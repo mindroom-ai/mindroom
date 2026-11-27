@@ -1860,7 +1860,7 @@ async def test_managed_shell_job_does_not_inherit_reply_shell_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A managed run_shell_command job keeps running after the reply ends and closes its shell scope."""
-    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     context, runtime = await _managed_context(tmp_path)
@@ -1910,7 +1910,7 @@ async def test_non_job_owned_turn_auto_backgrounds_shell_and_cleans_up_on_exit(
     streaming: bool,
 ) -> None:
     """An owned non-job turn auto-backgrounds slow shell calls, never leaks scope across yields, and stops them on exit."""
-    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     paths = _runtime_paths(tmp_path)

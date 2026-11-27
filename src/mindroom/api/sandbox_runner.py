@@ -73,13 +73,9 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
-from mindroom.shell.execution import (
-    CommandStdin,
-    kill_all_records,
-    kill_namespace_records,
-    shell_request_budget_seconds,
-    stream_command,
-)
+from mindroom.shell.execution import kill_all_records, kill_namespace_records
+from mindroom.shell.policy import shell_request_budget_seconds
+from mindroom.shell.streaming import CommandStdin, stream_command
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.timing import elapsed_ms_between, elapsed_ms_since
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution

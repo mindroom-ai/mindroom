@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.shell import execution as shell_execution
 from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell.process import ManagedProcess
 from tests.test_shell_async import _get_toolkit
 
 if TYPE_CHECKING:
@@ -116,7 +116,7 @@ async def test_a_stop_cancelled_during_its_grace_still_kills_what_ignored_sigter
     )
     member = await _wait_for_pid(pid_file)
     try:
-        stopping = asyncio.create_task(shell_execution._terminate_process_group(process, grace_period=30))
+        stopping = asyncio.create_task(ManagedProcess(process).terminate_tree(grace_period=30))
         # The leader dies of SIGTERM while its member ignores it and keeps the group alive.
         await asyncio.wait_for(process.wait(), timeout=10)
         stopping.cancel()
@@ -144,7 +144,7 @@ async def test_run_shell_command_cancellation_kills_subprocess(tmp_path: Path) -
         str(pid_file),
     ]
 
-    with patch("mindroom.shell.execution.os.killpg", wraps=os.killpg) as killpg_mock:
+    with patch("mindroom.shell._process_target.os.killpg", wraps=os.killpg) as killpg_mock:
         task = asyncio.create_task(run_shell_command(command, timeout=120))
         pid = await _wait_for_pid(pid_file)
         await asyncio.sleep(0.1)
@@ -271,7 +271,7 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
 
     with (
         patch("mindroom.shell.execution._await_reader_tasks_with_grace", new=blocked_reader_grace),
-        patch("mindroom.shell.execution._terminate_process_group", new=terminate_process_group),
+        patch.object(ManagedProcess, "terminate_tree", new=terminate_process_group),
     ):
         task = asyncio.create_task(run_shell_command(command, timeout=120))
         try:

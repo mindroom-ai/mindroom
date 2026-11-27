@@ -39,9 +39,10 @@ from mindroom.shell.execution import (
     _read_stream,
     kill_namespace_records,
     run_command,
-    shell_request_budget_seconds,
 )
 from mindroom.shell.output_capture import CapturedShellStream, ShellOutputDestination
+from mindroom.shell.policy import shell_request_budget_seconds
+from mindroom.shell.process import ManagedProcess
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -976,7 +977,7 @@ async def test_only_a_job_command_runs_past_the_default_time_limit(tmp_path: Pat
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
     command = ["bash", "-c", "sleep 0.6; echo done"]
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         stopped = await entrypoint(command)
         with job_control_context(JobControl()):
             finished = await entrypoint(command)
@@ -1137,7 +1138,7 @@ async def test_scoped_auto_background_untimed_streams_log_and_exits_cleanly(tmp_
     workspace, fn = _workspace_shell_entrypoint(tmp_path)
     cmd = "echo before-out; echo before-err >&2; sleep 0.5; echo after-out; echo after-err >&2"
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         async with shell_background_scope() as scope:
             receipt = await fn.entrypoint(["bash", "-c", cmd])
             assert isinstance(receipt, str)
@@ -1185,7 +1186,7 @@ async def test_scoped_short_timeout_kills_inline_without_backgrounding(tmp_path:
     """A scoped command with timeout <= wait limit is killed inline rather than backgrounded."""
     workspace, fn = _workspace_shell_entrypoint(tmp_path)
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 2):
         async with shell_background_scope() as scope:
             result = await fn.entrypoint(["bash", "-c", "echo start; sleep 10"], timeout=1)
             assert result == ToolOutcome(
@@ -1203,7 +1204,7 @@ async def test_scoped_long_timeout_backgrounds_then_kills_at_deadline(tmp_path: 
     """A scoped command with timeout > wait backgrounds at wait, then stops at its total timeout."""
     workspace, fn = _workspace_shell_entrypoint(tmp_path)
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         async with shell_background_scope():
             receipt = await fn.entrypoint(["bash", "-c", "sleep 10"], timeout=1)
             assert isinstance(receipt, str)
@@ -1221,7 +1222,7 @@ async def test_scope_exit_stops_running_process_group_and_writes_trailer(tmp_pat
     """Closing a shell background scope stops its running process group and writes the turn-ended trailer."""
     workspace, fn = _workspace_shell_entrypoint(tmp_path)
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         async with shell_background_scope():
             receipt = await fn.entrypoint(["bash", "-c", "sleep 10"])
             assert isinstance(receipt, str)
@@ -1244,7 +1245,7 @@ async def test_auto_background_with_output_path_returns_handled_and_leaves_targe
     request = prepare_tool_output_file(policy, tool_name="run_shell_command", output_path="existing.txt")
     assert not isinstance(request, dict)
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         async with shell_background_scope():
             token = _active_output_request.set(request)
             try:
@@ -1321,7 +1322,7 @@ async def test_background_log_rejects_symlink_directories(tmp_path: Path, symlin
     link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(outside)
 
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+    with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
         async with shell_background_scope() as scope:
             result = await fn.entrypoint(["bash", "-c", "sleep 10"])
             assert isinstance(result, ToolOutcome)
@@ -1338,7 +1339,7 @@ def test_background_rejection_enforces_per_namespace_and_total_caps(monkeypatch:
         handle="shell:11111111",
         pid=1234,
         args=["sleep", "10"],
-        process=SimpleNamespace(pid=1234, returncode=None),  # type: ignore[arg-type]
+        managed=ManagedProcess(SimpleNamespace(pid=1234, returncode=None)),  # type: ignore[arg-type]
     )
     registry = {record.handle: record}
     closed_scope = ShellBackgroundScope(records=registry, closed=True)
@@ -1457,7 +1458,7 @@ async def test_auto_backgrounded_natural_exit_preserves_detached_nohup_child(tmp
     cmd = f"sleep 0.35; nohup sleep 30 >/dev/null 2>&1 & echo $! > {detached_pid_file}; exit 0"
     detached_pid: int | None = None
     try:
-        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15):
+        with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15):
             async with shell_background_scope() as scope:
                 result = await fn.entrypoint(["bash", "-c", cmd])
                 assert isinstance(result, str)
@@ -1500,7 +1501,7 @@ async def test_sigterm_to_backgrounded_leader_still_kills_sigterm_ignoring_child
     )
     child_pid: int | None = None
     try:
-        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+        with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
             async with shell_background_scope() as scope:
                 result = await fn.entrypoint([sys.executable, "-c", parent_script, child_script, str(child_pid_file)])
                 assert isinstance(result, str)
@@ -1780,7 +1781,7 @@ async def test_execute_tool_call_shell_outcome_boundaries(tmp_path: Path, monkey
         assert (out.is_error, out.counts_as_tool_failure) == flags
         assert out.content.startswith(prefix)
 
-    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15)
+    monkeypatch.setattr("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15)
     async with shell_background_scope() as scope:
         bg = await execute_tool_call(fn, {"args": "echo bg; sleep 30"}, ctx, middleware=())
         assert (bg.is_error, scope.had_backgrounded) == (False, True)
@@ -1817,7 +1818,7 @@ async def test_scope_exit_stops_new_pgid_sigterm_ignoring_child_and_preserves_no
     child_pgid: int | None = None
     nohup_pid: int | None = None
     try:
-        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+        with patch("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
             async with shell_background_scope():
                 await fn.entrypoint(
                     [

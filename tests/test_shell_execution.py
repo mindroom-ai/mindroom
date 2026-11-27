@@ -23,16 +23,10 @@ from mindroom.shell._process_target import (
     _parse_proc_stat,
     _resolve_scope_cgroup_dir,
     _scan_session_members,
+    is_safe_slice_name,
 )
 from mindroom.shell.execution import (
     ProcessRecord,
-    _idle_io_launcher,
-    _idle_launch_argv,
-    _idle_launcher,
-    _probe_systemd_slice_launcher,
-    _schedule_process_tree_idle,
-    _systemd_slice_launcher,
-    _SystemdSliceLauncher,
     check_command,
     kill_all_records,
     kill_command,
@@ -40,6 +34,17 @@ from mindroom.shell.execution import (
     signal_record,
 )
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.process import (
+    ManagedProcess,
+    _idle_io_launcher,
+    _idle_launch_argv,
+    _idle_launcher,
+    _probe_systemd_slice_launcher,
+    _schedule_process_tree_idle,
+    _systemd_slice_launcher,
+    _SystemdSliceLauncher,
+)
+from mindroom.shell.streaming import CommandStdin
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
@@ -490,7 +495,7 @@ async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_se
             await asyncio.sleep(0.01)
         return process
 
-    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", spawn_then_let_the_shell_exit)
+    monkeypatch.setattr("mindroom.shell.process.asyncio.create_subprocess_exec", spawn_then_let_the_shell_exit)
     orphan = int(await _run(registry, ["/bin/sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"], tmp_path))
     try:
         assert os.sched_getscheduler(orphan) == os.SCHED_IDLE
@@ -523,8 +528,8 @@ def test_a_relative_path_entry_is_searched_from_the_command_directory(
         program.write_text("#!/bin/sh\n")
         program.chmod(0o755)
     monkeypatch.chdir(tmp_path / "mindroom")
-    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
-    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.process._idle_launcher", lambda: "/chrt")
+    monkeypatch.setattr("mindroom.shell.process._idle_io_launcher", lambda: None)
     monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     env = {"PATH": "scripts"}
     workspace = str(tmp_path / "workspace")
@@ -577,9 +582,9 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
         bus_env=(("XDG_RUNTIME_DIR", xdg), ("DBUS_SESSION_BUS_ADDRESS", bus)),
         slice_cgroup_dir=slice_cg,
     )
-    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
-    monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: "/ionice")
-    monkeypatch.setattr("mindroom.shell.execution._systemd_slice_launcher", lambda: launcher)
+    monkeypatch.setattr("mindroom.shell.process._idle_launcher", lambda: "/chrt")
+    monkeypatch.setattr("mindroom.shell.process._idle_io_launcher", lambda: "/ionice")
+    monkeypatch.setattr("mindroom.shell.process._systemd_slice_launcher", lambda: launcher)
 
     caller_env = {"PATH": str(tmp_path)}
     argv = ["run-me", "$$", "$VAR"]
@@ -662,7 +667,7 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     assert missing_launch.argv is missing
     assert missing_launch.env is caller_env
 
-    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.process._idle_launcher", lambda: None)
     no_chrt = _idle_launch_argv(argv, caller_env, str(tmp_path))
     assert no_chrt.scope is not None
     assert no_chrt.argv == [
@@ -717,8 +722,8 @@ def _stub_systemd_tools(
         stdout = probe_stdout(cmd) if probe_stdout is not None else ""
         return subprocess.CompletedProcess(cmd, probe_rc(), stdout=stdout)
 
-    monkeypatch.setattr("mindroom.shell.execution.shutil.which", fake_which)
-    monkeypatch.setattr("mindroom.shell.execution.subprocess.run", fake_run)
+    monkeypatch.setattr("mindroom.shell.process.shutil.which", fake_which)
+    monkeypatch.setattr("mindroom.shell.process.subprocess.run", fake_run)
     return show_calls, probe_calls
 
 
@@ -953,12 +958,12 @@ async def test_idle_fallback_runs_when_chrt_is_absent_even_if_other_wrappers_pre
     _idle_io_launcher.cache_clear()
     if _idle_io_launcher() is None:
         pytest.skip("needs ionice so argv is still wrapped when chrt is absent")
-    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    monkeypatch.setattr("mindroom.shell.process._idle_launcher", lambda: None)
     monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     fallback_pids: list[int] = []
     real_fallback = _schedule_process_tree_idle
     monkeypatch.setattr(
-        "mindroom.shell.execution._schedule_process_tree_idle",
+        "mindroom.shell.process._schedule_process_tree_idle",
         lambda pid: (fallback_pids.append(pid), real_fallback(pid)),
     )
 
@@ -1401,3 +1406,103 @@ async def test_systemd_scope_kills_setsid_sigterm_ignoring_child_on_timeout(
                     os.kill(child_pid, signal.SIGKILL)
     finally:
         _probe_systemd_slice_launcher.cache_clear()
+
+
+def test_is_safe_slice_name_accepts_valid_and_rejects_unsafe_names() -> None:
+    """Slice-name validation shared by _process_target and process rejects traversal, flags, and whitespace."""
+    assert is_safe_slice_name("app.slice") is True
+    assert is_safe_slice_name("mindroom-shell.slice") is True
+    for bad in (
+        "",
+        ".slice",
+        "mindroom.service",
+        "-bad.slice",
+        "a/b.slice",
+        "a\\b.slice",
+        "a..b.slice",
+        "a b.slice",
+        "a\tb.slice",
+        "a\x00b.slice",
+    ):
+        assert is_safe_slice_name(bad) is False
+
+
+def test_managed_process_owns_scope_directly_and_forwards_it_to_target_ops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ManagedProcess attaches ProcessScope directly to the instance and threads it through target helpers."""
+
+    class _FakeProcess:
+        __slots__ = ("pid", "returncode", "stderr", "stdin", "stdout")
+
+        def __init__(self) -> None:
+            self.pid = 43210
+            self.returncode = None
+            self.stdin = None
+            self.stdout = None
+            self.stderr = None
+
+    scope = ProcessScope(
+        unit_name="mindroom-shell-0123456789abcdef.scope",
+        slice_name="app.slice",
+        slice_cgroup_dir=Path("/sys/fs/cgroup/user.slice/app.slice"),
+    )
+    fake_proc = _FakeProcess()
+    managed = ManagedProcess(fake_proc, scope)  # type: ignore[arg-type]
+    assert managed.process is fake_proc
+    assert managed.scope == scope
+    assert managed.pid == 43210
+    assert managed.returncode is None
+
+    seen: list[tuple[str, int, object]] = []
+    monkeypatch.setattr(
+        "mindroom.shell.process.signal_command",
+        lambda pid, sig, *, scope: (seen.append(("signal", pid, (sig, scope))), True)[1],
+    )
+    monkeypatch.setattr(
+        "mindroom.shell.process.command_processes_exist",
+        lambda pid, *, scope: (seen.append(("exists", pid, scope)), True)[1],
+    )
+    monkeypatch.setattr(
+        "mindroom.shell.process.kill_command_processes",
+        lambda pid, *, scope: seen.append(("kill", pid, scope)),
+    )
+
+    assert managed.signal(signal.SIGTERM) is True
+    assert managed.processes_exist() is True
+    managed.kill_tree()
+    assert seen == [
+        ("signal", 43210, (signal.SIGTERM, scope)),
+        ("exists", 43210, scope),
+        ("kill", 43210, scope),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_command_stdin_attach_and_detach_gate_writes() -> None:
+    """CommandStdin.attach connects a writer and detach cleanly closes subsequent writes."""
+    written: list[bytes] = []
+    eof_called = False
+
+    class _FakeWriter:
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        def write_eof(self) -> None:
+            nonlocal eof_called
+            eof_called = True
+
+        async def drain(self) -> None:
+            return None
+
+    stdin = CommandStdin()
+    assert await stdin.write(0, b"before", eof=False) is False
+
+    stdin.attach(_FakeWriter())  # type: ignore[arg-type]
+    assert await stdin.write(0, b"hello", eof=False) is True
+    assert written == [b"hello"]
+
+    stdin.detach()
+    assert await stdin.write(1, b"after", eof=True) is False
+    assert written == [b"hello"]
+    assert eof_called is False

@@ -1003,7 +1003,7 @@ async def test_minimal_child_auto_backgrounds_untimed_bash_and_cleans_up_on_fini
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A minimal child backgrounds a slow Bash call, keeps running next Bash calls, and stops it when the child ends."""
-    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     config = _config(helper_tools=["shell"])
     config.defaults.allow_shell_without_worker = True
     paths = _paths(tmp_path, {})
@@ -1051,7 +1051,7 @@ async def test_minimal_child_job_cancellation_stops_auto_backgrounded_bash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cancelling a delegated minimal child job stops its auto-backgrounded Bash process group."""
-    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("mindroom.shell.policy._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     config = _config(helper_tools=["shell"])
     config.defaults.allow_shell_without_worker = True
     paths = _paths(tmp_path, {})

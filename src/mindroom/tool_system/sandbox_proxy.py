@@ -26,7 +26,7 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import current_shell_background_scope
-from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR

@@ -69,7 +69,7 @@ from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session,
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
-from mindroom.shell import execution as shell_execution
+from mindroom.shell.process import ManagedProcess
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.desktop_helpers import (
     FailingSource,
@@ -1088,18 +1088,23 @@ async def test_revoke_shell_keeps_native_channel_responsive_while_command_stops(
     execution = asyncio.create_task(bridge.execute_pending(shell_starts=True))
     pid_file = tmp_path / "child.pid"
     output = _RecordingOutput(shell)
-    terminate = shell_execution._terminate_process_group
+    terminate = ManagedProcess.terminate_tree
 
-    async def terminate_after_two_replies(process: asyncio.subprocess.Process) -> None:
+    async def terminate_after_two_replies(
+        self: ManagedProcess,
+        *,
+        grace_period: float = 0.5,
+        whole_group: bool = False,
+    ) -> bool:
         # Termination may only finish once revoke and status replied, however slowly they are written.
         # A revoke that waited for the command to stop would never reply; the stream's deadline then
         # fails the test, and the bound lets termination still run so cleanup stops the child.
         with suppress(TimeoutError):
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await output.two_replies_written.wait()
-        await terminate(process)
+        return await terminate(self, grace_period=grace_period, whole_group=whole_group)
 
-    monkeypatch.setattr(shell_execution, "_terminate_process_group", terminate_after_two_replies)
+    monkeypatch.setattr(ManagedProcess, "terminate_tree", terminate_after_two_replies)
     try:
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110 - a real child writes it

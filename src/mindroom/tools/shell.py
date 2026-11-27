@@ -23,13 +23,13 @@ from mindroom.constants import (
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import BackgroundLogPolicy, current_shell_background_scope
-from mindroom.shell.execution import (
+from mindroom.shell.execution import run_command
+from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.policy import (
     default_run_timeout_seconds,
     normalize_shell_args,
-    run_command,
     shell_call_timeout,
 )
-from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     current_shell_dispatch_context,

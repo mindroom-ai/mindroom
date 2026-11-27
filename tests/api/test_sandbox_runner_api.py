@@ -39,7 +39,7 @@ import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
 import mindroom.api.sandbox_runner_scripts as sandbox_runner_scripts_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
-import mindroom.shell.execution as shell_execution_module
+import mindroom.shell.policy as shell_policy_module
 import mindroom.shell.supervisor as shell_supervisor_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.output_files as output_files_module
@@ -8345,7 +8345,7 @@ def test_execute_shell_scope_auto_backgrounds_and_kills_process_group(
 ) -> None:
     """A scoped shell call auto-backgrounds and /execute/shell-scope/kill stops its process group."""
     _set_sandbox_token(monkeypatch)
-    monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(shell_policy_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     child_pid_file = workspace / "child.pid"
@@ -8597,7 +8597,7 @@ def test_shell_direct_supervised_dispatch_handles_scope_cancel_and_concurrent_en
         assert r2["result"] == "beta"
         assert "ISO_TOKEN" not in os.environ
 
-        monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+        monkeypatch.setattr(shell_policy_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
         scope_id = f"direct-{execution_mode}"
         bg = post_shell(
             "echo bg-ready; sleep 60",

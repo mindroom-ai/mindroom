@@ -91,6 +91,11 @@ def _is_safe_unit_name(name: str, *, prefix: str, suffix: str) -> bool:
     )
 
 
+def is_safe_slice_name(slice_name: str) -> bool:
+    """Return whether *slice_name* is a safe systemd slice unit name."""
+    return _is_safe_unit_name(slice_name, prefix="", suffix=".slice")
+
+
 def _resolve_scope_cgroup_dir(
     scope: ProcessScope | None,
     *,
@@ -102,7 +107,7 @@ def _resolve_scope_cgroup_dir(
         scope is None
         or scope.slice_cgroup_dir is None
         or not _is_safe_unit_name(scope.unit_name, prefix=_SCOPE_UNIT_PREFIX, suffix=_SCOPE_UNIT_SUFFIX)
-        or not _is_safe_unit_name(scope.slice_name, prefix="", suffix=".slice")
+        or not is_safe_slice_name(scope.slice_name)
         or not scope.slice_cgroup_dir.is_absolute()
         or ".." in scope.slice_cgroup_dir.parts
     ):

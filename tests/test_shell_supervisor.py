@@ -25,12 +25,10 @@ from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.background_scope import BackgroundLogPolicy
-from mindroom.shell.execution import (
-    ShellRunResult,
-    run_command,
-    shell_request_budget_seconds,
-)
+from mindroom.shell.execution import ShellRunResult, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.policy import shell_request_budget_seconds
+from mindroom.shell.process import ManagedProcess
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -302,7 +300,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
         handle=handle,
         pid=process.pid,
         args=[sys.executable, "-c", "pass"],
-        process=process,
+        managed=ManagedProcess(process),
     )
     registry = {handle: record}
     stdout_reader = asyncio.create_task(asyncio.sleep(0))
@@ -312,7 +310,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
         msg = "process group belongs to a different user"
         raise PermissionError(msg)
 
-    monkeypatch.setattr(shell_execution_module.os, "killpg", deny_group_cleanup)
+    monkeypatch.setattr(os, "killpg", deny_group_cleanup)
 
     await shell_execution_module._monitor_process(
         registry,

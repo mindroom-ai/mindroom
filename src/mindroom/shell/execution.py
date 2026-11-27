@@ -1,9 +1,10 @@
 """Shell command execution core: foreground runs that stop at their timeout, or background handles.
 
-This module owns the process spawning, output buffering, and background
-handle registry shared by the shell toolkit (local execution), the Desktop
-shell, and the worker-local shell supervisor process. It must stay importable
-without the heavy `mindroom.tools` package so the supervisor process starts fast.
+This module owns the output buffering, foreground/background command execution,
+and background handle registry shared by the shell toolkit (local execution),
+the Desktop shell, and the worker-local shell supervisor process. It must stay
+importable without the heavy `mindroom.tools` package so the supervisor process
+starts fast.
 """
 
 from __future__ import annotations
@@ -11,34 +12,17 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
-import errno
-import functools
 import itertools
-import json
-import os
 import re
 import shlex
-import shutil
 import signal
-import subprocess
-import sys
 import time
 import uuid
-import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
-from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.shell._process_target import (
-    ProcessScope,
-    command_processes_exist,
-    kill_command_processes,
-    make_scope_unit_name,
-    parse_probe_slice_cgroup_dir,
-    signal_command,
-)
 from mindroom.shell.background_scope import (
     BackgroundLogFile,
     BackgroundLogPolicy,
@@ -55,19 +39,10 @@ from mindroom.shell.output_capture import (
     format_shell_completion,
     format_shell_timeout,
 )
-from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.shell.process import ManagedProcess, classify_launch_failure
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
-
-_DESKTOP_SHELL_FUNCTION = "run_desktop_shell"
-_DEFAULT_RUN_TIMEOUT_SECONDS = 120
-_SHELL_ARGS_ERROR = (
-    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
-)
-_SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
-# Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
-_SHELL_REQUEST_GRACE_SECONDS = 30.0
+    from collections.abc import Callable
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 MAX_BACKGROUNDED = 16
@@ -80,29 +55,12 @@ _CAPPED_STREAM_BURST_READS = 16
 _CAPPED_STREAM_SMALL_READ_BYTES = 4096
 _CAPPED_STREAM_BULK_FREE_BYTES = 256 * 1024 * 1024
 _CAPPED_STREAM_PACE_SECONDS = 0.02
-# The most bytes of a streamed command's output handed on at once.
-_STREAM_CHUNK_BYTES = 32 * 1024
-# Once a streamed command's process group was killed, only what its pipes still held is read. More bytes than pipes
-# hold, or bytes still waited for after this long, come from a process that left the group, and are not read.
-_KILLED_GROUP_PIPE_BYTES = 8 * 1024 * 1024
-_KILLED_GROUP_READ_SECONDS = 1.0
-# How long one chunk of a streamed command's stdin waits to leave before its sender is told to send it again.
-_STDIN_WRITE_SECONDS = 20.0
-_PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 # A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
 _PROGRESS_INTERVAL_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 # Numbers every append to any output buffer, so a reader can tell which stream printed last.
 _APPEND_SEQUENCE = itertools.count(1)
-_PROCESS_SCOPES: weakref.WeakKeyDictionary[asyncio.subprocess.Process, ProcessScope] = weakref.WeakKeyDictionary()
-
-
-def _process_scope(process: asyncio.subprocess.Process) -> ProcessScope | None:
-    try:
-        return _PROCESS_SCOPES.get(process)
-    except TypeError:
-        return None
 
 
 class _OutputChunk(NamedTuple):
@@ -268,7 +226,7 @@ class ProcessRecord:
     handle: str
     pid: int
     args: list[str]
-    process: asyncio.subprocess.Process
+    managed: ManagedProcess
     stdout_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
     stderr_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
     started_at: float = field(default_factory=time.monotonic)
@@ -282,6 +240,11 @@ class ProcessRecord:
     _log_file: BackgroundLogFile | None = field(default=None, repr=False)
     _stop_reason: StopReason | None = field(default=None, repr=False)
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+    @property
+    def process(self) -> asyncio.subprocess.Process:
+        """Return the underlying subprocess handle."""
+        return self.managed.process
 
     @property
     def _log_path(self) -> str | None:
@@ -375,111 +338,6 @@ class ShellRunResult:
         )
 
 
-def default_run_timeout_seconds() -> float:
-    """Return the current foreground wait / auto-background threshold in seconds."""
-    return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
-
-
-def shell_call_timeout(timeout: float | None) -> float | None:
-    """Return when a shell call's command is stopped: its own timeout, none for a top-level job, else the default."""
-    if timeout is not None:
-        return timeout
-    if job_owns_execution() and current_shell_background_scope() is None:
-        return None
-    return _DEFAULT_RUN_TIMEOUT_SECONDS
-
-
-def _looks_like_shell_command_line(command: str) -> bool:
-    """Return whether a single argv item is probably a shell command line."""
-    if any(char.isspace() for char in command):
-        return True
-    return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
-
-
-def _parse_shell_args(args: object) -> str | list[str]:
-    """Parse natural shell command strings and explicit argv lists.
-
-    Returns a raw shell command line string when the caller supplied one (including a
-    single-item list containing shell syntax or whitespace), or an explicit argv list.
-    """
-    if isinstance(args, str):
-        stripped = args.strip()
-        if not stripped:
-            raise ValueError(_SHELL_ARGS_ERROR)
-        if stripped[0] not in "[{":
-            return args
-        try:
-            args = json.loads(args)
-        except json.JSONDecodeError as exc:
-            if any(char.isspace() for char in stripped):
-                return args
-            raise ValueError(_SHELL_ARGS_ERROR) from exc
-
-    if not isinstance(args, list):
-        raise ValueError(_SHELL_ARGS_ERROR)  # noqa: TRY004
-
-    if any(not isinstance(item, str) for item in args):
-        raise ValueError(_SHELL_ARGS_ERROR)
-
-    normalized_args = cast("list[str]", args)
-    if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
-        if not normalized_args[0].strip():
-            raise ValueError(_SHELL_ARGS_ERROR)
-        return normalized_args[0]
-    return normalized_args
-
-
-def normalize_shell_args(args: object) -> list[str]:
-    """Normalize natural shell command strings and explicit argv lists into argv."""
-    parsed = _parse_shell_args(args)
-    return ["bash", "-c", parsed] if isinstance(parsed, str) else parsed
-
-
-def shell_args_to_command(args: object) -> str:
-    """Convert natural shell command strings or argv lists into one shell command line."""
-    parsed = _parse_shell_args(args)
-    if isinstance(parsed, str):
-        return parsed
-    if not parsed or not parsed[0]:
-        raise ValueError(_SHELL_ARGS_ERROR)
-    return shlex.join(parsed)
-
-
-def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
-    """Return how long a reply waits for a shell command that runs as a job when its call sets no wait, else None.
-
-    The reply waits as long as a command outside a job may run, then the command continues as a job, so a command
-    that runs longer than the model expected never holds the conversation longer than one outside a job would.
-    """
-    if (registered_toolkit, function_name) in {("shell", SHELL_FUNCTION), ("desktop", _DESKTOP_SHELL_FUNCTION)}:
-        return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
-    return None
-
-
-def shell_request_budget_seconds(
-    tool_name: str,
-    function_name: str,
-    kwargs: Mapping[str, Any],
-    *,
-    auto_background: bool = False,
-) -> float:
-    """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
-
-    Callers give a job's call no budget, as `shell_call_timeout` gives its command no limit.
-    With ``auto_background``, foreground waiting is capped at the default auto-background wait.
-    """
-    if tool_name != "shell" or function_name != SHELL_FUNCTION:
-        return 0.0
-    raw_timeout = kwargs.get("timeout")
-    try:
-        timeout = _DEFAULT_RUN_TIMEOUT_SECONDS if raw_timeout is None else max(0.0, float(raw_timeout))
-    except (TypeError, ValueError):
-        timeout = _DEFAULT_RUN_TIMEOUT_SECONDS
-    if auto_background:
-        timeout = min(timeout, float(_DEFAULT_RUN_TIMEOUT_SECONDS))
-    return timeout + _SHELL_REQUEST_GRACE_SECONDS
-
-
 async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
     registry: dict[str, ProcessRecord],
     *,
@@ -556,7 +414,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 capture.close()
             return ShellRunResult(message=f"Error: {exc}", execution_error=True)
         try:
-            process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
+            managed = await ManagedProcess.spawn(argv, env, cwd, stdin=stdin, stderr=stderr)
         except asyncio.CancelledError:
             if capture is not None:
                 capture.close()
@@ -572,16 +430,15 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
         stdout_buf = ShellOutputBuffer()
         stderr_buf = ShellOutputBuffer()
         stdout_reader = asyncio.create_task(
-            _read_stream(process.stdout, stdout_buf, capture.stdout if capture else None),
+            _read_stream(managed.stdout, stdout_buf, capture.stdout if capture else None),
         )
         stderr_reader = asyncio.create_task(
-            _read_stream(process.stderr, stderr_buf, capture.stderr if capture else None),
+            _read_stream(managed.stderr, stderr_buf, capture.stderr if capture else None),
         )
 
         try:
             try:
-                await _await_process_exit(
-                    process,
+                await managed.wait_exit(
                     timeout_seconds=timeout,
                     on_poll=ShellOutputProgress(on_progress, stdout_buf, stderr_buf).poll
                     if on_progress is not None
@@ -591,7 +448,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 assert timeout is not None
                 if on_timeout == "kill":
                     return await _stop_timed_out_process(
-                        process,
+                        managed,
                         stdout_buf=stdout_buf,
                         stderr_buf=stderr_buf,
                         stdout_reader=stdout_reader,
@@ -604,7 +461,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                     registry,
                     namespace=namespace,
                     argv=argv,
-                    process=process,
+                    managed=managed,
                     stdout_buf=stdout_buf,
                     stderr_buf=stderr_buf,
                     tail=tail,
@@ -619,23 +476,23 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
 
             if kill_group_after_exit:
-                _kill_process_group(process.pid, scope=_process_scope(process))
+                managed.kill_tree()
             await _await_reader_tasks_with_grace(
                 stdout_reader,
                 stderr_reader,
                 grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
             )
         except asyncio.CancelledError:
-            if process.returncode is None:
-                await _terminate_process_group(process)
+            if managed.returncode is None:
+                await managed.terminate_tree()
             if kill_group_after_exit:
-                _kill_process_group(process.pid, scope=_process_scope(process))
+                managed.kill_tree()
             await _cancel_pending_tasks(stdout_reader, stderr_reader)
             if capture is not None:
                 capture.close()
             raise
 
-        return_code = process.returncode
+        return_code = managed.returncode
         assert return_code is not None
         finished_handle = None
         if register_finished:
@@ -643,9 +500,9 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
             registry[finished_handle] = ProcessRecord(
                 namespace=namespace,
                 handle=finished_handle,
-                pid=process.pid,
+                pid=managed.pid,
                 args=argv,
-                process=process,
+                managed=managed,
                 stdout_buf=stdout_buf,
                 stderr_buf=stderr_buf,
                 tail=tail,
@@ -677,208 +534,6 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
             handle_reservations.discard(handle)
 
 
-async def _start_command(
-    argv: list[str],
-    env: dict[str, str],
-    cwd: str | None,
-    *,
-    stdin: int | None,
-    stderr: int = asyncio.subprocess.PIPE,
-) -> asyncio.subprocess.Process:
-    """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    launch = await asyncio.to_thread(_idle_launch_argv, argv, env, cwd)
-    process = await asyncio.create_subprocess_exec(
-        *launch.argv,
-        stdin=stdin,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=stderr,
-        cwd=cwd,
-        env=launch.env,
-        start_new_session=True,
-    )
-    if launch.scope is not None:
-        with contextlib.suppress(TypeError):
-            _PROCESS_SCOPES[process] = launch.scope
-    # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
-    # command starts later inherit the priority.
-    with contextlib.suppress(OSError):
-        os.setpriority(os.PRIO_PGRP, process.pid, 19)
-    if sys.platform == "linux" and not launch.uses_chrt:
-        _schedule_process_tree_idle(process.pid)
-    return process
-
-
-class CommandStdin:
-    """The stdin of a command `stream_command` runs, written in chunks numbered from 0, one at a time."""
-
-    def __init__(self) -> None:
-        self._writer: asyncio.StreamWriter | None = None
-        self._next = 0
-        self._writing = False
-
-    async def write(self, seq: int, data: bytes, *, eof: bool) -> bool:
-        """Write chunk ``seq`` once, however often it arrives, and with ``eof`` close stdin after it.
-
-        Return whether stdin takes a next chunk, once this one has left for the command: a command that reads
-        slowly slows its writer down. One chunk at most waits to leave, and for a bounded time: TimeoutError says
-        this one has not left yet, or that the one before it still waits, and that it is to be sent again.
-        """
-        writer = self._writer
-        if writer is None:
-            return False
-        if seq > self._next:
-            msg = f"stdin chunk {seq} arrived before chunk {self._next}"
-            raise ValueError(msg)
-        if self._writing:
-            raise TimeoutError
-        self._writing = True
-        try:
-            if seq == self._next:
-                self._next += 1
-                writer.write(data)
-                if eof:
-                    self._writer = None
-                    writer.write_eof()
-                    return False
-            async with asyncio.timeout(_STDIN_WRITE_SECONDS):
-                await writer.drain()
-        except TimeoutError:
-            raise
-        except OSError:
-            # The command closed its stdin or ended.
-            self._writer = None
-        finally:
-            self._writing = False
-        return self._writer is not None
-
-
-async def _start_streamed_command(
-    argv: list[str],
-    env: dict[str, str],
-    cwd: str | None,
-    on_start: Callable[[], Awaitable[None]],
-    on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
-) -> asyncio.subprocess.Process | int:
-    """Start a streamed command; one whose program is missing or cannot be executed gets its exit code back."""
-    try:
-        return await _start_command(argv, env, cwd, stdin=asyncio.subprocess.PIPE)
-    except OSError as exc:
-        if (failure := _launch_failure_exit(argv, env, cwd, exc)) is None:
-            raise
-        await on_start()
-        await on_output("err", f"{failure[1]}\n".encode())
-        return failure[0]
-
-
-class _PipeReaders:
-    """The tasks that hand each read of a streamed command's stdout and stderr to ``on_output``, unchanged."""
-
-    def __init__(
-        self,
-        process: asyncio.subprocess.Process,
-        on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
-    ) -> None:
-        self._on_output = on_output
-        self._moved = 0
-        self._idle: set[str] = set()
-        # When the command's process group was killed, and how many bytes its pipes may still give.
-        self.killed_at: float | None = None
-        self._left = _KILLED_GROUP_PIPE_BYTES
-        self.tasks = {
-            asyncio.create_task(self._read(process.stdout, "out")),
-            asyncio.create_task(self._read(process.stderr, "err")),
-        }
-
-    async def _read(self, stream: asyncio.StreamReader | None, kind: Literal["out", "err"]) -> None:
-        assert stream is not None
-        loop, waited = asyncio.get_running_loop(), 0.0
-        while True:
-            self._idle.add(kind)
-            asked = loop.time()
-            chunk = await stream.read(_STREAM_CHUNK_BYTES)
-            self._idle.discard(kind)
-            if self.killed_at is not None:
-                # Time spent handing bytes on is the reader's and does not count: only the wait for new ones does.
-                waited += loop.time() - max(asked, self.killed_at)
-                self._left -= len(chunk)
-                if waited > _KILLED_GROUP_READ_SECONDS or self._left < 0:
-                    return
-            if not chunk:
-                return
-            await self._on_output(kind, chunk)
-            self._moved += len(chunk)
-
-    async def drain(self, until: float | None) -> None:
-        """Wait, at the pace of ``on_output``, until both pipes ended, stayed silent, or are read no further."""
-        pending = self.tasks
-        while pending:
-            seen = self._moved
-            async with asyncio.timeout_at(until):
-                _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
-            # Pipes that stay silent once their command ended are held open by a process it left behind.
-            if self._moved == seen and len(self._idle) == len(pending):
-                break
-
-
-async def stream_command(
-    argv: list[str],
-    env: dict[str, str],
-    cwd: str | None,
-    *,
-    timeout: float | None,  # noqa: ASYNC109
-    stdin: CommandStdin,
-    on_start: Callable[[], Awaitable[None]],
-    on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
-    on_exit: Callable[[int, bool], Awaitable[None]],
-    on_stopped: Callable[[], None],
-) -> None:
-    """Run one command on pipes of its own, handing ``on_output`` each read of its stdout and stderr unchanged.
-
-    ``on_start`` is awaited once the command runs and ``stdin`` reaches it. A slow ``on_output`` slows the command
-    down instead of letting its output pile up. ``on_exit`` gets the exit code and whether ``timeout`` stopped the
-    command, once its leader and both pipes ended; a pipe only a silent process it left behind keeps open is not
-    waited for. ``timeout`` runs until then, and a stop, at ``timeout`` or by cancellation, kills the whole process
-    group, also once its leader ended. What the group wrote before ``timeout`` stopped it reaches ``on_output``
-    before ``on_exit``, however slowly it is taken, and what a process outside the group writes after that is not
-    waited for; ``on_stopped`` is called when a command that had not ended was cancelled and its group is gone,
-    after the last ``on_output``. A program that is missing or cannot be executed ends as a shell ends it: the
-    reason on stderr, exit code 127 or 126.
-    """
-    process = await _start_streamed_command(argv, env, cwd, on_start, on_output)
-    if isinstance(process, int):
-        await on_exit(process, False)
-        return
-    loop = asyncio.get_running_loop()
-    deadline = None if timeout is None else loop.time() + timeout
-    readers = _PipeReaders(process, on_output)
-    ended = timed_out = False
-    try:
-        stdin._writer = process.stdin
-        await on_start()
-        try:
-            await _await_process_exit(process, timeout_seconds=None if deadline is None else deadline - loop.time())
-            await readers.drain(deadline)
-        except TimeoutError:
-            timed_out = True
-            await _terminate_process_group(process, whole_group=True)
-            # The killed group closed its pipes, so what it had written is all read, and then they end.
-            readers.killed_at = loop.time()
-            await readers.drain(None)
-        # The command ended here: a cancel that comes while its exit waits to be taken stops nothing it left behind.
-        ended = True
-        # Nothing follows the exit: a reader still at a pipe that a process left behind holds reads no more.
-        await _cancel_pending_tasks(*readers.tasks)
-        await on_exit(-signal.SIGKILL if process.returncode is None else process.returncode, timed_out)
-    finally:
-        stdin._writer = None
-        stopped = not ended and await _terminate_process_group(process, whole_group=True)
-        await _cancel_pending_tasks(*readers.tasks)
-        if stopped:
-            on_stopped()
-        if process.stdin is not None:
-            process.stdin.close()
-
-
 def format_shell_success(stdout_buf: ShellOutputBuffer, stderr_buf: ShellOutputBuffer, tail: int) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
     output_notice, output = stdout_buf._render_parts(tail=tail)
@@ -888,7 +543,7 @@ def format_shell_success(stdout_buf: ShellOutputBuffer, stderr_buf: ShellOutputB
 
 
 async def _stop_timed_out_process(
-    process: asyncio.subprocess.Process,
+    managed: ManagedProcess,
     *,
     stdout_buf: ShellOutputBuffer,
     stderr_buf: ShellOutputBuffer,
@@ -899,7 +554,7 @@ async def _stop_timed_out_process(
     timeout: float,  # noqa: ASYNC109
 ) -> ShellRunResult:
     """Stop a command at its timeout and report its output so far; a stopped command saves no output file."""
-    await _terminate_process_group(process)
+    await managed.terminate_tree()
     await _await_reader_tasks_with_grace(stdout_reader, stderr_reader, grace_seconds=_POST_EXIT_READER_GRACE_SECONDS)
     message = format_shell_timeout(
         stdout_buf.render(tail=tail),
@@ -908,14 +563,14 @@ async def _stop_timed_out_process(
         no_output_file=output_capture is not None,
     )
     if output_capture is None:
-        return ShellRunResult(message=message, return_code=process.returncode, timed_out=True)
+        return ShellRunResult(message=message, return_code=managed.returncode, timed_out=True)
     output_capture.incomplete = True
     output_capture.interruption = message
     try:
         return ShellRunResult(
-            message=output_capture.publish(process.returncode),
+            message=output_capture.publish(managed.returncode),
             output_file_handled=True,
-            return_code=process.returncode,
+            return_code=managed.returncode,
             timed_out=True,
         )
     finally:
@@ -1042,7 +697,7 @@ async def _background_process(
     *,
     namespace: str,
     argv: list[str],
-    process: asyncio.subprocess.Process,
+    managed: ManagedProcess,
     stdout_buf: ShellOutputBuffer,
     stderr_buf: ShellOutputBuffer,
     tail: int,
@@ -1065,7 +720,7 @@ async def _background_process(
         try:
             log_file = _prepare_background_log(
                 background_log,
-                pid=process.pid,
+                pid=managed.pid,
                 handle=handle,
                 registry=registry,
                 stdout_buf=stdout_buf,
@@ -1079,16 +734,16 @@ async def _background_process(
                 output_capture.close()
                 record_capture = None
     if rejection is not None:
-        await _discard_unregistered_process(process, stdout_reader, stderr_reader)
+        await _discard_unregistered_process(managed, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
         return ShellRunResult(message=rejection, output_file_handled=had_capture, background_rejected=True)
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
-        pid=process.pid,
+        pid=managed.pid,
         args=argv,
-        process=process,
+        managed=managed,
         stdout_buf=stdout_buf,
         stderr_buf=stderr_buf,
         tail=tail,
@@ -1105,7 +760,7 @@ async def _background_process(
     except asyncio.CancelledError:
         registry.pop(handle, None)
         monitor_task.cancel()
-        await _terminate_process_group(process)
+        await managed.terminate_tree()
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
         if log_file is not None:
             log_file.finish()
@@ -1121,7 +776,7 @@ async def _background_process(
         )
     message = (
         _format_auto_background_message(
-            pid=process.pid,
+            pid=managed.pid,
             timeout=timeout,
             log_path=log_file.path,
             display_root=background_log.display_root,
@@ -1132,17 +787,17 @@ async def _background_process(
             tail=tail,
         )
         if background_log is not None and log_file is not None
-        else f"Command timed out after {timeout}s. Still running (PID {process.pid}).\nHandle: {handle}"
+        else f"Command timed out after {timeout}s. Still running (PID {managed.pid}).\nHandle: {handle}"
     )
     return ShellRunResult(message=message, handle=handle, output_file_handled=had_capture)
 
 
 async def _discard_unregistered_process(
-    process: asyncio.subprocess.Process,
+    managed: ManagedProcess,
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
 ) -> None:
-    _kill_process_group(process.pid, scope=_process_scope(process))
+    managed.kill_tree()
     await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
@@ -1196,7 +851,7 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:
     """Send SIGTERM, or SIGKILL with *force*, to a record's command processes; report whether it was delivered."""
     sig = signal.SIGKILL if force else signal.SIGTERM
-    if not signal_command(record.pid, sig, scope=_process_scope(record.process)):
+    if not record.managed.signal(sig):
         return False
     if record.output_capture is not None:
         record.output_capture.incomplete = True
@@ -1209,12 +864,12 @@ async def close_background_records(records: dict[str, ProcessRecord]) -> None:
     if not entries:
         return
     try:
-        to_stop = [r for r in entries if not r.finished and r.process.returncode is None]
+        to_stop = [r for r in entries if not r.finished and r.managed.returncode is None]
         for record in to_stop:
             record._stop_reason = record._stop_reason or "scope_ended"
         if to_stop:
             await asyncio.gather(
-                *(_terminate_process_group(r.process, whole_group=True) for r in to_stop),
+                *(r.managed.terminate_tree(whole_group=True) for r in to_stop),
                 return_exceptions=True,
             )
         monitors = [r._monitor_task for r in entries if r._monitor_task is not None and not r._monitor_task.done()]
@@ -1259,15 +914,15 @@ def _kill_record(
     if was_running:
         if stop_reason is not None and record._stop_reason is None:
             record._stop_reason = stop_reason
-        _kill_process_group(record.pid, scope=_process_scope(record.process))
+        record.managed.kill_tree()
         record.finished = True
         record.finished_at = time.monotonic()
-        record.return_code = record.process.returncode
+        record.return_code = record.managed.returncode
     if record._log_file is not None and not record._log_file.closed:
         if stop_reason is not None and was_running:
             record._log_file.finish(
                 format_log_trailer(
-                    record.process.returncode,
+                    record.managed.returncode,
                     stop_reason=record._stop_reason,
                     max_runtime_seconds=record.max_runtime_seconds,
                 ),
@@ -1379,44 +1034,6 @@ async def _cancel_pending_tasks(*tasks: asyncio.Task[None]) -> None:
             await task
 
 
-async def _await_process_exit(
-    process: asyncio.subprocess.Process,
-    *,
-    timeout_seconds: float | None = None,
-    on_poll: Callable[[], None] | None = None,
-) -> None:
-    """Wait for the process to exit without depending on inherited pipe EOF, calling ``on_poll`` while it runs."""
-    if process.returncode is not None:
-        return
-    if timeout_seconds is not None and timeout_seconds <= 0:
-        raise TimeoutError
-
-    wait_task = asyncio.create_task(process.wait())
-    deadline = None if timeout_seconds is None else asyncio.get_running_loop().time() + timeout_seconds
-    try:
-        while process.returncode is None:
-            poll_seconds = _PROCESS_EXIT_POLL_INTERVAL_SECONDS
-            if deadline is not None:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError
-                poll_seconds = min(poll_seconds, remaining)
-            done_tasks, _pending_tasks = await asyncio.wait(
-                (wait_task,),
-                timeout=poll_seconds,
-            )
-            if wait_task in done_tasks:
-                await wait_task
-                return
-            if on_poll is not None:
-                on_poll()
-    finally:
-        if not wait_task.done():
-            wait_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await wait_task
-
-
 async def _await_reader_tasks_with_grace(
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
@@ -1438,251 +1055,6 @@ async def _await_reader_tasks_with_grace(
                 await task
 
 
-_SHELL_SYSTEMD_SLICE_ENV = "MINDROOM_SHELL_SYSTEMD_SLICE"
-_SYSTEMD_SCOPE_DESCRIPTION = "MindRoom shell"
-
-
-class _IdleLaunch(NamedTuple):
-    argv: list[str]
-    env: dict[str, str]
-    uses_chrt: bool
-    scope: ProcessScope | None = None
-
-
-class _SystemdSliceLauncher(NamedTuple):
-    prefix: tuple[str, ...]
-    slice_name: str
-    env_bin: str
-    bus_env: tuple[tuple[str, str | None], ...]
-    slice_cgroup_dir: Path | None = None
-
-
-@functools.cache
-def _idle_launcher() -> str | None:
-    """Return a ``chrt`` that can start a program at ``SCHED_IDLE``, or ``None`` when there is none or it fails."""
-    chrt = shutil.which("chrt")
-    if chrt is None:
-        return None
-    chrt = str(Path(chrt).absolute())  # commands run in other directories
-    # A sandbox that refuses the policy makes chrt exit without running the program; then commands start directly.
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        if subprocess.run([chrt, "-i", "0", chrt, "-m"], capture_output=True, timeout=5, check=False).returncode == 0:
-            return chrt
-    return None
-
-
-@functools.cache
-def _idle_io_launcher() -> str | None:
-    """Return an ``ionice`` that can start a program in the idle I/O class, or ``None`` when unavailable."""
-    ionice = shutil.which("ionice")
-    if ionice is None:
-        return None
-    ionice = str(Path(ionice).absolute())  # commands run in other directories
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        if subprocess.run([ionice, "-c", "3", ionice], capture_output=True, timeout=5, check=False).returncode == 0:
-            return ionice
-    return None
-
-
-_SYSTEMD_UNAVAILABLE_STATES = frozenset({"stopping", "offline"})
-
-
-def _systemd_bus_env(runtime_dir: str | None, dbus_addr: str | None) -> dict[str, str]:
-    """Return the minimal bus environment passed to user-systemd probe commands."""
-    return {
-        key: value
-        for key, value in (("XDG_RUNTIME_DIR", runtime_dir), ("DBUS_SESSION_BUS_ADDRESS", dbus_addr))
-        if value is not None
-    }
-
-
-def _user_manager_generation(runtime_dir: str | None, dbus_addr: str | None) -> int | None:
-    """Return the active ``systemd --user`` monotonic startup timestamp, or ``None`` if unavailable."""
-    systemctl = shutil.which("systemctl")
-    if systemctl is None:
-        return None
-    systemctl = str(Path(systemctl).absolute())  # commands run in other directories
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        result = subprocess.run(
-            [systemctl, "--user", "show", "--property=UserspaceTimestampMonotonic", "--property=SystemState"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-            env=_systemd_bus_env(runtime_dir, dbus_addr),
-        )
-        if result.returncode != 0 or not result.stdout:
-            return None
-        props = {
-            key: value.strip()
-            for line in result.stdout.splitlines()
-            for key, sep, value in (line.partition("="),)
-            if sep
-        }
-        if props.get("SystemState") in _SYSTEMD_UNAVAILABLE_STATES:
-            return None
-        raw_generation = props.get("UserspaceTimestampMonotonic", "")
-        if raw_generation.isascii() and raw_generation.isdigit() and (generation := int(raw_generation)) > 0:
-            return generation
-    return None
-
-
-@functools.lru_cache(maxsize=4)
-def _probe_systemd_slice_launcher(
-    slice_name: str,
-    runtime_dir: str | None,
-    dbus_addr: str | None,
-    generation: int,
-) -> _SystemdSliceLauncher | None:
-    """Return a ``systemd-run --user --scope`` launcher when probing *slice_name* succeeds, else ``None``."""
-    del generation  # cache key only; re-probes when the user manager restarts
-    systemd_run = shutil.which("systemd-run")
-    env_bin = shutil.which("env")
-    if systemd_run is None or env_bin is None:
-        return None
-    systemd_run = str(Path(systemd_run).absolute())  # commands run in other directories
-    env_bin = str(Path(env_bin).absolute())
-    cat_bin = shutil.which("cat")
-    probe_payload = (
-        [str(Path(cat_bin).absolute()), "/proc/self/cgroup"] if cat_bin is not None else [systemd_run, "--version"]
-    )
-    probe_unit = make_scope_unit_name(probe=True)
-    # --description hides raw argv from the systemd user journal;
-    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here);
-    # OOMPolicy=kill sets memory.oom.group=1 on each transient .scope so a slice-level MemoryMax OOM cleanly
-    # terminates the whole offending command scope instead of picking off single workers one at a time.
-    prefix = (
-        systemd_run,
-        "--user",
-        "--scope",
-        "--quiet",
-        f"--description={_SYSTEMD_SCOPE_DESCRIPTION}",
-        "--expand-environment=no",
-        f"--slice={slice_name}",
-        "--property=OOMPolicy=kill",
-    )
-    bus_env: tuple[tuple[str, str | None], ...] = (
-        ("XDG_RUNTIME_DIR", runtime_dir),
-        ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
-    )
-    try:
-        probe = subprocess.run(
-            [
-                *prefix,
-                f"--unit={probe_unit}",
-                "--",
-                env_bin,
-                "-u",
-                "MINDROOM_PROBE_UNSET",
-                "--",
-                "MINDROOM_PROBE_SET=1",
-                *probe_payload,
-            ],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-            check=False,
-            env=_systemd_bus_env(runtime_dir, dbus_addr),
-        )
-    except subprocess.TimeoutExpired:
-        # Let transient probe timeouts escape lru_cache so the next call re-probes instead of caching None.
-        raise
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if probe.returncode == 0:
-        slice_cgroup_dir = (
-            parse_probe_slice_cgroup_dir(probe.stdout or "", probe_unit=probe_unit, slice_name=slice_name)
-            if cat_bin is not None
-            else None
-        )
-        return _SystemdSliceLauncher(
-            prefix=prefix,
-            slice_name=slice_name,
-            env_bin=env_bin,
-            bus_env=bus_env,
-            slice_cgroup_dir=slice_cgroup_dir,
-        )
-    return None
-
-
-def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
-    """Return a ``systemd-run --user --scope`` launcher for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
-    slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
-    if (
-        len(slice_name) <= len(".slice")
-        or not slice_name.endswith(".slice")
-        or slice_name.startswith("-")
-        or "/" in slice_name
-        or any(ch.isspace() or ch == "\x00" for ch in slice_name)
-    ):
-        return None
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or None
-    dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None
-    generation = _user_manager_generation(runtime_dir, dbus_addr)
-    if generation is None:
-        _probe_systemd_slice_launcher.cache_clear()
-        return None
-    try:
-        return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
-    except subprocess.TimeoutExpired:
-        return None
-
-
-def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
-    """Like Popen, look a bare name up on the command's PATH and a path with a slash up, both from the command's directory."""
-    program = str(Path(cwd, program)) if cwd and os.sep in program else program
-    search = [str(Path(cwd, entry)) if cwd else entry for entry in os.get_exec_path(env)]
-    return shutil.which(program, mode=mode, path=os.pathsep.join(search))
-
-
-# Bash's exit code and words for the spawn errors that are a shell's own exit: of a program named by a path, of a bare
-# name no PATH entry holds, and of a bare name found on PATH. Every other error stays a failed call.
-_PATH_LAUNCH_FAILURES = {
-    errno.ENOENT: (127, "No such file or directory"),
-    errno.ENOTDIR: (126, "Not a directory"),
-    errno.EACCES: (126, "Permission denied"),
-}
-_MISSING_NAME_LAUNCH_FAILURES = dict.fromkeys((errno.ENOENT, errno.ENOTDIR), (127, "command not found"))
-_FOUND_NAME_LAUNCH_FAILURES = {
-    # A file the program needs to start, such as its interpreter, is missing.
-    errno.ENOENT: (127, "cannot execute: required file not found"),
-    errno.ENOTDIR: (127, "cannot execute: required file not found"),
-    errno.EACCES: (126, "Permission denied"),
-}
-
-
-def _launch_failure_exit(
-    argv: list[str],
-    env: dict[str, str],
-    cwd: str | None,
-    exc: Exception,
-) -> tuple[int, str] | None:
-    """Return Bash's exit code and words for a spawn error of a program that is missing or cannot be executed, else None.
-
-    A working directory the command cannot enter fails before any program. The error number and the program's name
-    as given decide alone: the program file is never opened.
-    """
-    if (
-        not isinstance(exc, OSError)
-        or not argv
-        # uvloop, which sandbox runners serve on, names no file in a spawn error.
-        or exc.filename not in (argv[0], None)
-        or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
-    ):
-        return None
-    program = argv[0]
-    if os.sep in program:
-        failures = _PATH_LAUNCH_FAILURES
-    elif (found := _find_program(program, env, cwd, os.F_OK)) is None:
-        failures = _MISSING_NAME_LAUNCH_FAILURES
-    else:
-        # Bash names a program it found on PATH by where it found it.
-        program, failures = found, _FOUND_NAME_LAUNCH_FAILURES
-    failure = failures.get(exc.errno or 0)
-    return None if failure is None else (failure[0], f"{program}: {failure[1]}")
-
-
 def _launch_failure(
     argv: list[str],
     env: dict[str, str],
@@ -1695,7 +1067,7 @@ def _launch_failure(
     The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
     failed command's result reads this one.
     """
-    if (failure := _launch_failure_exit(argv, env, cwd, exc)) is None:
+    if (failure := classify_launch_failure(argv, env, cwd, exc)) is None:
         return None
     return_code, said = failure
     if capture is None:
@@ -1708,114 +1080,6 @@ def _launch_failure(
     return ShellRunResult(message=capture.publish(return_code), output_file_handled=True, return_code=return_code)
 
 
-def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> _IdleLaunch:
-    """Wrap *argv* on Linux for optional systemd slice, ``SCHED_IDLE``, and idle I/O priority.
-
-    Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
-    MindRoom's waking event loop. It counts a CPU that runs only idle-policy threads as free, and a waking normal thread
-    preempts them at once.
-    All wrappers exec the program in the same process. A program that cannot be found starts directly instead, so the
-    spawn fails with the same error as before; unavailable wrappers are skipped individually.
-    """
-    if sys.platform != "linux" or not argv or _find_program(argv[0], env, cwd) is None:
-        return _IdleLaunch(argv, env, uses_chrt=False)
-
-    spawn_argv = argv
-    spawn_env = env
-    ionice = _idle_io_launcher()
-    chrt = _idle_launcher()
-    systemd_launcher = _systemd_slice_launcher()
-    if ionice is not None:
-        spawn_argv = [ionice, "-c", "3", "--", *spawn_argv]
-    if chrt is not None:
-        spawn_argv = [chrt, "-i", "0", *spawn_argv]
-    scope: ProcessScope | None = None
-    if systemd_launcher is not None:
-        # systemd-run needs the verified backend user bus, while the payload must keep the caller's exact
-        # values and omissions for those bus variables.
-        spawn_env = dict(env)
-        unset_ops: list[str] = []
-        set_ops: list[str] = []
-        for key, bus_value in systemd_launcher.bus_env:
-            if bus_value is None:
-                spawn_env.pop(key, None)
-            else:
-                spawn_env[key] = bus_value
-            if (key in spawn_env) != (key in env) or spawn_env.get(key) != env.get(key):
-                if key in env:
-                    set_ops.append(f"{key}={env[key]}")
-                else:
-                    unset_ops.extend(["-u", key])
-        if unset_ops or set_ops:
-            spawn_argv = [systemd_launcher.env_bin, *unset_ops, "--", *set_ops, *spawn_argv]
-        unit_name = make_scope_unit_name()
-        scope = ProcessScope(
-            unit_name=unit_name,
-            slice_name=systemd_launcher.slice_name,
-            slice_cgroup_dir=systemd_launcher.slice_cgroup_dir,
-        )
-        spawn_argv = [*systemd_launcher.prefix, f"--unit={unit_name}", "--", *spawn_argv]
-    return _IdleLaunch(spawn_argv, spawn_env, uses_chrt=chrt is not None, scope=scope)
-
-
-def _schedule_process_tree_idle(pid: int) -> None:
-    """Move every thread of ``pid`` and of its descendants to ``SCHED_IDLE``; what they start later inherits it.
-
-    This is the fallback for a command that did not start behind chrt (see ``_idle_launch_argv``).
-    A busy event loop gives the command time to fork and start threads before this runs, so the walk sets each thread
-    before it reads that thread's children: whatever the thread starts afterwards inherits the policy. It misses a
-    thread started during the walk by a thread it has not reached yet, and a process whose parent already exited.
-    """
-    if sys.platform != "linux":
-        return
-    pending = [pid]
-    while pending:
-        with contextlib.suppress(OSError):
-            for thread in Path(f"/proc/{pending.pop()}/task").iterdir():
-                with contextlib.suppress(OSError):
-                    os.sched_setscheduler(int(thread.name), os.SCHED_IDLE, os.sched_param(0))
-                    pending.extend(int(child) for child in (thread / "children").read_text().split())
-
-
-def _kill_process_group(pid: int, *, scope: ProcessScope | None = None) -> None:
-    """Kill every process in the group led by *pid*, its Linux session, and its verified scope."""
-    kill_command_processes(pid, scope=scope)
-
-
-async def _terminate_process_group(
-    process: asyncio.subprocess.Process,
-    *,
-    grace_period: float = 0.5,
-    whole_group: bool = False,
-) -> bool:
-    """Stop a running command: SIGTERM, then SIGKILL every process left after the grace.
-
-    Members that outlive the leader are killed too, so a child that ignores SIGTERM cannot survive the stop.
-    A command whose leader already exited ended on its own, and its detached children keep running, unless
-    ``whole_group`` stops them too; return whether all command processes are then gone.
-    """
-    if process.returncode is not None and not whole_group:
-        return False
-
-    scope = _process_scope(process)
-    signal_command(process.pid, signal.SIGTERM, scope=scope)
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + grace_period
-    try:
-        while loop.time() < deadline and command_processes_exist(process.pid, scope=scope):  # noqa: ASYNC110 - a process tree has no exit event
-            await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
-    finally:
-        # A stop cancelled during the grace still kills what ignored SIGTERM.
-        _kill_process_group(process.pid, scope=scope)
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(process.wait(), timeout=grace_period)
-    deadline = loop.time() + grace_period
-    while whole_group and command_processes_exist(process.pid, scope=scope) and loop.time() < deadline:  # noqa: ASYNC110 - as above
-        await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
-    return not command_processes_exist(process.pid, scope=scope)
-
-
 async def _monitor_process(
     registry: dict[str, ProcessRecord],
     record: ProcessRecord,
@@ -1824,7 +1088,7 @@ async def _monitor_process(
 ) -> None:
     """Wait for a backgrounded process to exit (or hit max_runtime_seconds) and update its record."""
     handle = record.handle
-    process = record.process
+    managed = record.managed
     log_file = record._log_file
     natural_exit = False
     try:
@@ -1834,12 +1098,12 @@ async def _monitor_process(
             else max(0.0, record.started_at + record.max_runtime_seconds - time.monotonic())
         )
         try:
-            await _await_process_exit(process, timeout_seconds=timeout_seconds)
-            natural_exit = record._stop_reason is None and process.returncode is not None and process.returncode >= 0
+            await managed.wait_exit(timeout_seconds=timeout_seconds)
+            natural_exit = record._stop_reason is None and managed.returncode is not None and managed.returncode >= 0
         except TimeoutError:
             if record._stop_reason is None:
                 record._stop_reason = "timeout"
-            await _terminate_process_group(process, whole_group=True)
+            await managed.terminate_tree(whole_group=True)
     finally:
         try:
             live_record = registry.get(handle)
@@ -1852,7 +1116,7 @@ async def _monitor_process(
                     capture.incomplete |= bool(pending)
             finally:
                 if (not natural_exit or log_file is None) and record._stop_reason != "scope_ended":
-                    _kill_process_group(process.pid, scope=_process_scope(process))
+                    managed.kill_tree()
             drain_timeout = _POST_EXIT_READER_GRACE_SECONDS if log_file is not None else 2.0
             await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)
             await _cancel_pending_tasks(stdout_reader, stderr_reader)
@@ -1862,17 +1126,17 @@ async def _monitor_process(
                 if capture is not None and not capture.closed:
                     capture.incomplete |= stdout_reader.cancelled() or stderr_reader.cancelled()
                     try:
-                        live_record.output_receipt = capture.publish(process.returncode)
+                        live_record.output_receipt = capture.publish(managed.returncode)
                     finally:
                         capture.close()
             record.finished = True
             record.finished_at = time.monotonic()
-            record.return_code = process.returncode
+            record.return_code = managed.returncode
         finally:
             if log_file is not None and not log_file.closed:
                 log_file.finish(
                     format_log_trailer(
-                        process.returncode,
+                        managed.returncode,
                         stop_reason=record._stop_reason,
                         max_runtime_seconds=record.max_runtime_seconds,
                     ),

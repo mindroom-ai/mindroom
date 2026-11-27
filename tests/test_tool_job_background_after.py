@@ -21,7 +21,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
 from mindroom.participation import ParticipationGate
-from mindroom.shell import execution as shell_execution
+from mindroom.shell import policy as shell_policy
 from mindroom.tool_jobs.background_after import background_after_schema
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution import approval_can_run_as_job, offered_definitions, project_definitions, wait_mode
@@ -245,7 +245,7 @@ async def test_a_shell_job_without_a_wait_budget_holds_its_reply_only_as_long_as
         await gate.wait()
         return args
 
-    monkeypatch.setattr(shell_execution, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(shell_policy, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.01)
     context, runtime = await _managed_context(tmp_path)
     owner = context.execution_identity
     actor = job_actor(job_tool(run_shell_command, authored_name="shell"))

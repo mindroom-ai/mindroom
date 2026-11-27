@@ -18,8 +18,8 @@ from mindroom.desktop.media import DesktopMediaError, download_encrypted_media
 from mindroom.desktop.protocol import DesktopAction, DesktopCommand, DesktopResponse
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
 from mindroom.shell import execution, output_capture
-from mindroom.shell.execution import shell_call_timeout
 from mindroom.shell.output_capture import format_shell_completion, format_shell_timeout
+from mindroom.shell.policy import shell_args_to_command, shell_call_timeout
 from mindroom.tool_jobs.control import current_job_id
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.output_files import ToolOutputFileHandled, current_tool_output_file_request
@@ -96,7 +96,7 @@ def _nonempty_str(value: object) -> str | None:
 
 
 def _validate_args(args: object, tail: object, limit: object, cwd: object) -> tuple[str, int, float | None, str | None]:
-    command = execution.shell_args_to_command(args)
+    command = shell_args_to_command(args)
     if len(command) > 8192:
         msg = "Shell command must not exceed 8192 characters."
         raise ValueError(msg)

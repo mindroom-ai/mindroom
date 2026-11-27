@@ -37,7 +37,7 @@ from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.script_runs.launch_contract import RUN_ID_ENV
-from mindroom.shell import execution
+from mindroom.shell import streaming
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.toolkits import toolkit_function
@@ -600,7 +600,7 @@ async def test_a_command_that_never_reads_stdin_holds_one_pending_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Chunks a command does not read are not piled up: one waits, a short time, and repeats of it wait for nothing."""
-    monkeypatch.setattr(execution, "_STDIN_WRITE_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(streaming, "_STDIN_WRITE_SECONDS", 1.0, raising=False)
     chunk = base64.b64encode(bytes(32 * 1024)).decode()
     async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
         operation = stack.submit("sleep 300", stream=True)
@@ -850,12 +850,12 @@ async def test_a_cancel_while_the_exit_waits_to_be_delivered_does_not_stop_what_
         await asyncio.Event().wait()
 
     command = asyncio.create_task(
-        execution.stream_command(
+        streaming.stream_command(
             ["bash", "-c", f"sleep 300 > /dev/null 2>&1 & echo $! > {child}"],
             dict(os.environ),
             None,
             timeout=60,
-            stdin=execution.CommandStdin(),
+            stdin=streaming.CommandStdin(),
             on_start=taken,
             on_output=taken,
             on_exit=on_exit,
@@ -935,17 +935,17 @@ async def test_a_stdin_chunk_the_runner_asks_to_send_again_is_sent_again(
     status: int,
 ) -> None:
     """An answer of the runner that passes is no refusal: the chunk is sent again, and written once."""
-    write = execution.CommandStdin.write
+    write = streaming.CommandStdin.write
     writes = 0
 
-    async def busy_once(self: execution.CommandStdin, seq: int, data: bytes, *, eof: bool) -> bool:
+    async def busy_once(self: streaming.CommandStdin, seq: int, data: bytes, *, eof: bool) -> bool:
         nonlocal writes
         writes += 1
         if writes == 3:
             raise HTTPException(status_code=status, detail="busy")
         return await write(self, seq, data, eof=eof)
 
-    monkeypatch.setattr(execution.CommandStdin, "write", busy_once)
+    monkeypatch.setattr(streaming.CommandStdin, "write", busy_once)
     sent = os.urandom(300_000)
     async with _stack(tmp_path) as stack:
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):

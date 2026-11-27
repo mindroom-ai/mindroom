@@ -447,7 +447,7 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
         await asyncio.Event().wait()
 
     monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", observed_file)
-    monkeypatch.setattr("mindroom.shell.execution.asyncio.create_subprocess_exec", blocked_spawn)
+    monkeypatch.setattr("mindroom.shell.process.asyncio.create_subprocess_exec", blocked_spawn)
     task = asyncio.create_task(
         run_command(
             {},

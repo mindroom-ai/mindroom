@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.shell.execution import shell_args_to_command
+from mindroom.shell.policy import shell_args_to_command
 from mindroom.tool_system.declarations import (
     ApprovalAlias,
     ConfigField,
