@@ -22802,6 +22802,37 @@ def check():
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
+#### Common use cases
+
+Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers(action="watch_script", ...)`:
+
+- **Email watching + cheap triage (`gmail`):** *"Whenever I get an unread email from my accountant or about an invoice, summarize it and draft a reply."* The check polls `tool("gmail", "gmail_read", action="search_emails", query=...)`, tracks `seen_ids` in `state` so idle ticks cost zero LLM tokens, and optionally attaches `triage_instructions` + a cheap `triage_model` to filter out noise before waking the main agent. Write tools requiring approval (such as `gmail_send`) stay blocked inside the background tick, while the woken turn can still ask you to approve sending a reply.
+- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
+- **Smart home threshold alerts (`homeassistant`):** *"Alert me if the garage door stays open for more than 15 minutes."* Read `tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door")`, persist `opened_since` in `state`, and return a dict once the threshold is crossed (with `cooldown_seconds` so flapping sensors do not spam):
+
+  ```python
+  import json
+  import time
+
+
+  def check():
+      reading = json.loads(tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door"))
+      if reading.get("state") != "open":
+          state.delete("opened_since")
+          return None
+      now = time.time()
+      opened_since = state.get("opened_since")
+      if opened_since is None:
+          state.set("opened_since", now)
+          return None
+      if now - opened_since < 900:
+          return None
+      return {"title": "Garage door open >15m", "data": {"minutes_open": round((now - opened_since) / 60, 1)}}
+  ```
+
+- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
+- **Cross-agent wakeups & thread workflows:** Any `watch_script` runs with the authoring agent's credentials, but can wake a different agent or team (`target_agent`), post into a fresh thread (`new_thread=True`, optional `thread_key`), or reopen a resolved thread (`reopen_on_fire=True`).
+
 #### `check()` authoring contract
 
 - **Entry point:** Provide exactly one of `source` or `path` (`<= 64 KiB` UTF-8). The module must parse cleanly and define a top-level synchronous `def check():` taking no required or positional arguments (`async def check()` is rejected).
@@ -22819,6 +22850,7 @@ def check():
 - **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow(action="start")` may require approval (grant `script` or allow unapproved `workflow` launch).
 - **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
 - **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
+- **Agent and runtime support:** Works for shared agents, personal agents, and `private.per: user_agent` private agents across Linux local mode (`defaults.allow_shell_without_worker: true` or explicit local execution mode), dedicated Docker workers (with `MINDROOM_SCRIPT_GATEWAY_URL` or `MINDROOM_PUBLIC_URL`), and dedicated Kubernetes workers with an isolated gateway (`MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` + `MINDROOM_SCRIPT_GATEWAY_URL`). Not supported on the shared `static_runner` backend, macOS local mode, or `private.per: user` agents under worker placement (rejected up front at authoring/re-enable time).
 
 ### Cheap tool-less triage
 
