@@ -56,8 +56,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
     from pathlib import Path
 
+    from mindroom.history.conversation_text import Utterance
     from mindroom.history.summary_fork import SummaryFork
     from mindroom.history.types import CompactionMode
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
@@ -94,18 +96,62 @@ class _UnsetWorkspaceRoot:
 _UNSET_WORKSPACE_ROOT = _UnsetWorkspaceRoot()
 
 
-def compaction_transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
-    """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
-    return tuple(
-        TranscriptLine(
-            role="user" if said.kind == "said" else "assistant",
-            sender=said.sender,
-            display_name=said.display_name,
-            text=said.unredacted,
-        )
-        for run in runs
-        for said in utterances(run)
+def _utterance_line(said: Utterance) -> TranscriptLine:
+    return TranscriptLine(
+        role="user" if said.kind == "said" else "assistant",
+        sender=said.sender,
+        display_name=said.display_name,
+        text=said.unredacted,
     )
+
+
+def _compaction_transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
+    """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
+    return tuple(_utterance_line(said) for run in runs for said in utterances(run))
+
+
+def projected_messages_transcript(
+    history_messages: Sequence[Message],
+    current_messages: Sequence[Message],
+    *,
+    record: AnyRunRecord,
+    session_runs: Sequence[AnyRunRecord] = (),
+) -> tuple[TranscriptLine, ...]:
+    """Project replayed ``history_messages`` and ``current_messages`` into compaction transcript lines.
+
+    History messages matching a stored run in ``session_runs`` reuse that run's ``utterances`` projection so run-level
+    attribution and exclusions (automation turns, job follow-up prompts, stopped turns) are preserved.
+    """
+    lines: list[TranscriptLine] = []
+    if history_messages:
+        known_stored_ids = {msg.id for run in session_runs for msg in run.messages if msg.id}
+        stored_lines_by_msg_id: dict[str, list[TranscriptLine]] = {}
+        for run in session_runs:
+            for said in utterances(run):
+                if said.message.id:
+                    stored_lines_by_msg_id.setdefault(said.message.id, []).append(_utterance_line(said))
+        seen_stored_ids: set[str] = set()
+        for msg in history_messages:
+            if msg.id and msg.id in known_stored_ids:
+                if msg.id not in seen_stored_ids:
+                    seen_stored_ids.add(msg.id)
+                    lines.extend(stored_lines_by_msg_id.get(msg.id, ()))
+            else:
+                lines.extend(_compaction_transcript([RunRecord(run_id="", messages=[msg])]))
+    if current_messages:
+        lines.extend(
+            _compaction_transcript(
+                [
+                    RunRecord(
+                        run_id="",
+                        user_id=record.user_id,
+                        messages=list(current_messages),
+                        metadata=record.metadata,
+                    ),
+                ],
+            ),
+        )
+    return tuple(lines)
 
 
 async def emit_compaction_hook(
@@ -134,14 +180,17 @@ async def emit_compaction_hook(
         if isinstance(workspace_root, _UnsetWorkspaceRoot)
         else workspace_root
     )
+    hook_kwargs = scope_hook_context_kwargs(
+        runtime_context,
+        event_name=event_name,
+        correlation_id=runtime_context.correlation_id or f"{event_name}:{effective_session_id}:{uuid4().hex}",
+        scope=scope,
+        session_id=effective_session_id,
+    )
+    # Compaction hooks always attribute to the compacted scope's own id (e.g. a team member).
+    hook_kwargs["agent_name"] = scope.scope_id
     context = CompactionHookContext(
-        **scope_hook_context_kwargs(
-            runtime_context,
-            event_name=event_name,
-            correlation_id=runtime_context.correlation_id or f"{event_name}:{effective_session_id}:{uuid4().hex}",
-            scope=scope,
-            session_id=effective_session_id,
-        ),
+        **hook_kwargs,
         transcript=tuple(transcript),
         token_count_before=token_count_before,
         token_count_after=token_count_after,
@@ -206,7 +255,7 @@ async def compact_scope_history(
         resolved_workspace = await emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            transcript=compaction_transcript(included_runs) if hooks_registered else (),
+            transcript=_compaction_transcript(included_runs) if hooks_registered else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
             kind="pre_reply",
@@ -220,7 +269,7 @@ async def compact_scope_history(
         remaining_runs: Sequence[AnyRunRecord],
     ) -> None:
         if hooks_registered:
-            compacted_transcript.extend(compaction_transcript(chunk.included_runs))
+            compacted_transcript.extend(_compaction_transcript(chunk.included_runs))
         if progress is None or not remaining_runs:
             return
         snapshot = replace(
@@ -444,7 +493,7 @@ async def compact_running_turn(
         messages=list(fold.messages),
         metadata=fold.run.metadata,
     )
-    transcript = compaction_transcript([*basis.runs, folded_run]) if compaction_hooks_registered() else ()
+    transcript = _compaction_transcript([*basis.runs, folded_run]) if compaction_hooks_registered() else ()
     resolved_workspace = await emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
@@ -529,8 +578,8 @@ __all__ = [
     "compact_running_turn",
     "compact_scope_history",
     "compaction_hooks_registered",
-    "compaction_transcript",
     "emit_compaction_hook",
     "iso_utc_now",
+    "projected_messages_transcript",
     "scope_usage_recorder",
 ]

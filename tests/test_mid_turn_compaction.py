@@ -19,8 +19,13 @@ from mindroom.agent_loop.model_loop import LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX
 from mindroom.config.models import CompactionConfig, ModelConfig
-from mindroom.constants import MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY
+from mindroom.constants import (
+    HOOK_SOURCE_RUN_METADATA_KEY,
+    MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
+    TURN_INTENT_RUN_METADATA_KEY,
+)
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
@@ -83,6 +88,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_origin import TurnIntent
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, estimate_only_model, tool_call
@@ -2451,3 +2457,72 @@ async def test_run_local_mid_turn_compaction_emits_hooks_with_raw_summary_and_ex
     if with_history:
         assert "q1" in transcript_texts
         assert "a1" in transcript_texts
+
+
+@pytest.mark.asyncio
+async def test_run_local_mid_turn_compaction_preserves_session_run_metadata_and_exclusions(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """Run-local folds reuse stored run metadata so job follow-ups keep replies and exclude runtime/automation turns."""
+    config, paths = _config(tmp_path)
+    summary_calls.summary = "Run-local summary."
+    storage = create_session_storage("test_agent", config, paths, execution_identity=None)
+    seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[
+                RunRecord(
+                    run_id="run-user",
+                    agent_id="test_agent",
+                    status=RunStatus.completed,
+                    user_id="@alice:localhost",
+                    messages=[
+                        Message(role="user", content="Alice question"),
+                        Message(role="assistant", content="Alice answer"),
+                    ],
+                ),
+                RunRecord(
+                    run_id="run-job",
+                    agent_id="test_agent",
+                    status=RunStatus.completed,
+                    messages=[
+                        Message(role="user", content="Background job finished runtime prompt"),
+                        Message(role="assistant", content="Job follow-up reply"),
+                    ],
+                    metadata={TURN_INTENT_RUN_METADATA_KEY: TurnIntent.JOB_FOLLOW_UP},
+                ),
+                RunRecord(
+                    run_id="run-auto",
+                    agent_id="test_agent",
+                    status=RunStatus.completed,
+                    messages=[
+                        Message(role="user", content="Automation trigger prompt"),
+                        Message(role="assistant", content="Automation reply"),
+                    ],
+                    metadata={HOOK_SOURCE_RUN_METADATA_KEY: f"{AUTOMATION_HOOK_PREFIX}nightly"},
+                ),
+            ],
+        ),
+    )
+    hook_context, observed = _observed_compaction_hooks(config, paths)
+    agent = _scoped_agent(ToolLoopModel(tool_rounds=5), config, paths, storage, folds_into_scope=False)
+
+    with tool_runtime_context(hook_context):
+        await _run(agent, "Current prompt", user_id="@bob:localhost")
+
+    assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    before_ctx, after_ctx = observed[:2]
+    assert before_ctx.kind == after_ctx.kind == "run_local"
+    assert before_ctx.transcript == after_ctx.transcript
+    assert before_ctx.transcript[:3] == (
+        TranscriptLine(role="user", sender="@alice:localhost", display_name=None, text="Alice question"),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Alice answer"),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Job follow-up reply"),
+    )
+    texts = [line.text for line in before_ctx.transcript]
+    assert "Background job finished runtime prompt" not in texts
+    assert "Automation trigger prompt" not in texts
+    assert "Automation reply" not in texts
+    assert all(line.sender != "unknown" for line in before_ctx.transcript)

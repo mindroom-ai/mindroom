@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.compaction import (
     compaction_hooks_registered,
-    compaction_transcript,
     emit_compaction_hook,
     iso_utc_now,
+    projected_messages_transcript,
 )
 from mindroom.history.request_size import RequestSizer, request_sizer
 from mindroom.hooks import EVENT_COMPACTION_AFTER
-from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts, message_context_tokens
-from mindroom.native_compaction import extract_native_checkpoint, native_replay
+from mindroom.native_compaction import ENCRYPTED_REPLAY_RESET_KEY, extract_native_checkpoint, native_replay
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.agent_loop.model_loop import AfterTurnHook, LoopState
     from mindroom.config.main import Config
     from mindroom.history.types import HistoryScope
@@ -37,27 +40,39 @@ def native_compaction_after_turn_hook(
     scope: HistoryScope,
     model_name: str,
     model: ModelProvider,
+    session_runs: Sequence[AnyRunRecord] | Callable[[], Sequence[AnyRunRecord]] = (),
 ) -> AfterTurnHook:
     """Return a post-turn loop hook that emits ``compaction:after`` when the provider compacted natively."""
-    emitted_ids: set[str] = set()
 
     async def after_turn(state: LoopState, sent_request: ModelRequest, message: Message) -> None:
         checkpoint: NativeCheckpoint | None = extract_native_checkpoint(message)
-        if checkpoint is None or checkpoint.message_id in emitted_ids:
+        if checkpoint is None:
             return
         if not compaction_hooks_registered(EVENT_COMPACTION_AFTER):
             return
-        emitted_ids.add(checkpoint.message_id)
         try:
+            stripped = sent_request.strip_encrypted_replay or bool(
+                (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY),
+            )
+            reset_scope = model.capabilities.replay_reset_scope
+            effective_request = replace(sent_request, strip_encrypted_replay=True) if stripped else sent_request
             sizer = request_sizer(model, config, model_name)
-            token_count_before = (await asyncio.to_thread(sizer.size, sent_request)).tokens
+            token_count_before = (await asyncio.to_thread(sizer.size, effective_request)).tokens
             token_count_after = await _token_count_after(
                 state=state,
                 message=message,
                 model=model,
                 sizer=sizer,
             )
-            transcript = _native_transcript(sent_request, state.record, checkpoint.route)
+            runs = session_runs if isinstance(session_runs, Sequence) else session_runs()
+            transcript = _native_transcript(
+                sent_request,
+                state.record,
+                checkpoint.route,
+                reset_scope=reset_scope,
+                stripped=stripped,
+                session_runs=runs,
+            )
             await emit_compaction_hook(
                 event_name=EVENT_COMPACTION_AFTER,
                 scope=scope,
@@ -116,24 +131,21 @@ def _native_transcript(
     sent_request: ModelRequest,
     record: AnyRunRecord,
     route: str,
+    *,
+    reset_scope: str | None = None,
+    stripped: bool = False,
+    session_runs: Sequence[AnyRunRecord] = (),
 ) -> tuple[TranscriptLine, ...]:
     """Project the pre-compaction messages covered by this native checkpoint into compaction transcript lines."""
-    replayed = native_replay(sent_request.messages, route).messages
+    replayed = native_replay(
+        sent_request.messages,
+        route,
+        reset_scope=reset_scope,
+        stripped=stripped,
+    ).messages
     history = [msg for msg in replayed if msg.from_history]
     current = [msg for msg in replayed if not msg.from_history]
-    runs: list[RunRecord] = []
-    if history:
-        runs.append(RunRecord(run_id="", messages=history))
-    if current:
-        runs.append(
-            RunRecord(
-                run_id="",
-                user_id=record.user_id,
-                messages=current,
-                metadata=record.metadata,
-            ),
-        )
-    return compaction_transcript(runs)
+    return projected_messages_transcript(history, current, record=record, session_runs=session_runs)
 
 
 __all__ = ["native_compaction_after_turn_hook"]

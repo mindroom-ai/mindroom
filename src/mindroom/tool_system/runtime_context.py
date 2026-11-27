@@ -559,8 +559,7 @@ def scope_hook_context_kwargs(
 ) -> dict[str, Any]:
     """Return the fields of a session or compaction hook context about ``scope``, emitted from ``context``.
 
-    Both team and agent scopes name ``scope.scope_id`` as ``agent_name``, so a team member's hooks still attribute
-    to that member even when ``context`` names the team or transport agent.
+    A team scope's hooks name the team as ``agent_name``; an agent scope's name the agent ``context`` runs.
     """
     return {
         **context.hooks.context_kwargs(
@@ -571,7 +570,7 @@ def scope_hook_context_kwargs(
         ),
         "turn_id": context.turn_id,
         "parent_turn_id": context.parent_turn_id,
-        "agent_name": scope.scope_id,
+        "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
         "scope": scope,
         "session_id": session_id,
         "room_id": context.room_id,

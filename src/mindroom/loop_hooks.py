@@ -225,6 +225,7 @@ def _loop_hooks(
     checkpoint = checkpoint_hooks(turn.storage, on_saved=acknowledge_saved_run) if turn.checkpoints else None
     if checkpoint is not None:
         before_request.append(checkpoint.before_request)
+    storage = turn.storage
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
@@ -234,6 +235,7 @@ def _loop_hooks(
                 scope=scope,
                 model_name=turn.model_name,
                 model=model,
+                session_runs=(lambda: storage.session.runs) if storage is not None else (),
             ),
         ),
         answer_tool_calls=_answer_tool_calls(),

@@ -21,9 +21,9 @@ from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.compaction import (
     compact_running_turn,
     compaction_hooks_registered,
-    compaction_transcript,
     emit_compaction_hook,
     iso_utc_now,
+    projected_messages_transcript,
     scope_usage_recorder,
 )
 from mindroom.history.conversation_text import is_own_thread_message
@@ -68,7 +68,6 @@ if TYPE_CHECKING:
         ResolvedHistorySettings,
         ResolvedReplayPlan,
     )
-    from mindroom.hooks import TranscriptLine
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
@@ -374,7 +373,17 @@ async def _summarize(
             compacted_run_count = 1 if (layout.folded and not layout.history) else None
 
             async def commit_run_local() -> None:
-                transcript = _run_local_transcript(layout, record) if compaction_hooks_registered() else ()
+                session_runs = compaction.storage.session.runs if compaction.storage is not None else ()
+                transcript = (
+                    projected_messages_transcript(
+                        layout.history,
+                        layout.folded,
+                        record=record,
+                        session_runs=session_runs,
+                    )
+                    if compaction_hooks_registered()
+                    else ()
+                )
                 workspace_root = await emit_compaction_hook(
                     event_name=EVENT_COMPACTION_BEFORE,
                     scope=compaction.scope,
@@ -739,23 +748,6 @@ def _rewritten_messages(
     prompt_to_mark = layout.kept[after_prompt - 1] if after_prompt and is_scope_summary(summary_message) else None
     rewritten = [*messages[: layout.leading], *layout.kept[:after_prompt], summary_message, *layout.kept[after_prompt:]]
     return rewritten, prompt_to_mark
-
-
-def _run_local_transcript(layout: _Layout, record: AnyRunRecord) -> tuple[TranscriptLine, ...]:
-    """Return what was said in the replayed history and folded exchanges of a run-local compaction."""
-    runs: list[RunRecord] = []
-    if layout.history:
-        runs.append(RunRecord(run_id="", messages=list(layout.history)))
-    if layout.folded:
-        runs.append(
-            RunRecord(
-                run_id="",
-                user_id=record.user_id,
-                messages=list(layout.folded),
-                metadata=record.metadata,
-            ),
-        )
-    return compaction_transcript(runs)
 
 
 def _apply_rewrite(

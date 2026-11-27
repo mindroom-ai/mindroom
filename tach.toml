@@ -3532,7 +3532,6 @@ depends_on = [
     "mindroom.history.compaction",
     "mindroom.history.request_size",
     "mindroom.hooks",
-    "mindroom.llm",
     "mindroom.model_usage",
     "mindroom.native_compaction",
 ]
