@@ -641,6 +641,7 @@ class TriggersTools(Toolkit):
         record: ReactiveTriggerRecord,
         *,
         verb: str = "changed",
+        not_found_prefix: str = "external trigger not found",
     ) -> None:
         owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
         if not can_view_reactive_trigger(
@@ -649,7 +650,7 @@ class TriggersTools(Toolkit):
             event_sources=_event_sources_registry(context),
             viewer_user_ids=owner_ids,
         ):
-            msg = f"external trigger not found: {record.trigger_id}"
+            msg = f"{not_found_prefix}: {record.trigger_id}"
             raise ReactiveTriggerStoreError(msg)
         if not (record.owner_user_id in owner_ids or cls._is_admin(context)):
             msg = f"trigger can only be {verb} by its owner or an external trigger admin"
@@ -1257,7 +1258,7 @@ class TriggersTools(Toolkit):
             event_sources=_event_sources_registry(context),
             viewer_user_ids=owner_ids,
         ):
-            msg = f"external trigger not found: {resolved_trigger_id}"
+            msg = f"Reactive trigger not found: {resolved_trigger_id}"
             raise ReactiveTriggerStoreError(msg)
         if existing.owner_user_id not in owner_ids:
             msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
@@ -1399,7 +1400,12 @@ class TriggersTools(Toolkit):
                     direct_error="Firing history is only available for reactive triggers.",
                 ),
             )
-            self._require_reactive_owner_or_admin(context, record, verb="viewed")
+            self._require_reactive_owner_or_admin(
+                context,
+                record,
+                verb="viewed",
+                not_found_prefix="Reactive trigger not found",
+            )
             if not is_admin:
                 if not await self._has_source_access_for_history(
                     context,
@@ -1598,7 +1604,12 @@ class TriggersTools(Toolkit):
                 direct_error="Dry-run testing is only supported for reactive triggers.",
             ),
         )
-        self._require_reactive_owner_or_admin(context, rule, verb="tested")
+        self._require_reactive_owner_or_admin(
+            context,
+            rule,
+            verb="tested",
+            not_found_prefix="Reactive trigger not found",
+        )
 
         now = time.time()
         event, matched, skip_note = _build_dry_run_event_and_match(context, rule=rule, args=args, now=now)

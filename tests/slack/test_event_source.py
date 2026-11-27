@@ -1638,9 +1638,23 @@ async def test_admin_rotate_key_on_hidden_private_slack_trigger_returns_not_foun
         absent_rotate = json.loads(
             await tool.triggers(action="rotate_key", trigger_id="absent_trigger", public_key=sample_public_key),
         )
+        hidden_history = json.loads(await tool.triggers(action="history", trigger_id="alice_slack"))
+        absent_history = json.loads(await tool.triggers(action="history", trigger_id="absent_trigger"))
+        hidden_test = json.loads(await tool.triggers(action="test", trigger_id="alice_slack"))
+        absent_test = json.loads(await tool.triggers(action="test", trigger_id="absent_trigger"))
+        hidden_update = json.loads(await tool.triggers(action="update", trigger_id="alice_slack", prompt="Hijack"))
+        absent_update = json.loads(await tool.triggers(action="update", trigger_id="absent_trigger", prompt="Hijack"))
     assert hidden_rotate["status"] == "error"
     assert hidden_rotate["message"] == "external trigger not found: alice_slack"
     assert absent_rotate["message"] == "external trigger not found: absent_trigger"
+    for hidden_resp, absent_resp in (
+        (hidden_history, absent_history),
+        (hidden_test, absent_test),
+        (hidden_update, absent_update),
+    ):
+        assert hidden_resp["status"] == "error"
+        assert hidden_resp["message"] == "Reactive trigger not found: alice_slack"
+        assert absent_resp["message"] == "Reactive trigger not found: absent_trigger"
 
     assert service.event_sources.unregister(SLACK_EVENT_SOURCE_ID, slack_emitter.token) is True
     with tool_runtime_context(admin_ctx):
