@@ -17,31 +17,24 @@ if TYPE_CHECKING:
     from .upgrades import SchemaInspector
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-_TERMINAL_STATUSES_SQL = "('completed', 'failed', 'cancelled', 'denied', 'interrupted')"
-_COLD_JOB_SQL = f"status IN {_TERMINAL_STATUSES_SQL} AND consumed AND NOT is_workflow"
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 _BACKFILL_BATCH_SIZE = 1000
 _LOAD_ALL_SQL = "SELECT job_id, job_json FROM tool_jobs"
 
 # LEGACY_COMPAT: tool_jobs rows stored before indexed metadata columns were added.
 # Legacy format: tool_jobs had only (job_id, job_json, result_payload_json), forcing startup to scan every row.
-# Handling: upgrade_tool_jobs_metadata adds the 9 metadata columns with defaults and backfills existing rows in
+# Handling: upgrade_tool_jobs_metadata adds the 6 metadata columns with defaults and backfills existing rows in
 # bounded keyset-paginated batches, tolerating malformed legacy JSON so startup never crashes on backfill.
 _METADATA_COLUMN_DEFS: tuple[tuple[str, str], ...] = (
-    ("status", "TEXT NOT NULL DEFAULT ''"),
-    ("consumed", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("cold", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("returned_inline", "BOOLEAN NOT NULL DEFAULT FALSE"),
-    ("kind", "TEXT NOT NULL DEFAULT 'tool'"),
-    ("is_workflow", "BOOLEAN NOT NULL DEFAULT FALSE"),
-    ("updated_at_ns", "BIGINT NOT NULL DEFAULT 0"),
+    ("updated_at_us", "BIGINT NOT NULL DEFAULT 0"),
     ("recipient", "TEXT"),
     ("room_id", "TEXT"),
     ("delegation_id", "TEXT"),
 )
 _METADATA_COLUMNS = frozenset(name for name, _ddl in _METADATA_COLUMN_DEFS)
-_METADATA_SET_SQL = (
-    "status = ?, consumed = ?, returned_inline = ?, kind = ?, is_workflow = ?, "
-    "updated_at_ns = ?, recipient = ?, room_id = ?, delegation_id = ?"
-)
+_METADATA_SET_SQL = "cold = ?, returned_inline = ?, updated_at_us = ?, recipient = ?, room_id = ?, delegation_id = ?"
 
 
 class ToolJobExistsError(ValueError):
@@ -70,30 +63,30 @@ class ToolJobSnapshotUpdate:
     approval_end_reason: str | None = None
 
 
-def _datetime_to_epoch_ns(dt: datetime) -> int:
-    """Convert a datetime to exact UTC epoch nanoseconds without float rounding."""
+def _datetime_to_epoch_us(dt: datetime) -> int:
+    """Convert a datetime to exact UTC epoch microseconds without float rounding or 64-bit overflow."""
     delta = (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt) - _EPOCH
-    return ((delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1_000
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
-def _iso_to_epoch_ns(value: object) -> int:
+def _iso_to_epoch_us(value: object) -> int:
     if not isinstance(value, str):
         return 0
     try:
-        return _datetime_to_epoch_ns(datetime.fromisoformat(value))
+        return _datetime_to_epoch_us(datetime.fromisoformat(value))
     except ValueError:
         return 0
 
 
 def _extract_metadata(job_json: str) -> tuple[object, ...]:
-    """Return the 9 indexed metadata column values from *job_json*, tolerating legacy or corrupt payloads."""
+    """Return the 6 indexed metadata column values from *job_json*, tolerating legacy or corrupt payloads."""
     try:
         raw = json.loads(job_json)
     except ValueError:
         raw = None
     if not isinstance(raw, dict):
-        # Empty non-terminal status keeps corrupt rows visible to startup validation.
-        return ("", False, False, "tool", False, 0, None, None, None)
+        # Keep corrupt rows hot (cold=False) so startup validation still sees them.
+        return (False, False, 0, None, None, None)
     status = raw.get("status") if isinstance(raw.get("status"), str) else ""
     consumed = raw.get("consumed") is True
     returned_inline = raw.get("returned_inline") is True
@@ -103,6 +96,7 @@ def _extract_metadata(job_json: str) -> tuple[object, ...]:
     is_workflow = kind == "workflow" or (
         kind == "delegation" and isinstance(child, dict) and bool(child.get("workflow_run_id"))
     )
+    cold = status in _TERMINAL_STATUSES and consumed and not is_workflow
     owner = raw.get("owner")
     recipient: str | None = None
     room_id: str | None = None
@@ -117,12 +111,9 @@ def _extract_metadata(job_json: str) -> tuple[object, ...]:
     raw_deleg = child.get("delegation_id") if kind == "delegation" and isinstance(child, dict) else None
     delegation_id = raw_deleg if isinstance(raw_deleg, str) else None
     return (
-        status,
-        consumed,
+        cold,
         returned_inline,
-        kind,
-        is_workflow,
-        _iso_to_epoch_ns(raw.get("updated_at")),
+        _iso_to_epoch_us(raw.get("updated_at")),
         recipient,
         room_id,
         delegation_id,
@@ -146,10 +137,10 @@ def upgrade_tool_jobs_metadata(transaction: Transaction, inspector: SchemaInspec
         cursor_clause, params = (
             ("", (_BACKFILL_BATCH_SIZE,))
             if after_job_id is None
-            else (" WHERE job_id/*bytes*/ > ?", (after_job_id, _BACKFILL_BATCH_SIZE))
+            else (" WHERE job_id > ?", (after_job_id, _BACKFILL_BATCH_SIZE))
         )
         rows = transaction.fetchall(
-            f"SELECT job_id, job_json FROM tool_jobs{cursor_clause} ORDER BY job_id/*bytes*/ LIMIT ?",  # noqa: S608
+            f"SELECT job_id, job_json FROM tool_jobs{cursor_clause} ORDER BY job_id LIMIT ?",  # noqa: S608
             params,
         )
         if not rows:
@@ -176,25 +167,32 @@ def take_ownership(transaction: Transaction, runtime_generation: str) -> None:
 
 
 def require_ownership(transaction: Transaction, runtime_generation: str) -> None:
-    """Refuse to proceed once another runtime generation owns the tool jobs."""
+    """Refuse unless this generation owns the jobs, holding the owner row until the transaction ends.
+
+    The no-op update locks that row, so on PostgreSQL a takeover from another process cannot commit between this
+    check and the write that follows it; SQLite's single writer already orders them.
+    """
     row = transaction.fetchone(
-        "SELECT 1 FROM tool_job_owner WHERE singleton = ? AND runtime_generation = ?",
+        """
+        UPDATE tool_job_owner SET runtime_generation = runtime_generation
+        WHERE singleton = ? AND runtime_generation = ?
+        RETURNING runtime_generation
+        """,
         (True, runtime_generation),
     )
     if row is None:
-        msg = "Tool job ownership was taken over by a newer runtime."
+        msg = "Another tool job runtime took over this journal."
         raise ToolJobOwnershipLostError(msg)
 
 
 def accept(transaction: Transaction, runtime_generation: str, job_id: str, job_json: str) -> None:
-    """Persist one newly accepted job, failing when ``job_id`` already exists."""
+    """Save a newly accepted job, refusing an ID that is still saved."""
     require_ownership(transaction, runtime_generation)
     inserted = transaction.fetchone(
         """
         INSERT INTO tool_jobs (
-            job_id, job_json, status, consumed, returned_inline, kind,
-            is_workflow, updated_at_ns, recipient, room_id, delegation_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            job_id, job_json, cold, returned_inline, updated_at_us, recipient, room_id, delegation_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (job_id) DO NOTHING
         RETURNING job_id
         """,
@@ -231,7 +229,11 @@ def save(
     *,
     approval_end_reason: str | None,
 ) -> None:
-    """Replace an accepted job's snapshot, and its outcome payload when one is given."""
+    """Replace an accepted job's snapshot, and its outcome payload when one is given.
+
+    A snapshot that ends the job's approvals, its end or its cancel request, denies the calls its approval cards still
+    ask about with ``approval_end_reason`` and queues the cards' terminal edits, so no card of an ending job stays open.
+    """
     save_many(
         transaction,
         runtime_generation,
@@ -270,22 +272,22 @@ def load_startup(transaction: Transaction) -> tuple[SavedToolJob, ...]:
     """Return only active, unconsumed, workflow, or workflow-node jobs in ID order."""
     return _saved_jobs(
         transaction.fetchall(
-            f"""
+            """
             SELECT job_id, job_json FROM tool_jobs
-            WHERE status NOT IN {_TERMINAL_STATUSES_SQL} OR NOT consumed OR is_workflow
+            WHERE NOT cold
             ORDER BY job_id/*bytes*/
-            """,  # noqa: S608 - fixed status literals
+            """,
         ),
     )
 
 
 def load_ended_rooms(transaction: Transaction) -> frozenset[tuple[str, str]]:
-    """Return distinct (recipient, room_id) pairs retaining at least one terminal job."""
+    """Return distinct (recipient, room_id) pairs retaining at least one cold terminal job."""
     rows = transaction.fetchall(
-        f"""
+        """
         SELECT DISTINCT recipient, room_id FROM tool_jobs
-        WHERE status IN {_TERMINAL_STATUSES_SQL} AND recipient IS NOT NULL AND room_id IS NOT NULL
-        """,  # noqa: S608 - fixed status literals
+        WHERE cold AND recipient IS NOT NULL AND room_id IS NOT NULL
+        """,
     )
     return frozenset((str(row["recipient"]), str(row["room_id"])) for row in rows)
 
@@ -313,9 +315,9 @@ def load_by_prefix(transaction: Transaction, prefix: str) -> tuple[SavedToolJob,
         transaction.fetchall(
             f"""
             SELECT job_id, job_json FROM tool_jobs
-            WHERE {_COLD_JOB_SQL} AND NOT returned_inline AND job_id/*bytes*/ >= ?{upper_clause}
+            WHERE cold AND NOT returned_inline AND job_id/*bytes*/ >= ?{upper_clause}
             ORDER BY job_id/*bytes*/
-            """,  # noqa: S608 - fixed status literals
+            """,  # noqa: S608 - fixed upper bound clause
             params,
         ),
     )
@@ -330,9 +332,9 @@ def load_listable(transaction: Transaction, *, recipient: str, room_id: str | No
         transaction.fetchall(
             f"""
             SELECT job_id, job_json FROM tool_jobs
-            WHERE {_COLD_JOB_SQL} AND NOT returned_inline AND recipient = ?{room_clause}
-            ORDER BY updated_at_ns DESC, job_id/*bytes*/
-            """,  # noqa: S608 - fixed status literals
+            WHERE cold AND NOT returned_inline AND recipient = ?{room_clause}
+            ORDER BY updated_at_us DESC, job_id/*bytes*/
+            """,  # noqa: S608 - fixed room filter clause
             params,
         ),
     )
@@ -345,15 +347,15 @@ def load_expirable(
     ended_before: datetime,
 ) -> tuple[SavedToolJob, ...]:
     """Return cold terminal saved jobs older than the inline or non-inline retention cutoff."""
-    sql = f"""
+    sql = """
         SELECT job_id, job_json FROM tool_jobs
-        WHERE {_COLD_JOB_SQL} AND returned_inline = ? AND updated_at_ns < ?
-        ORDER BY updated_at_ns, job_id/*bytes*/
-    """  # noqa: S608 - fixed status literals
+        WHERE cold AND returned_inline = ? AND updated_at_us < ?
+        ORDER BY updated_at_us, job_id/*bytes*/
+    """
     return _saved_jobs(
         [
-            *transaction.fetchall(sql, (True, _datetime_to_epoch_ns(inline_before))),
-            *transaction.fetchall(sql, (False, _datetime_to_epoch_ns(ended_before))),
+            *transaction.fetchall(sql, (True, _datetime_to_epoch_us(inline_before))),
+            *transaction.fetchall(sql, (False, _datetime_to_epoch_us(ended_before))),
         ],
     )
 

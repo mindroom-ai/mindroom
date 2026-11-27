@@ -347,7 +347,7 @@ class ToolJobStore:
         return await self._backend.read(tool_jobs.load_startup)
 
     async def load_ended_rooms(self) -> frozenset[tuple[str, str]]:
-        """Return distinct ``(recipient, room_id)`` pairs retaining terminal jobs."""
+        """Return distinct ``(recipient, room_id)`` pairs retaining cold terminal jobs."""
         return await self._backend.read(tool_jobs.load_ended_rooms)
 
     async def load_by_id(self, job_id: str) -> SavedToolJob | None:

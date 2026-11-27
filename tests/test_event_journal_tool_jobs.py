@@ -90,7 +90,7 @@ async def test_a_newer_runtime_fences_the_older_one(journal_database: Callable[[
 @pytest.mark.asyncio
 async def test_writes_need_ownership(journal_store: EventJournalStore) -> None:
     """A runtime that never took ownership cannot write."""
-    with pytest.raises(ToolJobOwnershipLostError):
+    with pytest.raises(ToolJobOwnershipLostError, match=r"Another tool job runtime took over this journal\."):
         await journal_store.tool_jobs("unowned").accept("job", "{}")
 
 
@@ -272,6 +272,20 @@ async def test_legacy_tool_jobs_table_upgrades_and_backfills_metadata(
             ),
         ),
         (
+            "abcdef01coldfuture",
+            json.dumps(
+                {
+                    "job_id": "abcdef01coldfuture",
+                    "status": "completed",
+                    "consumed": True,
+                    "returned_inline": False,
+                    "kind": "tool",
+                    "updated_at": "2500-01-01T00:00:00+00:00",
+                    "owner": {"agent_name": "member", "transport_agent_name": "team", "room_id": "!team:test"},
+                },
+            ),
+        ),
+        (
             "abcdef01coldlist",
             json.dumps(
                 {
@@ -368,14 +382,16 @@ async def test_legacy_tool_jobs_table_upgrades_and_backfills_metadata(
         ]
         assert await jobs.load_ended_rooms() == frozenset(
             {
-                ("code", "!hot:test"),
                 ("code", "!inline:test"),
                 ("team", "!team:test"),
-                ("code", "!wf:test"),
             },
         )
-        assert [row.job_id for row in await jobs.load_by_prefix("abcdef01")] == ["abcdef01coldlist"]
+        assert [row.job_id for row in await jobs.load_by_prefix("abcdef01")] == [
+            "abcdef01coldfuture",
+            "abcdef01coldlist",
+        ]
         assert [row.job_id for row in await jobs.load_listable(recipient="team", room_id="!team:test")] == [
+            "abcdef01coldfuture",
             "abcdef01coldlist",
         ]
         assert [row.job_id for row in await jobs.load_listable(recipient="code", room_id=None)] == ["abcdef02deleg"]
@@ -406,9 +422,8 @@ def test_tool_jobs_cold_queries_use_targeted_indexes_without_stat1(tmp_path: Pat
             database.execute(
                 """
                 INSERT INTO tool_jobs (
-                    job_id, job_json, status, consumed, returned_inline, kind,
-                    is_workflow, updated_at_ns, recipient, room_id, delegation_id
-                ) VALUES (?, '{}', 'completed', TRUE, ?, 'tool', FALSE, ?, 'agent', '!r:test', ?)
+                    job_id, job_json, cold, returned_inline, updated_at_us, recipient, room_id, delegation_id
+                ) VALUES (?, '{}', TRUE, ?, ?, 'agent', '!r:test', ?)
                 """,
                 (job_id, index % 2 == 0, 1_000 + index, f"d-{index}" if index % 5 == 0 else None),
             )
@@ -455,6 +470,13 @@ def test_tool_jobs_cold_queries_use_targeted_indexes_without_stat1(tmp_path: Pat
         record("load_by_delegation_ids", lambda tx: event_journal_tool_jobs.load_by_delegation_ids(tx, ("d-5", "d-10")))
         record("load_by_prefix", lambda tx: event_journal_tool_jobs.load_by_prefix(tx, "abcdef01"))
         record("load_by_id", lambda tx: event_journal_tool_jobs.load_by_id(tx, "abcdef010001"))
+        record(
+            "backfill_cursor",
+            lambda tx: tx.fetchall(
+                "SELECT job_id, job_json FROM tool_jobs WHERE job_id > ? ORDER BY job_id LIMIT ?",
+                ("abcdef010001", 10),
+            ),
+        )
 
     assert "USING INDEX tool_jobs_startup" in plans["load_startup"][0], plans["load_startup"]
     assert "USING INDEX tool_jobs_ended_rooms" in plans["load_ended_rooms"][0], plans["load_ended_rooms"]
@@ -464,3 +486,5 @@ def test_tool_jobs_cold_queries_use_targeted_indexes_without_stat1(tmp_path: Pat
     assert "USING INDEX tool_jobs_delegation" in plans["load_by_delegation_ids"][0], plans["load_by_delegation_ids"]
     assert "USING INDEX tool_jobs_prefix" in plans["load_by_prefix"][0], plans["load_by_prefix"]
     assert "USING INDEX sqlite_autoindex_tool_jobs_1" in plans["load_by_id"][0], plans["load_by_id"]
+    assert "USING INDEX sqlite_autoindex_tool_jobs_1" in plans["backfill_cursor"][0], plans["backfill_cursor"]
+    assert "USE TEMP B-TREE" not in plans["backfill_cursor"][0], plans["backfill_cursor"]
