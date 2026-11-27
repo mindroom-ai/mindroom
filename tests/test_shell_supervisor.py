@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 from functools import partial
@@ -24,7 +25,7 @@ from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.background_scope import BackgroundLogPolicy
+from mindroom.shell.background_scope import BackgroundLogPolicy, shell_background_scope
 from mindroom.shell.execution import (
     ShellRunResult,
     run_command,
@@ -32,18 +33,23 @@ from mindroom.shell.execution import (
 )
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
+    ShellSupervisorConnectError,
     _handle_connection,
     _kill_namespace_via_supervisor,
     _ShellSupervisorManager,
+    _SliceShellSupervisorManager,
     check_command_via_supervisor,
+    ensure_slice_shell_supervisor_async,
     kill_command_via_supervisor,
     kill_shell_supervisor_namespace,
     parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
+    shutdown_slice_shell_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tools.shell import shell_tools
 from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_shell_async import _get_toolkit, _make_runtime_paths
@@ -1461,3 +1467,463 @@ def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
         120.0,
     )
     assert timeout_seconds == 150.0
+
+
+# ---------------------------------------------------------------------------
+# Persistent user-slice shell supervisor
+# ---------------------------------------------------------------------------
+
+
+def _stub_slice_systemd(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_on: object = None,
+) -> tuple[list[tuple[list[str], dict[str, str]]], list[tuple[list[str], dict[str, str]]]]:
+    """Stub systemd-run/systemctl for _SliceShellSupervisorManager unit tests using real supervisor subprocesses."""
+    spawns: list[tuple[list[str], dict[str, str]]] = []
+    stops: list[tuple[list[str], dict[str, str]]] = []
+    real_popen = subprocess.Popen
+    real_run = subprocess.run
+
+    def fake_which(name: str) -> str | None:
+        if name in {"systemd-run", "systemctl"}:
+            return f"/usr/bin/{name}"
+        return shutil.which(name)
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        cmd_env = dict(kwargs.get("env") or {})  # type: ignore[arg-type]
+        spawns.append((list(cmd), cmd_env))
+        if callable(fail_on) and fail_on(cmd):
+            return real_popen(
+                [sys.executable, "-c", "import sys; sys.stderr.write('systemd-run failed\n'); sys.exit(1)"],
+                stdin=kwargs.get("stdin"),  # type: ignore[arg-type]
+                stdout=kwargs.get("stdout"),  # type: ignore[arg-type]
+                stderr=kwargs.get("stderr"),  # type: ignore[arg-type]
+            )
+        child_argv = cmd[cmd.index("--") + 1 :]
+        return real_popen(
+            child_argv,
+            stdin=kwargs.get("stdin"),  # type: ignore[arg-type]
+            stdout=kwargs.get("stdout"),  # type: ignore[arg-type]
+            stderr=kwargs.get("stderr"),  # type: ignore[arg-type]
+            env=cmd_env,
+        )
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if cmd and Path(cmd[0]).name == "systemctl":
+            stops.append((list(cmd), dict(kwargs.get("env") or {})))  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(shell_supervisor.shutil, "which", fake_which)
+    monkeypatch.setattr(shell_supervisor.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shell_supervisor.subprocess, "run", fake_run)
+    return spawns, stops
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
+@pytest.mark.asyncio
+async def test_slice_manager_reuses_supervisor_unsets_slice_env_and_handles_config_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One supervisor is reused with OOMPolicy=continue, slice env popped, and mismatch never kills live turns."""
+    spawns, stops = _stub_slice_systemd(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "mindroom-shells.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+
+    manager = _SliceShellSupervisorManager()
+    try:
+        sock1 = manager.ensure()
+        sock2 = manager.ensure()
+        assert sock1 is not None
+        assert sock2 == sock1
+        assert len(spawns) == 1
+        cmd, child_env = spawns[0]
+        assert "--property=OOMPolicy=continue" in cmd
+        assert "--slice=mindroom-shells.slice" in cmd
+        assert "--description=MindRoom shell supervisor" in cmd
+        assert "MINDROOM_SHELL_SYSTEMD_SLICE" not in child_env
+        assert "--expand-environment=no" not in cmd
+        assert not any(Path(arg).name in {"chrt", "ionice"} for arg in cmd)
+
+        # Config mismatch falls back to None without killing the live supervisor.
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
+        assert manager.ensure() is None
+        assert manager._supervisor is not None
+        assert manager._supervisor.process.poll() is None
+        assert stops == []
+
+        # Restoring config resumes reuse of the same supervisor.
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "mindroom-shells.slice")
+        assert manager.ensure() == sock1
+        assert await _run(sock1, ["echo", "ok"]) == "ok"
+    finally:
+        manager.shutdown()
+    assert len(stops) == 1
+    assert stops[0][0][1:] == ["--user", "stop", f"mindroom-shell-supervisor-{os.getpid()}-1.scope"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
+def test_slice_manager_backoff_fingerprint_recovery_and_oom_policy_fail_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup failure (including rejected OOMPolicy=continue) enters backoff and retries instantly on bus change."""
+    should_fail = True
+    spawns, _stops = _stub_slice_systemd(
+        monkeypatch,
+        fail_on=lambda cmd: should_fail and "--property=OOMPolicy=continue" in cmd,
+    )
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+
+    manager = _SliceShellSupervisorManager()
+    try:
+        assert manager.ensure() is None
+        assert len(spawns) == 1
+        # Same socket fingerprint stays in backoff without spawning again.
+        assert manager.ensure() is None
+        assert len(spawns) == 1
+
+        # Bus socket appearing changes fingerprint -> clears backoff immediately.
+        should_fail = False
+        (tmp_path / "bus").write_text("ready")
+        sock = manager.ensure()
+        assert sock is not None
+        assert len(spawns) == 2
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
+def test_slice_manager_dead_sigkilled_supervisor_stops_generation_scope_unit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After SIGKILL of the supervisor, the next ensure stops its generation-specific scope unit and respawns."""
+    spawns, stops = _stub_slice_systemd(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={tmp_path / 'bus'}")
+
+    manager = _SliceShellSupervisorManager()
+    try:
+        sock1 = manager.ensure()
+        assert sock1 is not None
+        first_sup = manager._supervisor
+        assert first_sup is not None
+        first_unit = first_sup.unit_name
+        first_dir = first_sup.runtime_dir
+
+        os.kill(first_sup.process.pid, signal.SIGKILL)
+        first_sup.process.wait(timeout=5)
+
+        sock2 = manager.ensure()
+        assert sock2 is not None
+        assert sock2 != sock1
+        assert not first_dir.exists()
+        assert len(spawns) == 2
+        assert len(stops) == 1
+        assert stops[0][0][1:] == ["--user", "stop", first_unit]
+        assert stops[0][1] == {
+            "XDG_RUNTIME_DIR": str(tmp_path),
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={tmp_path / 'bus'}",
+        }
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_kill_namespace_is_graceful_and_flushes_background_log_trailer(tmp_path: Path) -> None:
+    """kill_namespace sends SIGTERM before SIGKILL so processes can flush output before the scope-ended trailer."""
+    registry: dict[str, ProcessRecord] = {}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
+    script = (
+        "import signal, sys, time; "
+        "signal.signal(signal.SIGTERM, lambda *_: (print('flushed-on-term', flush=True), sys.exit(0))); "
+        "print('ready', flush=True); time.sleep(30)"
+    )
+    async with _running_server(registry) as socket_path:
+        res = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:grace",
+            argv=[sys.executable, "-c", script],
+            env=_MINIMAL_ENV,
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.3,
+            on_timeout="background",
+            background_log=policy,
+        )
+        assert res.handle is not None
+        log_path = Path(registry[res.handle]._log_path or "")
+        await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:grace")
+        content = log_path.read_text(encoding="utf-8")
+        assert "flushed-on-term" in content
+        assert "[MindRoom: stopped when turn ended]" in content
+
+
+@pytest.mark.asyncio
+async def test_toolkit_slice_connect_error_falls_back_once_and_post_send_error_does_not_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-send connect errors invalidate and fall back once unsliced; post-send execution errors never retry."""
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    tool = _get_toolkit(tmp_path)
+    missing_sock = str(tmp_path / "missing.sock")
+    invalidated: list[str] = []
+    direct_calls: list[bool] = []
+    real_run = run_command
+
+    async def spy_run_command(*args: object, **kwargs: object) -> ShellRunResult:
+        direct_calls.append(bool(kwargs.get("allow_systemd_slice", True)))
+        return await real_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
+        lambda: asyncio.sleep(0, missing_sock),
+    )
+    monkeypatch.setattr("mindroom.tools.shell.invalidate_slice_shell_supervisor", invalidated.append)
+    monkeypatch.setattr("mindroom.tools.shell.run_command", spy_run_command)
+
+    # Pre-send ShellSupervisorConnectError -> invalidates & falls back once with allow_systemd_slice=False.
+    with pytest.raises(ShellSupervisorConnectError):
+        await run_command_via_supervisor(
+            missing_sock,
+            namespace="ns",
+            argv=["echo", "x"],
+            env=_MINIMAL_ENV,
+            cwd=None,
+            tail=10,
+            timeout=5,
+            raise_on_connect_error=True,
+        )
+    kill_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "mindroom.tools.shell.kill_slice_shell_supervisor_namespace",
+        lambda s, n: kill_calls.append((s, n)),
+    )
+    async with shell_background_scope() as scope:
+        assert await tool.run_shell_command("echo fallback-ok") == "fallback-ok"
+        assert scope.had_backgrounded is False
+    assert kill_calls == []
+    assert invalidated == [missing_sock]
+    assert direct_calls == [False]
+
+    # Post-send execution_error=True -> must NOT retry or call run_command.
+    direct_calls.clear()
+    invalidated.clear()
+    monkeypatch.setattr(
+        "mindroom.tools.shell.run_command_via_supervisor",
+        lambda *_a, **_kw: asyncio.sleep(0, ShellRunResult(message="Error: mid-flight failure", execution_error=True)),
+    )
+    assert await tool.run_shell_command("echo side-effect") == "Error: mid-flight failure"
+    assert direct_calls == []
+    assert invalidated == []
+
+
+@pytest.mark.asyncio
+async def test_toolkit_slice_scope_cleanup_cancellation_and_worker_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice supervisor enforces turn-end scope isolation, foreground skip, cancellation, and worker precedence."""
+    registry: dict[str, ProcessRecord] = {}
+    kill_calls: list[tuple[str, str]] = []
+    real_kill = shell_supervisor.kill_slice_shell_supervisor_namespace
+
+    def spy_kill(sock: str, ns: str) -> None:
+        kill_calls.append((sock, ns))
+        real_kill(sock, ns)
+
+    monkeypatch.setattr("mindroom.tools.shell.kill_slice_shell_supervisor_namespace", spy_kill)
+    monkeypatch.setattr("mindroom.tools.shell.default_run_timeout_seconds", lambda: 0.25)
+
+    async with _running_server(registry) as socket_path:
+        monkeypatch.setattr(
+            "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
+            lambda: asyncio.sleep(0, socket_path),
+        )
+        tool = _get_toolkit(tmp_path)
+
+        # Normal foreground call inside a scope triggers zero cleanup RPCs.
+        async with shell_background_scope() as fg_scope:
+            assert await tool.run_shell_command("echo fast") == "fast"
+            assert fg_scope.had_backgrounded is False
+        assert kill_calls == []
+
+        # Backgrounded turn-end cleanup stops only that turn's process and writes its trailer.
+        async with shell_background_scope() as turn_b:
+            await tool.run_shell_command("echo b; sleep 30")
+            assert len(registry) == 1
+            handle_b = next(iter(registry))
+            pid_b = registry[handle_b].pid
+            async with shell_background_scope() as turn_a:
+                await tool.run_shell_command("echo a; sleep 30")
+                handle_a = next(h for h in registry if h != handle_b)
+                pid_a = registry[handle_a].pid
+                log_a = Path(registry[handle_a]._log_path or "")
+                assert turn_a.had_backgrounded is True
+            await _assert_pid_dead(pid_a)
+            assert "[MindRoom: stopped when turn ended]" in log_a.read_text(encoding="utf-8")
+            os.kill(pid_b, 0)
+            assert turn_b.had_backgrounded is True
+        await _assert_pid_dead(pid_b)
+
+        # Cancellation kills foreground command.
+        pid_file = tmp_path / "cancel.pid"
+        task = asyncio.create_task(
+            tool.run_shell_command(f"echo $$ > {pid_file}; exec sleep 30", timeout=10),
+        )
+        for _ in range(40):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        cancel_pid = int(pid_file.read_text().strip())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _assert_pid_dead(cancel_pid)
+
+        # Explicit worker _supervisor_socket always wins and never calls slice supervisor.
+        slice_called: list[bool] = []
+        monkeypatch.setattr(
+            "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
+            lambda: (slice_called.append(True), asyncio.sleep(0, None))[1],
+        )
+        monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, socket_path)
+        worker_tool = _get_toolkit(tmp_path)
+        assert await worker_tool.run_shell_command("echo worker-wins") == "worker-wins"
+        assert slice_called == []
+
+
+_LIVE_SLICE_PROBE = (
+    "import json, os, pathlib, sys; "
+    "print(json.dumps({"
+    "'ppid': os.getppid(), "
+    "'sup_sched': os.sched_getscheduler(os.getppid()), "
+    "'child_sched': os.sched_getscheduler(0), "
+    "'cgroup': pathlib.Path('/proc/self/cgroup').read_text().strip(), "
+    "'argv': sys.argv[1:], "
+    "'xdg': os.environ.get('XDG_RUNTIME_DIR'), "
+    "'dbus': os.environ.get('DBUS_SESSION_BUS_ADDRESS')"
+    "}))"
+)
+
+
+def _live_systemd_runtime_dir() -> str:
+    live_xdg = os.environ.get("XDG_RUNTIME_DIR") or (
+        f"/run/user/{os.getuid()}" if Path(f"/run/user/{os.getuid()}/bus").exists() else None
+    )
+    if live_xdg is None:
+        pytest.skip("requires a live systemd --user runtime directory")
+    return live_xdg
+
+
+def _sigkill_cached_slice_supervisor(pid: int) -> None:
+    os.kill(pid, signal.SIGKILL)
+    assert shell_supervisor._slice_manager is not None
+    assert shell_supervisor._slice_manager._supervisor is not None
+    shell_supervisor._slice_manager._supervisor.process.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
+@pytest.mark.asyncio
+async def test_live_systemd_slice_supervisor_reuse_priority_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live systemd slice supervisor reuses one scope, runs SCHED_OTHER->SCHED_IDLE, and preserves $ args & bus env."""
+    monkeypatch.setenv("XDG_RUNTIME_DIR", _live_systemd_runtime_dir())
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    if await ensure_slice_shell_supervisor_async() is None:
+        pytest.skip("requires a live systemd --user bus supporting --property=OOMPolicy=continue")
+
+    self_cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
+    tool = _get_toolkit(tmp_path)
+    argv = [sys.executable, "-c", _LIVE_SLICE_PROBE, "$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
+    first = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
+    second = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
+    assert first["ppid"] == second["ppid"]
+    assert first["cgroup"] == second["cgroup"]
+    assert "/app.slice/" in first["cgroup"]
+    assert first["cgroup"] != self_cgroup
+    assert (first["sup_sched"], first["child_sched"]) == (os.sched_getscheduler(0), os.SCHED_IDLE)
+    assert first["argv"] == ["$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
+    assert (first["xdg"], first["dbus"]) == (None, None)
+
+    custom_xdg, custom_dbus = str(tmp_path / "custom-xdg"), "unix:path=/nonexistent/bus"
+    custom_tool = shell_tools()(
+        extra_env_passthrough="XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, MINDROOM_TEST_VAR",
+        runtime_paths=_make_runtime_paths(
+            tmp_path,
+            process_env={
+                "PATH": os.environ["PATH"],
+                "XDG_RUNTIME_DIR": custom_xdg,
+                "DBUS_SESSION_BUS_ADDRESS": custom_dbus,
+                "MINDROOM_TEST_VAR": "expanded",
+            },
+        ),
+        allow_without_worker=True,
+    )
+    custom = json.loads(str(await custom_tool.run_shell_command(argv, timeout=10)))
+    assert (custom["ppid"], custom["xdg"], custom["dbus"]) == (first["ppid"], custom_xdg, custom_dbus)
+    assert custom["argv"] == ["$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
+@pytest.mark.asyncio
+async def test_live_systemd_slice_supervisor_sigkill_grandchild_and_outage_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SIGKILLed supervisor cleans up scope grandchildren on respawn; XDG_RUNTIME_DIR outage fails open and recovers."""
+    live_xdg = _live_systemd_runtime_dir()
+    with tempfile.TemporaryDirectory(prefix="mr-") as runtime_parent:
+        runtime_link = Path(runtime_parent) / "rt"
+        runtime_link.symlink_to(live_xdg)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_link))
+        monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+        if await ensure_slice_shell_supervisor_async() is None:
+            pytest.skip("requires a live systemd --user bus supporting --property=OOMPolicy=continue")
+
+        self_cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
+        tool = _get_toolkit(tmp_path)
+        argv = [sys.executable, "-c", _LIVE_SLICE_PROBE]
+        first = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
+
+        spawn_grandchild = (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+            "start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+            "print(p.pid)"
+        )
+        grandchild_pid = int(str(await tool.run_shell_command([sys.executable, "-c", spawn_grandchild], timeout=10)))
+        os.kill(grandchild_pid, 0)
+        _sigkill_cached_slice_supervisor(first["ppid"])
+
+        respawned = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
+        await _assert_pid_dead(grandchild_pid)
+        assert respawned["ppid"] != first["ppid"]
+        assert "/app.slice/" in respawned["cgroup"]
+        assert respawned["cgroup"] != first["cgroup"]
+
+        runtime_link.unlink()
+        runtime_link.symlink_to(tmp_path / "dead-runtime-dir")
+        _sigkill_cached_slice_supervisor(respawned["ppid"])
+        assert json.loads(str(await tool.run_shell_command(argv, timeout=10)))["cgroup"] == self_cgroup
+
+        runtime_link.unlink()
+        runtime_link.symlink_to(live_xdg)
+        recovered = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
+        assert "/app.slice/" in recovered["cgroup"]
+        assert recovered["cgroup"] != self_cgroup
+        shutdown_slice_shell_supervisor()

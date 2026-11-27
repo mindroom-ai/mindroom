@@ -48,14 +48,18 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.logging_config import get_logger
 from mindroom.shell.background_scope import BackgroundLogPolicy
 from mindroom.shell.execution import (
+    _SHELL_SYSTEMD_SLICE_ENV,
     ProcessRecord,
     ShellRunResult,
+    _systemd_bus_env,
     check_command,
+    close_background_records,
+    configured_systemd_slice_name,
     discard_background_record,
     kill_all_records,
     kill_command,
-    kill_namespace_records,
     run_command,
+    systemd_bus_socket_fingerprint,
 )
 from mindroom.shell.output_capture import ShellOutputDestination
 
@@ -77,8 +81,18 @@ _STDERR_TAIL_BYTES = 4096
 _FINISHED_STATUS_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+)(?:,|\))")
 
 
+_SLICE_READY_PROBE_INTERVAL_SECONDS = 0.01
+_SLICE_STARTUP_TIMEOUT_SECONDS = 10.0
+_SLICE_BACKOFF_SECONDS = 5.0
+_SYSTEMD_STOP_UNIT_TIMEOUT_SECONDS = 2.0
+
+
 class ShellSupervisorStartupError(RuntimeError):
     """The shell supervisor process failed to start or become ready."""
+
+
+class ShellSupervisorConnectError(OSError):
+    """Connecting to the shell supervisor socket failed before any request bytes were sent."""
 
 
 def background_script_supervision_supported() -> bool:
@@ -272,7 +286,10 @@ async def _handle_connection(
                 ),
             )
         elif op == "kill_namespace":
-            killed = kill_namespace_records(registry, namespace=str(payload["namespace"]))
+            namespace = str(payload["namespace"])
+            matching = {h: registry.pop(h) for h in [k for k, rec in registry.items() if rec.namespace == namespace]}
+            killed = len(matching)
+            await close_background_records(matching)
             result = ShellRunResult(message=f"Killed {killed}.")
         else:
             result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
@@ -347,6 +364,7 @@ async def run_command_via_supervisor(
     output_destination: ShellOutputDestination | None = None,
     background_log: BackgroundLogPolicy | None = None,
     launch_failure_exits: bool = False,
+    raise_on_connect_error: bool = False,
 ) -> ShellRunResult:
     """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
     request: dict[str, object] = {
@@ -371,6 +389,8 @@ async def run_command_via_supervisor(
     try:
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
+        if raise_on_connect_error:
+            raise ShellSupervisorConnectError(str(exc)) from exc
         return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}", execution_error=True)
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
@@ -582,8 +602,13 @@ class _ShellSupervisorManager:
         )
 
 
-def _wait_supervisor_ready(supervisor: _SupervisorProcess) -> None:
-    deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
+def _wait_supervisor_ready(
+    supervisor: _SupervisorProcess,
+    *,
+    timeout_seconds: float = _STARTUP_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = _READY_PROBE_INTERVAL_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
     while True:
         if supervisor.process.poll() is not None:
             msg = (
@@ -599,7 +624,7 @@ def _wait_supervisor_ready(supervisor: _SupervisorProcess) -> None:
                 probe.settimeout(1.0)
                 probe.connect(supervisor.socket_path)
         except OSError:
-            time.sleep(_READY_PROBE_INTERVAL_SECONDS)
+            time.sleep(poll_interval_seconds)
         else:
             logger.info("shell_supervisor_ready", supervisor_pid=supervisor.process.pid)
             return
@@ -626,6 +651,254 @@ def kill_shell_supervisor_namespace(namespace: str) -> None:
         manager = _manager
     if manager is not None:
         manager.kill_namespace(namespace)
+
+
+_SliceConfigKey = tuple[str, str | None, str | None]
+_BusFingerprint = tuple[tuple[int, int, int] | None, tuple[int, int, int] | None] | None
+
+
+class _SlowPath:
+    pass
+
+
+_NEED_SLOW_PATH = _SlowPath()
+
+
+@dataclass
+class _SliceSupervisorProcess(_SupervisorProcess):
+    unit_name: str
+    config_key: _SliceConfigKey
+
+
+@dataclass(frozen=True)
+class _SliceSupervisorBackoff:
+    config_key: _SliceConfigKey
+    fingerprint: _BusFingerprint
+    retry_after: float
+
+
+def _slice_config_key() -> _SliceConfigKey | None:
+    if sys.platform != "linux" or (slice_name := configured_systemd_slice_name()) is None:
+        return None
+    return (slice_name, os.environ.get("XDG_RUNTIME_DIR") or None, os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None)
+
+
+def _stop_systemd_scope_unit(unit_name: str, bus_env: dict[str, str]) -> None:
+    if (systemctl := shutil.which("systemctl")) is None:
+        return
+    with suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            [str(Path(systemctl).absolute()), "--user", "stop", unit_name],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_SYSTEMD_STOP_UNIT_TIMEOUT_SECONDS,
+            check=False,
+            env=bus_env,
+        )
+
+
+def _terminate_slice_supervisor(supervisor: _SliceSupervisorProcess) -> None:
+    _terminate_supervisor(supervisor)
+    _stop_systemd_scope_unit(supervisor.unit_name, _systemd_bus_env(supervisor.config_key[1], supervisor.config_key[2]))
+
+
+class _SliceShellSupervisorManager:
+    """Owns the persistent user-slice shell supervisor for local host shell execution."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._supervisor: _SliceSupervisorProcess | None = None
+        self._backoff: _SliceSupervisorBackoff | None = None
+        self._next_generation = 0
+
+    def _fast_path_locked(self, config_key: _SliceConfigKey) -> str | None | _SlowPath:
+        if (supervisor := self._supervisor) is not None:
+            if supervisor.process.poll() is None:
+                return supervisor.socket_path if supervisor.config_key == config_key else None
+            return _NEED_SLOW_PATH
+        backoff = self._backoff
+        if backoff is not None and backoff.config_key == config_key and time.monotonic() < backoff.retry_after:
+            fp = systemd_bus_socket_fingerprint(config_key[1], config_key[2])
+            if fp is None or fp == backoff.fingerprint:
+                return None
+            self._backoff = None
+        return _NEED_SLOW_PATH
+
+    def try_fast_path(self) -> str | None | _SlowPath:
+        """Return cached socket or ``None`` without blocking when no spawn or cleanup is needed."""
+        if (config_key := _slice_config_key()) is None:
+            return None
+        if not self._lock.acquire(blocking=False):
+            return _NEED_SLOW_PATH
+        try:
+            return self._fast_path_locked(config_key)
+        finally:
+            self._lock.release()
+
+    def ensure(self) -> str | None:
+        """Return the live slice supervisor socket, spawning one inside the configured slice if needed."""
+        if (config_key := _slice_config_key()) is None:
+            return None
+        with self._lock:
+            fast = self._fast_path_locked(config_key)
+            if not isinstance(fast, _SlowPath):
+                return fast
+            if (supervisor := self._supervisor) is not None and supervisor.process.poll() is not None:
+                logger.warning(
+                    "slice_shell_supervisor_died",
+                    unit_name=supervisor.unit_name,
+                    stderr_tail=_stderr_tail(supervisor.stderr_path),
+                )
+                self._supervisor = None
+                _terminate_slice_supervisor(supervisor)
+            self._backoff = None
+            return self._spawn_locked(config_key)
+
+    def invalidate(self, socket_path: str) -> None:
+        """Tear down the cached slice supervisor if it still owns *socket_path*."""
+        with self._lock:
+            supervisor = self._supervisor
+            if supervisor is None or supervisor.socket_path != socket_path:
+                return
+            self._supervisor = None
+        _terminate_slice_supervisor(supervisor)
+
+    def shutdown(self) -> None:
+        """Terminate the slice supervisor, stop its scope unit, and clear cached state."""
+        with self._lock:
+            supervisor = self._supervisor
+            self._supervisor = None
+            self._backoff = None
+        if supervisor is not None:
+            _terminate_slice_supervisor(supervisor)
+
+    def _fail_spawn_locked(self, config_key: _SliceConfigKey, event: str, **fields: object) -> None:
+        self._backoff = _SliceSupervisorBackoff(
+            config_key=config_key,
+            fingerprint=systemd_bus_socket_fingerprint(config_key[1], config_key[2]),
+            retry_after=time.monotonic() + _SLICE_BACKOFF_SECONDS,
+        )
+        logger.warning(event, slice_name=config_key[0], **fields)
+
+    def _spawn_locked(self, config_key: _SliceConfigKey) -> str | None:
+        slice_name = config_key[0]
+        if (systemd_run := shutil.which("systemd-run")) is None:
+            self._fail_spawn_locked(config_key, "slice_shell_supervisor_unavailable", reason="systemd-run not found")
+            return None
+        runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-slice-"))
+        socket_path, stderr_path = str(runtime_dir / "supervisor.sock"), runtime_dir / "supervisor.err"
+        self._next_generation += 1
+        unit_name = f"mindroom-shell-supervisor-{os.getpid()}-{self._next_generation}.scope"
+        child_argv = [sys.executable, "-m", "mindroom.shell.supervisor", socket_path]
+        cmd = [
+            str(Path(systemd_run).absolute()),
+            "--user",
+            "--scope",
+            "--quiet",
+            f"--unit={unit_name}",
+            "--description=MindRoom shell supervisor",
+            "--property=OOMPolicy=continue",
+            f"--slice={slice_name}",
+            *(["--expand-environment=no"] if any("$" in arg for arg in child_argv) else ()),
+            "--",
+            *child_argv,
+        ]
+        child_env = os.environ.copy()
+        child_env.pop(_SHELL_SYSTEMD_SLICE_ENV, None)
+        logger.info(
+            "slice_shell_supervisor_spawning",
+            slice_name=slice_name,
+            unit_name=unit_name,
+            socket_path=socket_path,
+        )
+        try:
+            with stderr_path.open("wb") as stderr_file:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    env=child_env,
+                )
+        except OSError as exc:
+            shutil.rmtree(runtime_dir, ignore_errors=True)
+            self._fail_spawn_locked(
+                config_key,
+                "slice_shell_supervisor_spawn_failed",
+                unit_name=unit_name,
+                error=str(exc),
+            )
+            return None
+        supervisor = _SliceSupervisorProcess(process, socket_path, stderr_path, runtime_dir, unit_name, config_key)
+        try:
+            _wait_supervisor_ready(
+                supervisor,
+                timeout_seconds=_SLICE_STARTUP_TIMEOUT_SECONDS,
+                poll_interval_seconds=_SLICE_READY_PROBE_INTERVAL_SECONDS,
+            )
+        except (OSError, ShellSupervisorStartupError) as exc:
+            _terminate_slice_supervisor(supervisor)
+            self._fail_spawn_locked(
+                config_key,
+                "slice_shell_supervisor_start_failed",
+                unit_name=unit_name,
+                error=str(exc),
+            )
+            return None
+        self._supervisor = supervisor
+        return supervisor.socket_path
+
+
+_slice_manager: _SliceShellSupervisorManager | None = None
+_slice_manager_lock = threading.Lock()
+
+
+def _get_slice_manager(*, create: bool = True) -> _SliceShellSupervisorManager | None:
+    global _slice_manager
+    with _slice_manager_lock:
+        if _slice_manager is None and create:
+            _slice_manager = _SliceShellSupervisorManager()
+            atexit.register(_slice_manager.shutdown)
+        return _slice_manager
+
+
+def ensure_slice_shell_supervisor() -> str | None:
+    """Return the persistent user-slice shell supervisor socket, or ``None`` when unconfigured or unavailable."""
+    if _slice_config_key() is None:
+        return None
+    manager = _get_slice_manager(create=True)
+    assert manager is not None
+    return manager.ensure()
+
+
+async def ensure_slice_shell_supervisor_async() -> str | None:
+    """Return the persistent user-slice supervisor socket, avoiding ``to_thread`` on warm and fast paths."""
+    if _slice_config_key() is None:
+        return None
+    manager = _get_slice_manager(create=True)
+    assert manager is not None
+    fast = manager.try_fast_path()
+    return fast if not isinstance(fast, _SlowPath) else await asyncio.to_thread(manager.ensure)
+
+
+def invalidate_slice_shell_supervisor(socket_path: str) -> None:
+    """Invalidate and tear down the slice supervisor if it still owns *socket_path*."""
+    if (manager := _get_slice_manager(create=False)) is not None:
+        manager.invalidate(socket_path)
+
+
+def kill_slice_shell_supervisor_namespace(socket_path: str, namespace: str) -> None:
+    """Kill every background process in *namespace* on *socket_path* without spawning a supervisor."""
+    with suppress(OSError):
+        if Path(socket_path).exists():
+            _kill_namespace_via_supervisor(socket_path, namespace=namespace)
+
+
+def shutdown_slice_shell_supervisor() -> None:
+    """Terminate the persistent slice supervisor and clear cached state."""
+    if (manager := _get_slice_manager(create=False)) is not None:
+        manager.shutdown()
 
 
 if __name__ == "__main__":

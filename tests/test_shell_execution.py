@@ -28,10 +28,12 @@ from mindroom.shell.execution import (
     _systemd_slice_launcher,
     _SystemdSliceLauncher,
     check_command,
+    configured_systemd_slice_name,
     kill_all_records,
     kill_command,
     run_command,
     signal_record,
+    systemd_bus_socket_fingerprint,
 )
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 
@@ -1009,3 +1011,104 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
     assert reports[0] == "one"
     assert reports[-1] == "one\ntwo\nStderr:\nwarn"
     assert all(earlier != later for earlier, later in itertools.pairwise(reports))
+
+
+def test_systemd_bus_socket_fingerprint_handles_paths_and_non_path_addresses(tmp_path: Path) -> None:
+    """Default and unix:path= addresses stat sockets and detect changes; non-path addresses return None."""
+    rt = tmp_path / "rt"
+    (rt / "systemd").mkdir(parents=True)
+    bus = rt / "bus"
+    private = rt / "systemd" / "private"
+    bus.write_text("a")
+    private.write_text("p")
+
+    fp1 = systemd_bus_socket_fingerprint(str(rt), None)
+    assert fp1 is not None
+    assert fp1[0] is not None
+    assert fp1[1] is not None
+
+    bus.unlink()
+    bus.write_text("b")
+    assert systemd_bus_socket_fingerprint(str(rt), None) != fp1
+
+    spaced = tmp_path / "dir with space" / "bus"
+    spaced.parent.mkdir()
+    spaced.write_text("c")
+    encoded_addr = f"unix:path={str(spaced).replace(' ', '%20')},guid=123;tcp:host=127.0.0.1"
+    fp_path = systemd_bus_socket_fingerprint(str(rt), encoded_addr)
+    assert fp_path is not None
+    assert fp_path[0] is not None
+    assert fp_path[1] == fp1[1]
+
+    assert systemd_bus_socket_fingerprint(str(tmp_path / "missing"), None) == (None, None)
+    for non_path in (
+        "unix:abstract=/tmp/dbus-1",
+        "tcp:host=localhost,port=1234",
+        "unix:guid=1,path=/bus",
+        "unix:path=",
+    ):
+        assert systemd_bus_socket_fingerprint(str(rt), non_path) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+@pytest.mark.asyncio
+async def test_allow_systemd_slice_false_and_warm_unsliced_inline_fast_path(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """allow_systemd_slice=False skips systemd-run while keeping chrt/ionice, and warm unsliced runs skip to_thread."""
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "test.slice")
+    assert configured_systemd_slice_name() == "test.slice"
+
+    _idle_launcher()
+    _idle_io_launcher()
+    slice_calls: list[bool] = []
+    monkeypatch.setattr(
+        "mindroom.shell.execution._systemd_slice_launcher",
+        lambda: (slice_calls.append(True), _SystemdSliceLauncher(("/systemd-run", "--"), "/env", ()))[1],
+    )
+
+    env = {"PATH": os.environ["PATH"]}
+    unsliced = _idle_launch_argv([sys.executable, "-c", "pass"], env, str(tmp_path), allow_systemd_slice=False)
+    assert "/systemd-run" not in unsliced.argv
+    assert slice_calls == []
+    sliced = _idle_launch_argv([sys.executable, "-c", "pass"], env, str(tmp_path), allow_systemd_slice=True)
+    assert sliced.argv[0] == "/systemd-run"
+    assert len(slice_calls) == 1
+
+    to_thread_calls: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def tracking_to_thread(func: object, *args: object, **kwargs: object) -> object:
+        to_thread_calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", tracking_to_thread)
+    result = await run_command(
+        registry,
+        namespace="test",
+        argv=[sys.executable, "-c", "print('inline')"],
+        env=env,
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=10,
+        allow_systemd_slice=False,
+    )
+    assert result.message == "inline"
+    assert to_thread_calls == []
+
+    # With allow_systemd_slice=True and slice configured, _start_command still offloads to asyncio.to_thread.
+    monkeypatch.setattr("mindroom.shell.execution._systemd_slice_launcher", lambda: None)
+    result2 = await run_command(
+        registry,
+        namespace="test",
+        argv=[sys.executable, "-c", "print('threaded')"],
+        env=env,
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=10,
+        allow_systemd_slice=True,
+    )
+    assert result2.message == "threaded"
+    assert _idle_launch_argv in to_thread_calls

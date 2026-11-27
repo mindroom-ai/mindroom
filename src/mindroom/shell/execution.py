@@ -28,6 +28,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from urllib.parse import unquote
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
@@ -473,6 +474,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
     launch_failure_exits: bool = False,
     max_runtime_seconds: float | None = None,
     background_log: BackgroundLogPolicy | None = None,
+    allow_systemd_slice: bool = True,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -521,7 +523,14 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 capture.close()
             return ShellRunResult(message=f"Error: {exc}", execution_error=True)
         try:
-            process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
+            process = await _start_command(
+                argv,
+                env,
+                cwd,
+                stdin=stdin,
+                stderr=stderr,
+                allow_systemd_slice=allow_systemd_slice,
+            )
         except asyncio.CancelledError:
             if capture is not None:
                 capture.close()
@@ -649,9 +658,21 @@ async def _start_command(
     *,
     stdin: int | None,
     stderr: int = asyncio.subprocess.PIPE,
+    allow_systemd_slice: bool = True,
 ) -> asyncio.subprocess.Process:
     """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    launch = await asyncio.to_thread(_idle_launch_argv, argv, env, cwd)
+    warm_unsliced = sys.platform != "linux" or (
+        (not allow_systemd_slice or configured_systemd_slice_name() is None)
+        and all(
+            callable(info := getattr(fn, "cache_info", None)) and info().currsize > 0
+            for fn in (_idle_launcher, _idle_io_launcher)
+        )
+    )
+    launch = (
+        _idle_launch_argv(argv, env, cwd, allow_systemd_slice=allow_systemd_slice)
+        if warm_unsliced
+        else await asyncio.to_thread(_idle_launch_argv, argv, env, cwd, allow_systemd_slice=allow_systemd_slice)
+    )
     process = await asyncio.create_subprocess_exec(
         *launch.argv,
         stdin=stdin,
@@ -1526,8 +1547,8 @@ def _probe_systemd_slice_launcher(
     return None
 
 
-def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
-    """Return a ``systemd-run --user --scope`` launcher for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
+def configured_systemd_slice_name() -> str | None:
+    """Return the validated ``MINDROOM_SHELL_SYSTEMD_SLICE`` unit name, or ``None`` if unset or invalid."""
     slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
     if (
         len(slice_name) <= len(".slice")
@@ -1536,6 +1557,41 @@ def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
         or "/" in slice_name
         or any(ch.isspace() or ch == "\x00" for ch in slice_name)
     ):
+        return None
+    return slice_name
+
+
+def _stat_key(path: Path | None) -> tuple[int, int, int] | None:
+    if path is None:
+        return None
+    try:
+        st = path.stat()
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns)
+
+
+def systemd_bus_socket_fingerprint(
+    runtime_dir: str | None,
+    dbus_addr: str | None,
+) -> tuple[tuple[int, int, int] | None, tuple[int, int, int] | None] | None:
+    """Return ``(bus_stat, systemd_private_stat)``, or ``None`` when *dbus_addr* is not filesystem-fingerprintable."""
+    if dbus_addr is None:
+        bus_path = Path(runtime_dir) / "bus" if runtime_dir else None
+    elif dbus_addr.startswith("unix:path="):
+        raw_path = dbus_addr.removeprefix("unix:path=").split(";", 1)[0].split(",", 1)[0]
+        if not raw_path:
+            return None
+        bus_path = Path(unquote(raw_path))
+    else:
+        return None
+    private_path = Path(runtime_dir) / "systemd" / "private" if runtime_dir else None
+    return (_stat_key(bus_path), _stat_key(private_path))
+
+
+def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
+    """Return a ``systemd-run --user --scope`` launcher for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
+    if (slice_name := configured_systemd_slice_name()) is None:
         return None
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or None
     dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None
@@ -1622,7 +1678,13 @@ def _launch_failure(
     return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
 
 
-def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> _IdleLaunch:
+def _idle_launch_argv(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    *,
+    allow_systemd_slice: bool = True,
+) -> _IdleLaunch:
     """Wrap *argv* on Linux for optional systemd slice, ``SCHED_IDLE``, and idle I/O priority.
 
     Nice 19 lowers a command's CPU share, but the kernel still counts a CPU that runs it as busy when it places
@@ -1638,7 +1700,7 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
     spawn_env = env
     ionice = _idle_io_launcher()
     chrt = _idle_launcher()
-    systemd_launcher = _systemd_slice_launcher()
+    systemd_launcher = _systemd_slice_launcher() if allow_systemd_slice else None
     if ionice is not None:
         spawn_argv = [ionice, "-c", "3", "--", *spawn_argv]
     if chrt is not None:

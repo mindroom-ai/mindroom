@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import os
@@ -24,13 +25,21 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import BackgroundLogPolicy, current_shell_background_scope
 from mindroom.shell.execution import (
+    configured_systemd_slice_name,
     default_run_timeout_seconds,
     normalize_shell_args,
     run_command,
     shell_call_timeout,
 )
 from mindroom.shell.output_capture import ShellOutputDestination
-from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.shell.supervisor import (
+    SHELL_SUPERVISOR_SOCKET_ENV,
+    ShellSupervisorConnectError,
+    ensure_slice_shell_supervisor_async,
+    invalidate_slice_shell_supervisor,
+    kill_slice_shell_supervisor_namespace,
+    run_command_via_supervisor,
+)
 from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError, TerminalLaunch
 from mindroom.tool_system.authoring import Toolkit
@@ -56,8 +65,10 @@ from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
+    from mindroom.shell.background_scope import ShellBackgroundScope
+    from mindroom.shell.execution import ShellRunResult
     from mindroom.tool_system.tool_function import ToolFunction
 
 _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
@@ -285,6 +296,49 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
     # Restore MindRoom's captured execution PATH without re-sourcing workspace hooks.
     adjusted_args[command_index] = env_restore + adjusted_args[command_index]
     return adjusted_args
+
+
+async def _run_local_command(
+    invoke: Callable[[Callable[..., Awaitable[ShellRunResult]]], Awaitable[ShellRunResult]],
+    *,
+    bg_scope: ShellBackgroundScope | None,
+    namespace: str,
+) -> ShellRunResult:
+    """Run via the persistent user-slice supervisor when active, falling back once on connect error."""
+    if (slice_socket := await ensure_slice_shell_supervisor_async()) is not None:
+        endpoint_key = f"slice-supervisor:{slice_socket}"
+        if bg_scope is not None:
+            bg_scope.track_remote_start(
+                endpoint_key,
+                functools.partial(kill_slice_shell_supervisor_namespace, slice_socket, namespace),
+            )
+        result: ShellRunResult | None = None
+        connect_failed = False
+        try:
+            result = await invoke(
+                functools.partial(run_command_via_supervisor, slice_socket, raise_on_connect_error=True),
+            )
+        except ShellSupervisorConnectError:
+            connect_failed = True
+        finally:
+            if bg_scope is not None:
+                needs_cleanup = (
+                    False if connect_failed else (result is None or result.handle is not None or result.execution_error)
+                )
+                bg_scope.track_remote_end(endpoint_key, backgrounded=needs_cleanup)
+        if not connect_failed:
+            assert result is not None
+            return result
+        await asyncio.to_thread(invalidate_slice_shell_supervisor, slice_socket)
+    return await invoke(
+        functools.partial(
+            run_command,
+            bg_scope.records if bg_scope is not None else {},
+            # Never the terminal MindRoom runs in, where a prompting command would wait forever.
+            stdin=subprocess.DEVNULL,
+            allow_systemd_slice=configured_systemd_slice_name() is None,
+        ),
+    )
 
 
 @register_tool_with_metadata(
@@ -594,29 +648,31 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             wait_limit = default_run_timeout_seconds()
             bg_scope = scope if scope is not None and (timeout is None or timeout > wait_limit) else None
             on_timeout: Literal["background", "kill"] = "background" if bg_scope is not None else "kill"
-            runner = (
-                functools.partial(run_command_via_supervisor, self._supervisor_socket)
-                if self._supervisor_socket is not None
-                else functools.partial(
-                    run_command,
-                    bg_scope.records if bg_scope is not None else {},
-                    # Never the terminal MindRoom runs in, where a prompting command would wait forever.
-                    stdin=subprocess.DEVNULL,
+            namespace = f"shell-scope:{bg_scope.scope_id}" if bg_scope is not None else _SHELL_NAMESPACE
+            run_timeout = wait_limit if bg_scope is not None else shell_call_timeout(timeout)
+            max_runtime_seconds = timeout if bg_scope is not None else None
+            background_log = self._background_log_policy() if bg_scope is not None else None
+
+            async def _invoke(runner: Callable[..., Awaitable[ShellRunResult]]) -> ShellRunResult:
+                return await runner(
+                    namespace=namespace,
+                    argv=argv,
+                    env=subprocess_env,
+                    cwd=cwd,
+                    tail=tail,
+                    timeout=run_timeout,
+                    on_timeout=on_timeout,
+                    on_progress=report_tool_progress,
+                    output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
+                    max_runtime_seconds=max_runtime_seconds,
+                    background_log=background_log,
                 )
-            )
-            result = await runner(
-                namespace=f"shell-scope:{bg_scope.scope_id}" if bg_scope is not None else _SHELL_NAMESPACE,
-                argv=argv,
-                env=subprocess_env,
-                cwd=cwd,
-                tail=tail,
-                timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
-                on_timeout=on_timeout,
-                on_progress=report_tool_progress,
-                output_destination=output_destination,
-                launch_failure_exits=worker is not None,
-                max_runtime_seconds=timeout if bg_scope is not None else None,
-                background_log=self._background_log_policy() if bg_scope is not None else None,
+
+            result = (
+                await _invoke(functools.partial(run_command_via_supervisor, self._supervisor_socket))
+                if self._supervisor_socket is not None
+                else await _run_local_command(_invoke, bg_scope=bg_scope, namespace=namespace)
             )
             if bg_scope is not None and result.handle is not None:
                 bg_scope.had_backgrounded = True

@@ -202,6 +202,8 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
 )
+from mindroom.shell.execution import _probe_systemd_slice_launcher
+from mindroom.shell.supervisor import shutdown_slice_shell_supervisor
 from mindroom.steward_duties import StewardDuties
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
@@ -4406,6 +4408,16 @@ def _reset_runtime_paths() -> Generator[None]:
     os.environ.update(original_env)
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.clear()
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID.update(original_bound_configs)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shell_systemd_slice(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Keep host MINDROOM_SHELL_SYSTEMD_SLICE and persistent slice-supervisor state isolated per test."""
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
+    _probe_systemd_slice_launcher.cache_clear()
+    yield
+    shutdown_slice_shell_supervisor()
+    _probe_systemd_slice_launcher.cache_clear()
 
 
 @pytest.fixture(autouse=True)

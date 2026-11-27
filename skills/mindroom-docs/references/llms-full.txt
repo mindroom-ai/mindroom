@@ -11840,9 +11840,10 @@ Deployments that route `shell` to Docker or Kubernetes workers already isolate c
 When running `shell` directly in the MindRoom process on a Linux systemd host (`defaults.allow_shell_without_worker: true`), spawned commands inherit MindRoom's own service cgroup by default, so heavy builds or test suites can compete with MindRoom for RAM and swap.
 
 To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
-MindRoom checks the active `systemd --user` manager generation (`systemctl --user show`) and caches the `systemd-run --user --scope` + `env` probe per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, manager generation)`.
-It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers.
-When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
+Local `run_shell_command` runs through one persistent `mindroom.shell.supervisor` process started inside a single `systemd-run --user --scope --property=OOMPolicy=continue --slice=<slice>` scope (systemd 246+), eliminating per-command transient scope creation overhead while still running each child command at `SCHED_IDLE`, idle I/O priority, `nice 19`, and in its own process group with the caller's exact arguments and environment.
+It fails open automatically to direct local execution with brief backoff when the user manager is unavailable, stopping, or rejects the scope, and re-enables slice isolation automatically once the user manager recovers.
+`OOMPolicy=continue` keeps the shared scope alive if the kernel OOM-kills one child process, whereas `systemd-oomd` (`ManagedOOMMemoryPressure=kill`) kills the entire cgroup under sustained pressure; if the supervisor is terminated, MindRoom stops its scope unit and respawns a fresh supervisor on the next command.
+Direct `run_command`/`stream_command` callers continue to use per-command `systemd-run --user --scope` scopes (keyed on the active `systemd --user` manager generation, requiring `--expand-environment=no` to preserve literal `$$`/`$VAR` arguments).
 
 Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
 
