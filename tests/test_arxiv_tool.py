@@ -89,7 +89,7 @@ def test_read_arxiv_papers_downloads_and_reads_the_pdf(arxiv_http: list[str], tm
     """Papers download from the export host under the sanitized filename and return the expected article JSON."""
     toolkit = arxiv_tools()(download_dir=str(tmp_path))
 
-    articles = json.loads(toolkit.read_arxiv_papers(["math/0211159v1"], pages_to_read=1))
+    articles = json.loads(toolkit.arxiv_read_papers(["math/0211159v1"], pages_to_read=1))
 
     assert articles == [
         {
@@ -127,24 +127,24 @@ def test_search_and_page_bounds(
     toolkit = arxiv_tools()(download_dir=tmp_path)
     toolkit.client.page_size = page_size
 
-    assert json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=0)) == []
+    assert json.loads(toolkit.arxiv_search("ricci flow", num_articles=0)) == []
     assert arxiv_http == []
 
-    search_articles = json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=3))
+    search_articles = json.loads(toolkit.arxiv_search("ricci flow", num_articles=3))
     assert len(search_articles) == 1
     assert search_articles[0]["id"] == "math/0211159v1"
     assert "content" not in search_articles[0]
     assert parse_qs(urlparse(arxiv_http[0]).query)["max_results"] == [expected_api_limit]
     assert delays == []
 
-    assert json.loads(toolkit.search_arxiv_and_return_articles("ricci flow", num_articles=3)) == search_articles
+    assert json.loads(toolkit.arxiv_search("ricci flow", num_articles=3)) == search_articles
     assert len(delays) == 1
 
-    all_pages = json.loads(toolkit.read_arxiv_papers(["math/0211159v1"]))
+    all_pages = json.loads(toolkit.arxiv_read_papers(["math/0211159v1"]))
     assert [page["page"] for page in all_pages[0]["content"]] == [1, 2]
     assert len(delays) == 2
 
-    zero_pages = json.loads(toolkit.read_arxiv_papers(["math/0211159v1"], pages_to_read=0))
+    zero_pages = json.loads(toolkit.arxiv_read_papers(["math/0211159v1"], pages_to_read=0))
     assert zero_pages[0]["content"] == []
 
 
@@ -159,7 +159,7 @@ def test_default_downloads_use_a_temporary_directory(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(arxiv_module, "_download_pdf", download)
 
-    articles = json.loads(arxiv_tools()().read_arxiv_papers(["math/0211159v1"], pages_to_read=1))
+    articles = json.loads(arxiv_tools()().arxiv_read_papers(["math/0211159v1"], pages_to_read=1))
 
     assert articles[0]["content"] == [{"page": 1, "text": "First page text\n"}]
     assert list(tmp_path.iterdir()) == []
@@ -211,10 +211,10 @@ def test_arxiv_toolkit_flags_and_name() -> None:
 
     default_tool = tool_class()
     assert default_tool.name == "arxiv_tools"
-    assert list(default_tool.functions) == ["search_arxiv_and_return_articles", "read_arxiv_papers"]
+    assert list(default_tool.functions) == ["arxiv_search", "arxiv_read_papers"]
 
     read_only = tool_class(enable_search_arxiv=False, enable_read_arxiv_papers=True)
-    assert list(read_only.functions) == ["read_arxiv_papers"]
+    assert list(read_only.functions) == ["arxiv_read_papers"]
 
     all_override = tool_class(enable_search_arxiv=False, enable_read_arxiv_papers=False, all=True)
-    assert list(all_override.functions) == ["search_arxiv_and_return_articles", "read_arxiv_papers"]
+    assert list(all_override.functions) == ["arxiv_search", "arxiv_read_papers"]

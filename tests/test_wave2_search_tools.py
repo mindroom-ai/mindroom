@@ -64,8 +64,8 @@ def _build_env_configured_tool(
         (duckduckgo_tools, "websearch", ["duckduckgo_search"]),
         (googlesearch_tools, "websearch", ["google_search"]),
         (baidusearch_tools, "baidusearch", ["baidu_search"]),
-        (serper_tools, "serper_tools", ["serper_search", "scrape_webpage"]),
-        (serpapi_tools, "serpapi_tools", ["search_google"]),
+        (serper_tools, "serper_tools", ["serper_search", "serper_scrape_webpage"]),
+        (serpapi_tools, "serpapi_tools", ["serpapi_search_google"]),
     ],
 )
 def test_wave2_search_toolkits_are_native_with_preserved_names_and_order(
@@ -107,13 +107,13 @@ def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
     assert schema["properties"]["action"]["enum"] == ["web", "news", "scholar"]
     assert schema["properties"]["num_results"]["type"] == "integer"
 
-    scrape_schema = tool_parameters(serper.functions["scrape_webpage"])
+    scrape_schema = tool_parameters(serper.functions["serper_scrape_webpage"])
     assert scrape_schema["required"] == ["url"]
     assert scrape_schema["properties"]["markdown"]["type"] == "boolean"
 
     serpapi_toolkit = serpapi_tools()(all=True)
-    assert tool_parameters(serpapi_toolkit.functions["search_google"])["required"] == ["query"]
-    assert tool_parameters(serpapi_toolkit.functions["search_youtube"])["required"] == ["query"]
+    assert tool_parameters(serpapi_toolkit.functions["serpapi_search_google"])["required"] == ["query"]
+    assert tool_parameters(serpapi_toolkit.functions["serpapi_search_youtube"])["required"] == ["query"]
 
 
 def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -352,7 +352,7 @@ def test_serper_all_endpoints_headers_payload_and_env_fallback(
         web = json.loads(toolkit.serper_search("python", "web"))
         news = json.loads(toolkit.serper_search("ai", "news", num_results=3))
         scholar = json.loads(toolkit.serper_search("transformers", "scholar"))
-        scraped = json.loads(toolkit.scrape_webpage("https://example.com", markdown=True))
+        scraped = json.loads(toolkit.serper_scrape_webpage("https://example.com", markdown=True))
 
     assert web["endpoint"] == "/search"
     assert news["endpoint"] == "/news"
@@ -390,7 +390,7 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
     assert json.loads(no_key_toolkit.serper_search("", "scholar")) == {
         "error": "Please provide a query to search for academic papers",
     }
-    assert json.loads(no_key_toolkit.scrape_webpage("")) == {"error": "Please provide a URL to scrape"}
+    assert json.loads(no_key_toolkit.serper_scrape_webpage("")) == {"error": "Please provide a URL to scrape"}
     assert json.loads(no_key_toolkit.serper_search("python", "web")) == {"error": "Please provide a Serper API key"}
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -407,7 +407,7 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
 
     tool_class = serper_tools()
     only_scrape = tool_class(enable_search=False, enable_search_news=False, enable_search_scholar=False)
-    assert list(only_scrape.functions) == ["scrape_webpage"]
+    assert list(only_scrape.functions) == ["serper_scrape_webpage"]
 
     only_scholar = tool_class(enable_search=False, enable_search_news=False, enable_scrape_webpage=False)
     offered_scholar = adapt_toolkit(only_scholar).functions[0]
@@ -427,7 +427,7 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
         enable_scrape_webpage=False,
         all=True,
     )
-    assert list(all_enabled.functions) == ["serper_search", "scrape_webpage"]
+    assert list(all_enabled.functions) == ["serper_search", "serper_scrape_webpage"]
 
 
 def test_serpapi_google_youtube_env_fallback_and_key_redaction(
@@ -470,8 +470,8 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
 
     no_key = serpapi_tools()()
     assert no_key.api_key is None
-    assert no_key.search_google("mindroom") == "Please provide an API key"
-    assert no_key.search_youtube("mindroom") == "Please provide an API key"
+    assert no_key.serpapi_search_google("mindroom") == "Please provide an API key"
+    assert no_key.serpapi_search_youtube("mindroom") == "Please provide an API key"
 
     test_key = "serp key+1/2"
     toolkit = _build_env_configured_tool(
@@ -481,10 +481,10 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
         overrides={"enable_search_youtube": True},
     )
 
-    assert toolkit.search_google("") == "Please provide a query to search for"
-    assert toolkit.search_youtube("") == "Please provide a query to search for"
+    assert toolkit.serpapi_search_google("") == "Please provide a query to search for"
+    assert toolkit.serpapi_search_youtube("") == "Please provide a query to search for"
 
-    google_result = json.loads(toolkit.search_google("mindroom", num_results=5))
+    google_result = json.loads(toolkit.serpapi_search_google("mindroom", num_results=5))
     assert google_result == {
         "search_results": [{"title": "MindRoom"}],
         "recipes_results": "",
@@ -492,14 +492,14 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
         "knowledge_graph": {"title": "MindRoom"},
         "related_questions": "",
     }
-    youtube_result = json.loads(toolkit.search_youtube("matrix"))
+    youtube_result = json.loads(toolkit.serpapi_search_youtube("matrix"))
     assert youtube_result == {
         "video_results": [{"title": "Demo"}],
         "movie_results": "",
         "channel_results": [{"title": "Official"}],
     }
 
-    error_text = toolkit.search_google("boom")
+    error_text = toolkit.serpapi_search_google("boom")
     assert error_text.startswith("Error searching for the query boom:")
     assert test_key not in error_text
     assert quote(test_key, safe="") not in error_text
@@ -514,12 +514,12 @@ def test_serpapi_enable_flags_and_all() -> None:
     """SerpApiTools defaults to Google only and honors YouTube and all switches."""
     tool_class = serpapi_tools()
 
-    assert list(tool_class().functions) == ["search_google"]
-    assert list(tool_class(enable_search_youtube=True).functions) == ["search_google", "search_youtube"]
+    assert list(tool_class().functions) == ["serpapi_search_google"]
+    assert list(tool_class(enable_search_youtube=True).functions) == ["serpapi_search_google", "serpapi_search_youtube"]
     assert list(tool_class(enable_search_google=False).functions) == []
     assert list(tool_class(enable_search_google=False, enable_search_youtube=False, all=True).functions) == [
-        "search_google",
-        "search_youtube",
+        "serpapi_search_google",
+        "serpapi_search_youtube",
     ]
 
 
@@ -563,10 +563,10 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
     assert serper_news_op is not None
     assert serper_news_op.mcp_tool_name == "news"
 
-    # scrape_webpage stays non-action-scoped on serper.
+    # serper_scrape_webpage stays non-action-scoped on serper.
     scrape_op = grant_operation(
         config,
-        "scrape_webpage",
+        "serper_scrape_webpage",
         {"url": "https://example.com"},
         tools=registry,
         toolkit_name="serper",

@@ -37,10 +37,10 @@ class GiphyTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_search_gifs:
-            tools.append(self.search_gifs)
+            tools.append(self.giphy_search_gifs)
         super().__init__(name="giphy", tools=tools)
 
-    def search_gifs(self, query: str) -> ToolValue:
+    def giphy_search_gifs(self, query: str) -> ToolValue:
         """Search Giphy for GIFs matching a query.
 
         Args:

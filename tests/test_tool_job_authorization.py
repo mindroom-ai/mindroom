@@ -197,8 +197,8 @@ def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
         pytest.param({}, True, id="absent"),
         pytest.param({"include_tools": None}, True, id="null"),
         pytest.param({"include_tools": []}, False, id="empty"),
-        pytest.param({"include_tools": ["get_top_hackernews_stories"]}, True, id="allowed"),
-        pytest.param({"include_tools": ["get_user_details"]}, False, id="denied"),
+        pytest.param({"include_tools": ["hackernews_top_stories"]}, True, id="allowed"),
+        pytest.param({"include_tools": ["hackernews_user_details"]}, False, id="denied"),
     ],
 )
 def test_authored_include_policy_matches_real_toolkit_surface(
@@ -228,12 +228,12 @@ def test_authored_include_policy_matches_real_toolkit_surface(
     )
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
-    assert ("get_top_hackernews_stories" in toolkit_function_names(toolkit)) is expected_allowed
+    assert ("hackernews_top_stories" in toolkit_function_names(toolkit)) is expected_allowed
     assert (
         locally_allowed(
             config,
             _OWNER,
-            tool_name="get_top_hackernews_stories",
+            tool_name="hackernews_top_stories",
             toolkit_name="hackernews",
             origin={},
             depth=0,

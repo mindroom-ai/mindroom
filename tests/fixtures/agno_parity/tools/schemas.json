@@ -62,7 +62,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "agentql_scrape_website",
         "description": "Scrape all text content from a website using AgentQL.",
         "parameters": {
           "type": "object",
@@ -97,7 +97,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "save_dag_file",
+        "name": "airflow_save_dag_file",
         "description": "Write Python DAG `contents` to `dag_file` under the DAG directory and return its path.",
         "parameters": {
           "type": "object",
@@ -129,7 +129,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_dag_file",
+        "name": "airflow_read_dag_file",
         "description": "Read and return the contents of `dag_file` under the DAG directory.",
         "parameters": {
           "type": "object",
@@ -208,7 +208,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_arxiv_and_return_articles",
+        "name": "arxiv_search",
         "description": "Use this function to search arXiv for a query and return the top articles.",
         "parameters": {
           "type": "object",
@@ -241,7 +241,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_arxiv_papers",
+        "name": "arxiv_read_papers",
         "description": "Use this function to read a list of arxiv papers and return the content.",
         "parameters": {
           "type": "object",
@@ -584,7 +584,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_functions",
+        "name": "aws_lambda_list_functions",
         "description": "List AWS Lambda function names in the configured region.",
         "parameters": {
           "type": "object",
@@ -607,7 +607,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "invoke_function",
+        "name": "aws_lambda_invoke_function",
         "description": "Invoke AWS Lambda `function_name` with a JSON `payload` string.",
         "parameters": {
           "type": "object",
@@ -644,7 +644,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "aws_ses_send_email",
         "description": "Send plain-text email via Amazon SES.",
         "parameters": {
           "type": "object",
@@ -2406,7 +2406,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "screenshot",
+        "name": "browserbase_screenshot",
         "description": "Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`).",
         "parameters": {
           "type": "object",
@@ -2617,7 +2617,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "text_to_speech",
+        "name": "cartesia_text_to_speech",
         "description": "Synthesize MP3 speech audio from text using Cartesia.",
         "parameters": {
           "type": "object",
@@ -2650,7 +2650,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "list_voices",
+        "name": "cartesia_list_voices",
         "description": "List available Cartesia voices (first page) as JSON.",
         "parameters": {
           "type": "object",
@@ -3272,7 +3272,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "crawl",
+        "name": "crawl4ai_crawl",
         "description": "Crawl validated public HTTP(S) URLs.",
         "parameters": {
           "type": "object",
@@ -3358,7 +3358,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "query_csv_file",
+        "name": "csv_query",
         "description": "Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`).",
         "parameters": {
           "type": "object",
@@ -3396,7 +3396,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "make_request",
+        "name": "custom_api_request",
         "description": "Make an HTTP request to a validated public HTTP(S) URL.",
         "parameters": {
           "type": "object",
@@ -4336,7 +4336,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "duckdb_run_query",
         "description": "Run a single DuckDB SQL query and return CSV-formatted output.",
         "parameters": {
           "type": "object",
@@ -4775,7 +4775,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_voices",
+        "name": "eleven_labs_get_voices",
         "description": "List available ElevenLabs voices with ID, name, and description.",
         "parameters": {
           "type": "object",
@@ -4798,7 +4798,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_sound_effect",
+        "name": "eleven_labs_generate_sound_effect",
         "description": "Generate a sound effect from a text prompt.",
         "parameters": {
           "type": "object",
@@ -4831,7 +4831,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "text_to_speech",
+        "name": "eleven_labs_text_to_speech",
         "description": "Convert text to speech audio using ElevenLabs.",
         "parameters": {
           "type": "object",
@@ -5032,7 +5032,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "fal_generate_media",
         "description": "Generate an image or video with the configured Fal model.",
         "parameters": {
           "type": "object",
@@ -5477,7 +5477,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "firecrawl_scrape_website",
         "description": "Use this function to scrape a website using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -5512,7 +5512,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_image",
+        "name": "gemini_generate_image",
         "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
@@ -5541,7 +5541,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_video",
+        "name": "gemini_generate_video",
         "description": "Generate a video from a text prompt using Vertex AI Veo.",
         "parameters": {
           "type": "object",
@@ -5576,7 +5576,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_gifs",
+        "name": "giphy_search_gifs",
         "description": "Search Giphy for GIFs matching a query.",
         "parameters": {
           "type": "object",
@@ -6296,7 +6296,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_tables",
+        "name": "google_bigquery_list_tables",
         "description": "List table names in the configured dataset.",
         "parameters": {
           "type": "object",
@@ -6319,7 +6319,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "describe_table",
+        "name": "google_bigquery_describe_table",
         "description": "Describe one table in the configured dataset.",
         "parameters": {
           "type": "object",
@@ -6348,7 +6348,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "google_bigquery_run_sql_query",
         "description": "Run one read-only GoogleSQL SELECT query; unqualified tables resolve in the configured dataset.",
         "parameters": {
           "type": "object",
@@ -6914,7 +6914,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google_scholar",
+        "name": "google_scholar_search",
         "description": "Search Google Scholar for academic publications.",
         "parameters": {
           "type": "object",
@@ -7196,7 +7196,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "groq_transcribe_audio",
         "description": "Transcribe audio from an http(s) URL or local file using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -7225,7 +7225,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "translate_audio",
+        "name": "groq_translate_audio",
         "description": "Translate audio from an http(s) URL or local file into English using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -7254,7 +7254,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "groq_generate_speech",
         "description": "Synthesize speech audio from text using Groq TTS.",
         "parameters": {
           "type": "object",
@@ -7289,7 +7289,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_top_hackernews_stories",
+        "name": "hackernews_top_stories",
         "description": "Use this function to get top stories from Hacker News.",
         "parameters": {
           "type": "object",
@@ -7316,7 +7316,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "get_user_details",
+        "name": "hackernews_user_details",
         "description": "Use this function to get the details of a Hacker News user using their username.",
         "parameters": {
           "type": "object",
@@ -7501,7 +7501,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_url",
+        "name": "jina_read_url",
         "description": "Reads a URL and returns the truncated content using Jina Reader API.",
         "parameters": {
           "type": "object",
@@ -7739,7 +7739,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_with_linkup",
+        "name": "linkup_search",
         "description": "Use this function to search the web for a given query.\nThis function uses the Linkup API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -7782,7 +7782,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_video",
+        "name": "lumalabs_generate_video",
         "description": "Generate a video from a text prompt and optional keyframes.",
         "parameters": {
           "type": "object",
@@ -7844,7 +7844,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "image_to_video",
+        "name": "lumalabs_image_to_video",
         "description": "Generate a video from one or two images with a prompt.",
         "parameters": {
           "type": "object",
@@ -9204,7 +9204,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "modelslabs_generate_media",
         "description": "Generate an image, video, audio clip, or GIF from a text prompt using ModelsLab.",
         "parameters": {
           "type": "object",
@@ -9239,7 +9239,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "extract_audio",
+        "name": "moviepy_video_tools_extract_audio",
         "description": "Extract the audio track from a video file.",
         "parameters": {
           "type": "object",
@@ -9273,7 +9273,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_srt",
+        "name": "moviepy_video_tools_create_srt",
         "description": "Write SRT-formatted subtitle text to a file.",
         "parameters": {
           "type": "object",
@@ -9307,7 +9307,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "embed_captions",
+        "name": "moviepy_video_tools_embed_captions",
         "description": "Burn word-highlighted SRT captions onto a video.",
         "parameters": {
           "type": "object",
@@ -9400,7 +9400,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_cypher_query",
+        "name": "neo4j_run_cypher_query",
         "description": "Execute a Cypher query against the Neo4j database and return JSON records.",
         "parameters": {
           "type": "object",
@@ -9434,7 +9434,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_article",
+        "name": "newspaper_read_article",
         "description": "Use this function to read an article from a URL.",
         "parameters": {
           "type": "object",
@@ -9572,7 +9572,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "openai_transcribe_audio",
         "description": "Transcribe an audio file using OpenAI speech-to-text.",
         "parameters": {
           "type": "object",
@@ -9601,7 +9601,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_image",
+        "name": "openai_generate_image",
         "description": "Generate an image from a text prompt using OpenAI.",
         "parameters": {
           "type": "object",
@@ -9630,7 +9630,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "openai_generate_speech",
         "description": "Synthesize speech audio from text using OpenAI.",
         "parameters": {
           "type": "object",
@@ -10240,7 +10240,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_pandas_dataframe",
+        "name": "pandas_create_dataframe",
         "description": "Create and store a DataFrame under `dataframe_name` via `pandas.<create_using_function>(**function_parameters)`.",
         "parameters": {
           "type": "object",
@@ -10279,7 +10279,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_dataframe_operation",
+        "name": "pandas_run_operation",
         "description": "Run `operation` on stored DataFrame `dataframe_name` with optional `operation_parameters`.",
         "parameters": {
           "type": "object",
@@ -10364,7 +10364,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "postgres_run_query",
         "description": "Run a read-only SQL query against PostgreSQL and return CSV-formatted rows.",
         "parameters": {
           "type": "object",
@@ -10392,7 +10392,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "export_table_to_path",
+        "name": "postgres_export_table_to_path",
         "description": "Export a PostgreSQL table as a local CSV file at `path`.",
         "parameters": {
           "type": "object",
@@ -10430,7 +10430,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_pubmed",
+        "name": "pubmed_search",
         "description": "Search PubMed, using the configured max_results when the call omits it.",
         "parameters": {
           "type": "object",
@@ -10747,7 +10747,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "redshift_run_query",
         "description": "Run a SQL query against Amazon Redshift and return CSV-formatted rows.",
         "parameters": {
           "type": "object",
@@ -10775,7 +10775,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "export_table_to_path",
+        "name": "redshift_export_table_to_path",
         "description": "Export a Redshift table as a local CSV file at `path`.",
         "parameters": {
           "type": "object",
@@ -10813,7 +10813,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "replicate_generate_media",
         "description": "Generate an image or video using the configured Replicate model.",
         "parameters": {
           "type": "object",
@@ -10905,7 +10905,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "resend_send_email",
         "description": "Send an HTML email via Resend.",
         "parameters": {
           "type": "object",
@@ -11116,7 +11116,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "smartscraper",
+        "name": "scrapegraph_smartscraper",
         "description": "Extract structured data from a webpage using an AI prompt.",
         "parameters": {
           "type": "object",
@@ -11436,7 +11436,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google",
+        "name": "serpapi_search_google",
         "description": "Search Google using the Serpapi API. Returns the search results.",
         "parameters": {
           "type": "object",
@@ -11515,7 +11515,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "scrape_webpage",
+        "name": "serper_scrape_webpage",
         "description": "Scrapes and extracts content from a webpage using the Serper scraping API.",
         "parameters": {
           "type": "object",
@@ -12359,7 +12359,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "sql_run_query",
         "description": "Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty).",
         "parameters": {
           "type": "object",
@@ -12428,7 +12428,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_using_tavily",
+        "name": "tavily_search",
         "description": "Use this function to search the web for a given query.\nThis function uses the Tavily API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -13061,7 +13061,7 @@
     "functions": [
       {
         "name": "trafilatura_extract",
-        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `trafilatura_html_to_text`; to crawl a site use `trafilatura_crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -13108,7 +13108,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "html_to_text",
+        "name": "trafilatura_html_to_text",
         "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
@@ -13139,7 +13139,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "crawl_website",
+        "name": "trafilatura_crawl_website",
         "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
@@ -13970,7 +13970,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_url",
+        "name": "website_read_url",
         "description": "Read a URL and return relevant documents from the website.",
         "parameters": {
           "type": "object",
@@ -14067,7 +14067,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_wikipedia",
+        "name": "wikipedia_search",
         "description": "Searches Wikipedia for a query.",
         "parameters": {
           "type": "object",
@@ -14381,7 +14381,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_zendesk",
+        "name": "zendesk_search",
         "description": "Search Zendesk Help Center articles matching `search_string`.",
         "parameters": {
           "type": "object",

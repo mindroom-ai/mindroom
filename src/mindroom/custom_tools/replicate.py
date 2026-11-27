@@ -55,10 +55,10 @@ class ReplicateTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_generate_media:
-            tools.append(self.generate_media)
+            tools.append(self.replicate_generate_media)
         super().__init__(name="replicate", tools=tools)
 
-    def generate_media(self, prompt: str) -> ToolValue:
+    def replicate_generate_media(self, prompt: str) -> ToolValue:
         """Generate an image or video using the configured Replicate model.
 
         Args:

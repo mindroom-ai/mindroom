@@ -46,9 +46,9 @@ class GoogleScholarTools(Toolkit):
     def __init__(self, max_results: int = 5) -> None:
         """Initialize Google Scholar tools."""
         self.max_results = max_results
-        super().__init__(name="google_scholar_tools", tools=[self.search_google_scholar])
+        super().__init__(name="google_scholar_tools", tools=[self.google_scholar_search])
 
-    def search_google_scholar(self, query: str, max_results: int | None = None) -> str:
+    def google_scholar_search(self, query: str, max_results: int | None = None) -> str:
         """Search Google Scholar for academic publications.
 
         Args:

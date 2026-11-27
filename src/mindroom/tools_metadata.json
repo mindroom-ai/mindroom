@@ -1638,8 +1638,8 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "read_dag_file",
-        "save_dag_file"
+        "airflow_read_dag_file",
+        "airflow_save_dag_file"
       ],
       "helper_text": null,
       "icon": "FaCog",
@@ -1775,8 +1775,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "invoke_function",
-        "list_functions"
+        "aws_lambda_invoke_function",
+        "aws_lambda_list_functions"
       ],
       "helper_text": null,
       "icon": "FaAws",
@@ -2220,9 +2220,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_voices",
-        "localize_voice",
-        "text_to_speech"
+        "cartesia_list_voices",
+        "cartesia_localize_voice",
+        "cartesia_text_to_speech"
       ],
       "helper_text": null,
       "icon": "VolumeX",
@@ -2624,7 +2624,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "make_request"
+        "custom_api_request"
       ],
       "helper_text": null,
       "icon": "Globe",
@@ -3156,9 +3156,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_sound_effect",
-        "get_voices",
-        "text_to_speech"
+        "eleven_labs_generate_sound_effect",
+        "eleven_labs_get_voices",
+        "eleven_labs_text_to_speech"
       ],
       "helper_text": null,
       "icon": "SiElevenlabs",
@@ -3254,8 +3254,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_media",
-        "image_to_image"
+        "fal_generate_media",
+        "fal_image_to_image"
       ],
       "helper_text": null,
       "icon": "FaRobot",
@@ -3682,8 +3682,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_image",
-        "generate_video"
+        "gemini_generate_image",
+        "gemini_generate_video"
       ],
       "helper_text": null,
       "icon": "SiGooglegemini",
@@ -3765,7 +3765,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_gifs"
+        "giphy_search_gifs"
       ],
       "helper_text": null,
       "icon": "SiGiphy",
@@ -3887,7 +3887,7 @@
         {
           "authored_override": true,
           "default": 100,
-          "description": "Maximum rows returned by run_sql_query (1 to 1000)",
+          "description": "Maximum rows returned by google_bigquery_run_sql_query (1 to 1000)",
           "env": [],
           "label": "Max Rows",
           "name": "max_rows",
@@ -3967,9 +3967,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "describe_table",
-        "list_tables",
-        "run_sql_query"
+        "google_bigquery_describe_table",
+        "google_bigquery_list_tables",
+        "google_bigquery_run_sql_query"
       ],
       "helper_text": "Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
       "icon": "SiGooglebigquery",
@@ -4361,9 +4361,9 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "generate_speech",
-        "transcribe_audio",
-        "translate_audio"
+        "groq_generate_speech",
+        "groq_transcribe_audio",
+        "groq_translate_audio"
       ],
       "helper_text": null,
       "icon": "TbBrain",
@@ -4561,8 +4561,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_video",
-        "image_to_video"
+        "lumalabs_generate_video",
+        "lumalabs_image_to_video"
       ],
       "helper_text": null,
       "icon": "FaVideo",
@@ -4696,7 +4696,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_media"
+        "modelslabs_generate_media"
       ],
       "helper_text": null,
       "icon": "Video",
@@ -4776,9 +4776,9 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "create_srt",
-        "embed_captions",
-        "extract_audio"
+        "moviepy_video_tools_create_srt",
+        "moviepy_video_tools_embed_captions",
+        "moviepy_video_tools_extract_audio"
       ],
       "helper_text": null,
       "icon": "FaVideo",
@@ -4930,7 +4930,7 @@
       "file_access": "none",
       "function_names": [
         "neo4j_inspect",
-        "run_cypher_query"
+        "neo4j_run_cypher_query"
       ],
       "helper_text": null,
       "icon": "SiNeo4J",
@@ -5127,9 +5127,9 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "generate_image",
-        "generate_speech",
-        "transcribe_audio"
+        "openai_generate_image",
+        "openai_generate_speech",
+        "openai_transcribe_audio"
       ],
       "helper_text": null,
       "icon": "TbBrandOpenai",
@@ -5390,9 +5390,9 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "export_table_to_path",
+        "postgres_export_table_to_path",
         "postgres_inspect",
-        "run_query"
+        "postgres_run_query"
       ],
       "helper_text": null,
       "icon": "SiPostgresql",
@@ -5740,9 +5740,9 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "export_table_to_path",
+        "redshift_export_table_to_path",
         "redshift_inspect",
-        "run_query"
+        "redshift_run_query"
       ],
       "helper_text": null,
       "icon": "AwsRedshift",
@@ -5824,7 +5824,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "generate_media"
+        "replicate_generate_media"
       ],
       "helper_text": null,
       "icon": "FaVideo",
@@ -6541,7 +6541,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_zendesk"
+        "zendesk_search"
       ],
       "helper_text": null,
       "icon": "SiZendesk",
@@ -6634,7 +6634,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "send_email"
+        "aws_ses_send_email"
       ],
       "helper_text": null,
       "icon": "FaAws",
@@ -7003,7 +7003,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "send_email"
+        "resend_send_email"
       ],
       "helper_text": null,
       "icon": "Mail",
@@ -7985,7 +7985,7 @@
       "file_access": "unconfined",
       "function_names": [
         "csv_inspect",
-        "query_csv_file"
+        "csv_query"
       ],
       "helper_text": null,
       "icon": "FaFileCsv",
@@ -8121,7 +8121,7 @@
       "function_names": [
         "duckdb_inspect",
         "duckdb_manage",
-        "run_query"
+        "duckdb_run_query"
       ],
       "helper_text": null,
       "icon": "Database",
@@ -9199,8 +9199,8 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "create_pandas_dataframe",
-        "run_dataframe_operation"
+        "pandas_create_dataframe",
+        "pandas_run_operation"
       ],
       "helper_text": null,
       "icon": "Database",
@@ -9477,8 +9477,8 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "run_sql_query",
-        "sql_inspect"
+        "sql_inspect",
+        "sql_run_query"
       ],
       "helper_text": null,
       "icon": "Database",
@@ -10007,8 +10007,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "custom_scrape_website",
-        "scrape_website"
+        "agentql_custom_scrape_website",
+        "agentql_scrape_website"
       ],
       "helper_text": null,
       "icon": "FaSpider",
@@ -10089,8 +10089,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "read_arxiv_papers",
-        "search_arxiv_and_return_articles"
+        "arxiv_read_papers",
+        "arxiv_search"
       ],
       "helper_text": null,
       "icon": "SiArxiv",
@@ -10870,7 +10870,7 @@
       "file_access": "unconfined",
       "function_names": [
         "browserbase",
-        "screenshot"
+        "browserbase_screenshot"
       ],
       "helper_text": null,
       "icon": "FaChrome",
@@ -11016,7 +11016,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "crawl"
+        "crawl4ai_crawl"
       ],
       "helper_text": null,
       "icon": "FaSpider",
@@ -11582,7 +11582,7 @@
       "file_access": "none",
       "function_names": [
         "exa_lookup",
-        "research"
+        "exa_research"
       ],
       "helper_text": null,
       "icon": "FaSearch",
@@ -11742,10 +11742,10 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "crawl_website",
-        "map_website",
-        "scrape_website",
-        "search_web"
+        "firecrawl_crawl_website",
+        "firecrawl_map_website",
+        "firecrawl_scrape_website",
+        "firecrawl_search_web"
       ],
       "helper_text": null,
       "icon": "FaSpider",
@@ -11786,7 +11786,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_google_scholar"
+        "google_scholar_search"
       ],
       "helper_text": null,
       "icon": "SiGooglescholar",
@@ -12011,8 +12011,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_top_hackernews_stories",
-        "get_user_details"
+        "hackernews_top_stories",
+        "hackernews_user_details"
       ],
       "helper_text": null,
       "icon": "FaHackerNews",
@@ -12160,8 +12160,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "read_url",
-        "search_query"
+        "jina_read_url",
+        "jina_search_query"
       ],
       "helper_text": null,
       "icon": "FaGlobe",
@@ -12256,7 +12256,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "web_search_with_linkup"
+        "linkup_search"
       ],
       "helper_text": null,
       "icon": "FaSearch",
@@ -12324,8 +12324,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_article_data",
-        "read_article"
+        "newspaper_read_article"
       ],
       "helper_text": null,
       "icon": "FaNewspaper",
@@ -12502,7 +12501,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_pubmed"
+        "pubmed_search"
       ],
       "helper_text": null,
       "icon": "SiPubmed",
@@ -12662,11 +12661,11 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "crawl",
-        "markdownify",
-        "scrape",
-        "searchscraper",
-        "smartscraper"
+        "scrapegraph_crawl",
+        "scrapegraph_markdownify",
+        "scrapegraph_scrape",
+        "scrapegraph_searchscraper",
+        "scrapegraph_smartscraper"
       ],
       "helper_text": null,
       "icon": "FaGlobe",
@@ -12826,8 +12825,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_google",
-        "search_youtube"
+        "serpapi_search_google",
+        "serpapi_search_youtube"
       ],
       "helper_text": null,
       "icon": "FaGoogle",
@@ -13000,7 +12999,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "scrape_webpage",
+        "serper_scrape_webpage",
         "serper_search"
       ],
       "helper_text": null,
@@ -13464,9 +13463,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "extract_url_content",
-        "web_search_using_tavily",
-        "web_search_with_tavily"
+        "tavily_extract",
+        "tavily_search",
+        "tavily_search_context"
       ],
       "helper_text": null,
       "icon": "FaSearch",
@@ -13754,9 +13753,9 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "crawl_website",
-        "html_to_text",
-        "trafilatura_extract"
+        "trafilatura_crawl_website",
+        "trafilatura_extract",
+        "trafilatura_html_to_text"
       ],
       "helper_text": null,
       "icon": "FaFileAlt",
@@ -13903,7 +13902,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "read_url"
+        "website_read_url"
       ],
       "helper_text": null,
       "icon": "FaGlobe",
@@ -13957,7 +13956,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "search_wikipedia"
+        "wikipedia_search"
       ],
       "helper_text": null,
       "icon": "SiWikipedia",

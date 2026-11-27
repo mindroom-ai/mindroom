@@ -54,12 +54,12 @@ class LumaLabTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_generate_video:
-            tools.append(self.generate_video)
+            tools.append(self.lumalabs_generate_video)
         if all or enable_image_to_video:
-            tools.append(self.image_to_video)
+            tools.append(self.lumalabs_image_to_video)
         super().__init__(name="lumalabs", tools=tools)
 
-    def generate_video(
+    def lumalabs_generate_video(
         self,
         prompt: str,
         loop: bool = False,
@@ -82,7 +82,7 @@ class LumaLabTools(Toolkit):
             keyframes=keyframes,
         )
 
-    def image_to_video(
+    def lumalabs_image_to_video(
         self,
         prompt: str,
         start_image_url: str,

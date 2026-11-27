@@ -25,10 +25,10 @@ from mindroom.tools.youtube import youtube_tools
 @pytest.mark.parametrize(
     ("factory", "expected_name", "expected_functions"),
     [
-        (wikipedia_tools, "wikipedia_tools", ["search_wikipedia"]),
-        (arxiv_tools, "arxiv_tools", ["search_arxiv_and_return_articles", "read_arxiv_papers"]),
-        (pubmed_tools, "pubmed", ["search_pubmed"]),
-        (hackernews_tools, "hackers_news", ["get_top_hackernews_stories", "get_user_details"]),
+        (wikipedia_tools, "wikipedia_tools", ["wikipedia_search"]),
+        (arxiv_tools, "arxiv_tools", ["arxiv_search", "arxiv_read_papers"]),
+        (pubmed_tools, "pubmed", ["pubmed_search"]),
+        (hackernews_tools, "hackers_news", ["hackernews_top_stories", "hackernews_user_details"]),
         (youtube_tools, "youtube_tools", ["youtube_video"]),
     ],
 )
@@ -62,16 +62,16 @@ def test_wikipedia_search_success_disambiguation_and_error(monkeypatch: pytest.M
     monkeypatch.setattr(wikipedia, "summary", fake_summary)
     toolkit = wikipedia_tools()(auto_suggest=False)
 
-    assert json.loads(toolkit.search_wikipedia("Python")) == {
+    assert json.loads(toolkit.wikipedia_search("Python")) == {
         "name": "Python",
         "meta_data": {},
         "content": "Python is a programming language.",
     }
-    assert json.loads(toolkit.search_wikipedia("Mercury")) == {
+    assert json.loads(toolkit.wikipedia_search("Mercury")) == {
         "disambiguation": "Mercury",
         "options": ["Mercury (planet)", "Mercury (element)"],
     }
-    assert json.loads(toolkit.search_wikipedia("boom")) == {"error": "service unavailable"}
+    assert json.loads(toolkit.wikipedia_search("boom")) == {"error": "service unavailable"}
     assert seen == [("Python", False), ("Mercury", False), ("boom", False)]
 
 
@@ -103,24 +103,27 @@ def test_hackernews_stories_user_details_and_error_paths(monkeypatch: pytest.Mon
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = hackernews_tools()(timeout=15)
 
-        assert toolkit.get_top_hackernews_stories(num_stories=0) == "[]"
-        assert toolkit.get_top_hackernews_stories(num_stories=-2) == "[]"
+        assert toolkit.hackernews_top_stories(num_stories=0) == "[]"
+        assert toolkit.hackernews_top_stories(num_stories=-2) == "[]"
 
-        stories = json.loads(toolkit.get_top_hackernews_stories(num_stories=3))
+        stories = json.loads(toolkit.hackernews_top_stories(num_stories=3))
         assert stories == [
             {"id": 101, "title": "First", "by": "alice", "username": "alice"},
             {"id": 103, "title": "No Author", "username": "unknown"},
         ]
 
-        user = json.loads(toolkit.get_user_details("pg"))
+        user = json.loads(toolkit.hackernews_user_details("pg"))
         assert user == {"id": "pg", "karma": 157000, "about": "essays", "total_items_submitted": 3}
 
-        assert toolkit.get_user_details("missing") == "Error getting user details: user 'missing' not found"
-        assert toolkit.get_user_details("error_user").startswith("Error getting user details:")
-        assert toolkit.get_user_details("../topstories") == "Error getting user details: user '../topstories' not found"
+        assert toolkit.hackernews_user_details("missing") == "Error getting user details: user 'missing' not found"
+        assert toolkit.hackernews_user_details("error_user").startswith("Error getting user details:")
+        assert (
+            toolkit.hackernews_user_details("../topstories")
+            == "Error getting user details: user '../topstories' not found"
+        )
 
         fail_topstories = True
-        assert toolkit.get_top_hackernews_stories(num_stories=1).startswith("Error fetching stories:")
+        assert toolkit.hackernews_top_stories(num_stories=1).startswith("Error fetching stories:")
 
     assert "/v0/user/..%2Ftopstories.json" in requested_paths
 
@@ -129,11 +132,11 @@ def test_hackernews_enable_flags_and_all() -> None:
     """HackerNewsTools honors individual enable flags and the all override."""
     tool_class = hackernews_tools()
 
-    assert list(tool_class(enable_get_top_stories=False).functions) == ["get_user_details"]
-    assert list(tool_class(enable_get_user_details=False).functions) == ["get_top_hackernews_stories"]
+    assert list(tool_class(enable_get_top_stories=False).functions) == ["hackernews_user_details"]
+    assert list(tool_class(enable_get_user_details=False).functions) == ["hackernews_top_stories"]
     assert list(tool_class(enable_get_top_stories=False, enable_get_user_details=False, all=True).functions) == [
-        "get_top_hackernews_stories",
-        "get_user_details",
+        "hackernews_top_stories",
+        "hackernews_user_details",
     ]
 
 

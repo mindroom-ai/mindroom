@@ -483,7 +483,7 @@ async def test_routing_preserves_pandas_frames_across_calls(
     )
     created = await run_offered(
         agent,
-        "create_pandas_dataframe",
+        "pandas_create_dataframe",
         {
             "dataframe_name": "retained",
             "create_using_function": "DataFrame",
@@ -495,7 +495,7 @@ async def test_routing_preserves_pandas_frames_across_calls(
 
     operated = await run_offered(
         agent,
-        "run_dataframe_operation",
+        "pandas_run_operation",
         {"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
     )
     assert not operated.is_error
@@ -532,13 +532,13 @@ async def test_routing_preserves_sql_memory_database_across_calls(
         process_env,
         agent_settings={"tools": ["sql"], **({"worker_tools": ["sql"]} if explicit else {})},
     )
-    toolkit = source_toolkit(offered_function(agent, "run_sql_query"))
+    toolkit = source_toolkit(offered_function(agent, "sql_run_query"))
     try:
-        created = await run_offered(agent, "run_sql_query", {"query": "CREATE TABLE retained (value INTEGER)"})
+        created = await run_offered(agent, "sql_run_query", {"query": "CREATE TABLE retained (value INTEGER)"})
         assert not created.is_error
         returned = await run_offered(
             agent,
-            "run_sql_query",
+            "sql_run_query",
             {"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
         )
         assert not returned.is_error
@@ -583,9 +583,9 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         },
     )
     name, arguments = (
-        ("generate_image", {"prompt": "Offline image"})
+        ("openai_generate_image", {"prompt": "Offline image"})
         if media_kind == "image"
-        else ("generate_speech", {"text_input": "Offline speech"})
+        else ("openai_generate_speech", {"text_input": "Offline speech"})
     )
     # The primary's run state stays on the primary, though the call's injected agent carries it.
     context = ToolCallContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY}, user_id=None)

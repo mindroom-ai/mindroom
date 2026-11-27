@@ -127,7 +127,7 @@ class ModelsLabTools(Toolkit):
         if not self.api_key:
             logger.error("MODELS_LAB_API_KEY not set")
 
-        super().__init__(name="modelslabs", tools=[self.generate_media])
+        super().__init__(name="modelslabs", tools=[self.modelslabs_generate_media])
 
     def _create_payload(self, prompt: str) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -243,7 +243,7 @@ class ModelsLabTools(Toolkit):
             content += f" Last status-check error: {last_fetch_error}"
         return _JobWaitResult(content=content)
 
-    def generate_media(self, prompt: str) -> ToolValue:
+    def modelslabs_generate_media(self, prompt: str) -> ToolValue:
         """Generate an image, video, audio clip, or GIF from a text prompt using ModelsLab.
 
         Args:

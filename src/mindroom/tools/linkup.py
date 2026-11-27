@@ -46,11 +46,11 @@ class _LinkupTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_web_search_with_linkup:
-            tools.append(self.web_search_with_linkup)
+            tools.append(self.linkup_search)
 
         super().__init__(name="linkup_tools", tools=tools)
 
-    def web_search_with_linkup(
+    def linkup_search(
         self,
         query: str,
         depth: str | None = None,
@@ -122,7 +122,7 @@ class _LinkupTools(Toolkit):
     ],
     dependencies=["linkup-sdk"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#linkup",
-    function_names=("web_search_with_linkup",),
+    function_names=("linkup_search",),
 )
 def linkup_tools() -> type[Toolkit]:
     """Return Linkup tools for web search."""

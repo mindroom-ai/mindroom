@@ -117,7 +117,7 @@ def test_website_read_url_crawls_links_from_chrome_without_returning_chrome_text
 
     _serve(monkeypatch, lambda url: _page(pages[url]))
 
-    documents = json.loads(WebsiteTools().read_url(root_url))
+    documents = json.loads(WebsiteTools().website_read_url(root_url))
     content_by_url = {document["meta_data"]["url"]: document["content"] for document in documents}
 
     assert list(content_by_url) == [root_url, docs_url]
@@ -479,7 +479,7 @@ def test_website_reader_logs_a_fetched_url_without_its_query_or_fragment(monkeyp
         lambda _url: _page("<main><p>Reference material with enough page text for the reader.</p></main>"),
     )
 
-    documents = json.loads(WebsiteTools().read_url("https://example.test/docs?token=query-secret#frag-secret"))
+    documents = json.loads(WebsiteTools().website_read_url("https://example.test/docs?token=query-secret#frag-secret"))
 
     assert "Reference material" in documents[0]["content"]
     assert logged_messages == [
@@ -502,7 +502,7 @@ def test_website_reader_logs_sanitized_urls_without_secrets(monkeypatch: pytest.
     requested_urls = _serve(monkeypatch, lambda _url: _page("<main><p>Docs</p></main>"))
 
     with pytest.raises(PublicFetchError, match="credentials_in_url"):
-        WebsiteTools().read_url(full_url)
+        WebsiteTools().website_read_url(full_url)
 
     assert requested_urls == []
     assert logged_messages == [
@@ -528,7 +528,7 @@ def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
         tools=builtin_tool_registry(),
     )
 
-    assert list(tool.functions) == ["read_url"]
+    assert list(tool.functions) == ["website_read_url"]
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
         validate_authored_tool_entry_overrides(
             "website",

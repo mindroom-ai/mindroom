@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["elevenlabs"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#eleven_labs",
-    function_names=("generate_sound_effect", "get_voices", "text_to_speech"),
+    function_names=("eleven_labs_generate_sound_effect", "eleven_labs_get_voices", "eleven_labs_text_to_speech"),
 )
 def eleven_labs_tools() -> type[ElevenLabsTools]:
     """Return Eleven Labs tools for text-to-speech and sound effect generation."""

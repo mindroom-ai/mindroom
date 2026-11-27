@@ -176,7 +176,7 @@ class _SQLTools(Toolkit):
         if self._inspect_actions:
             tools.append(self.sql_inspect)
         if enable_all or resolve_bool_toggle(enable_run_sql_query, default=True):
-            tools.append(self.run_sql_query)
+            tools.append(self.sql_run_query)
 
         super().__init__(name="sql_tools", tools=tools)
 
@@ -235,7 +235,7 @@ class _SQLTools(Toolkit):
             logger.exception("Error describing SQL table", table_name=table_name)
             return f"Error getting table schema: {exc}"
 
-    def run_sql_query(self, query: str, limit: int | None = 10) -> str:
+    def sql_run_query(self, query: str, limit: int | None = 10) -> str:
         """Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty)."""
         try:
             from sqlalchemy.sql.expression import text
@@ -324,7 +324,7 @@ class _SQLTools(Toolkit):
     ],
     dependencies=["sqlalchemy"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#sql",
-    function_names=("run_sql_query", "sql_inspect"),
+    function_names=("sql_inspect", "sql_run_query"),
     action_scoped_grants=("sql_inspect",),
 )
 def sql_tools() -> type[Toolkit]:

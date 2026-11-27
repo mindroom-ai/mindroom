@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["scholarly"],
     docs_url="https://docs.mindroom.chat/tools/research-sources/#google_scholar",
-    function_names=("search_google_scholar",),
+    function_names=("google_scholar_search",),
 )
 def google_scholar_tools() -> type[GoogleScholarTools]:
     """Return Google Scholar tools for academic publication search."""

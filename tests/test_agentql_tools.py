@@ -217,7 +217,7 @@ def _tool(
     )
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 @pytest.mark.parametrize(
     ("stored_key", "env_key", "sdk_key", "file_key", "expected_key"),
     [
@@ -264,7 +264,7 @@ def test_agentql_resolved_key_reaches_request_without_shared_auth_mutation(
     assert all(browser.closed for browser in agentql_boundary.browsers)
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 def test_agentql_reads_its_key_from_the_env_file_beside_config(
     tmp_path: Path,
     agentql_boundary: _AgentQLBoundary,
@@ -324,7 +324,7 @@ def test_agentql_reads_its_host_from_the_env_file_beside_config(
     (tmp_path / ".env").write_text(env_file)
     agentql_boundary.api_host = expected_host
 
-    result = _tool(tmp_path, "scoped-key").scrape_website(_URL)
+    result = _tool(tmp_path, "scoped-key").agentql_scrape_website(_URL)
 
     assert [request.url for request in agentql_boundary.requests] == [f"{expected_host}/api/v2/query-data"]
     assert not result.startswith("Error")
@@ -358,7 +358,7 @@ def test_agentql_custom_scrape_preserves_extracted_values(
     monkeypatch.setenv("AGENTQL_API_KEY", "matching-key")
     agentql_boundary.custom_data = data
 
-    result = _tool(tmp_path, "matching-key").custom_scrape_website(_URL)
+    result = _tool(tmp_path, "matching-key").agentql_custom_scrape_website(_URL)
 
     assert json.loads(result) == data
     assert len(agentql_boundary.requests) == 1
@@ -377,7 +377,7 @@ def test_agentql_independent_scoped_toolkits_keep_their_credentials(
     second = _tool(tmp_path, "bob-key", requester="@bob:example.org")
 
     for tool in (first, second, first):
-        assert not tool.scrape_website(_URL).startswith("Error")
+        assert not tool.agentql_scrape_website(_URL).startswith("Error")
 
     assert [request.headers["X-API-Key"] for request in agentql_boundary.requests] == [
         "alice-key",
@@ -387,7 +387,7 @@ def test_agentql_independent_scoped_toolkits_keep_their_credentials(
     assert agentql_boundary.observed_auth == [("ambient-env", "ambient-sdk")] * 3
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 def test_agentql_concurrent_scoped_calls_leave_unrelated_sdk_auth_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -431,7 +431,7 @@ def test_agentql_concurrent_scoped_calls_leave_unrelated_sdk_auth_untouched(
     assert all(browser.closed for browser in agentql_boundary.browsers)
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 @pytest.mark.parametrize(
     ("status_code", "timeout_error", "error_name"),
     [(401, False, "APIKeyError"), (500, False, "AgentQLServerError"), (200, True, "AgentQLServerTimeoutError")],
@@ -466,14 +466,14 @@ def test_agentql_normal_scrape_retains_text_values(
     """The standard text query keeps its existing filtering and deduplication behavior."""
     monkeypatch.setenv("AGENTQL_API_KEY", "matching-key")
 
-    result = _tool(tmp_path, "matching-key").scrape_website(_URL)
+    result = _tool(tmp_path, "matching-key").agentql_scrape_website(_URL)
 
     assert set(result.split()) == {"Alpha", "Beta"}
     assert len(result.split()) == 2
     assert len(agentql_boundary.requests) == 1
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 def test_agentql_empty_url_does_not_start_browser(
     tmp_path: Path,
     agentql_boundary: _AgentQLBoundary,
@@ -487,7 +487,7 @@ def test_agentql_empty_url_does_not_start_browser(
     assert agentql_boundary.requests == []
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 @pytest.mark.parametrize(
     "url",
     [
@@ -539,7 +539,7 @@ def test_agentql_browser_connects_only_through_destination_relay(
 
         agentql_boundary.on_goto = probe_loopback_through_browser_proxy
 
-        result = _tool(tmp_path, "scoped-key").scrape_website(_URL)
+        result = _tool(tmp_path, "scoped-key").agentql_scrape_website(_URL)
 
         with pytest.raises(BlockingIOError):
             loopback_service.accept()
@@ -552,7 +552,7 @@ def test_agentql_missing_custom_query_does_not_start_browser(
     agentql_boundary: _AgentQLBoundary,
 ) -> None:
     """The custom-query guard still runs before browser startup."""
-    result = _tool(tmp_path, "scoped-key", query="").custom_scrape_website(_URL)
+    result = _tool(tmp_path, "scoped-key", query="").agentql_custom_scrape_website(_URL)
 
     assert result.startswith("Custom AgentQL query not provided.")
     assert agentql_boundary.browsers == []
@@ -575,7 +575,7 @@ def test_agentql_sdk_credentials_do_not_replace_missing_toolkit_key(
     assert agentql_boundary.requests == []
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 @pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
 @pytest.mark.parametrize(
     "destination",
@@ -666,7 +666,7 @@ def test_agentql_malformed_success_retains_parse_error(
     assert [request.headers["X-API-Key"] for request in agentql_boundary.requests] == ["ambient-sdk", "scoped-key"]
 
 
-@pytest.mark.parametrize("method", ["scrape_website", "custom_scrape_website"])
+@pytest.mark.parametrize("method", ["agentql_scrape_website", "agentql_custom_scrape_website"])
 def test_agentql_malformed_success_exposes_parse_detail(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

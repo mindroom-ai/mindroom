@@ -63,13 +63,13 @@ class _JinaReaderTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_read_url:
-            tools.append(self.read_url)
+            tools.append(self.jina_read_url)
         if all or enable_search_query:
-            tools.append(self.search_query)
+            tools.append(self.jina_search_query)
 
         super().__init__(name="jina_reader_tools", tools=tools)
 
-    def read_url(self, url: str) -> str:
+    def jina_read_url(self, url: str) -> str:
         """Reads a URL and returns the truncated content using Jina Reader API."""
         full_url = f"{self.config.base_url}{url}"
         try:
@@ -87,7 +87,7 @@ class _JinaReaderTools(Toolkit):
         else:
             return self._truncate_content(str(content))
 
-    def search_query(self, query: str) -> str:
+    def jina_search_query(self, query: str) -> str:
         """Performs a web search using Jina Reader API and returns the truncated results."""
         full_url = f"{self.config.search_url}"
         headers = self._get_headers()
@@ -181,7 +181,7 @@ class _JinaReaderTools(Toolkit):
     ],
     dependencies=["httpx", "pydantic"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#jina",
-    function_names=("read_url", "search_query"),
+    function_names=("jina_read_url", "jina_search_query"),
 )
 def jina_tools() -> type[Toolkit]:
     """Return Jina Reader tools for web content reading and search."""

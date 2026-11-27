@@ -62,7 +62,7 @@ if TYPE_CHECKING:
             type="number",
             required=False,
             default=100,
-            description="Maximum rows returned by run_sql_query (1 to 1000)",
+            description="Maximum rows returned by google_bigquery_run_sql_query (1 to 1000)",
             validation={"min": 1, "max": 1000},
         ),
         bool_config_field("list_tables", "List Tables"),
@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_bigquery",
     helper_text="Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
-    function_names=("describe_table", "list_tables", "run_sql_query"),
+    function_names=("google_bigquery_describe_table", "google_bigquery_list_tables", "google_bigquery_run_sql_query"),
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""

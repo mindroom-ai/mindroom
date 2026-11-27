@@ -30,13 +30,13 @@ Use [Web Search](web-search.md) for broader web discovery or news search.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_search_arxiv` | `boolean` | `true` | Enable `search_arxiv_and_return_articles(query, num_articles=10)`. |
-| `enable_read_arxiv_papers` | `boolean` | `true` | Enable `read_arxiv_papers(id_list, pages_to_read=None)`. |
+| `enable_search_arxiv` | `boolean` | `true` | Enable `arxiv_search(query, num_articles=10)`. |
+| `enable_read_arxiv_papers` | `boolean` | `true` | Enable `arxiv_read_papers(id_list, pages_to_read=None)`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 | `download_dir` | `text` | unset | Directory that retains downloaded PDFs when set; when unset, PDFs use a writable temporary directory that is cleaned up after extraction. |
 
 Search returns JSON with each paper's title, ID, authors, categories, publish date, PDF URL, summary, and comment.
-`read_arxiv_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
+`arxiv_read_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
 
 ```yaml
 agents:
@@ -48,7 +48,7 @@ agents:
 
 ## [`google_scholar`]
 
-`google_scholar` provides `search_google_scholar(query, max_results=None)`, which returns a JSON list with title, authors, year, venue, abstract, citation count, publication URL, and PDF URL when available.
+`google_scholar` provides `google_scholar_search(query, max_results=None)`, which returns a JSON list with title, authors, year, venue, abstract, citation count, publication URL, and PDF URL when available.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -60,7 +60,7 @@ Prefer `arxiv` or `pubmed` when they cover the topic, and use Google Scholar for
 
 ## [`wikipedia`]
 
-`wikipedia` provides `search_wikipedia(query)`, which returns the Wikipedia summary for the query as JSON.
+`wikipedia` provides `wikipedia_search(query)`, which returns the Wikipedia summary for the query as JSON.
 An ambiguous query returns a list of candidate page titles instead of a summary, so retry with one of them or a more specific query.
 
 | Option | Type | Default | Notes |
@@ -77,7 +77,7 @@ agents:
 
 ## [`pubmed`]
 
-`pubmed` provides `search_pubmed(query, max_results=None)` through NCBI E-utilities and returns a JSON list of formatted text results.
+`pubmed` provides `pubmed_search(query, max_results=None)` through NCBI E-utilities and returns a JSON list of formatted text results.
 By default each result has the title, publication year, and a summary truncated to about 200 characters.
 With `results_expanded: true`, each result has the full abstract plus the first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
 
@@ -86,7 +86,7 @@ With `results_expanded: true`, each result has the full abstract plus the first 
 | `email` | `text` | `your_email@example.com` | Contact email sent to NCBI with each request; set a real address. |
 | `max_results` | `number` | unset | Result cap when the call does not pass `max_results`; 10 results when neither sets it. |
 | `results_expanded` | `boolean` | `false` | Return the full abstract and the expanded metadata described above. |
-| `enable_search_pubmed` | `boolean` | `true` | Enable `search_pubmed()`. |
+| `enable_search_pubmed` | `boolean` | `true` | Enable `pubmed_search()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
@@ -103,13 +103,13 @@ agents:
 ## [`hackernews`]
 
 `hackernews` reads the public Hacker News API.
-`get_top_hackernews_stories(num_stories=10)` returns the current top story items, including title, URL, score, and author.
-`get_user_details(username)` returns the user's karma, about text, and number of submitted items.
+`hackernews_top_stories(num_stories=10)` returns the current top story items, including title, URL, score, and author.
+`hackernews_user_details(username)` returns the user's karma, about text, and number of submitted items.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_get_top_stories` | `boolean` | `true` | Enable `get_top_hackernews_stories()`. |
-| `enable_get_user_details` | `boolean` | `true` | Enable `get_user_details()`. |
+| `enable_get_top_stories` | `boolean` | `true` | Enable `hackernews_top_stories()`. |
+| `enable_get_user_details` | `boolean` | `true` | Enable `hackernews_user_details()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 

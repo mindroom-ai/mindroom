@@ -361,32 +361,6 @@
           }
         },
         {
-          "name": "search_wikipedia",
-          "description": "Searches Wikipedia for a query.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "query": {
-                "type": "string",
-                "description": "The query to search for."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "query"
-            ]
-          }
-        },
-        {
           "name": "skill",
           "description": "Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).",
           "parameters": {
@@ -425,12 +399,38 @@
               "name"
             ]
           }
+        },
+        {
+          "name": "wikipedia_search",
+          "description": "Searches Wikipedia for a query.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The query to search for."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
         }
       ],
       "tool_choice": null,
       "output_schema": null,
       "deferred_tool_names": [
-        "search_wikipedia"
+        "wikipedia_search"
       ]
     },
     {
@@ -733,32 +733,6 @@
           }
         },
         {
-          "name": "search_wikipedia",
-          "description": "Searches Wikipedia for a query.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "query": {
-                "type": "string",
-                "description": "The query to search for."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
-            },
-            "required": [
-              "query"
-            ]
-          }
-        },
-        {
           "name": "skill",
           "description": "Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).",
           "parameters": {
@@ -797,12 +771,38 @@
               "name"
             ]
           }
+        },
+        {
+          "name": "wikipedia_search",
+          "description": "Searches Wikipedia for a query.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The query to search for."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
         }
       ],
       "tool_choice": null,
       "output_schema": null,
       "deferred_tool_names": [
-        "search_wikipedia"
+        "wikipedia_search"
       ]
     }
   ],

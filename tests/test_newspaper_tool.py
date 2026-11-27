@@ -77,7 +77,7 @@ def test_newspaper_rejects_unsafe_targets_without_connecting(
     redirect = httpx.Response(302, headers={"Location": "http://127.0.0.1:8765/api/config/raw"})
     requests = serve_routes(monkeypatch, {"https://example.com/redirect-to-loopback": redirect})
 
-    result = newspaper4k_tools()().read_article(url)
+    result = newspaper4k_tools()().newspaper_read_article(url)
 
     assert result == f"Error reading article from {url}: No data found."
     assert connect_attempts == []
@@ -95,7 +95,7 @@ def test_newspaper_extracts_public_article_without_fetching_its_images(
         {url: httpx.Response(200, headers={"Content-Type": "text/html; charset=utf-8"}, content=_ARTICLE_HTML)},
     )
 
-    result = json.loads(newspaper4k_tools()().read_article(url))
+    result = json.loads(newspaper4k_tools()().newspaper_read_article(url))
 
     assert result["title"] == "Matrix bridges"
     assert "relays messages in both directions" in result["text"]
@@ -113,7 +113,7 @@ def test_newspaper_refuses_a_page_over_its_size_limit(
     serve_routes(monkeypatch, {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=_ARTICLE_HTML)})
     monkeypatch.setattr(newspaper4k_module, "_MAX_PAGE_BYTES", 64)
 
-    result = newspaper4k_tools()().read_article(url)
+    result = newspaper4k_tools()().newspaper_read_article(url)
 
     assert result == f"Error reading article from {url}: No data found."
     assert connect_attempts == []
@@ -143,7 +143,7 @@ def test_newspaper_decodes_page_with_charset_declared_only_in_meta(
         {url: httpx.Response(200, headers={"Content-Type": "text/html"}, content=page.encode(encoding))},
     )
 
-    result = json.loads(newspaper4k_tools()().read_article(url))
+    result = json.loads(newspaper4k_tools()().newspaper_read_article(url))
 
     assert "Brücken verbinden Räume." in result["text"]
     assert connect_attempts == []
@@ -167,7 +167,7 @@ def test_newspaper_decodes_page_with_charset_declared_only_in_content_type(
         },
     )
 
-    result = json.loads(newspaper4k_tools()().read_article(url))
+    result = json.loads(newspaper4k_tools()().newspaper_read_article(url))
 
     assert "Brücken verbinden Räume." in result["text"]
     assert connect_attempts == []

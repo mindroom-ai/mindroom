@@ -232,7 +232,7 @@ async def _transcribe_with_openai(
     client = SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint))
     monkeypatch.setattr(openai_module, "OpenAIClient", lambda **_kwargs: client)
     tool = OpenAITools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
-    tool.transcribe_audio(raw_path)
+    tool.openai_transcribe_audio(raw_path)
     return endpoint.uploads == [_PNG]
 
 
@@ -246,7 +246,7 @@ async def _transcribe_with_groq(
     endpoint = _AudioEndpoint()
     tool = GroqTools(api_key="test", tool_output_workspace_root=workspace, file_access=file_access)
     monkeypatch.setattr(tool, "client", SimpleNamespace(audio=SimpleNamespace(transcriptions=endpoint)))
-    tool.transcribe_audio(raw_path)
+    tool.groq_transcribe_audio(raw_path)
     return endpoint.uploads == [_PNG]
 
 
@@ -267,7 +267,7 @@ async def _extract_audio_with_moviepy(
     monkeypatch.setattr(moviepy_module, "VideoFileClip", open_video)
     monkeypatch.setattr(moviepy_module, "_require_plain_media", lambda _path: None)
     tool = MoviePyVideoTools(tool_output_workspace_root=workspace, file_access=file_access)
-    tool.extract_audio(raw_path, "audio.wav")
+    tool.moviepy_video_tools_extract_audio(raw_path, "audio.wav")
     return videos == [_PNG]
 
 
@@ -279,7 +279,7 @@ async def _read_dag_file(
     raw_path: str,
 ) -> bool:
     tool = airflow_tools()(tool_output_workspace_root=workspace, file_access=file_access)
-    return tool.read_dag_file(raw_path) == _TEXT
+    return tool.airflow_read_dag_file(raw_path) == _TEXT
 
 
 async def _show_canvas_path(
@@ -393,10 +393,10 @@ _PROBES = (
     _ToolProbe("slack", "slack_send", _upload_to_slack, file_access_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "e2b_files", _upload_to_e2b, e2b_module),
-    _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),
-    _ToolProbe("groq", "transcribe_audio", _transcribe_with_groq, groq_module),
-    _ToolProbe("moviepy_video_tools", "extract_audio", _extract_audio_with_moviepy, moviepy_module),
-    _ToolProbe("airflow", "read_dag_file", _read_dag_file, airflow_module, "doc.txt"),
+    _ToolProbe("openai", "openai_transcribe_audio", _transcribe_with_openai, openai_module),
+    _ToolProbe("groq", "groq_transcribe_audio", _transcribe_with_groq, groq_module),
+    _ToolProbe("moviepy_video_tools", "moviepy_video_tools_extract_audio", _extract_audio_with_moviepy, moviepy_module),
+    _ToolProbe("airflow", "airflow_read_dag_file", _read_dag_file, airflow_module, "doc.txt"),
     _ToolProbe("chat_ui", "show_canvas", _show_canvas_path, chat_ui_module, "doc.txt"),
     # `filesystem` resolves paths itself and reads through descriptors pinned
     # from its base directory; its own link-swap test is below.

@@ -97,7 +97,7 @@ class PubmedTools(Toolkit):
         self.timeout = timeout
         super().__init__(name="pubmed")
         if not (all or enable_search_pubmed):
-            self.functions.pop(self.search_pubmed.__name__, None)
+            self.functions.pop(self.pubmed_search.__name__, None)
 
     def fetch_pubmed_ids(self, query: str, max_results: int, email: str) -> list[str]:
         """Fetch matching PubMed IDs from NCBI ESearch."""
@@ -160,7 +160,7 @@ class PubmedTools(Toolkit):
         return articles
 
     @tool
-    def search_pubmed(self, query: str, max_results: int | None = None) -> str:
+    def pubmed_search(self, query: str, max_results: int | None = None) -> str:
         """Search PubMed, using the configured max_results when the call omits it."""
         effective_max_results = self.max_results if max_results is None else max_results
         if effective_max_results is None:

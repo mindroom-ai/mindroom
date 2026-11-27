@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["openai"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#openai",
-    function_names=("generate_image", "generate_speech", "transcribe_audio"),
+    function_names=("openai_generate_image", "openai_generate_speech", "openai_transcribe_audio"),
 )
 def openai_tools() -> type[OpenAITools]:
     """Return OpenAI tools whose transcription input follows the agent's file_access."""

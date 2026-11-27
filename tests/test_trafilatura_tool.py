@@ -81,7 +81,7 @@ def _call_all_url_functions(url: str) -> list[str]:
         toolkit.trafilatura_extract("text", url=url),
         toolkit.trafilatura_extract("metadata", url=url),
         toolkit.trafilatura_extract("batch", urls=[url]),
-        toolkit.crawl_website(url, extract_content=True),
+        toolkit.trafilatura_crawl_website(url, extract_content=True),
     ]
 
 
@@ -119,7 +119,7 @@ def test_trafilatura_revalidates_redirects_before_following(monkeypatch: pytest.
         trafilatura_tools()().trafilatura_extract("text", url=start_url),
         trafilatura_tools()().trafilatura_extract("metadata", url=start_url),
         trafilatura_tools()().trafilatura_extract("batch", urls=[start_url]),
-        trafilatura_tools()().crawl_website(start_url),
+        trafilatura_tools()().trafilatura_crawl_website(start_url),
     ]
 
     assert {str(request.url) for request in requests} == {start_url, "https://example.com/robots.txt"}
@@ -239,7 +239,7 @@ def _crawl(
             "https://example.com/guide": httpx.Response(200, text=_DOCS_HTML),
         },
     )
-    result = trafilatura_tools()().crawl_website(homepage, extract_content=True)
+    result = trafilatura_tools()().trafilatura_crawl_website(homepage, extract_content=True)
     return result, [str(request.url) for request in requests]
 
 
@@ -317,7 +317,7 @@ def test_trafilatura_crawls_of_one_site_running_at_once_share_no_crawl_state(mon
     results: dict[str, dict[str, object]] = {}
 
     def crawl(section: str) -> None:
-        results[section] = json.loads(toolkit.crawl_website(f"https://example.com/{section}/"))
+        results[section] = json.loads(toolkit.trafilatura_crawl_website(f"https://example.com/{section}/"))
 
     threads = [threading.Thread(target=crawl, args=(section,)) for section in sections]
     for thread in threads:
@@ -414,7 +414,7 @@ def test_trafilatura_crawl_stops_visiting_pages_at_half_its_time_limit_and_extra
     )
     toolkit = trafilatura_tools()()
 
-    crawl = json.loads(toolkit.crawl_website(homepage, extract_content=True))
+    crawl = json.loads(toolkit.trafilatura_crawl_website(homepage, extract_content=True))
 
     assert elapsed[0] == trafilatura_module.CALL_SECONDS / 2
     (unvisited,) = crawl["to_visit"]

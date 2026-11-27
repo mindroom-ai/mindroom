@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["groq"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#groq",
-    function_names=("generate_speech", "transcribe_audio", "translate_audio"),
+    function_names=("groq_generate_speech", "groq_transcribe_audio", "groq_translate_audio"),
 )
 def groq_tools() -> type[GroqTools]:
     """Return Groq audio tools whose local audio sources follow the agent's file_access."""

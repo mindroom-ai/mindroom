@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["cartesia"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#cartesia",
-    function_names=("list_voices", "localize_voice", "text_to_speech"),
+    function_names=("cartesia_list_voices", "cartesia_localize_voice", "cartesia_text_to_speech"),
 )
 def cartesia_tools() -> type[CartesiaTools]:
     """Return Cartesia tools for voice AI services."""

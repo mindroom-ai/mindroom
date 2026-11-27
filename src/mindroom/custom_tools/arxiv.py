@@ -108,12 +108,12 @@ class ArxivTools(Toolkit):
 
         super().__init__(name="arxiv_tools")
         if not (all or enable_search_arxiv):
-            self.functions.pop(self.search_arxiv_and_return_articles.__name__, None)
+            self.functions.pop(self.arxiv_search.__name__, None)
         if not (all or enable_read_arxiv_papers):
-            self.functions.pop(self.read_arxiv_papers.__name__, None)
+            self.functions.pop(self.arxiv_read_papers.__name__, None)
 
     @tool
-    def search_arxiv_and_return_articles(self, query: str, num_articles: int = 10) -> str:
+    def arxiv_search(self, query: str, num_articles: int = 10) -> str:
         """Use this function to search arXiv for a query and return the top articles.
 
         Args:
@@ -142,7 +142,7 @@ class ArxivTools(Toolkit):
         return json.dumps(articles, indent=4)
 
     @tool
-    def read_arxiv_papers(
+    def arxiv_read_papers(
         self,
         id_list: list[str],
         pages_to_read: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.

@@ -288,14 +288,14 @@ class _AgentQLTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_scrape_website:
-            tools.append(self.scrape_website)
+            tools.append(self.agentql_scrape_website)
         if (all or enable_custom_scrape_website or agentql_query) and agentql_query:
             logger.info("Custom AgentQL query provided. Registering custom scrape function.")
-            tools.append(self.custom_scrape_website)
+            tools.append(self.agentql_custom_scrape_website)
 
         super().__init__(name="agentql_tools", tools=tools)
 
-    def scrape_website(self, url: str) -> str:
+    def agentql_scrape_website(self, url: str) -> str:
         """Scrape all text content from a website using AgentQL.
 
         Args:
@@ -309,7 +309,7 @@ class _AgentQLTools(Toolkit):
             return "No URL provided"
         return self._scrape(url, "{ text_content[] }", custom=False)
 
-    def custom_scrape_website(self, url: str) -> str:
+    def agentql_custom_scrape_website(self, url: str) -> str:
         """Scrape a website using a custom AgentQL query.
 
         Args:
@@ -404,7 +404,7 @@ class _AgentQLTools(Toolkit):
     dependencies=["agentql", "playwright"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#agentql",
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
-    function_names=("custom_scrape_website", "scrape_website"),
+    function_names=("agentql_custom_scrape_website", "agentql_scrape_website"),
 )
 def agentql_tools() -> type[Toolkit]:
     """Return AgentQL tools for AI-powered web scraping."""

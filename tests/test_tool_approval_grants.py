@@ -1481,7 +1481,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     plugin_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="custom_plugin",
-        function_name="scrape_webpage",
+        function_name="serper_scrape_webpage",
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1503,18 +1503,18 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     registry = refresh_plugins(config, runtime_paths).tools
     assert "serper" in registry.entries
     assert "custom_plugin" in registry.entries
-    assert "scrape_webpage" not in registry.entries["serper"].action_scoped_grants
-    assert "scrape_webpage" in registry.entries["custom_plugin"].action_scoped_grants
+    assert "serper_scrape_webpage" not in registry.entries["serper"].action_scoped_grants
+    assert "serper_scrape_webpage" in registry.entries["custom_plugin"].action_scoped_grants
 
     # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
-    serper_op = grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="serper")
+    serper_op = grant_operation(config, "serper_scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="serper")
     assert serper_op is not None
-    assert serper_op.tool_name == "scrape_webpage"
+    assert serper_op.tool_name == "serper_scrape_webpage"
     assert serper_op.mcp_server_id is None
     assert serper_op.mcp_tool_name is None
     assert scheduled_call_offers_any_arguments(
         config,
-        "scrape_webpage",
+        "serper_scrape_webpage",
         {"query": "x"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1526,21 +1526,22 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # The owning plugin gets per-action scoping and fails closed when action is missing.
     plugin_op = grant_operation(
         config,
-        "scrape_webpage",
+        "serper_scrape_webpage",
         {"action": "read"},
         tools=registry,
         toolkit_name="custom_plugin",
     )
     assert plugin_op is not None
-    assert plugin_op.tool_name == "scrape_webpage"
+    assert plugin_op.tool_name == "serper_scrape_webpage"
     assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
     assert (
-        grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+        grant_operation(config, "serper_scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="custom_plugin")
+        is None
     )
     assert not scheduled_call_offers_any_arguments(
         config,
-        "scrape_webpage",
+        "serper_scrape_webpage",
         {"action": "read"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1552,14 +1553,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # timed_grant_operation threads call.toolkit_name into grant_operation.
     serper_tool = ToolExecution(
         tool_call_id="call-serper",
-        tool_name="scrape_webpage",
+        tool_name="serper_scrape_webpage",
         tool_args={"query": "x"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     serper_call = ApprovalCall(
         tool_call_id="call-serper",
-        tool_name="scrape_webpage",
+        tool_name="serper_scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="serper",
@@ -1568,14 +1569,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
 
     plugin_tool = ToolExecution(
         tool_call_id="call-plugin",
-        tool_name="scrape_webpage",
+        tool_name="serper_scrape_webpage",
         tool_args={"action": "read"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     plugin_call = ApprovalCall(
         tool_call_id="call-plugin",
-        tool_name="scrape_webpage",
+        tool_name="serper_scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="custom_plugin",
@@ -3591,9 +3592,9 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
     ("tools", "matches", "error_pattern"),
     [
         (["serper"], ["skill", "*"], r"check\.py.*serper_search"),
-        (["serper"], ["serper_search", "skill", "*"], None),
+        (["serper"], ["serper_search", "serper_scrape_webpage", "skill", "*"], None),
         (["browserbase"], ["skill", "*"], r"check\.py.*browserbase"),
-        (["browserbase"], ["browserbase", "skill", "*"], None),
+        (["browserbase"], ["browserbase", "browserbase_screenshot", "skill", "*"], None),
     ],
 )
 def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits(
@@ -4927,3 +4928,64 @@ def test_single_verb_renamed_filter_guidance_replaces_in_place(
     guidance = message.split("was removed; ", 1)[1]
     assert "action" not in guidance
     assert "remove" not in guidance
+
+
+def test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped(tmp_path: Path) -> None:
+    """Normalized integration names fail closed for enabled toolkits without firing across unrelated toolkits."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    def _validate(tools: list[object], rules: list[dict[str, object]]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "defaults": {"tools": []},
+                "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+                "tool_approval": {"rules": rules},
+            },
+            runtime_paths,
+        )
+
+    # 1. Exact retired rule fails closed when its toolkit is enabled.
+    with pytest.raises(ConfigRuntimeValidationError, match=r"read_url.*website_read_url"):
+        _validate(["website"], [{"match": "read_url", "action": "require_approval"}])
+
+    # 2. Wildcard approval script fails closed until the replacement has an explicit rule ahead of it.
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*read_url.*website_read_url"):
+        _validate(["website"], [{"match": "skill", "script": "check.py"}, {"match": "*", "script": "check.py"}])
+
+    # 3. Overlapping retired names (`read_url` for website vs jina, `run_query` for postgres vs duckdb) stay scoped
+    #    to the enabled toolkit and never fire for disabled toolkits.
+    loaded_website = _validate(
+        ["website"],
+        [
+            {"match": "website_read_url", "action": "require_approval"},
+            {"match": "skill", "script": "check.py"},
+            {"match": "*", "script": "check.py"},
+        ],
+    )
+    assert loaded_website.tool_approval.rules[0].match == "website_read_url"
+
+    loaded_postgres = _validate(
+        ["postgres"],
+        [
+            {"match": "postgres_inspect", "action": "auto_approve"},
+            {"match": "postgres_run_query", "action": "require_approval"},
+            {"match": "postgres_export_table_to_path", "action": "require_approval"},
+            {"match": "skill", "script": "check.py"},
+            {"match": "*", "script": "check.py"},
+        ],
+    )
+    assert loaded_postgres.tool_approval.rules[1].match == "postgres_run_query"
+
+    # 4. Single-verb filter guidance replaces in place without claiming an action parameter.
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _validate([{"wikipedia": {"include_tools": ["search_wikipedia"]}}], [])
+    message = str(exc_info.value)
+    assert (
+        "replace `search_wikipedia` with `wikipedia_search` in `wikipedia.include_tools` "
+        "while preserving any other entries in the list"
+    ) in message
+    assert "action" not in message.split("was removed; ", 1)[1]

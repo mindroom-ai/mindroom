@@ -77,7 +77,7 @@ class _RedshiftTools(SqlCursorToolkit):
         self.ssl = ssl is not False
         super().__init__(
             name="redshift_tools",
-            tools=[self.redshift_inspect, self.run_query, self.export_table_to_path],
+            tools=[self.redshift_inspect, self.redshift_run_query, self.redshift_export_table_to_path],
             table_schema=table_schema,
         )
 
@@ -152,11 +152,11 @@ class _RedshiftTools(SqlCursorToolkit):
         """
         return self._inspect_db(action, table=table, query=query)
 
-    def run_query(self, query: str) -> str:
+    def redshift_run_query(self, query: str) -> str:
         """Run a SQL query against Amazon Redshift and return CSV-formatted rows."""
         return self._run_db_query(query)
 
-    def export_table_to_path(self, table: str, path: str) -> str:
+    def redshift_export_table_to_path(self, table: str, path: str) -> str:
         """Export a Redshift table as a local CSV file at `path`."""
         return self._export_table(table, path)
 
@@ -286,7 +286,7 @@ class _RedshiftTools(SqlCursorToolkit):
     ],
     dependencies=["redshift-connector"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#redshift",
-    function_names=("export_table_to_path", "redshift_inspect", "run_query"),
+    function_names=("redshift_export_table_to_path", "redshift_inspect", "redshift_run_query"),
     action_scoped_grants=("redshift_inspect",),
 )
 def redshift_tools() -> type[Toolkit]:

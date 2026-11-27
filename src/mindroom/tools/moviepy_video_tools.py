@@ -38,9 +38,9 @@ if TYPE_CHECKING:
     dependencies=["moviepy"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#moviepy_video_tools",
     function_names=(
-        "create_srt",
-        "embed_captions",
-        "extract_audio",
+        "moviepy_video_tools_create_srt",
+        "moviepy_video_tools_embed_captions",
+        "moviepy_video_tools_extract_audio",
     ),
 )
 def moviepy_video_tools() -> type[MoviePyVideoTools]:

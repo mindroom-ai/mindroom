@@ -136,11 +136,11 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         self.max_rows = max_rows
         tools = []
         if all or list_tables:
-            tools.append(self.list_tables)
+            tools.append(self.google_bigquery_list_tables)
         if all or describe_table:
-            tools.append(self.describe_table)
+            tools.append(self.google_bigquery_describe_table)
         if all or run_sql_query:
-            tools.append(self.run_sql_query)
+            tools.append(self.google_bigquery_run_sql_query)
         super().__init__(
             name="google_bigquery",
             tools=tools,
@@ -159,7 +159,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             lambda credentials: bigquery.Client(project=self.project, credentials=credentials, location=self.location),
         )
 
-    def list_tables(self) -> str:
+    def google_bigquery_list_tables(self) -> str:
         """List table names in the configured dataset.
 
         Returns:
@@ -172,7 +172,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "list_tables", exc)
 
-    def describe_table(self, table_id: str) -> str:
+    def google_bigquery_describe_table(self, table_id: str) -> str:
         """Describe one table in the configured dataset.
 
         Args:
@@ -200,7 +200,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         ]
         return json.dumps({"table_description": table.description or "", "columns": columns})
 
-    def run_sql_query(self, query: str) -> str:
+    def google_bigquery_run_sql_query(self, query: str) -> str:
         """Run one read-only GoogleSQL SELECT query; unqualified tables resolve in the configured dataset.
 
         Args:

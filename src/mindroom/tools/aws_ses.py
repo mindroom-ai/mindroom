@@ -32,10 +32,10 @@ class _AWSSESTool(Toolkit):
         self._region_name = region_name
         super().__init__()
         if not (all or enable_send_email):
-            self.functions.pop("send_email")
+            self.functions.pop("aws_ses_send_email")
 
     @tool
-    def send_email(self, subject: str, body: str, receiver_email: str) -> str:
+    def aws_ses_send_email(self, subject: str, body: str, receiver_email: str) -> str:
         """Send plain-text email via Amazon SES.
 
         Args:
@@ -103,7 +103,7 @@ class _AWSSESTool(Toolkit):
     ],
     dependencies=["boto3"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_ses",
-    function_names=("send_email",),
+    function_names=("aws_ses_send_email",),
 )
 def aws_ses_tools() -> type[_AWSSESTool]:
     """Return the native aws ses toolkit."""

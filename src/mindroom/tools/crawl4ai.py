@@ -66,7 +66,7 @@ class _Crawl4aiTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_crawl:
-            tools.append(self.crawl)
+            tools.append(self.crawl4ai_crawl)
 
         super().__init__(name="crawl4ai_tools", tools=tools)
 
@@ -101,7 +101,7 @@ class _Crawl4aiTools(Toolkit):
 
         return config_params
 
-    def crawl(self, url: str | list[str], search_query: str | None = None) -> str | dict[str, str]:
+    def crawl4ai_crawl(self, url: str | list[str], search_query: str | None = None) -> str | dict[str, str]:
         """Crawl validated public HTTP(S) URLs."""
         if isinstance(url, str):
             validated = validate_server_fetch_url(url)
@@ -227,7 +227,7 @@ class _Crawl4aiTools(Toolkit):
     dependencies=["crawl4ai"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#crawl4ai",
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
-    function_names=("crawl",),
+    function_names=("crawl4ai_crawl",),
 )
 def crawl4ai_tools() -> type[Toolkit]:
     """Return Crawl4AI tools for web crawling and scraping."""

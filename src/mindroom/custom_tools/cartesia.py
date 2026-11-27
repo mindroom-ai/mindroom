@@ -51,14 +51,14 @@ class CartesiaTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_localize_voice:
-            tools.append(self.localize_voice)
+            tools.append(self.cartesia_localize_voice)
         if all or enable_text_to_speech:
-            tools.append(self.text_to_speech)
+            tools.append(self.cartesia_text_to_speech)
         if all or enable_list_voices:
-            tools.append(self.list_voices)
+            tools.append(self.cartesia_list_voices)
         super().__init__(name="cartesia", tools=tools)
 
-    def list_voices(self) -> str:
+    def cartesia_list_voices(self) -> str:
         """List available Cartesia voices (first page) as JSON."""
         try:
             voices = self.client.voices.list()
@@ -76,9 +76,9 @@ class CartesiaTools(Toolkit):
             return json.dumps(result)
         except Exception as exc:
             logger.exception("Error listing Cartesia voices")
-            return json.dumps({"error": str(exc), "detail": "Error occurred in list_voices function."})
+            return json.dumps({"error": str(exc), "detail": "Error occurred in cartesia_list_voices function."})
 
-    def localize_voice(
+    def cartesia_localize_voice(
         self,
         name: str,
         description: str,
@@ -115,7 +115,7 @@ class CartesiaTools(Toolkit):
             logger.exception("Error localizing Cartesia voice")
             return json.dumps({"error": str(exc), "type": type(exc).__name__})
 
-    def text_to_speech(self, transcript: str, voice_id: str | None = None) -> ToolValue:
+    def cartesia_text_to_speech(self, transcript: str, voice_id: str | None = None) -> ToolValue:
         """Synthesize MP3 speech audio from text using Cartesia.
 
         Args:

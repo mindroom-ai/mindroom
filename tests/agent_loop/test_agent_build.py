@@ -313,12 +313,12 @@ def test_deferred_toolkits_fill_the_request_template_and_the_surface(tmp_path: P
     build = _build(config, runtime_paths, agent_mode=agent_mode)
 
     if agent_mode == "standard":
-        assert "search_wikipedia" in _offered(build)
-        assert build.request_template.deferred_tools.names == frozenset({"search_wikipedia"})
+        assert "wikipedia_search" in _offered(build)
+        assert build.request_template.deferred_tools.names == frozenset({"wikipedia_search"})
         assert build.surface.deferred == ()
         assert any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     else:
-        assert "search_wikipedia" not in _offered(build)
+        assert "wikipedia_search" not in _offered(build)
         assert build.request_template.deferred_tools.names == frozenset()
         assert [deferred.name for deferred in build.surface.deferred] == ["wikipedia"]
         assert build.surface.mode == "minimal"
@@ -660,7 +660,7 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
             return str(agent)
 
         toolkit = Toolkit(name="wikipedia", tools=[ping])
-        toolkit.functions["search_wikipedia"] = bad_search
+        toolkit.functions["wikipedia_search"] = bad_search
         return toolkit
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
@@ -671,7 +671,7 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
     assert not any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
     assert warning["tool"] == "wikipedia"
-    assert "'search_wikipedia' takes agent" in warning["error"]
+    assert "'wikipedia_search' takes agent" in warning["error"]
 
 
 def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_path: Path) -> None:

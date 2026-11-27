@@ -916,16 +916,16 @@ async def test_native_deferred_filters_remain_authoritative(context: AgentToolCo
     """Deferred discovery must not remove authored function restrictions."""
     raw = context.config.model_dump()
     raw["agents"]["personal"]["tools"] = [
-        {"hackernews": {"defer": True, "include_tools": ["get_top_hackernews_stories"]}},
+        {"hackernews": {"defer": True, "include_tools": ["hackernews_top_stories"]}},
     ]
     context = replace(context, config=Config.model_validate(raw))
     result = await gateway.search_tools(context, toolkit="hackernews")
     assert "error" not in result
-    assert [item["function"] for item in result["results"]] == ["get_top_hackernews_stories"]
+    assert [item["function"] for item in result["results"]] == ["hackernews_top_stories"]
     result = await gateway.invoke_tool(
         context,
         toolkit="hackernews",
-        function="get_user_details",
+        function="hackernews_user_details",
         arguments={"username": "pg"},
     )
     assert "result" not in result

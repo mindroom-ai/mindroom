@@ -30,12 +30,12 @@ class HackerNewsTools(Toolkit):
         self.timeout = timeout
         super().__init__(name="hackers_news")
         if not (all or enable_get_top_stories):
-            self.functions.pop(self.get_top_hackernews_stories.__name__, None)
+            self.functions.pop(self.hackernews_top_stories.__name__, None)
         if not (all or enable_get_user_details):
-            self.functions.pop(self.get_user_details.__name__, None)
+            self.functions.pop(self.hackernews_user_details.__name__, None)
 
     @tool
-    def get_top_hackernews_stories(self, num_stories: int = 10) -> str:
+    def hackernews_top_stories(self, num_stories: int = 10) -> str:
         """Use this function to get top stories from Hacker News.
 
         Args:
@@ -69,7 +69,7 @@ class HackerNewsTools(Toolkit):
         return json.dumps(stories)
 
     @tool
-    def get_user_details(self, username: str) -> str:
+    def hackernews_user_details(self, username: str) -> str:
         """Use this function to get the details of a Hacker News user using their username.
 
         Args:

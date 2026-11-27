@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["fal-client"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#fal",
-    function_names=("generate_media", "image_to_image"),
+    function_names=("fal_generate_media", "fal_image_to_image"),
 )
 def fal_tools() -> type[FalTools]:
     """Return Fal tools for AI model serving and media generation."""

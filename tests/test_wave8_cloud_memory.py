@@ -101,9 +101,9 @@ def test_aws_lambda_scoped_credentials_toggles_and_invoke(tmp_path: Path, monkey
         "aws_secret_access_key": "scoped-sk",
         "aws_session_token": "scoped-st",
     }
-    assert "fn-a, fn-b" in toolkit.list_functions()
-    assert '{"ok":true}' in toolkit.invoke_function("fn-a", '{"x": 1}')
-    assert toolkit.invoke_function("fn-a", "not-json").startswith("Error invoking function:")
+    assert "fn-a, fn-b" in toolkit.aws_lambda_list_functions()
+    assert '{"ok":true}' in toolkit.aws_lambda_invoke_function("fn-a", '{"x": 1}')
+    assert toolkit.aws_lambda_invoke_function("fn-a", "not-json").startswith("Error invoking function:")
 
 
 def test_zep_no_env_leak_lazy_init_and_operations(monkeypatch: pytest.MonkeyPatch) -> None:

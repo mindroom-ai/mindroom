@@ -74,7 +74,7 @@ class SerperTools(Toolkit):
         if self._search_actions:
             tools.append(self.serper_search)
         if all or enable_scrape_webpage:
-            tools.append(self.scrape_webpage)
+            tools.append(self.serper_scrape_webpage)
         super().__init__(name="serper_tools", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
@@ -129,7 +129,7 @@ class SerperTools(Toolkit):
         logger.debug("Searching via Serper", endpoint=endpoint, query=query)
         return self._post(endpoint, {"q": query, "num": num_results or self.num_results})
 
-    def scrape_webpage(self, url: str, markdown: bool = False) -> str:
+    def serper_scrape_webpage(self, url: str, markdown: bool = False) -> str:
         """Scrapes and extracts content from a webpage using the Serper scraping API.
 
         Args:

@@ -31,7 +31,7 @@ _KEYFRAMES = {
     "frame0": {"type": "image", "url": "https://example.com/start.png"},
     "frame1": {"type": "image", "url": "https://example.com/end.png"},
 }
-_FUNCTIONS = ["generate_video", "image_to_video"]
+_FUNCTIONS = ["lumalabs_generate_video", "lumalabs_image_to_video"]
 
 
 @dataclass
@@ -83,14 +83,14 @@ def _tool(tmp_path: Path, **overrides: object) -> LumaLabTools:
 
 
 def _invoke(tool: LumaLabTools, function_name: str) -> ToolValue:
-    if function_name == "generate_video":
-        return tool.generate_video(
+    if function_name == "lumalabs_generate_video":
+        return tool.lumalabs_generate_video(
             prompt="A calm lake.",
             loop=True,
             aspect_ratio="9:16",
             keyframes=_KEYFRAMES,
         )
-    return tool.image_to_video(
+    return tool.lumalabs_image_to_video(
         prompt="A calm lake.",
         start_image_url=_KEYFRAMES["frame0"]["url"],
         end_image_url=_KEYFRAMES["frame1"]["url"],
@@ -132,7 +132,7 @@ def test_lumalabs_generation_sends_model_and_returns_video(
     assert len(result.videos) == 1
     assert result.videos[0].url == _VIDEO_URL
     assert result.videos[0].id
-    assert set(tool.functions) == {"generate_video", "image_to_video"}
+    assert set(tool.functions) == {"lumalabs_generate_video", "lumalabs_image_to_video"}
     assert [(request.method, request.url.path) for request in luma_http.requests] == [
         ("POST", "/dream-machine/v1/generations/video"),
         ("GET", "/dream-machine/v1/generations/generation-id"),
@@ -225,12 +225,12 @@ def test_lumalabs_preserves_sdk_http_errors(
 @pytest.mark.parametrize(
     ("overrides", "expected_functions"),
     [
-        ({"enable_generate_video": False}, {"image_to_video"}),
-        ({"enable_image_to_video": False}, {"generate_video"}),
+        ({"enable_generate_video": False}, {"lumalabs_image_to_video"}),
+        ({"enable_image_to_video": False}, {"lumalabs_generate_video"}),
         ({"enable_generate_video": False, "enable_image_to_video": False}, set()),
         (
             {"enable_generate_video": False, "enable_image_to_video": False, "all": True},
-            {"generate_video", "image_to_video"},
+            {"lumalabs_generate_video", "lumalabs_image_to_video"},
         ),
     ],
 )

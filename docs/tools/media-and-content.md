@@ -29,11 +29,11 @@ Missing Python dependencies install on first use (see [Automatic Dependency Inst
 
 ### What It Does
 
-- `extract_audio(video_path, output_path)` saves a video's audio track to `output_path`.
-- `create_srt(transcription, output_path)` writes the given text to disk unchanged, so the text must already be SRT-formatted.
-- `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)` renders an MP4 with word-by-word highlighted captions from an SRT file.
+- `moviepy_video_tools_extract_audio(video_path, output_path)` saves a video's audio track to `output_path`.
+- `moviepy_video_tools_create_srt(transcription, output_path)` writes the given text to disk unchanged, so the text must already be SRT-formatted.
+- `moviepy_video_tools_embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)` renders an MP4 with word-by-word highlighted captions from an SRT file.
 
-In `embed_captions()`, `font_size` is the caption text size in pixels and `font_color` is the base text color, while the word being spoken is always yellow.
+In `moviepy_video_tools_embed_captions()`, `font_size` is the caption text size in pixels and `font_color` is the base text color, while the word being spoken is always yellow.
 `stroke_color` and `stroke_width` set the text outline, and `stroke_width=0` removes it.
 Captions sit at the bottom of the video, and a word or caption line too large to fit at the requested size returns an error.
 Without `output_path`, the output is `<video>_captioned.mp4` next to the input, where `<video>` is the input file name without its extension.
@@ -51,9 +51,9 @@ Real audio and video processing needs FFmpeg in the runtime that executes the to
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_process_video` | `boolean` | `true` | Enable `extract_audio()`. |
-| `enable_generate_captions` | `boolean` | `true` | Enable `create_srt()`. |
-| `enable_embed_captions` | `boolean` | `true` | Enable `embed_captions()`. |
+| `enable_process_video` | `boolean` | `true` | Enable `moviepy_video_tools_extract_audio()`. |
+| `enable_generate_captions` | `boolean` | `true` | Enable `moviepy_video_tools_create_srt()`. |
+| `enable_embed_captions` | `boolean` | `true` | Enable `moviepy_video_tools_embed_captions()`. |
 | `all` | `boolean` | `false` | Enable all three functions regardless of the `enable_*` options. |
 
 ### Example
@@ -73,7 +73,7 @@ embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_capti
 
 ## [`giphy`]
 
-`giphy` provides `search_gifs(query)`, which returns Giphy-hosted GIF URLs and attaches the GIFs as images to the tool result.
+`giphy` provides `giphy_search_gifs(query)`, which returns Giphy-hosted GIF URLs and attaches the GIFs as images to the tool result.
 The number of GIFs per search is set by `limit`, not per call.
 A Giphy API key is needed for searches to succeed, even though the field is marked optional.
 
@@ -81,7 +81,7 @@ A Giphy API key is needed for searches to succeed, even though the field is mark
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Giphy API key; falls back to `GIPHY_API_KEY`. |
 | `limit` | `number` | `1` | GIFs returned per search. |
-| `enable_search_gifs` | `boolean` | `true` | Enable `search_gifs()`. |
+| `enable_search_gifs` | `boolean` | `true` | Enable `giphy_search_gifs()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml

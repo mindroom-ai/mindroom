@@ -67,8 +67,8 @@ def test_resend_uses_each_toolkits_credentials(tmp_path: Path, monkeypatch: pyte
         worker_target=None,
     )
     with patch("resend.RequestsClient.request", return_value=(b"{}", 200, {})) as request:
-        assert first.send_email("reader@example.test", "Status", "<b>Ready</b>") == "Email sent."
-        assert second.send_email("reader@example.test", "Status", "Hello") == "Email sent."
+        assert first.resend_send_email("reader@example.test", "Status", "<b>Ready</b>") == "Email sent."
+        assert second.resend_send_email("reader@example.test", "Status", "Hello") == "Email sent."
     endpoint = "https://mail.example.test/proxy/emails"
     assert [args.args[:2] for args in request.call_args_list] == [("POST", endpoint)] * 2
     assert [args.kwargs["headers"]["Authorization"] for args in request.call_args_list] == [
@@ -83,7 +83,7 @@ def test_ses_sends_via_configured_region() -> None:
     pytest.importorskip("boto3")
     tools = aws_ses_tools()(sender_email="sender@example.test", region_name="us-west-2")
     with patch("boto3.client") as client:
-        assert tools.send_email("Status", "Ready", "reader@example.test") == "Email sent."
+        assert tools.aws_ses_send_email("Status", "Ready", "reader@example.test") == "Email sent."
     client.assert_called_once_with("ses", region_name="us-west-2")
     assert client.return_value.send_email.call_args.kwargs["Destination"] == {"ToAddresses": ["reader@example.test"]}
 

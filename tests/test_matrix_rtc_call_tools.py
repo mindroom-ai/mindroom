@@ -2320,7 +2320,7 @@ async def test_build_call_tools_hides_functions_needing_text_chat(tmp_path: Path
     runtime_paths = test_runtime_paths(tmp_path)
     config = _ollama_config(runtime_paths, tools=["hackernews"])
     config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="get_top_hackernews_stories", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="hackernews_top_stories", action="require_approval")],
     )
 
     tooling = await build_call_tools(
@@ -2334,8 +2334,8 @@ async def test_build_call_tools_hides_functions_needing_text_chat(tmp_path: Path
     )
 
     names = _tool_names(tooling.tools)
-    assert "get_top_hackernews_stories" not in names
-    assert "get_user_details" in names
+    assert "hackernews_top_stories" not in names
+    assert "hackernews_user_details" in names
 
 
 @pytest.mark.asyncio

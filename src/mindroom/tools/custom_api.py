@@ -121,7 +121,7 @@ class _CustomApiTools(Toolkit):
         self.timeout = timeout
         super().__init__(name="api_tools")
         if not (all or enable_make_request):
-            self.functions.pop("make_request", None)
+            self.functions.pop("custom_api_request", None)
 
     def _get_headers(self, additional_headers: dict[str, str] | None = None) -> dict[str, str]:
         """Combine configured default headers, optional bearer auth, and per-call headers."""
@@ -133,7 +133,7 @@ class _CustomApiTools(Toolkit):
         return merged
 
     @tool
-    def make_request(
+    def custom_api_request(
         self,
         endpoint: str,
         method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"] = "GET",
@@ -252,7 +252,7 @@ class _CustomApiTools(Toolkit):
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#custom_api",
-    function_names=("make_request",),
+    function_names=("custom_api_request",),
 )
 def custom_api_tools() -> type[_CustomApiTools]:
     """Return Custom API tools for making HTTP requests to external APIs."""
