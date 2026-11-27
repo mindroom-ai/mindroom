@@ -29,8 +29,8 @@ from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.agents import create_agent
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.agents import create_agent, non_resumable_alias_refusal_message
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.background_tasks import (
     drain_tasks,
     run_blocking_until_complete,
@@ -84,8 +84,10 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import TokenCounter
     from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage
     from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.declarations import ApprovalAlias
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolkitClose
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -474,7 +476,7 @@ class _CallAgentCache:
             eager_deferred_tools=True,
             inline_tools=True,
         )
-        return _refuse_text_chat_functions(_spoken(build), self.config)
+        return _refuse_text_chat_functions(_spoken(build), self.config, tools=self.context.plugins.tools)
 
 
 async def build_call_tools(
@@ -986,9 +988,15 @@ def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool
     )
 
 
-def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild:
+def _refuse_text_chat_functions(
+    build: AgentBuild,
+    config: Config,
+    *,
+    tools: ToolRegistry | None = None,
+) -> AgentBuild:
     """Keep functions that need text chat visible, as chat offers them, but refuse them when called."""
     refused: set[str] = set()
+    passthrough_aliases: dict[str, ApprovalAlias] = {}
 
     def callable_in_a_call(function: ToolFunction) -> ToolFunction:
         if function.gate is ToolGate.DELEGATION:
@@ -996,12 +1004,41 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
             function = replace(function, gate=None)
         if not _function_requires_text_chat(function, config):
             return function
+        if (
+            tools is not None
+            and function.gate in {ToolGate.POLICY, ToolGate.JOB}
+            and function.name not in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
+            and not tool_may_require_approval(config, function.name)
+            and (
+                alias := toolkit_approval_alias(
+                    config,
+                    tools,
+                    function.registered_toolkit or function.toolkit,
+                    function.name,
+                )
+            )
+            is not None
+            and alias.allow_non_resumable_passthrough
+        ):
+            passthrough_aliases[function.name] = alias
+            return replace(function, gate=None)
         refused.add(function.name)
         # A gate pauses the run before any tool-call policy can refuse the call.
         return replace(function, gate=None)
 
     async def refuse(call: ToolCall, call_next: ToolNext) -> object:
         if call.function.name in refused:
+            logger.info("call_tool_blocked_needs_text_chat", tool=call.function.name)
+            return _TEXT_CHAT_REQUIRED_MESSAGE
+        if (alias := passthrough_aliases.get(call.function.name)) is not None and (
+            await non_resumable_alias_refusal_message(
+                call.function.name,
+                call.arguments,
+                config=config,
+                alias=alias,
+            )
+            is not None
+        ):
             logger.info("call_tool_blocked_needs_text_chat", tool=call.function.name)
             return _TEXT_CHAT_REQUIRED_MESSAGE
         return await call_next(call.arguments)

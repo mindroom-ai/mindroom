@@ -10257,43 +10257,45 @@ background_tool_jobs:
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
 | `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large, `0` for never by cost; see [Cost Limit](#cost-limit) |
 
-A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
+A run is a background job, so `workflow(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
-An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `start_workflow` asks before anything starts, as for any other call.
-A plugin's `tool:before_call` or `tool:environment` hook that declines `start_workflow` or `resume_workflow` also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `workflow` asks before anything starts, as for any other call (timed grants are scoped per `action`).
+A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
 A restart of MindRoom while the run is unfinished is the exception: the continued job delivers the report to the conversation, and the `tool:after_call` hooks of the call that started it do not run.
 Do not rely on an after-call hook running exactly once for a workflow call.
 
 ## Functions
 
+All workflow operations use a single unified function `workflow(action=...)`:
+
 ```text
-start_workflow(source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
-get_workflow(run_id, nodes="active", messages=False)
-cancel_workflow(run_id)
-resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
-list_workflow_runs()
-save_workflow(run_id, name, description=None)
+workflow(action="start", source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
+workflow(action="get", run_id=..., nodes="active", messages=False)
+workflow(action="cancel", run_id=...)
+workflow(action="resume", run_id=..., source=None, path=None, rerun=None, max_cost_usd=None)
+workflow(action="list")
+workflow(action="save", run_id=..., name=..., description=None)
 ```
 
-- `start_workflow` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
+- `action="start"` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
   The report reaches the agent through the [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
   `max_cost_usd` stops the run as `interrupted` at that cost so it can be resumed with a higher limit; see [Cost Limit](#cost-limit).
-- `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
+- `action="get"` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
   Pass `messages=True` to include the full, uncapped peer message history (`messages`) and shared state (`shared_state`).
   For a run that has ended it also returns `result`: the report, or why the run has none.
   See [Cost](#cost) for `usage`.
-- `cancel_workflow` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
+- `action="cancel"` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
   Cancelling the run's job, for example with `!cancel_job`, does the same.
   A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
   The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
-- `resume_workflow` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
-- `list_workflow_runs` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
-- `save_workflow` saves an owned run's script to `workflows/<name>.py` so `start_workflow(name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
+- `action="resume"` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
+- `action="list"` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
+- `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
 
 A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
 
-Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `start_workflow` and `resume_workflow` wait for the run and return the report themselves.
+Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `workflow(action="start", ...)` and `workflow(action="resume", ...)` wait for the run and return the report themselves.
 Cancelling that call cancels its run, unless another call still waits for the same run.
 The same call delivered again finds its own run: it waits for it, or returns the report the run ended with, and runs nothing a second time.
 A run that another call resumed since belongs to that call: the earlier one neither cancels it nor returns its report, and ends with `Run <id> was resumed by another call.`
@@ -10337,7 +10339,7 @@ def main(args):
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
   Name the toolkit as it is registered: another name of it, such as `file` for `filesystem`, is refused as a tool the run does not have.
-  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "start_workflow", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
+  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "workflow", action="start", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 - `run(name, args=None)` executes the saved workflow `workflows/<name>.py` inline inside the current run and returns what its `main(args)` returns; see [Saved Workflows](#saved-workflows).
@@ -10381,7 +10383,7 @@ The options are those of `run_subagent` under shorter names.
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
 So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
-The description of `start_workflow` lists the `delegate_to` agents and the agents configured for the room.
+The description of `workflow` lists the `delegate_to` agents and the agents configured for the room.
 That list is read from the configuration alone; whether a listed agent's bot is in the room and may reply to the requester is checked when the call starts.
 While the bot of a room's agent has not finished starting, for example right after a restart, or the requester's access to that agent is still loading, the call is not refused: it waits and starts once both are known.
 An agent whose bot failed to start for good is waited for in the same way, until the run is stopped or its working time ends.
@@ -10409,7 +10411,7 @@ A `tool()` or `shell()` call of the script that needs an approval shows `waiting
 An agent of a run acts in the room and the thread the run was started in, for the run's requester.
 A message it sends with `matrix_message` and no other target lands in that thread.
 
-The agents of a run are not listed among the conversation's background jobs: the run reports them, and `get_workflow` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `workflow(action="get", ...)` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 
@@ -10561,11 +10563,11 @@ def main(args):
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
   Graph frames and the finished run card carry message-count `edges` (`{"from", "to", "kind": "message", "count"}`) and bounded, redacted peer message previews (`messages`), plus bounded, redacted result `preview` text on completed `agent`, `turn` and `tool` nodes; `shared_state` never enters the workflow graph or run card.
-  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `get_workflow(run_id, messages=True)` returns the full uncapped message history and shared state to the run's owner.
+  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `workflow(action="get", run_id=..., messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
 
-An agent of a run has the `workflow` tool of its agent, so it can call `start_workflow` itself.
+An agent of a run has the `workflow` tool of its agent, so it can call `workflow(action="start", ...)` itself.
 That call waits for the new run and returns its report to the agent.
 
 - The new run is a run inside the agent's run: it names that run and the agent's call, and the outer run shows it as a group under that call.
@@ -10582,15 +10584,15 @@ That call waits for the new run and returns its report to the agent.
 A script can start agents and runs through `tool()` as well.
 
 - `tool("delegate", "run_subagent", task=..., agent_name=..., system_prompt=...)` is the same as `agent()`: the run shows an agent call, with a job of its own, and the call returns the agent's answer.
-- `tool("workflow", "start_workflow", source=...)` starts a run inside the script's run and returns its report.
+- `tool("workflow", "workflow", action="start", source=...)` starts a run inside the script's run and returns its report.
   Its agents are as deep as the script's own.
-- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `start_workflow` applies.
+- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `workflow` applies.
   While the call waits for an approval it shows `waiting`, nothing is started before the decision, and a denial raises `ToolError` with kind `denied`.
 - `tool("delegate", "continue_subagent", ...)` is refused with `A workflow script cannot call delegate.continue_subagent yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).`
 
 ## Cost
 
-`get_workflow` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
+`workflow(action="get", ...)` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
 
 - `cost_usd` is what the run cost so far, over every attempt, and `attempt_cost_usd` is what the current attempt cost.
   After a resume the second number shows what the resume itself spent.
@@ -10608,16 +10610,16 @@ A script can start agents and runs through `tool()` as well.
 
 ### Cost Limit
 
-Nothing caps what a run costs unless its start names a limit: `start_workflow(..., max_cost_usd=5)`.
+Nothing caps what a run costs unless its start names a limit: `workflow(action="start", ..., max_cost_usd=5)`.
 
 - When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further call starts.
   Calls that already run finish, and once nothing of the run is working any more, the run ends `interrupted` with `Stopped at the cost limit ($X of $Y).` on its card and in its delivered report.
   An amount under a cent is written with up to six decimal places.
 - A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
   Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
-- To continue a run stopped at its cost limit, call `resume_workflow(run_id, max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
+- To continue a run stopped at its cost limit, call `workflow(action="resume", run_id=..., max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
   Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`, and an interrupted nested child continues under the parent's raised limit.
-  Calling `resume_workflow` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+  Calling `workflow(action="resume", ...)` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
   A card Resume control (`io.mindroom.workflow_control`) without `max_cost_usd` on a run stopped at its limit raises `max_cost_usd` to `spent + max_cost_usd` (one more allowance of the same size).
 - A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
 - The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
@@ -10657,7 +10659,7 @@ A graph too large for one event keeps the calls that wait for a person first, th
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
 
 MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
-It resumes the run as `resume_workflow(run_id, max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
+It resumes the run as `workflow(action="resume", run_id=..., max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
 For a run stopped at its cost limit, a Resume control without `max_cost_usd` raises the limit to `spent + current max_cost_usd` (one more allowance of the same size); an explicit `max_cost_usd` that is not above what the run spent changes nothing.
 The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
 The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
@@ -10687,7 +10689,7 @@ def main(args):
   `parallel([agent(a), agent(b)])` is refused with `parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn).`
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
-  The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
+  The run's `max_concurrent`, 16 unless `workflow(action="start", ...)` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
   A call that waits for an approval keeps its concurrency place until it finishes, so queued calls wait for a free place.
   A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
   An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
@@ -10698,7 +10700,7 @@ def main(args):
   Its message names the failures, for example `2 of 5 calls failed: [1] AgentError(failed): ...; [3] KeyError: 'x'`.
   A `PartialFailure` that the script does not catch fails the run.
 - An exception of the script's own code inside a function, such as a `KeyError`, fails only that item, and the run shows it as a failed call of kind `error` where it happened.
-- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); get_workflow(run_id, nodes="failed") shows them.`
+- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); workflow(action="get", run_id=..., nodes="failed") shows them.`
 
 On a resume each item is matched by its value, not by its position, so adding, removing, or reordering items reuses the saved calls of the items that stayed.
 Of two equal items the first and the second are told apart by their order.
@@ -10728,7 +10730,7 @@ def main(args):
 
 ## Resume A Run
 
-`resume_workflow(run_id)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
+`workflow(action="resume", run_id=...)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
 A run that has not ended is refused with `Run <id> is still running. Cancel it first.`
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
 Resume retries only calls proven not to have started.
@@ -10742,12 +10744,12 @@ A call that may have written (a tool that raised, an agent that made tool calls)
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
   That also holds when the call's arguments were edited, as long as no call before it ran again and `rerun` does not name it.
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.
-  Check its effect, then name it in `rerun`, for example `resume_workflow(run_id, rerun=["n4"])`, to run it again; `get_workflow(run_id, nodes="failed")` lists the IDs.
+  Check its effect, then name it in `rerun`, for example `workflow(action="resume", run_id=..., rerun=["n4"])`, to run it again; `workflow(action="get", run_id=..., nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
 - `max_cost_usd` sets the run's cost limit for the next attempt; when the run stopped at its cost limit, it must exceed what the run has spent.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
-- Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
+- Every attempt runs in the room and thread the run was started in, also when `workflow(action="resume", ...)` is called from another one by the same requester; the report goes to where it was called.
 
 One resume takes a run, and it takes it in one step: the run, its new script and the calls named in `rerun` change together or not at all.
 Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing, also when the first one took the run and its attempt could not start.
@@ -10772,7 +10774,7 @@ A write that finished before the interruption is not made again, and neither is 
 A run whose script had already returned its report ends with that report and gets no new attempt.
 
 - The next attempt starts once the requester's access to the agent in the run's room is confirmed; while MindRoom cannot check it yet, for example because the agent's bot has not synced or room membership is still loading after a start, the run waits `starting`.
-  Every attempt is checked in this way when it starts, the first one of a run and one that `resume_workflow` asked for included.
+  Every attempt is checked in this way when it starts, the first one of a run and one that `workflow(action="resume", ...)` asked for included.
   When the access is gone, or the bot is no longer in the run's room, the run ends `interrupted` with `The requester no longer has access.`
 - While the run's job is unfinished, only that job starts the run's attempts, so a Stop or a cancel of the job always reaches whatever could start one.
   After a restart of MindRoom, the job is first checked again as every background job that a restart stopped is, and only then does the next attempt start.
@@ -10795,19 +10797,19 @@ A run whose script had already returned its report ends with that report and get
 - When that paused turn cannot be resumed, for example because its saved paused run or approval metadata cannot be loaded, no follow-up turn is synthesized for it.
   Instead, the call ends as that of an agent that cannot be continued does: `indeterminate` if its record is unreadable or it had started another tool call, or `failed` with kind `interrupted` if its record proves no tool call started (a call still waiting for its decision counts as not started), in which case the next attempt runs it again.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
-- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
-- A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
-  When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
+- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow(action="resume", run_id=...).`
+- A run with no job, which is one that `workflow(action="start", ...)` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
+  When the call that waited for it is gone, nothing delivers the report; `workflow(action="get", run_id=...)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `start_workflow` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `start_workflow` was cut short).
-  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `start_workflow` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
+  The agent that was inside its `workflow(action="start", ...)` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `workflow` was cut short).
+  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `workflow(action="start", ...)` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
   Stopping the agent while it waits, or cancelling the outer run, cancels the nested run.
-- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
-  A script's own `tool("workflow", "start_workflow", ...)` call that a restart cut short ends `indeterminate` too.
+- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `workflow(action="get", ...)` of that run, and cancelling the outer run cancels it.
+  A script's own `tool("workflow", "workflow", action="start", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
-- A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
+- A run whose job was stopped gets no further attempt, and `workflow(action="resume", ...)` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
-  A job that ended in any other way only fails to deliver the report: the run goes on, and `get_workflow(run_id)` returns the report in `result`.
+  A job that ended in any other way only fails to deliver the report: the run goes on, and `workflow(action="get", run_id=...)` returns the report in `result`.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
 - The report of a run stays saved until its job has delivered it, however long ago the run ended.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
@@ -10819,7 +10821,7 @@ A run whose script had already returned its report ends with that report and get
 
 A run may work for `max_runtime_hours` of the agent's `workflow` entry, 72 by default.
 Only time in which the run is `running` counts, up to the moment its script ended.
-At the limit the run ends `interrupted` with `The run used its 72 hours of working time. resume_workflow continues it.`, and `resume_workflow` gives it the full time again.
+At the limit the run ends `interrupted` with `The run used its 72 hours of working time. workflow(action="resume", run_id=...) continues it.`, and `workflow(action="resume", ...)` gives it the full time again.
 An attempt that MindRoom starts on its own after an interruption keeps the time the run had left, and a run with none left gets no such attempt: it ends `interrupted` with the same sentence.
 The time a run waits for its next attempt after an interruption is not counted.
 With `max_runtime_hours: 0` a run has no limit.
@@ -10829,19 +10831,19 @@ One script process runs for at most 30 days; a run with working time left then c
 
 - With a worker backend (Docker or Kubernetes), each run's script runs in a dedicated worker of its own, as a [background script](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) does, and never falls back to the host when that backend is down.
 - Without a worker backend, the script runs as a child process of MindRoom on Linux, only when `defaults.allow_shell_without_worker` is `true` or `MINDROOM_SANDBOX_EXECUTION_MODE` selects [local execution](https://docs.mindroom.chat/tools/background-scripts/#local-execution).
-  Otherwise `start_workflow` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
+  Otherwise `workflow(action="start", ...)` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - The script never runs inside the MindRoom process itself.
 
 ## Saved Workflows
 
 A saved workflow is a Python file at `workflows/<name>.py` in the agent's workspace, where `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
 Its description is the first line of its module docstring, and an optional top-level literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
-`list_workflow_runs()` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
+`workflow(action="list")` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
 
-- `save_workflow(run_id, name, description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
+- `workflow(action="save", run_id=..., name=..., description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
   When the script has no module docstring and `description` is given, MindRoom adds one.
   Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
-- `start_workflow(name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
+- `workflow(action="start", name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
 - Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
   Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash so calls after the group rerun, while unchanged calls before the first edit inside the child lane are still reused.
   `run(name, args)` is an inline call inside the current run and adds no delegation depth.
@@ -12575,13 +12577,10 @@ tool_approval:
 
 `google_docs` creates, reads, and edits Google Docs through its own OAuth connection, separate from Google Drive.
 
-| Function | What it does |
-| --- | --- |
-| `google_docs_create_document(title, initial_text="")` | Creates a document, optionally with initial text. |
-| `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
-| `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
-| `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
-| `google_docs_batch_update(document_id, requests, required_revision_id=None)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` to reject the whole batch if the document changed since that read. |
+| Function | Actions | What it does |
+| --- | --- | --- |
+| `google_docs_get_document(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
+| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -12590,9 +12589,9 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `create_document` | `boolean` | `true` | Enable document creation. |
-| `read_document` | `boolean` | `true` | Enable structure and content reads. |
-| `edit_document` | `boolean` | `true` | Enable text insertion, text replacement, and batch updates. |
+| `create_document` | `boolean` | `true` | Enable `google_docs_write(action="create")`. |
+| `read_document` | `boolean` | `true` | Enable `google_docs_get_document()`. |
+| `edit_document` | `boolean` | `true` | Enable `google_docs_write()` `insert_text`, `replace_text`, and `batch_update` actions. |
 
 ## [`google_sheets`]
 
@@ -14138,22 +14137,24 @@ matrix_voice_message(
 
 `thread_tags` adds, removes, and lists tags that every member sees on a thread, such as on MindRoom Chat thread cards.
 
-- `tag_thread(tag, thread_id=None, room_id=None, note=None, data=None)` adds or updates one tag and returns the thread's updated tags.
-- `untag_thread(tag, thread_id=None, room_id=None)` removes one tag and returns the updated tags.
-- `list_thread_tags(thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
+All operations use a single unified function `thread_tags(action=...)`:
 
-Without `thread_id`, `tag_thread()` and `untag_thread()` use the current thread; outside a thread, pass `thread_id`.
-Without `thread_id`, `list_thread_tags()` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
+- `thread_tags(action="tag", tag=..., thread_id=None, room_id=None, note=None, data=None)` adds or updates one tag and returns the thread's updated tags.
+- `thread_tags(action="untag", tag=..., thread_id=None, room_id=None, canonical=False)` removes one tag and returns the updated tags.
+- `thread_tags(action="list", thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
+
+Without `thread_id`, `action="tag"` and `action="untag"` use the current thread; outside a thread, pass `thread_id`.
+Without `thread_id`, `action="list"` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
 
 Tag names that are already valid IDs of up to 50 characters are kept; other input is lowercased and hyphenated into a tag of at most 25 characters.
-The `tag_thread()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.
+The `thread_tags()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.
 Some tags validate their `data`: `blocked.data.blocked_by` must be a list of strings, `waiting.data.waiting_on` a non-empty string, `priority.data.level` one of `high`, `medium`, or `low`, and `due.data.deadline` an ISO-8601 timestamp.
 
-`resolved` is thread lifecycle state, so `tag_thread()` and `untag_thread()` reject it; use [`thread_resolution`] instead.
-`snoozed` is lifecycle state too, and `tag_thread()` and `untag_thread()` point to [`thread_snooze`].
+`resolved` is thread lifecycle state, so `action="tag"` and `action="untag"` reject it; use [`thread_resolution`] instead.
+`snoozed` is lifecycle state too, and `action="tag"` and `action="untag"` point to [`thread_snooze`].
 Listing and filtering by `resolved` still works.
 
-Filters for `list_thread_tags()`:
+Filters for `action="list"`:
 
 - `tag` keeps only that tag in the output.
 - `include_tag` returns only threads that have the tag, and `exclude_tag` returns only threads without it; they can be combined.
@@ -14161,9 +14162,9 @@ Filters for `list_thread_tags()`:
   It reads at most 2,000 thread roots, so check the `truncated` field before treating the list as complete.
 
 ```python
-tag_thread("blocked", data={"blocked_by": ["$otherThread"]})
-untag_thread("blocked")
-list_thread_tags(exclude_tag="resolved", include_untagged=True)  # unresolved threads
+thread_tags(action="tag", tag="blocked", data={"blocked_by": ["$otherThread"]})
+thread_tags(action="untag", tag="blocked")
+thread_tags(action="list", exclude_tag="resolved", include_untagged=True)  # unresolved threads
 ```
 
 Writing a tag requires both the agent's Matrix account and the requesting user to have enough power level to send room state in the target room, and the requesting user must be joined to it.
@@ -14186,7 +14187,7 @@ agents:
       - thread_resolution
 ```
 
-To close out finished threads, find candidates with `list_thread_tags(exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
 
 ## [`thread_snooze`]
 
@@ -16148,13 +16149,13 @@ agents:
 
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
-| `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values; with `false`, those functions are not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies; with `false`, those functions are not offered. |
-| `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
-| `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
-| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats; with `false`, those functions are not offered. |
-| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
+| `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges (`microsoft_files_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values (`microsoft_sharepoint_write`); with `false`, that function is not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies (`outlook_mail_create_draft`, `outlook_mail_send_message`, `outlook_mail_manage`); with `false`, those functions are not offered. |
+| `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events (`outlook_calendar_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks (`microsoft_todo_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats (`microsoft_teams_send`); with `false`, that function is not offered. |
+| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages (`microsoft_onenote_write`); with `false`, that function is not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 `microsoft_meetings` and `microsoft_people` only read, so they have no `write` option.
@@ -16172,17 +16173,10 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 
 ## Files
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_files_search` | no | Search the OneDrive and SharePoint files the requester can open, by name and content, up to 50 results. |
-| `microsoft_files_list_folder` | no | List a folder's files and folders, or the requester's OneDrive root, up to 200 entries. |
-| `microsoft_files_get_file` | no | Read a file's details, including its `etag`, web link, size, and last editor. |
-| `microsoft_files_download_file` | no | Save a file, up to 100 MB, into the workspace's `microsoft-files-downloads/` directory. |
-| `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB, given the `etag` the edit started from. |
-| `microsoft_files_upload_file` | yes | Upload a workspace file, up to 250 MB, as a new file in a folder or the requester's OneDrive root. |
-| `microsoft_files_excel_list_worksheets` | no | List the worksheets of an Excel workbook. |
-| `microsoft_files_excel_read_range` | no | Read a worksheet range, or its used range, up to 10,000 cells. |
-| `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_files_read` | `search`, `list_folder`, `get_file`, `download_file`, `excel_list_worksheets`, `excel_read_range` | no | Search accessible OneDrive/SharePoint files (up to 50), list folders (up to 200), inspect metadata (`etag`, `web_url`, size, last editor), download files (up to 100 MB) to `microsoft-files-downloads/`, list Excel worksheets, and read worksheet ranges (up to 10,000 cells). |
+| `microsoft_files_write` | `replace_file`, `upload_file`, `excel_update_range` | yes | Replace an existing file (up to 250 MB, checked against `etag`), upload a new workspace file (up to 250 MB), or write values/formulas into an Excel range (up to 10,000 cells). |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
 Replacing a file, uploading into a folder, and writing a range also take the target's `web_url` from its details, download, or folder listing (search results show another form) as `expected_web_url`, so an approval card shows where the write lands, and fail with `target_mismatch`, naming the target's `web_url`, when it differs.
@@ -16193,7 +16187,7 @@ The replace then fails with `etag_mismatch` if someone changed the file in the m
 A later download of the same name overwrites the copy in `microsoft-files-downloads/`.
 Uploads never overwrite an existing file; a name that already exists returns `name_conflict`.
 
-Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
+Excel actions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
 They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
 A written string that starts with `=` becomes a formula.
 
@@ -16202,41 +16196,28 @@ Search and folder listings return a `next_page_token` while more results exist; 
 
 ## SharePoint
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_sharepoint_search_sites` | no | Search the SharePoint sites the requester can open by keyword. |
-| `microsoft_sharepoint_get_site` | no | Get a site from its address, such as `https://contoso.sharepoint.com/sites/team`. |
-| `microsoft_sharepoint_list_lists` | no | List a site's lists and document libraries, leaving out hidden and system lists. |
-| `microsoft_sharepoint_get_list` | no | Read a list with its columns: internal name, display name, type, and whether each is required or read-only. |
-| `microsoft_sharepoint_list_items` | no | List up to 50 items of a list with their column values, each text value up to 4,000 characters. |
-| `microsoft_sharepoint_create_item` | yes | Add an item to a list with the given column values. |
-| `microsoft_sharepoint_update_item` | yes | Change column values of a list item; columns not given stay unchanged. |
-| `microsoft_sharepoint_list_pages` | no | List a site's pages and news posts. |
-| `microsoft_sharepoint_get_page` | no | Read a page as plain text, its title and then its text web parts in layout order, in chunks of up to 30,000 characters. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_sharepoint_read` | `search_sites`, `get_site`, `list_lists`, `get_list`, `list_items`, `list_pages`, `get_page` | no | Search SharePoint sites, look up a site by URL, list non-hidden lists and columns (internal/display name, type, required/read-only), list up to 50 items (text capped at 4,000 chars), list site pages/news posts, and read a page as plain text in 30,000-character chunks. |
+| `microsoft_sharepoint_write` | `create_item`, `update_item` | yes | Add a new list item or update column values on an existing list item (omitted columns stay unchanged). |
 
 The tool covers sites, lists, list items, and pages; files and the files in document libraries stay with `microsoft_files`.
-List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_get_list` reports next to the display name.
+List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_read` (`action="get_list"`) reports next to the display name.
 A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
 A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
-Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_list_lists` or `microsoft_sharepoint_get_list` as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
+Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_read` (`list_lists` or `get_list`) as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
 Site addresses must be the site itself, without a page, list, or library path after it.
 Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
 Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
 
 ## Mail
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `outlook_mail_search` | no | List messages newest first, in one folder or across the mailbox, optionally matching an Outlook search query, up to 50 results. |
-| `outlook_mail_get_message` | no | Read a message as plain text, up to 20,000 characters, with its recipients and attachment list. |
-| `outlook_mail_download_attachment` | no | Save a file attachment, up to 50 MB, into the workspace's `outlook-mail-attachments/` directory. |
-| `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
-| `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
-| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
-| `outlook_mail_mark_read` | yes | Mark a message read or unread. |
-| `outlook_mail_move` | yes | Move a message to a folder. |
-| `outlook_mail_get_automatic_replies` | no | Read whether the requester's automatic replies (out of office) are off, on, or scheduled, with their period and messages. |
-| `outlook_mail_set_automatic_replies` | yes | Turn the requester's automatic replies off, on, or on for a period, and set the messages for people inside and outside the organization. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `outlook_mail_read` | `search`, `get_message`, `download_attachment`, `get_automatic_replies` | no | List/search messages newest first (up to 50), read a message as plain text (up to 20,000 chars) with recipients and attachments, download a file attachment (up to 50 MB) to `outlook-mail-attachments/`, and read automatic-reply (out-of-office) settings. |
+| `outlook_mail_create_draft` | — | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
+| `outlook_mail_send_message` | `send`, `reply` | yes, sends mail | Send a new plain-text message (optionally with workspace attachments) or reply to sender / everyone (`reply_all`) above the quoted original, honoring reply-to addresses. |
+| `outlook_mail_manage` | `mark_read`, `move`, `set_automatic_replies` | yes | Mark a message read or unread, move a message to a folder, or configure the requester's automatic replies (`disabled`, `alwaysEnabled`, or `scheduled`). |
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
 Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
@@ -16246,7 +16227,7 @@ Messages and replies are plain text, and sent mail is saved in the sending mailb
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook, where the requester sends it.
 
-Every function except the automatic replies ones takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
+Every operation except the automatic-reply actions (`get_automatic_replies`, `set_automatic_replies`) takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
 Exchange permissions on that mailbox decide what works: reading and changing its messages needs access to them, such as Full Access, and sending from it, as a new message or a reply, needs Full Access plus Send As or Send on Behalf.
 With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
 A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
@@ -16265,16 +16246,10 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 
 ## Calendar
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `outlook_calendar_list_calendars` | no | List the requester's calendars, whether the requester can edit each, and which one is the default. |
-| `outlook_calendar_list_events` | no | List events between two moments in the default calendar or another, in start order, up to 50, with attendees and their responses and the online meeting link. |
-| `outlook_calendar_get_event` | no | Read an event with its description as plain text, up to 20,000 characters. |
-| `outlook_calendar_get_free_busy` | no | Look up when up to 20 colleagues, distribution lists, or rooms are busy, with their working hours, to find a time to meet. |
-| `outlook_calendar_create_event` | yes | Create an event, optionally with attendees, a location, a description, and an online meeting; Outlook emails each attendee an invitation. |
-| `outlook_calendar_update_event` | yes | Change an event's subject, start, end, location, or description; attendees of a meeting the requester organizes receive the update. |
-| `outlook_calendar_delete_event` | yes | Delete an event; for a meeting the requester organizes, Outlook sends every attendee a cancellation. |
-| `outlook_calendar_respond_to_event` | yes | Accept, tentatively accept, or decline a meeting invitation, optionally with a comment to the organizer. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `outlook_calendar_read` | `list_calendars`, `list_events`, `get_event`, `get_free_busy` | no | List calendars, list events in a window (up to 50) with attendees and meeting links, read an event description (up to 20,000 chars), and look up free/busy schedules and working hours for up to 20 people or rooms. |
+| `outlook_calendar_write` | `create_event`, `update_event`, `delete_event`, `respond_to_event` | yes | Create, update, or delete an event (sending invitations, updates, or cancellations to attendees), or accept, tentatively accept, or decline a meeting invitation. |
 
 Event times in event results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
@@ -16302,13 +16277,10 @@ Responding to invitations covers only the requester's own invitations, and free/
 
 ## To Do
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_todo_list_lists` | no | List the requester's task lists, including lists shared with them, and whether the requester owns each. |
-| `microsoft_todo_list_tasks` | no | List up to 50 open tasks of one list, or completed ones too when asked, with notes up to 2,000 characters each. |
-| `microsoft_todo_create_task` | yes | Create a task with a title and, optionally, a due date, notes, and importance. |
-| `microsoft_todo_update_task` | yes | Change a task's title, due date, notes, or importance, or mark it completed or not started again. |
-| `microsoft_todo_delete_task` | yes | Delete a task. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_todo_read` | `list_lists`, `list_tasks` | no | List task lists (including shared lists, default Tasks list, and flagged emails) and list up to 50 open or completed tasks with notes up to 2,000 characters. |
+| `microsoft_todo_write` | `create_task`, `update_task`, `delete_task` | yes | Create a task, update its title, due date, notes, importance, or completion status, or delete a task. |
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
 New and changed due dates take a calendar date and become midnight in the `time_zone` the agent passes, which should be the requester's zone and defaults to UTC.
@@ -16318,19 +16290,10 @@ Updating a task's notes replaces them completely.
 
 ## Teams
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_teams_list_teams` | no | List the teams the requester is a member of, and whether each is archived. |
-| `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
-| `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
-| `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
-| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
-| `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
-| `microsoft_teams_get_presence` | no | Read the availability, activity, and status message of up to 20 people. |
-| `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
-| `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
-| `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
-| `microsoft_teams_start_chat` | yes, creates a chat and posts to it | Start a chat with up to 20 people and send its first message. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_teams_read` | `list_teams`, `list_channels`, `list_channel_messages`, `list_channel_message_replies`, `list_chats`, `list_chat_messages`, `get_presence` | no | List teams, channels, top-level channel posts and thread replies, chats and chat messages (up to 50), and availability/status presence for up to 20 people. |
+| `microsoft_teams_send` | `send_channel_message`, `reply_to_channel_message`, `send_chat_message`, `start_chat` | yes, posts to Teams | Post a channel message, reply in a channel thread, send a message in an existing chat, or start a new one-on-one or group chat (up to 20 people) and send its first message. |
 
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
@@ -16349,52 +16312,44 @@ Shared channels from a team the requester is not a member of are not reachable.
 
 ## Teams Meetings
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_meetings_find` | no | Find the Teams meeting behind a join link, with its subject, times, organizer, and expiry. |
-| `microsoft_meetings_list_transcripts` | no | List the transcripts of one meeting, with when each was created and ended. |
-| `microsoft_meetings_get_transcript` | no | Read one transcript as timestamped lines labeled with their speaker, up to 30,000 characters per call. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_meetings_read` | `find`, `list_transcripts`, `get_transcript` | no | Find a Teams meeting by join link (subject, times, organizer, expiry), list its transcripts, and read a transcript as speaker-labeled timestamped lines (up to 30,000 characters per call). |
 
-To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_list_events` or `outlook_calendar_get_event`, finds the meeting, lists its transcripts, and reads one.
+To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_read` (`list_events` or `get_event`), finds the meeting, lists its transcripts, and reads one.
 Transcript lines look like `00:12:03 Alex Doe: text`, timed from the start of transcription, with each speaker's consecutive sentences joined into lines of up to about 2,000 characters.
 A long transcript comes back in chunks with a `next_page_token`; passing it back continues the same transcript, and transcript listings page the same way.
 A recurring meeting series is one meeting, so its listing holds a transcript for each occurrence that was transcribed.
 
 Transcripts exist only for meetings in which someone turned on transcription.
 Microsoft Graph serves them only to the meeting's organizer and the people its calendar invite names, only for meetings scheduled with a calendar event, and not for live events.
-Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_find` reports when a meeting expires.
+Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_read` (`action="find"`) reports when a meeting expires.
 Two Teams administrator settings also govern transcripts: with Graph access to transcripts turned off, listing and reading transcripts return `transcripts_disabled`, and with speaker attribution turned off, reading a transcript returns `speaker_attribution_disabled`.
 
 ## OneNote
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, or those of a team, a site, or a person who shares them, by name, and which one is the default. |
-| `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
-| `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
-| `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
-| `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
-| `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_onenote_read` | `list_notebooks`, `list_sections`, `list_pages`, `get_page` | no | List notebooks (owned, team, site, or shared), top-level sections, and up to 50 pages per section, and read page content as plain text in 30,000-character chunks. |
+| `microsoft_onenote_write` | `create_page`, `append_to_page` | yes | Create a page with a title and plain-text content in a section, or append a plain-text paragraph to an existing page. |
 
 Without `container`, the functions reach the notebooks the requester owns.
-Every function also takes an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_list_teams` (a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_search_sites` or `microsoft_sharepoint_get_site` (`host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
+Both functions also take an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_read` (`action="list_teams"`; a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_read` (`search_sites` or `get_site`, `host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
 A bare id always names a team, so a person is named by sign-in email address and not by id; a container of any other form is refused before any request.
 Results repeat the `container`, and calls on the sections and pages of those notebooks pass it again; `Notes.ReadWrite.All` already covers every notebook the requester can open, so containers need no new consent.
 Sections inside section groups are not listed.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
 Listings and page text return a `next_page_token` while more follows; passing it back with the same container and the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
-Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
+Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_read` (`action="list_notebooks"`), as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
 ## People
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_people_search` | no | Find people in the organization directory by name or by the beginning of their email address, up to 50 results. |
-| `microsoft_people_get_profile` | no | Read one person's profile and their manager. |
-| `microsoft_people_list_direct_reports` | no | List the people who report directly to one person. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_people_read` | `search`, `get_profile`, `list_direct_reports` | no | Search organization directory people by name or email prefix (up to 50), read one person's profile and manager, and list direct reports. |
 
-Agents use these functions to turn a name the requester mentions into a person and an email address for the mail, calendar, and Teams tools.
+Agents use `microsoft_people_read` to turn a name the requester mentions into a person and an email address for the mail, calendar, and Teams tools.
 Each person comes back with their id, name, email address, job title, department, office location, and business phones; mobile phones and other personal fields are never read.
 The email address is the person's primary email address, or their sign-in name when they have none.
 Profile and direct report lookups take a person's id, email address, or sign-in name, or `me` for the requester, so "who is my manager" needs no email address.
@@ -16405,61 +16360,36 @@ Guest accounts cannot search the directory.
 
 ## Approvals For Writes
 
-The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
+The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change.
+Timed approval grants on action-dispatched Microsoft 365 functions are scoped per `(function, action)` pair, so approving one action never grants a different action on the same function:
 
 ```yaml
 tool_approval:
   rules:
-    - match: microsoft_files_replace_file
+    - match: microsoft_files_write
       action: require_approval
-    - match: microsoft_files_upload_file
+    - match: microsoft_sharepoint_write
       action: require_approval
-    - match: microsoft_files_excel_update_range
+    - match: outlook_mail_send_message
       action: require_approval
-    - match: microsoft_sharepoint_create_item
+    - match: outlook_mail_manage
       action: require_approval
-    - match: microsoft_sharepoint_update_item
+    - match: outlook_calendar_write
       action: require_approval
-    - match: outlook_mail_send
+    - match: microsoft_todo_write
       action: require_approval
-    - match: outlook_mail_reply
+    - match: microsoft_teams_send
       action: require_approval
-    - match: outlook_mail_set_automatic_replies
-      action: require_approval
-    - match: outlook_calendar_create_event
-      action: require_approval
-    - match: outlook_calendar_update_event
-      action: require_approval
-    - match: outlook_calendar_delete_event
-      action: require_approval
-    - match: outlook_calendar_respond_to_event
-      action: require_approval
-    - match: microsoft_todo_create_task
-      action: require_approval
-    - match: microsoft_todo_update_task
-      action: require_approval
-    - match: microsoft_todo_delete_task
-      action: require_approval
-    - match: microsoft_teams_send_channel_message
-      action: require_approval
-    - match: microsoft_teams_reply_to_channel_message
-      action: require_approval
-    - match: microsoft_teams_send_chat_message
-      action: require_approval
-    - match: microsoft_teams_start_chat
-      action: require_approval
-    - match: microsoft_onenote_create_page
-      action: require_approval
-    - match: microsoft_onenote_append_to_page
+    - match: microsoft_onenote_write
       action: require_approval
 ```
 
-Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
-The approval cards of both mail functions list every recipient, and a reply is sent only to the recipients its card lists.
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send_message` (both `send` and `reply`), and likewise for `microsoft_teams_send`, whose messages everyone in the channel or chat sees at once.
+The approval cards of `outlook_mail_send_message` list every recipient, and a reply is sent only to the recipients its card lists.
 A card without `mailbox` sends as the requester; with it, the card names the shared mailbox the mail goes out from.
-`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
-Automatic replies answer every sender while they are on, outside the organization too when `external_audience` allows it.
-Every calendar write can email invitations, updates, cancellations, or responses to other people.
+`outlook_mail_create_draft` and mailbox-organization actions on `outlook_mail_manage` (`mark_read`, `move`) change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
+Automatic replies (`outlook_mail_manage` with `action="set_automatic_replies"`) answer every sender while they are on, outside the organization too when `external_audience` allows it.
+Every calendar write (`outlook_calendar_write`) can email invitations, updates, cancellations, or responses to other people.
 
 To give an agent read access only, set `write: false` on the tool.
 
@@ -16576,24 +16506,21 @@ If the Google Calendar connection lacks any required Calendar permission, the to
 
 ## [`google_tasks`]
 
-`google_tasks` works with the connected user's Google Tasks lists.
+`google_tasks` works with the connected user's Google Tasks lists through two risk-scoped functions:
 
-| Function | Behavior |
-| --- | --- |
-| `google_tasks_list_task_lists()` | Returns up to 1,000 task lists with their IDs and titles. |
-| `google_tasks_list_tasks()` | Returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat. Completed tasks, including those completed in Google's own apps, appear only with `show_completed=True`. |
-| `google_tasks_create_task()` | Creates a task with optional notes, due date, and parent task. |
-| `google_tasks_update_task()` | Changes only the fields you pass: title, notes, due date, or completion state. Pass an empty string as `notes` or `due` to remove that field. |
-| `google_tasks_delete_task()` | Deletes one task. Deleting a task assigned from Google Docs or Chat also deletes the original assignment. |
+| Function | Actions | Behavior |
+| --- | --- | --- |
+| `google_tasks_read(action, ...)` | `list_task_lists`, `list_tasks` | Returns up to 1,000 task lists with their IDs and titles, or up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat. Completed tasks, including those completed in Google's own apps, appear only with `show_completed=True`. |
+| `google_tasks_write(action, ...)` | `create`, `update`, `delete` | Creates a task with optional notes, due date, and `parent_task_id`; changes only the fields you pass (`title`, `notes`, `due`, or `completed`, passing `""` as `notes` or `due` to remove that field); or deletes one task (deleting a task assigned from Google Docs or Chat also deletes the original assignment). |
 
-Both list functions return a `nextPageToken` when more results remain.
-Every function uses the user's default list, `@default`, when no `task_list_id` is given.
+Both `google_tasks_read` actions return a `nextPageToken` when more results remain.
+Every action uses the user's default list, `@default`, when no `task_list_id` is given.
 Due dates use `YYYY-MM-DD`, because Google Tasks stores a due day without a time.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_list_task_lists()` and `google_tasks_list_tasks()`. |
-| `manage_tasks` | `boolean` | `no` | `true` | Expose task creation, updates, completion, and deletion. |
+| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_read()` (`list_task_lists` and `list_tasks`). |
+| `manage_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_write()` (`create`, `update`, and `delete`). |
 
 ```yaml
 agents:
@@ -16605,9 +16532,9 @@ agents:
 ```
 
 ```python
-google_tasks_list_tasks()
-google_tasks_create_task("Renew passport", notes="Bring two photos", due="2026-10-15")
-google_tasks_update_task("dGFzay0x", completed=True)
+google_tasks_read(action="list_tasks")
+google_tasks_write(action="create", title="Renew passport", notes="Bring two photos", due="2026-10-15")
+google_tasks_write(action="update", task_id="dGFzay0x", completed=True)
 ```
 
 ## [`cal_com`]
@@ -19097,6 +19024,11 @@ The rest require the primary runtime and cannot run in a worker (`claude_agent`,
 `workflow` runs in the primary process in the same way: it reads only the one source file a run starts from, and declares no file access.
 Its scripts run in a dedicated worker when a worker backend is configured, and never fall back to the host when that backend is down.
 Without a worker backend they run as a child process of the primary, as the primary's operating-system user, only on Linux and only when `defaults.allow_shell_without_worker` is `true` or the sandbox mode is local; that is the operator's existing statement that code may run there ([Workflows](https://docs.mindroom.chat/tools/workflows/#where-the-script-runs)).
+Scheduled `script_check` triggers (`triggers(action="watch_script", ...)`) keep `triggers` at `executes_code=False` so `triggers`-only agents never gain code execution or workspace write authority.
+Authoring a `script_check` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns tracked via `com.mindroom.automation_origin`, event-source watch turns, tool-filtered turns, tool-restricted personas, detached or background-script/workflow contexts, and non-Matrix turns), and the same `workflow_placement` check as `workflow` (dedicated worker when configured, local only under `defaults.allow_shell_without_worker` or explicit local mode, never falling back to the host); `triggers(action="update")` is metadata-only and never accepts `source` or `path`.
+`triggers` registers `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)` so only `watch_script` calls are judged under `start_script` approval rules (failing closed on missing, invalid, or unknown actions and keeping timed approval grants exact-call-only, while leaving other `triggers` actions usable on non-resumable surfaces and voice calls).
+Each tick runs in a short-lived `script_runs` process only after live rechecks of policy, `workflow_placement`, executing-agent capability, live owner membership in the source room, and owner reply authority; ticks enforce `_SCRIPT_CHECK_RESTRICTED_TOOLKITS` plus optional `external_trigger_policy.script_check_allowed_tools` (and live `tool_approval`) rather than an agent's `script.allowed_tools`, block `agent()`, evaluate live `tool_approval` rules and `ToolGate.CONFIRM` non-interactively and fail-closed (never posting approval cards or honoring transient `!auto_approve` windows, and rejecting state commits or event emission if any tool call was denied even when user code catches the error), and wrap emitted payloads inside `<untrusted_event_data>`.
+Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` live solely in the primary-only `script_check_checkpoints` table inside `control_state/reactive_triggers.db` and are redacted from `spec_json`, `triggers(action="list")`, and `/api/rooms/{room_id}/triggers`.
 `terminal` also runs in the primary process, but it only types into and reads the terminals of the agent's shell in its worker, so it declares no file access, and it offers nothing to an agent whose shell runs in the primary.
 It types only for an agent whose `run_shell_command` calls never ask for approval, because approval rules judge a command's text and what text typed into a persistent shell runs depends on what ran there before; any other agent is offered only reading and listing, on every path ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/#agent-typing)).
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools, path tools under `file_access: unrestricted`, or `script` under a local `MINDROOM_SANDBOX_EXECUTION_MODE`, which runs scripts in the primary process, because those tools can then read runtime secrets the worker was meant to keep away.
@@ -22658,7 +22590,7 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
@@ -22714,7 +22646,7 @@ external_trigger_policy:
 | Field | Type | Default | Valid values | Meaning |
 | --- | --- | --- | --- | --- |
 | `enabled` | bool | `true` | | Master switch. When `false`, every direct trigger, callback, and shared event-source endpoint answers not found, `callback_manager` refuses to mint callbacks, and reactive trigger delivery is disabled. |
-| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
+| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
 | `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new direct signed triggers that do not set their own window. |
 | `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any direct trigger's replay window. |
 | `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new direct triggers that do not set their own. |
@@ -22724,6 +22656,11 @@ external_trigger_policy:
 | `max_fires_per_hour` | int | `60` | 1 to 600 | Cap on the per-rule `max_fires_per_hour` rate limit for reactive triggers. |
 | `admin_users` | list of Matrix IDs | `[]` | | Trigger-only administrators. |
 | `event_sources` | mapping | `{}` | Keys matching `^[A-Za-z0-9_-]{1,64}$` | Named [shared external event sources](#shared-external-event-sources) served at `POST /api/event-sources/{source_id}`. |
+| `script_check_enabled` | bool | `true` | | Enables or disables scheduled `script_check` triggers (`watch_script`). |
+| `min_script_check_poll_interval_seconds` | int | `60` | 30 to 3600 | Minimum allowed `poll_interval_seconds` for `script_check` triggers. |
+| `max_script_checks_per_owner` | int | `10` | 1 to 200 | Maximum active `script_check` triggers one owner may hold (within `max_reactive_triggers_per_owner`). |
+| `script_check_timeout_seconds` | int | `30` | 5 to 120 | Maximum wall-clock runtime per `script_check` tick. |
+| `script_check_allowed_tools` | list of str or null | `null` | Non-empty toolkit names when set | Optional toolkit allowlist restricting which toolkits `script_check` ticks may call (in addition to the built-in restricted toolkit blocklist). |
 
 Each default must not exceed its matching cap.
 Lowering a cap also limits existing triggers.
@@ -22735,12 +22672,13 @@ Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
 To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers`.
+`watch_script` calls are also judged under `start_script` approval rules via `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers` actions (including in voice calls and other non-resumable surfaces).
 
 ## Reactive Triggers
 
 Reactive triggers run inside the primary runtime's unified pipeline:
 
-1. **Source adapter** observes new Matrix room messages, `com.mindroom.thread.tags` state transitions, or incoming shared external events.
+1. **Source adapter** observes new Matrix room messages, `com.mindroom.thread.tags` state transitions, GitHub PR polls/webhooks, scheduled `script_check` ticks, or incoming shared external events.
 2. **Deterministic filter** checks room, thread, sender aliases, regex pattern, tag transition, or structured event fields with zero LLM cost.
 3. **Optional tool-less triage** evaluates plain-English criteria using a cheap classifier or model before waking any agent.
 4. **Atomic SQLite claim** enforces `UNIQUE(trigger_id, dedupe_key)` idempotency, cooldown, hourly rate limit, expiry, and `once=True` disablement inside `<control_state>/reactive_triggers.db`.
@@ -22833,9 +22771,69 @@ The requester must be listed in that source's `subscribers` (or be a trigger/pla
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
+### Scheduled Python checks (`action="watch_script"`)
+
+`triggers(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
+On each due tick, MindRoom runs a fresh short-lived `script_runs` process that calls permitted owner-scoped tools directly with persisted JSON `state` across ticks.
+When `check()` returns `None`, updated `state` is saved and **zero LLM tokens** are spent; when `check()` returns a `dict`, it enters the reactive trigger pipeline (optional cheap triage, deduplication, rate limits, cooldown, expiry, `once`, and `reopen_on_fire`).
+
+```python
+import json
+
+
+def check():
+    page = json.loads(tool("gmail", "gmail_read", action="search_emails", query="from:alice is:unread"))
+    msgs = page["emails"]
+    seen = set(state.get("seen_ids", []))
+    new = [m["id"] for m in msgs if m["id"] not in seen]
+    state.set("seen_ids", [m["id"] for m in msgs])
+    return {"items": new} if new else None  # None = 0 LLM tokens
+```
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `prompt` | required | Instruction delivered to the woken agent when `check()` returns an event dict (max 4,000 chars). |
+| `source` | none | Inline Python source defining top-level synchronous `def check():` (mutually exclusive with `path`; UTF-8, max 64 KiB). |
+| `path` | none | Workspace file path to snapshot once at create time (mutually exclusive with `source`; max 64 KiB, never re-read from disk on ticks). |
+| `poll_interval_seconds` | `300` | Seconds between ticks, clamped to `[external_trigger_policy.min_script_check_poll_interval_seconds, 86400]`. |
+| `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage) (max 1,000 chars). |
+| `triage_model` | none | Configured model alias from `models` when `triage_provider="llm"`. |
+| `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
+| `triage_threshold` | none (`0.8` for classifiers) | Confidence threshold for `"typesafe"` or `"openai_decisions"`. |
+| `target_agent` | current agent | Agent or team to wake (does not change which agent's credentials run `check()`). |
+| `target_room_id` | current room | Room where the wake message is posted. |
+| `target_thread_id` | current thread in current room, else timeline | Fixed thread root ID, `"room"` for the current room timeline, or omitted (mutually exclusive with `new_thread`). |
+| `new_thread` | `false` | Open a fresh thread per firing (or per `thread_key`). |
+| `thread_key` | none | Optional grouping key (requires `new_thread=True`). |
+| `reopen_on_fire` | `false` | When `true`, removes the `resolved` thread tag before delivering the wake message. |
+| `once` | `false` | Disable automatically after one firing. |
+| `max_fires_per_hour` | `10` | Per-rule hourly cap, bounded by `external_trigger_policy.max_fires_per_hour`. |
+| `cooldown_seconds` | `0` | Minimum seconds between consecutive firings. |
+| `expires_in_hours` | none | Optional lifetime in hours (positive, up to `8760`). |
+| `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
+| `description` | `""` | Human-readable purpose. |
+
+#### `check()` authoring contract
+
+- **Entry point:** Provide exactly one of `source` or `path` (`<= 64 KiB` UTF-8). The module must parse cleanly and define a top-level synchronous `def check():` taking no required or positional arguments (`async def check()` is rejected).
+- **Pre-bound globals:**
+  - `tool(toolkit_name, function_name, **arguments)` invokes an owner-scoped MindRoom tool through the script gateway. Calls during module import/load outside `check()` are rejected.
+  - `state` persists a strict finite-JSON object (`<= 32 KiB` UTF-8, string keys) across ticks via `state.get(key, default=None)`, `state.set(key, value)`, `state.delete(key)`, `state.pop(key, default=...)`, `state.clear()`, and `state.keys()`. Mutations during module load outside `check()` are rejected.
+  - `agent(...)` is blocked and raises `RuntimeError`; return a `dict` from `check()` to wake the target agent (or attach optional cheap triage).
+- **Return values:**
+  - `None` — quiet tick (**0 LLM tokens**); commits any updated `state`.
+  - `dict` — emits one event with fixed `kind="script_check.match"` (strict finite JSON, `<= 64 KiB` serialized) and commits updated `state`. Optional envelope keys are `title` (`<= 500` chars), `summary` (`<= 2,000` chars), `text` (`<= 8,000` chars), `actor` (`<= 256` chars), `dedupe_key` (`<= 256` chars; hashed into a stable deduplication ID across ticks), and `data` (`dict`). Plain dicts become `event.data`; combining an explicit `data` key with extra non-envelope keys is rejected.
+  - Any other return type (`bool`, `int`, `str`, `list`) or uncaught exception fails the tick without committing `state` and applies exponential backoff (capped at 1 hour).
+
+#### Guardrails and security
+
+- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `start_script` approval rules via `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `start_workflow` may require approval (grant `script` or allow unapproved `start_workflow`).
+- **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
+- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
+
 ### Cheap tool-less triage
 
-When `triage_instructions` is set on `watch_room` or `subscribe_event`, MindRoom evaluates the event through the judgment subsystem before claiming or firing the rule:
+When `triage_instructions` is set on `watch_room`, `subscribe_event`, or `watch_script`, MindRoom evaluates the event through the judgment subsystem before claiming or firing the rule:
 
 - **`llm`**: calls a configured model alias (`triage_model`) with no tools attached. `triage_threshold` is not used.
 - **`typesafe`**: calls the TypeSafe classifier with `triage_threshold` (default `0.8`). `triage_model` must be omitted.
@@ -23081,12 +23079,12 @@ Triggers never create rooms or make agents join rooms.
 The `triggers(action=...)` tool provides unified lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
 
 - `triggers(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
-- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
+- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, `update` is metadata-only (delete and call `watch_script` to replace code) and bumps the checkpoint revision atomically when `poll_interval_seconds` changes. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
 - `triggers(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
 - `triggers(action="delete", trigger_id=...)` removes a direct or reactive trigger.
 - `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
-- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
 ### Watching GitHub Pull Requests (`action="watch_pr"`)
 
@@ -23183,6 +23181,7 @@ A trigger delivers only when all of these hold:
 - The target agent or team is running and joined to the target room.
 - For reactive `room_message` watches, the owner is also still joined to the watched source room and permitted to hear the sender.
 - For reactive `external_event` subscriptions, the owner is still authorized in the source's `subscribers` (or is an administrator).
+- For reactive `script_check` triggers, `external_trigger_policy.script_check_enabled` is true, the executing agent still has `triggers` plus `script` or `workflow`, `workflow_placement` permits execution, and the owner is still authorized for the executing agent in the source room.
 
 The triggered turn runs on behalf of the trigger owner.
 For a private agent (`private.per`), the trigger wakes the owner's private instance, so a trigger created by `@alice:example.org` uses Alice's private state.

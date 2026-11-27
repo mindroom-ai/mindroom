@@ -10,6 +10,7 @@ from mindroom.attachments.ids import merge_attachment_ids
 from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    AUTOMATION_ORIGIN_KEY,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -27,6 +28,7 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    automation_origin_from_content,
     content_owns_per_fire_thread_root,
     source_kind_from_content,
 )
@@ -185,6 +187,7 @@ def _router_handoff_extra_content(
     routed_extra_content = dict(extra_content) if extra_content is not None else {}
     routed_extra_content.pop(PER_FIRE_THREAD_ROOT_EVENT_ID_KEY, None)
     routed_extra_content.pop(PER_FIRE_THREAD_ROOT_KEY, None)
+    routed_extra_content.pop(AUTOMATION_ORIGIN_KEY, None)
     inherited_original_sender = routed_extra_content.get(ORIGINAL_SENDER_KEY)
     inherited_original_sender = inherited_original_sender if isinstance(inherited_original_sender, str) else None
     handoff_original_sender = original_sender_for_router_relay(
@@ -208,6 +211,8 @@ def _router_handoff_extra_content(
         routed_extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
         if thread_event_id is not None:
             routed_extra_content[PER_FIRE_THREAD_ROOT_EVENT_ID_KEY] = thread_event_id
+    if (automation_origin := automation_origin_from_content(event_content)) is not None:
+        routed_extra_content[AUTOMATION_ORIGIN_KEY] = automation_origin
     if source_kind_from_content(event_content) == SILENT_SCHEDULE_SOURCE_KIND:
         # A silent schedule's route stays one, so its responder runs it as a trigger that named it: quiet, for
         # whoever the task runs as, and in reply to nothing where the hidden trigger stands in the room.

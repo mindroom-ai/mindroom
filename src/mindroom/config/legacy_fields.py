@@ -355,30 +355,37 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 2 native toolkits (calculator, duckduckgo, googlesearch,
-#   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github,
-#   google_drive, google_sheets, homeassistant, including prefixed secondary Google Workspace plugin copies),
-#   Wave 4 native toolkits (exa, trafilatura, brightdata, oxylabs, browserbase, spider),
-#   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
-#   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
-#   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
-#   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
+#   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github, google_drive, google_sheets,
+#   homeassistant), Wave 4 native toolkits (exa, trafilatura, brightdata, oxylabs, browserbase, spider), Wave 5 native
+#   toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift,
+#   neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona), Wave 7 comms toolkits (email,
+#   twilio, discord, telegram, whatsapp, webex, zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup,
+#   trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits
+#   (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote,
+#   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, and Google Docs /
+#   Google Tasks (google_docs, google_tasks, including prefixed secondary Google Workspace plugin copies for all Google
+#   Workspace toolkits) previously exposed individual per-operation function names that could appear in
 #   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
-#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
+#   workflow/thread_tags: v2026.11.658; google_docs/google_tasks: v2026.11.659; Wave 2/4: v2026.11.663); replacement:
+#   unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments/Wave-2/Wave-4 function is decided by a wildcard
-#   approval script or any retired function's effective decision differs from the replacement's effective decision
-#   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
-#   consolidated toolkit entry, directing operators to the replacement function alongside per-action `enable_*`
-#   settings or `tool_approval.rules` so permissions are not broadened.
+#   reject tool_approval.rules when a retired skills/attachments/Microsoft 365/workflow/thread_tags/Wave-2/Wave-4
+#   function is decided by a wildcard approval script or any retired function's effective decision differs from the
+#   replacement's effective decision (regardless of other toolkits); also reject include_tools or exclude_tools naming a
+#   retired function on a consolidated toolkit entry, directing operators to the replacement function alongside
+#   per-action `enable_*` settings (where available) or `tool_approval.rules` so permissions are not broadened.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_microsoft_365_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_outlook_mail_send_and_reply_migration_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
@@ -458,6 +465,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "workflow": {
+        "start_workflow": "workflow",
+        "get_workflow": "workflow",
+        "cancel_workflow": "workflow",
+        "resume_workflow": "workflow",
+        "list_workflow_runs": "workflow",
+        "save_workflow": "workflow",
+    },
+    "thread_tags": {
+        "tag_thread": "thread_tags",
+        "untag_thread": "thread_tags",
+        "list_thread_tags": "thread_tags",
     },
     "gmail": {
         "get_latest_emails": "gmail_read",
@@ -555,12 +575,25 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "google_drive_move_file": "google_drive_write",
         "google_drive_trash_file": "google_drive_write",
     },
+    "google_docs": {
+        "google_docs_create_document": "google_docs_write",
+        "google_docs_insert_text": "google_docs_write",
+        "google_docs_replace_text": "google_docs_write",
+        "google_docs_batch_update": "google_docs_write",
+    },
     "google_sheets": {
         "read_sheet": "google_sheets_read",
         "create_sheet": "google_sheets_write",
         "update_sheet": "google_sheets_write",
         "batch_update_sheet": "google_sheets_write",
         "create_duplicate_sheet": "google_sheets_write",
+    },
+    "google_tasks": {
+        "google_tasks_list_task_lists": "google_tasks_read",
+        "google_tasks_list_tasks": "google_tasks_read",
+        "google_tasks_create_task": "google_tasks_write",
+        "google_tasks_update_task": "google_tasks_write",
+        "google_tasks_delete_task": "google_tasks_write",
     },
     "homeassistant": {
         "list_entities": "homeassistant_read",
@@ -945,6 +978,87 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "add_memory": "mem0_add",
         "delete_all_memories": "mem0_delete_all",
     },
+    "microsoft_teams": {
+        "microsoft_teams_list_teams": "microsoft_teams_read",
+        "microsoft_teams_list_channels": "microsoft_teams_read",
+        "microsoft_teams_list_channel_messages": "microsoft_teams_read",
+        "microsoft_teams_list_channel_message_replies": "microsoft_teams_read",
+        "microsoft_teams_list_chats": "microsoft_teams_read",
+        "microsoft_teams_list_chat_messages": "microsoft_teams_read",
+        "microsoft_teams_get_presence": "microsoft_teams_read",
+        "microsoft_teams_send_channel_message": "microsoft_teams_send",
+        "microsoft_teams_reply_to_channel_message": "microsoft_teams_send",
+        "microsoft_teams_send_chat_message": "microsoft_teams_send",
+        "microsoft_teams_start_chat": "microsoft_teams_send",
+    },
+    "microsoft_files": {
+        "microsoft_files_search": "microsoft_files_read",
+        "microsoft_files_list_folder": "microsoft_files_read",
+        "microsoft_files_get_file": "microsoft_files_read",
+        "microsoft_files_download_file": "microsoft_files_read",
+        "microsoft_files_excel_list_worksheets": "microsoft_files_read",
+        "microsoft_files_excel_read_range": "microsoft_files_read",
+        "microsoft_files_replace_file": "microsoft_files_write",
+        "microsoft_files_upload_file": "microsoft_files_write",
+        "microsoft_files_excel_update_range": "microsoft_files_write",
+    },
+    "microsoft_sharepoint": {
+        "microsoft_sharepoint_search_sites": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_site": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_lists": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_list": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_items": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_pages": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_page": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_create_item": "microsoft_sharepoint_write",
+        "microsoft_sharepoint_update_item": "microsoft_sharepoint_write",
+    },
+    "microsoft_onenote": {
+        "microsoft_onenote_list_notebooks": "microsoft_onenote_read",
+        "microsoft_onenote_list_sections": "microsoft_onenote_read",
+        "microsoft_onenote_list_pages": "microsoft_onenote_read",
+        "microsoft_onenote_get_page": "microsoft_onenote_read",
+        "microsoft_onenote_create_page": "microsoft_onenote_write",
+        "microsoft_onenote_append_to_page": "microsoft_onenote_write",
+    },
+    "microsoft_todo": {
+        "microsoft_todo_list_lists": "microsoft_todo_read",
+        "microsoft_todo_list_tasks": "microsoft_todo_read",
+        "microsoft_todo_create_task": "microsoft_todo_write",
+        "microsoft_todo_update_task": "microsoft_todo_write",
+        "microsoft_todo_delete_task": "microsoft_todo_write",
+    },
+    "microsoft_meetings": {
+        "microsoft_meetings_find": "microsoft_meetings_read",
+        "microsoft_meetings_list_transcripts": "microsoft_meetings_read",
+        "microsoft_meetings_get_transcript": "microsoft_meetings_read",
+    },
+    "microsoft_people": {
+        "microsoft_people_search": "microsoft_people_read",
+        "microsoft_people_get_profile": "microsoft_people_read",
+        "microsoft_people_list_direct_reports": "microsoft_people_read",
+    },
+    "outlook_mail": {
+        "outlook_mail_search": "outlook_mail_read",
+        "outlook_mail_get_message": "outlook_mail_read",
+        "outlook_mail_download_attachment": "outlook_mail_read",
+        "outlook_mail_get_automatic_replies": "outlook_mail_read",
+        "outlook_mail_send": "outlook_mail_send_message",
+        "outlook_mail_reply": "outlook_mail_send_message",
+        "outlook_mail_mark_read": "outlook_mail_manage",
+        "outlook_mail_move": "outlook_mail_manage",
+        "outlook_mail_set_automatic_replies": "outlook_mail_manage",
+    },
+    "outlook_calendar": {
+        "outlook_calendar_list_calendars": "outlook_calendar_read",
+        "outlook_calendar_list_events": "outlook_calendar_read",
+        "outlook_calendar_get_event": "outlook_calendar_read",
+        "outlook_calendar_get_free_busy": "outlook_calendar_read",
+        "outlook_calendar_create_event": "outlook_calendar_write",
+        "outlook_calendar_update_event": "outlook_calendar_write",
+        "outlook_calendar_delete_event": "outlook_calendar_write",
+        "outlook_calendar_respond_to_event": "outlook_calendar_write",
+    },
     "zep": {
         "get_zep_memory": "zep_read",
         "search_zep_memory": "zep_read",
@@ -977,6 +1091,17 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
         "oxylabs",
         "browserbase",
         "spider",
+        "workflow",
+        "thread_tags",
+        "outlook_mail",
+        "outlook_calendar",
+        "microsoft_teams",
+        "microsoft_files",
+        "microsoft_sharepoint",
+        "microsoft_onenote",
+        "microsoft_todo",
+        "microsoft_meetings",
+        "microsoft_people",
     },
 )
 
@@ -1305,19 +1430,20 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
-#   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
-# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
-#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
-#   differs from its replacement's effective decision.
+#   unified function is `workflow`.
+# Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function is decided by an approval script or
+#   its effective approval decision differs from `workflow`'s effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
-    "run_workflow": ("start_workflow", "resume_workflow"),
-    "create_workflow": ("save_workflow",),
-    "update_workflow": ("save_workflow",),
-    "get_workflow_run": ("get_workflow",),
-    "list_workflows": ("list_workflow_runs",),
+    "run_workflow": ("workflow",),
+    "create_workflow": ("workflow",),
+    "update_workflow": ("workflow",),
+    "get_workflow_run": ("workflow",),
+    "list_workflows": ("workflow",),
 }
 
 
@@ -1332,4 +1458,5 @@ def retired_dynamic_workflow_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=True,
     )

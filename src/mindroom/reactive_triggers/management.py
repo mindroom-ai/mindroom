@@ -155,6 +155,7 @@ def set_trigger_enabled_sync(
     caps = {
         "max_per_owner": pol.max_reactive_triggers_per_owner,
         "max_github_pr_per_owner": pol.max_github_pr_watches_per_owner,
+        "max_script_check_per_owner": pol.max_script_checks_per_owner,
     }
     updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=record.rule_uid, **caps)
     if updated is None:

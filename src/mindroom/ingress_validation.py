@@ -23,6 +23,8 @@ from mindroom.contacts.turns import contact_admission, contact_room
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    automation_origin_from_content,
+    is_automation_source_kind,
     source_kind_allows_self_authored_ingress,
     source_kind_allows_trusted_original_sender,
     source_kind_from_content,
@@ -196,6 +198,11 @@ class IngressValidator:
             and not _is_falling_back_reply(content)
             else None
         )
+        automation_origin = (
+            resolved_source_kind
+            if is_automation_source_kind(resolved_source_kind)
+            else automation_origin_from_content(trusted_content)
+        )
         return IngressFacts(
             physical_sender=sender,
             source_kind=resolved_source_kind,
@@ -204,6 +211,7 @@ class IngressValidator:
             original_sender_is_human=original_sender_is_human,
             acting_requester_id=acting_requester_id,
             hook_source=_trusted_hook_source(trusted_content),
+            automation_origin=automation_origin,
             message_received_depth=_trusted_message_received_depth(trusted_content),
             routed_event_ids=routed_event_ids,
             discovery_event_id=(routed_event_ids[-1] if routed_event_ids else None)

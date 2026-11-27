@@ -52,15 +52,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_files_search",
-        "microsoft_files_list_folder",
-        "microsoft_files_get_file",
-        "microsoft_files_download_file",
-        "microsoft_files_replace_file",
-        "microsoft_files_upload_file",
-        "microsoft_files_excel_list_worksheets",
-        "microsoft_files_excel_read_range",
-        "microsoft_files_excel_update_range",
+        "microsoft_files_read",
+        "microsoft_files_write",
+    ),
+    action_scoped_grants=(
+        "microsoft_files_read",
+        "microsoft_files_write",
     ),
 )
 def microsoft_files_tools() -> type[MicrosoftFilesTools]:

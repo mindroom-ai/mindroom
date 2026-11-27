@@ -81,13 +81,13 @@ agents:
 
 | Option | Tool | Type | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges; with `false`, those functions are not offered. |
-| `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values; with `false`, those functions are not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies; with `false`, those functions are not offered. |
-| `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events; with `false`, those functions are not offered. |
-| `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks; with `false`, those functions are not offered. |
-| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats; with `false`, those functions are not offered. |
-| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages; with `false`, those functions are not offered. |
+| `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges (`microsoft_files_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values (`microsoft_sharepoint_write`); with `false`, that function is not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies (`outlook_mail_create_draft`, `outlook_mail_send_message`, `outlook_mail_manage`); with `false`, those functions are not offered. |
+| `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events (`outlook_calendar_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks (`microsoft_todo_write`); with `false`, that function is not offered. |
+| `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats (`microsoft_teams_send`); with `false`, that function is not offered. |
+| `write` | `microsoft_onenote` | `boolean` | `true` | Allows creating pages and appending text to pages (`microsoft_onenote_write`); with `false`, that function is not offered. |
 
 The scopes stay the same with `write: false`, so turning writes back on does not need new consent.
 `microsoft_meetings` and `microsoft_people` only read, so they have no `write` option.
@@ -105,17 +105,10 @@ Microsoft ends a connection that has not been used for 90 days, and the requeste
 
 ## Files
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_files_search` | no | Search the OneDrive and SharePoint files the requester can open, by name and content, up to 50 results. |
-| `microsoft_files_list_folder` | no | List a folder's files and folders, or the requester's OneDrive root, up to 200 entries. |
-| `microsoft_files_get_file` | no | Read a file's details, including its `etag`, web link, size, and last editor. |
-| `microsoft_files_download_file` | no | Save a file, up to 100 MB, into the workspace's `microsoft-files-downloads/` directory. |
-| `microsoft_files_replace_file` | yes | Replace a file's contents with a workspace file, up to 250 MB, given the `etag` the edit started from. |
-| `microsoft_files_upload_file` | yes | Upload a workspace file, up to 250 MB, as a new file in a folder or the requester's OneDrive root. |
-| `microsoft_files_excel_list_worksheets` | no | List the worksheets of an Excel workbook. |
-| `microsoft_files_excel_read_range` | no | Read a worksheet range, or its used range, up to 10,000 cells. |
-| `microsoft_files_excel_update_range` | yes | Write values or formulas into a worksheet range, up to 10,000 cells. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_files_read` | `search`, `list_folder`, `get_file`, `download_file`, `excel_list_worksheets`, `excel_read_range` | no | Search accessible OneDrive/SharePoint files (up to 50), list folders (up to 200), inspect metadata (`etag`, `web_url`, size, last editor), download files (up to 100 MB) to `microsoft-files-downloads/`, list Excel worksheets, and read worksheet ranges (up to 10,000 cells). |
+| `microsoft_files_write` | `replace_file`, `upload_file`, `excel_update_range` | yes | Replace an existing file (up to 250 MB, checked against `etag`), upload a new workspace file (up to 250 MB), or write values/formulas into an Excel range (up to 10,000 cells). |
 
 Functions name a file or folder by its Graph item path, `/drives/{drive-id}/items/{item-id}`, which search, listing, and details return, or by a OneDrive or SharePoint link the requester can open.
 Replacing a file, uploading into a folder, and writing a range also take the target's `web_url` from its details, download, or folder listing (search results show another form) as `expected_web_url`, so an approval card shows where the write lands, and fail with `target_mismatch`, naming the target's `web_url`, when it differs.
@@ -126,7 +119,7 @@ The replace then fails with `etag_mismatch` if someone changed the file in the m
 A later download of the same name overwrites the copy in `microsoft-files-downloads/`.
 Uploads never overwrite an existing file; a name that already exists returns `name_conflict`.
 
-Excel functions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
+Excel actions work on `.xlsx` workbooks in OneDrive for work or school and SharePoint.
 They take a worksheet name and an address such as `B2` or `A1:C10` without a worksheet prefix, and written values must have the shape of the address.
 A written string that starts with `=` becomes a formula.
 
@@ -135,41 +128,28 @@ Search and folder listings return a `next_page_token` while more results exist; 
 
 ## SharePoint
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_sharepoint_search_sites` | no | Search the SharePoint sites the requester can open by keyword. |
-| `microsoft_sharepoint_get_site` | no | Get a site from its address, such as `https://contoso.sharepoint.com/sites/team`. |
-| `microsoft_sharepoint_list_lists` | no | List a site's lists and document libraries, leaving out hidden and system lists. |
-| `microsoft_sharepoint_get_list` | no | Read a list with its columns: internal name, display name, type, and whether each is required or read-only. |
-| `microsoft_sharepoint_list_items` | no | List up to 50 items of a list with their column values, each text value up to 4,000 characters. |
-| `microsoft_sharepoint_create_item` | yes | Add an item to a list with the given column values. |
-| `microsoft_sharepoint_update_item` | yes | Change column values of a list item; columns not given stay unchanged. |
-| `microsoft_sharepoint_list_pages` | no | List a site's pages and news posts. |
-| `microsoft_sharepoint_get_page` | no | Read a page as plain text, its title and then its text web parts in layout order, in chunks of up to 30,000 characters. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_sharepoint_read` | `search_sites`, `get_site`, `list_lists`, `get_list`, `list_items`, `list_pages`, `get_page` | no | Search SharePoint sites, look up a site by URL, list non-hidden lists and columns (internal/display name, type, required/read-only), list up to 50 items (text capped at 4,000 chars), list site pages/news posts, and read a page as plain text in 30,000-character chunks. |
+| `microsoft_sharepoint_write` | `create_item`, `update_item` | yes | Add a new list item or update column values on an existing list item (omitted columns stay unchanged). |
 
 The tool covers sites, lists, list items, and pages; files and the files in document libraries stay with `microsoft_files`.
-List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_get_list` reports next to the display name.
+List items take and return column values keyed by each column's internal name, which `microsoft_sharepoint_read` (`action="get_list"`) reports next to the display name.
 A lookup or person column is written as its name plus `LookupId`, such as `OwnerLookupId`, with the lookup ID.
 A multi-value column takes a list, together with `<name>@odata.type` set to `Collection(Edm.String)` for text or `Collection(Edm.Int32)` for lookup IDs.
-Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_list_lists` or `microsoft_sharepoint_get_list` as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
+Adding and changing items also take the list's `web_url` from `microsoft_sharepoint_read` (`list_lists` or `get_list`) as `expected_web_url`, so an approval card shows which list the write lands in, and fail with `target_mismatch`, naming the list's `web_url`, when it differs.
 Site addresses must be the site itself, without a page, list, or library path after it.
 Page text leaves out web parts that are not text, such as image or embedded document parts, and images inside text show as `[image]`.
 Site, list, item, and page listings, and long pages, return a `next_page_token` while more exists; passing it back continues the same listing or page.
 
 ## Mail
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `outlook_mail_search` | no | List messages newest first, in one folder or across the mailbox, optionally matching an Outlook search query, up to 50 results. |
-| `outlook_mail_get_message` | no | Read a message as plain text, up to 20,000 characters, with its recipients and attachment list. |
-| `outlook_mail_download_attachment` | no | Save a file attachment, up to 50 MB, into the workspace's `outlook-mail-attachments/` directory. |
-| `outlook_mail_create_draft` | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
-| `outlook_mail_send` | yes, sends mail | Send a new plain-text message at once, optionally with workspace files attached. |
-| `outlook_mail_reply` | yes, sends mail | Reply to the sender, or to everyone with `reply_all`, above the quoted original; the original's reply-to addresses, when set, take the sender's place. |
-| `outlook_mail_mark_read` | yes | Mark a message read or unread. |
-| `outlook_mail_move` | yes | Move a message to a folder. |
-| `outlook_mail_get_automatic_replies` | no | Read whether the requester's automatic replies (out of office) are off, on, or scheduled, with their period and messages. |
-| `outlook_mail_set_automatic_replies` | yes | Turn the requester's automatic replies off, on, or on for a period, and set the messages for people inside and outside the organization. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `outlook_mail_read` | `search`, `get_message`, `download_attachment`, `get_automatic_replies` | no | List/search messages newest first (up to 50), read a message as plain text (up to 20,000 chars) with recipients and attachments, download a file attachment (up to 50 MB) to `outlook-mail-attachments/`, and read automatic-reply (out-of-office) settings. |
+| `outlook_mail_create_draft` | — | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
+| `outlook_mail_send_message` | `send`, `reply` | yes, sends mail | Send a new plain-text message (optionally with workspace attachments) or reply to sender / everyone (`reply_all`) above the quoted original, honoring reply-to addresses. |
+| `outlook_mail_manage` | `mark_read`, `move`, `set_automatic_replies` | yes | Mark a message read or unread, move a message to a folder, or configure the requester's automatic replies (`disabled`, `alwaysEnabled`, or `scheduled`). |
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
 Search returns a `next_page_token` while more messages exist; passing it back continues the same listing or search.
@@ -179,7 +159,7 @@ Messages and replies are plain text, and sent mail is saved in the sending mailb
 A new message takes at most 50 email addresses across To and Cc.
 To review a message before it goes out, ask for a draft; its `web_link` opens it in Outlook, where the requester sends it.
 
-Every function except the automatic replies ones takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
+Every operation except the automatic-reply actions (`get_automatic_replies`, `set_automatic_replies`) takes an optional `mailbox`: the email address of a shared mailbox, or of a person who gave the requester access to their mailbox, to act in instead of the requester's own.
 Exchange permissions on that mailbox decide what works: reading and changing its messages needs access to them, such as Full Access, and sending from it, as a new message or a reply, needs Full Access plus Send As or Send on Behalf.
 With Send As, recipients see mail from the mailbox itself; with Send on Behalf, they see that the requester sent it on the mailbox's behalf.
 A missing permission fails with `forbidden`, and Microsoft Graph cannot list which mailboxes a requester may open.
@@ -198,16 +178,10 @@ A later download of the same attachment name overwrites the copy in `outlook-mai
 
 ## Calendar
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `outlook_calendar_list_calendars` | no | List the requester's calendars, whether the requester can edit each, and which one is the default. |
-| `outlook_calendar_list_events` | no | List events between two moments in the default calendar or another, in start order, up to 50, with attendees and their responses and the online meeting link. |
-| `outlook_calendar_get_event` | no | Read an event with its description as plain text, up to 20,000 characters. |
-| `outlook_calendar_get_free_busy` | no | Look up when up to 20 colleagues, distribution lists, or rooms are busy, with their working hours, to find a time to meet. |
-| `outlook_calendar_create_event` | yes | Create an event, optionally with attendees, a location, a description, and an online meeting; Outlook emails each attendee an invitation. |
-| `outlook_calendar_update_event` | yes | Change an event's subject, start, end, location, or description; attendees of a meeting the requester organizes receive the update. |
-| `outlook_calendar_delete_event` | yes | Delete an event; for a meeting the requester organizes, Outlook sends every attendee a cancellation. |
-| `outlook_calendar_respond_to_event` | yes | Accept, tentatively accept, or decline a meeting invitation, optionally with a comment to the organizer. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `outlook_calendar_read` | `list_calendars`, `list_events`, `get_event`, `get_free_busy` | no | List calendars, list events in a window (up to 50) with attendees and meeting links, read an event description (up to 20,000 chars), and look up free/busy schedules and working hours for up to 20 people or rooms. |
+| `outlook_calendar_write` | `create_event`, `update_event`, `delete_event`, `respond_to_event` | yes | Create, update, or delete an event (sending invitations, updates, or cancellations to attendees), or accept, tentatively accept, or decline a meeting invitation. |
 
 Event times in event results are in UTC, and the agent converts them to the requester's time zone.
 A listing window may span at most 366 days.
@@ -235,13 +209,10 @@ Responding to invitations covers only the requester's own invitations, and free/
 
 ## To Do
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_todo_list_lists` | no | List the requester's task lists, including lists shared with them, and whether the requester owns each. |
-| `microsoft_todo_list_tasks` | no | List up to 50 open tasks of one list, or completed ones too when asked, with notes up to 2,000 characters each. |
-| `microsoft_todo_create_task` | yes | Create a task with a title and, optionally, a due date, notes, and importance. |
-| `microsoft_todo_update_task` | yes | Change a task's title, due date, notes, or importance, or mark it completed or not started again. |
-| `microsoft_todo_delete_task` | yes | Delete a task. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_todo_read` | `list_lists`, `list_tasks` | no | List task lists (including shared lists, default Tasks list, and flagged emails) and list up to 50 open or completed tasks with notes up to 2,000 characters. |
+| `microsoft_todo_write` | `create_task`, `update_task`, `delete_task` | yes | Create a task, update its title, due date, notes, importance, or completion status, or delete a task. |
 
 The lists include the requester's default Tasks list and the list of flagged Outlook messages.
 New and changed due dates take a calendar date and become midnight in the `time_zone` the agent passes, which should be the requester's zone and defaults to UTC.
@@ -251,19 +222,10 @@ Updating a task's notes replaces them completely.
 
 ## Teams
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_teams_list_teams` | no | List the teams the requester is a member of, and whether each is archived. |
-| `microsoft_teams_list_channels` | no | List the channels of one team that the requester can see, and whether each is archived. |
-| `microsoft_teams_list_channel_messages` | no | List up to 50 top-level posts of one channel, without their replies, most recently active thread first. |
-| `microsoft_teams_list_channel_message_replies` | no | List up to 50 replies in the thread of one channel post. |
-| `microsoft_teams_list_chats` | no | List up to 50 of the requester's one-on-one, group, and meeting chats, with member names and email addresses, most recent message first. |
-| `microsoft_teams_list_chat_messages` | no | List up to 50 messages of one chat, newest first. |
-| `microsoft_teams_get_presence` | no | Read the availability, activity, and status message of up to 20 people. |
-| `microsoft_teams_send_channel_message` | yes, posts to the channel | Post a new message in a channel. |
-| `microsoft_teams_reply_to_channel_message` | yes, posts to the channel | Reply in the thread of a channel post. |
-| `microsoft_teams_send_chat_message` | yes, posts to the chat | Send a message in an existing chat. |
-| `microsoft_teams_start_chat` | yes, creates a chat and posts to it | Start a chat with up to 20 people and send its first message. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_teams_read` | `list_teams`, `list_channels`, `list_channel_messages`, `list_channel_message_replies`, `list_chats`, `list_chat_messages`, `get_presence` | no | List teams, channels, top-level channel posts and thread replies, chats and chat messages (up to 50), and availability/status presence for up to 20 people. |
+| `microsoft_teams_send` | `send_channel_message`, `reply_to_channel_message`, `send_chat_message`, `start_chat` | yes, posts to Teams | Post a channel message, reply in a channel thread, send a message in an existing chat, or start a new one-on-one or group chat (up to 20 people) and send its first message. |
 
 Messages come back as plain text, up to 4,000 characters each.
 Deleted messages and system events, such as members joining, come back labeled, without text.
@@ -282,52 +244,44 @@ Shared channels from a team the requester is not a member of are not reachable.
 
 ## Teams Meetings
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_meetings_find` | no | Find the Teams meeting behind a join link, with its subject, times, organizer, and expiry. |
-| `microsoft_meetings_list_transcripts` | no | List the transcripts of one meeting, with when each was created and ended. |
-| `microsoft_meetings_get_transcript` | no | Read one transcript as timestamped lines labeled with their speaker, up to 30,000 characters per call. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_meetings_read` | `find`, `list_transcripts`, `get_transcript` | no | Find a Teams meeting by join link (subject, times, organizer, expiry), list its transcripts, and read a transcript as speaker-labeled timestamped lines (up to 30,000 characters per call). |
 
-To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_list_events` or `outlook_calendar_get_event`, finds the meeting, lists its transcripts, and reads one.
+To read a meeting's transcript, the agent takes the event's `join_url` from `outlook_calendar_read` (`list_events` or `get_event`), finds the meeting, lists its transcripts, and reads one.
 Transcript lines look like `00:12:03 Alex Doe: text`, timed from the start of transcription, with each speaker's consecutive sentences joined into lines of up to about 2,000 characters.
 A long transcript comes back in chunks with a `next_page_token`; passing it back continues the same transcript, and transcript listings page the same way.
 A recurring meeting series is one meeting, so its listing holds a transcript for each occurrence that was transcribed.
 
 Transcripts exist only for meetings in which someone turned on transcription.
 Microsoft Graph serves them only to the meeting's organizer and the people its calendar invite names, only for meetings scheduled with a calendar event, and not for live events.
-Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_find` reports when a meeting expires.
+Graph no longer serves the transcripts of an expired meeting; a one-time meeting expires 60 days after its scheduled time, extended by 60 days whenever someone joins or changes it, and `microsoft_meetings_read` (`action="find"`) reports when a meeting expires.
 Two Teams administrator settings also govern transcripts: with Graph access to transcripts turned off, listing and reading transcripts return `transcripts_disabled`, and with speaker attribution turned off, reading a transcript returns `speaker_attribution_disabled`.
 
 ## OneNote
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_onenote_list_notebooks` | no | List the notebooks the requester owns, or those of a team, a site, or a person who shares them, by name, and which one is the default. |
-| `microsoft_onenote_list_sections` | no | List the sections directly in one notebook, by name. |
-| `microsoft_onenote_list_pages` | no | List up to 50 pages of one section, most recently modified first, with titles and dates. |
-| `microsoft_onenote_get_page` | no | Read a page's content as plain text, 30,000 characters at a time. |
-| `microsoft_onenote_create_page` | yes | Create a page with a title and plain-text content in a section. |
-| `microsoft_onenote_append_to_page` | yes | Add plain text as a new paragraph at the end of a page's first block of content. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_onenote_read` | `list_notebooks`, `list_sections`, `list_pages`, `get_page` | no | List notebooks (owned, team, site, or shared), top-level sections, and up to 50 pages per section, and read page content as plain text in 30,000-character chunks. |
+| `microsoft_onenote_write` | `create_page`, `append_to_page` | yes | Create a page with a title and plain-text content in a section, or append a plain-text paragraph to an existing page. |
 
 Without `container`, the functions reach the notebooks the requester owns.
-Every function also takes an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_list_teams` (a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_search_sites` or `microsoft_sharepoint_get_site` (`host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
+Both functions also take an optional `container` naming where other notebooks are, told apart by its form: a Teams team's id from `microsoft_teams_read` (`action="list_teams"`; a team's id is its Microsoft 365 group's id), a SharePoint site's id from `microsoft_sharepoint_read` (`search_sites` or `get_site`, `host,guid,guid`), or a person's sign-in email address (user principal name) for the notebooks that person shares with the requester.
 A bare id always names a team, so a person is named by sign-in email address and not by id; a container of any other form is refused before any request.
 Results repeat the `container`, and calls on the sections and pages of those notebooks pass it again; `Notes.ReadWrite.All` already covers every notebook the requester can open, so containers need no new consent.
 Sections inside section groups are not listed.
 Page text leaves out the title, shows images as `[image]`, and separates table cells with `|`.
 Listings and page text return a `next_page_token` while more follows; passing it back with the same container and the same notebook, section, or page continues.
 Created and appended text keeps its line breaks, and HTML in it shows literally instead of as formatting.
-Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_list_notebooks`, as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
+Creating and appending also take the `web_url` of the notebook they write into, from `microsoft_onenote_read` (`action="list_notebooks"`), as `expected_web_url`, so an approval card shows whose notebook the write lands in, and fail with `target_mismatch`, naming the notebook's `web_url`, when it differs.
 
 ## People
 
-| Function | Changes data | Purpose |
-| --- | --- | --- |
-| `microsoft_people_search` | no | Find people in the organization directory by name or by the beginning of their email address, up to 50 results. |
-| `microsoft_people_get_profile` | no | Read one person's profile and their manager. |
-| `microsoft_people_list_direct_reports` | no | List the people who report directly to one person. |
+| Function | Actions | Changes data | Purpose |
+| --- | --- | --- | --- |
+| `microsoft_people_read` | `search`, `get_profile`, `list_direct_reports` | no | Search organization directory people by name or email prefix (up to 50), read one person's profile and manager, and list direct reports. |
 
-Agents use these functions to turn a name the requester mentions into a person and an email address for the mail, calendar, and Teams tools.
+Agents use `microsoft_people_read` to turn a name the requester mentions into a person and an email address for the mail, calendar, and Teams tools.
 Each person comes back with their id, name, email address, job title, department, office location, and business phones; mobile phones and other personal fields are never read.
 The email address is the person's primary email address, or their sign-in name when they have none.
 Profile and direct report lookups take a person's id, email address, or sign-in name, or `me` for the requester, so "who is my manager" needs no email address.
@@ -338,61 +292,36 @@ Guest accounts cannot search the directory.
 
 ## Approvals For Writes
 
-The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change:
+The tools run without approval unless you add [tool approval](https://docs.mindroom.chat/tool-approval/) rules, which show a Matrix approval card before each change.
+Timed approval grants on action-dispatched Microsoft 365 functions are scoped per `(function, action)` pair, so approving one action never grants a different action on the same function:
 
 ```yaml
 tool_approval:
   rules:
-    - match: microsoft_files_replace_file
+    - match: microsoft_files_write
       action: require_approval
-    - match: microsoft_files_upload_file
+    - match: microsoft_sharepoint_write
       action: require_approval
-    - match: microsoft_files_excel_update_range
+    - match: outlook_mail_send_message
       action: require_approval
-    - match: microsoft_sharepoint_create_item
+    - match: outlook_mail_manage
       action: require_approval
-    - match: microsoft_sharepoint_update_item
+    - match: outlook_calendar_write
       action: require_approval
-    - match: outlook_mail_send
+    - match: microsoft_todo_write
       action: require_approval
-    - match: outlook_mail_reply
+    - match: microsoft_teams_send
       action: require_approval
-    - match: outlook_mail_set_automatic_replies
-      action: require_approval
-    - match: outlook_calendar_create_event
-      action: require_approval
-    - match: outlook_calendar_update_event
-      action: require_approval
-    - match: outlook_calendar_delete_event
-      action: require_approval
-    - match: outlook_calendar_respond_to_event
-      action: require_approval
-    - match: microsoft_todo_create_task
-      action: require_approval
-    - match: microsoft_todo_update_task
-      action: require_approval
-    - match: microsoft_todo_delete_task
-      action: require_approval
-    - match: microsoft_teams_send_channel_message
-      action: require_approval
-    - match: microsoft_teams_reply_to_channel_message
-      action: require_approval
-    - match: microsoft_teams_send_chat_message
-      action: require_approval
-    - match: microsoft_teams_start_chat
-      action: require_approval
-    - match: microsoft_onenote_create_page
-      action: require_approval
-    - match: microsoft_onenote_append_to_page
+    - match: microsoft_onenote_write
       action: require_approval
 ```
 
-Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` and `outlook_mail_reply`, and likewise for the Teams send functions, whose messages everyone in the channel or chat sees at once.
-The approval cards of both mail functions list every recipient, and a reply is sent only to the recipients its card lists.
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send_message` (both `send` and `reply`), and likewise for `microsoft_teams_send`, whose messages everyone in the channel or chat sees at once.
+The approval cards of `outlook_mail_send_message` list every recipient, and a reply is sent only to the recipients its card lists.
 A card without `mailbox` sends as the requester; with it, the card names the shared mailbox the mail goes out from.
-`outlook_mail_create_draft`, `outlook_mail_mark_read`, and `outlook_mail_move` change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
-Automatic replies answer every sender while they are on, outside the organization too when `external_audience` allows it.
-Every calendar write can email invitations, updates, cancellations, or responses to other people.
+`outlook_mail_create_draft` and mailbox-organization actions on `outlook_mail_manage` (`mark_read`, `move`) change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
+Automatic replies (`outlook_mail_manage` with `action="set_automatic_replies"`) answer every sender while they are on, outside the organization too when `external_audience` allows it.
+Every calendar write (`outlook_calendar_write`) can email invitations, updates, cancellations, or responses to other people.
 
 To give an agent read access only, set `write: false` on the tool.
 

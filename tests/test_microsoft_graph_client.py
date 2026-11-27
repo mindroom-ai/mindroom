@@ -16,9 +16,9 @@ import pytest
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
+    _graph_session,
     graph_call,
     graph_int,
-    graph_session,
     graph_time,
     html_to_text,
     mailbox_next_page_token,
@@ -70,7 +70,7 @@ def _result(
     if connected:
         publish_grant(PROVIDER, manager, **grant_overrides)
 
-    session = partial(graph_session, PROVIDER, paths, manager, worker_target() if requester else None, None)
+    session = partial(_graph_session, PROVIDER, paths, manager, worker_target() if requester else None, None)
     return json.loads(_call(session, operation))
 
 
@@ -121,7 +121,7 @@ def test_graph_call_refuses_malformed_arguments_before_asking_for_a_connection(
 ) -> None:
     graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
     paths = runtime_paths(tmp_path)
-    session = partial(graph_session, PROVIDER, paths, save_client_config(paths), worker_target(), None)
+    session = partial(_graph_session, PROVIDER, paths, save_client_config(paths), worker_target(), None)
 
     result = json.loads(
         graph_call(
@@ -578,7 +578,7 @@ def test_a_tenant_change_retires_connections_made_for_another_tenant(
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
+    session = partial(_graph_session, PROVIDER, paths, manager, worker_target(), None)
 
     result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 
@@ -593,7 +593,7 @@ def test_a_malformed_tenant_setting_is_reported_not_raised(tmp_path: Path, monke
     manager = save_client_config(paths)
     publish_grant(PROVIDER, manager)
 
-    session = partial(graph_session, PROVIDER, paths, manager, worker_target(), None)
+    session = partial(_graph_session, PROVIDER, paths, manager, worker_target(), None)
 
     result = json.loads(_call(session, lambda opened: opened.json("GET", "/me/drive")))
 

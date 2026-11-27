@@ -13,6 +13,7 @@ from mindroom.dispatch_source import (
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
+    is_automation_source_kind,
 )
 
 
@@ -62,6 +63,7 @@ class TurnOrigin:
     trust: TurnTrust
     # Whether the sender's message runs for a requester other than itself, so the sender stays its author.
     acts_for_requester: bool = False
+    automation_origin: str | None = None
 
     @property
     def may_dispatch_without_mention(self) -> bool:
@@ -114,6 +116,15 @@ class TurnOrigin:
         """Return whether replay guards may skip this turn when a newer requester prompt exists."""
         return self.may_answer_interactive_prompt
 
+    @property
+    def effective_automation_origin(self) -> str | None:
+        """Return the trusted automation origin for this turn, including internal job follow-up turns."""
+        if self.automation_origin is not None:
+            return self.automation_origin
+        if self.intent is TurnIntent.JOB_FOLLOW_UP:
+            return TurnIntent.JOB_FOLLOW_UP.value
+        return None
+
 
 def classify_turn_origin(
     *,
@@ -126,6 +137,7 @@ def classify_turn_origin(
     trusted_user_relay: bool,
     acts_for_requester: bool = False,
     routed: bool = False,
+    automation_origin: str | None = None,
 ) -> TurnOrigin:
     """Return the canonical origin policy for one inbound turn; `routed` marks one a room's steward routed."""
     sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
@@ -151,6 +163,11 @@ def classify_turn_origin(
         source_kind=source_kind,
         trust=trust,
         acts_for_requester=acts_for_requester,
+        automation_origin=(
+            automation_origin
+            if automation_origin is not None
+            else (source_kind if is_automation_source_kind(source_kind) else None)
+        ),
     )
 
 

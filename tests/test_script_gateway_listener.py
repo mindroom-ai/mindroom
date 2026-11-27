@@ -49,6 +49,21 @@ class _ReceiptBroker:
             result=3,
         )
 
+    async def get_authenticated_check_input(self, run_id: str, authorization: str | None) -> dict[str, object]:
+        raise AssertionError((run_id, authorization))
+
+    async def submit_authenticated_check_result(
+        self,
+        run_id: str,
+        authorization: str | None,
+        *,
+        result: object,
+        state: dict[str, object],
+        state_changed: bool,
+        error: str | None,
+    ) -> None:
+        raise AssertionError((run_id, authorization, result, state, state_changed, error))
+
 
 class _CliOwner:
     """Response owner double that echoes each authenticated operation."""
