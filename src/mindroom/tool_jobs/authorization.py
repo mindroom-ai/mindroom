@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
+# LEGACY_COMPAT: Pre-upgrade read-only knowledge_graph function names retained so saved read jobs
+# stay authorized when `knowledge_graph_edits=False`, while unknown or retired edit jobs fail closed.
+_RETIRED_KNOWLEDGE_GRAPH_READ_FUNCTIONS = frozenset({"knowledge_graph_read", "search_graph", "graph_entity"})
+
+
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
     """Freeze the actor's execution scope and file access without constructing tools."""
     agent = config.resolve_agent(agent_name)
@@ -121,9 +126,10 @@ def locally_allowed(
     if entry is None:
         return False
     # Graph edits are actions of the knowledge_graph tool that only an agent allowed to edit its graph gets.
-    edits_graph = entry.name == "knowledge_graph" and not (
+    is_graph_read = (
         tool_name == "knowledge_graph" and origin.get("action") in KNOWLEDGE_GRAPH_READ_ACTIONS
-    )
+    ) or tool_name in _RETIRED_KNOWLEDGE_GRAPH_READ_FUNCTIONS
+    edits_graph = entry.name == "knowledge_graph" and not is_graph_read
     if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
         return False
     return _configured_tool_allowed(config, tools, entry, tool_name, origin, construction)

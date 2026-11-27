@@ -484,6 +484,27 @@ def test_knowledge_graph_evidence_keeps_unrelated_paths_and_urls_but_drops_wrapp
     assert not is_evidence(
         _tool("run_script", "Alice leads Atlas", code="call_tool('knowledge_graph', {'action': 'search'})"),
     )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="cd ~/x\nmindroom-agent tools call knowledge_graph knowledge_graph '{}'",
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command='for q in a b; do\n\tmindroom-agent tools call knowledge_graph knowledge_graph "{}"\ndone',
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "run_script",
+            "Alice leads Atlas",
+            code='tool("knowledge_graph", "knowledge_graph", action="search", query="Atlas")',
+        ),
+    )
 
 
 class _Index:

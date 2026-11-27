@@ -27,7 +27,7 @@ from mindroom.knowledge_graph.store import EpisodeInput, EpisodeKind
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from mindroom.config.knowledge_graph import KnowledgeGraphIngestConfig
     from mindroom.knowledge_graph.names import EntityNames, KnownEntity
@@ -54,11 +54,11 @@ _RETIRED_GRAPH_FUNCTIONS = (
 )
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("knowledge_graph", *_RETIRED_GRAPH_FUNCTIONS)
-_CALL_TOOL_GRAPH_RE = re.compile(r"""\bcall_tool\s*\(\s*(?:name\s*=\s*)?\\?['"]knowledge_graph\\?['"]""")
+_CALL_TOOL_GRAPH_RE = re.compile(r"""\b(?:call_tool|tool)\s*\(\s*(?:name\s*=\s*)?['"]knowledge_graph['"]""")
 _CLI_GRAPH_CALL_RE = re.compile(
     r"\bmindroom-agent\b[^\n;&|]*\btools\s+call\s+"
     r"(?:-\S+(?:\s+\S+)?\s+)*"
-    r"\\?['\"]?knowledge_graph(?:\.knowledge_graph|\s+knowledge_graph)?(?=\\?['\"\s]|$)",
+    r"['\"]?knowledge_graph(?:\.knowledge_graph|\s+knowledge_graph)?(?=['\"\s]|$)",
 )
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
@@ -85,6 +85,27 @@ class RenderedEpisode:
     requester_id: str | None
 
 
+def _iter_arg_strings(value: object) -> Iterator[str]:
+    """Yield every raw string value nested inside a tool call's arguments."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_arg_strings(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _iter_arg_strings(item)
+
+
+def _references_graph_lookup(text: str) -> bool:
+    return (
+        any(name in text for name in (*_RETIRED_GRAPH_FUNCTIONS, KNOWLEDGE_SEARCH_TOOL_NAME))
+        or "knowledge_graph.knowledge_graph" in text
+        or _CLI_GRAPH_CALL_RE.search(text) is not None
+        or _CALL_TOOL_GRAPH_RE.search(text) is not None
+    )
+
+
 def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
@@ -98,17 +119,10 @@ def is_evidence(execution: ToolExecution) -> bool:
         return False
     if execution.tool_name == KNOWLEDGE_SEARCH_TOOL_NAME:
         return bool(_observed(execution))
-    # A shell, script, or `mindroom-agent` call can look the graph up too, directly or through the knowledge search,
-    # and returns its facts as the command's output; the whole arguments are searched, since the rendered ones are
-    # clipped. Match bare `knowledge_graph` only on wrapper invocations so unrelated paths/URLs remain evidence.
-    arguments = json.dumps(execution.tool_args or {}, default=str)
-    if any(name in arguments for name in (*_RETIRED_GRAPH_FUNCTIONS, KNOWLEDGE_SEARCH_TOOL_NAME)):
-        return False
-    return not (
-        "knowledge_graph.knowledge_graph" in arguments
-        or _CLI_GRAPH_CALL_RE.search(arguments) is not None
-        or _CALL_TOOL_GRAPH_RE.search(arguments) is not None
-    )
+    # A shell, script, workflow, or `mindroom-agent` call can look the graph up too, directly or through the
+    # knowledge search, and returns its facts as output; inspect every raw argument string (unclipped, unescaped),
+    # matching bare `knowledge_graph` only on wrapper invocations so unrelated paths/URLs remain evidence.
+    return not any(_references_graph_lookup(text) for text in _iter_arg_strings(execution.tool_args or {}))
 
 
 def _observed(execution: ToolExecution) -> str:

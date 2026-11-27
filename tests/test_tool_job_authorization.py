@@ -164,8 +164,12 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
     assert not allowed("knowledge_graph", {"action": "update_summary"})
     assert not allowed("knowledge_graph", {})
     assert not allowed("knowledge_graph_write", {})
+    assert not allowed("delete_graph_fact", {})
     assert allowed("knowledge_graph", {"action": "search"})
     assert allowed("knowledge_graph", {"action": "entity"})
+    assert allowed("knowledge_graph_read", {})
+    assert allowed("search_graph", {})
+    assert allowed("graph_entity", {})
 
 
 def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:
