@@ -1,4 +1,4 @@
-"""What the primary knows of each terminal's shell input line, so ``terminal_run`` types only at an empty prompt.
+"""What the primary knows of each terminal's shell input line, so ``terminal_write(action="run")`` types only at an empty prompt.
 
 Every input the primary sends a terminal goes through a ``TerminalStream``, one send at a time per terminal
 (``TerminalLine.lock``), which records it here, and the shell's prompt marks, read from any stream attached to the

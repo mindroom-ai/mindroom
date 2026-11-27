@@ -2107,14 +2107,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "add",
-        "divide",
-        "exponentiate",
-        "factorial",
-        "is_prime",
-        "multiply",
-        "square_root",
-        "subtract"
+        "calculate"
       ],
       "helper_text": null,
       "icon": "Calculator",
@@ -2460,11 +2453,8 @@
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
-        "claude_end_session",
-        "claude_interrupt",
-        "claude_send",
-        "claude_session_status",
-        "claude_start_session"
+        "claude_agent_status",
+        "claude_agent_write"
       ],
       "helper_text": null,
       "icon": "Bot",
@@ -5926,11 +5916,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "start_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "cancel_script",
-        "list_scripts"
+        "script_read",
+        "script_write"
       ],
       "helper_text": null,
       "icon": "FileCode2",
@@ -6152,11 +6139,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "terminal_open",
-        "terminal_run",
-        "terminal_send",
         "terminal_read",
-        "terminal_list"
+        "terminal_write"
       ],
       "helper_text": null,
       "icon": "SquareTerminal",
@@ -7189,9 +7173,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_video_timestamps",
-        "get_youtube_video_captions",
-        "get_youtube_video_data"
+        "youtube_video"
       ],
       "helper_text": null,
       "icon": "SiYoutube",
@@ -7255,9 +7237,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_my_usage",
-        "get_my_private_usage",
-        "get_all_usage"
+        "usage_stats"
       ],
       "helper_text": null,
       "icon": "FaChartBar",
@@ -9541,10 +9521,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_models",
-        "get_thread_model",
-        "switch_thread_model",
-        "reset_thread_model"
+        "thread_model_read",
+        "thread_model_write"
       ],
       "helper_text": null,
       "icon": "Cpu",
@@ -10547,10 +10525,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_screenshot",
-        "scrape_as_markdown",
-        "search_engine",
-        "web_data_feed"
+        "brightdata"
       ],
       "helper_text": null,
       "icon": "FaSpider",
@@ -10911,9 +10886,7 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "close_session",
-        "get_page_content",
-        "navigate_to",
+        "browserbase",
         "screenshot"
       ],
       "helper_text": null,
@@ -11218,8 +11191,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "web_search",
-        "search_news"
+        "duckduckgo_search"
       ],
       "helper_text": null,
       "icon": "SiDuckduckgo",
@@ -11626,11 +11598,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "exa_answer",
-        "find_similar",
-        "get_contents",
-        "research",
-        "search_exa"
+        "exa_lookup",
+        "research"
       ],
       "helper_text": null,
       "icon": "FaSearch",
@@ -11979,8 +11948,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "web_search",
-        "search_news"
+        "google_search"
       ],
       "helper_text": null,
       "icon": "FaGoogle",
@@ -12445,10 +12413,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_amazon_product",
-        "scrape_website",
-        "search_amazon_products",
-        "search_google"
+        "oxylabs"
       ],
       "helper_text": null,
       "icon": "FaGlobe",
@@ -13053,9 +13018,7 @@
       "file_access": "none",
       "function_names": [
         "scrape_webpage",
-        "search_news",
-        "search_scholar",
-        "search_web"
+        "serper_search"
       ],
       "helper_text": null,
       "icon": "FaSearch",
@@ -13161,9 +13124,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "crawl",
-        "scrape",
-        "search_web"
+        "spider"
       ],
       "helper_text": "Get your API key from the [Spider dashboard](https://spider.cloud)",
       "icon": "FaSpider",
@@ -13811,10 +13772,8 @@
       "file_access": "none",
       "function_names": [
         "crawl_website",
-        "extract_batch",
-        "extract_metadata_only",
-        "extract_text",
-        "html_to_text"
+        "html_to_text",
+        "trafilatura_extract"
       ],
       "helper_text": null,
       "icon": "FaFileAlt",

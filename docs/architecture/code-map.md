@@ -571,7 +571,7 @@ Matrix sync callback
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |
 | `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
-| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_run` types only at an empty prompt |
+| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_write(action="run")` types only at an empty prompt |
 | `terminal/resolution.py` | The terminals of an agent's workspace as its turn for one requester resolves them |
 | `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, offering typing only while its shell commands never ask for approval |
 | `api/agent_terminals.py` | Chat clients' routes to the terminals of the agents they may use in a room, and the rechecked terminal stream |
@@ -601,7 +601,7 @@ Matrix sync callback
 | `custom_tools/todo_state.py` | Leaf storage, the stored item shape and its strict reader, and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |
-| `custom_tools/calculator.py` | Native calculator toolkit with bounded `factorial()` and `is_prime()` arguments |
+| `custom_tools/calculator.py` | Native calculator toolkit (`calculate`) with bounded `factorial` and `is_prime` arguments |
 | `custom_tools/sleep.py` | Native sleep toolkit with pauses capped at 300 seconds |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations, and `SupervisedLoop`, which restarts a crashed long-running loop with backoff |
@@ -735,7 +735,7 @@ Matrix sync callback
 | `reactive_triggers/management.py` | Shared owner-checking, re-enable cursor/checkpoint refresh, enable/disable, and delete helpers across webhook and reactive trigger stores |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller (with opt-in `include_bots` internal-entity watching and target self-loop prevention), live `com.mindroom.thread.tags` observer, GitHub PR and `ScriptCheckPoller` cadence loops, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
 | `custom_tools/triggers.py` | Local-only unified `triggers(action=...)` toolkit (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
-| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
+| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State
 

@@ -617,14 +617,14 @@ update_agent({"role": "Answer in two sentences.", "instructions": None})
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) instead.
 
-The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
-`claude_send()` creates the session if needed, so `claude_start_session()` is optional.
+The tool exposes `claude_agent_status()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
+`claude_agent_write(action="send")` creates the session if needed, so `claude_agent_write(action="start")` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
-When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_send()` reply.
-`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
-`claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
-When Claude fails while processing a prompt, `claude_send()` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
+When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_agent_write(action="send")` reply.
+`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_agent_write(action="end")` first.
+`claude_agent_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+When Claude fails while processing a prompt, `claude_agent_write(action="send")` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](https://docs.mindroom.chat/openai-api/#session-continuity).
 
 | Option | Type | Default | Notes |
@@ -675,11 +675,12 @@ Credentials for an Anthropic-compatible gateway such as LiteLLM:
 ```
 
 ```python
-claude_send(
+claude_agent_write(
+    action="send",
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",
 )
-claude_session_status(session_label="bugfix")
-claude_interrupt(session_label="bugfix")
-claude_end_session(session_label="bugfix")
+claude_agent_status(session_label="bugfix")
+claude_agent_write(action="interrupt", session_label="bugfix")
+claude_agent_write(action="end", session_label="bugfix")
 ```

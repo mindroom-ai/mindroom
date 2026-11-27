@@ -342,6 +342,7 @@ def test_automation_thread_renders_nothing() -> None:
             [
                 _tool("job", "Job `j2` (run_subagent subagent) succeeded:\nI think Bob owns Atlas.", action="collect"),
                 _tool("claude_send", "Bob owns it", prompt="who"),
+                _tool("claude_agent_write", "Bob owns it", action="send", prompt="who"),
             ],
             id="jobs-and-claude",
         ),
@@ -360,6 +361,16 @@ def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecut
     run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_claude_agent_prose_exclusion_only_drops_send_and_legacy_claude_send() -> None:
+    """Historical claude_send and claude_agent_write(action='send') are excluded; lifecycle/status calls stay evidence."""
+    assert not is_evidence(_tool("claude_send", "Bob owns it", prompt="who"))
+    assert not is_evidence(_tool("claude_agent_write", "Bob owns it", action="send", prompt="who"))
+    assert is_evidence(_tool("claude_agent_write", "Started Claude session `s1`.", action="start"))
+    assert is_evidence(_tool("claude_agent_write", "Interrupt sent to Claude session `s1`.", action="interrupt"))
+    assert is_evidence(_tool("claude_agent_write", "Closed Claude session `s1`.", action="end"))
+    assert is_evidence(_tool("claude_agent_status", "Claude session `s1` is active."))
 
 
 class _Index:

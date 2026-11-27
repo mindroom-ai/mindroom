@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import threading
 from collections.abc import Iterator  # noqa: TC003 - tool schema reads annotations at runtime.
@@ -179,7 +180,7 @@ def _context(
                     if preapprove_script_tool
                     else [
                         {
-                            "match": "add",
+                            "match": "calculate",
                             "action": "require_approval" if require_approval else "auto_approve",
                         },
                     ]
@@ -269,10 +270,10 @@ class _RuntimeResolver:
     ) -> ToolApprovalDecision:
         assert origin.requester_id == "@alice:example.test"
         assert origin.toolkit_name == "calculator"
-        assert origin.function_name == "add"
+        assert origin.function_name == "calculate"
         assert context.requester_id == "@alice:example.test"
-        assert grant == ScriptToolGrant("calculator", "add")
-        assert arguments == {"a": 1, "b": 2}
+        assert grant == ScriptToolGrant("calculator", "calculate")
+        assert arguments == {"action": "add", "a": 1, "b": 2}
         assert timeout_seconds > 0
         if self.approval_events is not None:
             self.approval_events.append(f"approval:{origin.run_id}:{origin.call_id}")
@@ -343,7 +344,7 @@ def _broker(
                 else serialize_tool_execution_identity(context.execution_identity)
             ),
             source_digest="source-digest",
-            grants=(ScriptToolGrant("calculator", "add"),),
+            grants=(ScriptToolGrant("calculator", "calculate"),),
             token_hash=token_hash,
             preapprove_launch_grants=preapprove_script_tool,
             worker_key=durable_worker_key,
@@ -373,8 +374,8 @@ def _request(*, call_id: str = "call-1", b: int = 2, run_id: str = "run-1") -> S
     return ScriptToolCallRequest(
         run_id=run_id,
         call_id=call_id,
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": b},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": b},
     )
 
 
@@ -570,10 +571,24 @@ def _replace_calculator_toolkit(
 
 
 class _Calculator(Toolkit):
-    """A replacement ``calculator`` whose ``add`` sums; tests override ``add`` to observe, block, or fail a call."""
+    """A replacement ``calculator`` whose ``calculate`` forwards to ``calculate``; tests override ``calculate`` to observe, block, or fail a call."""
 
     def __init__(self) -> None:
-        super().__init__(name="calculator", tools=[self.add])
+        if inspect.iscoroutinefunction(self.add):
+
+            async def calculate(action: str, a: int, b: int) -> object:
+                del action
+                return await cast("Any", self.add)(a, b)
+
+            tool_fn: Callable[..., object] = calculate
+        else:
+
+            def calculate(action: str, a: int, b: int) -> object:
+                del action
+                return self.add(a, b)
+
+            tool_fn = calculate
+        super().__init__(name="calculator", tools=[tool_fn])
 
     def add(self, a: int, b: int) -> object:
         return a + b
@@ -663,7 +678,7 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
-    assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
+    assert events == ["tool:before_call", "tool:environment:calculator.calculate", "tool:after_call"]
 
 
 @pytest.mark.asyncio
@@ -692,14 +707,14 @@ async def test_script_call_receipt_records_that_the_tool_was_invoked(
     workflow_receipt = await broker.execute_for_workflow(
         workflow_run,
         call_id="call-wf",
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
     )
     denied = await denying.execute_for_workflow(
         denying.store.get_run("run-1"),
         call_id="call-wf-denied",
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
     )
 
     assert (plain.result, plain.effect_started_at, plain.metadata) == ("done", None, None)
@@ -736,7 +751,7 @@ async def test_a_call_a_plugin_hook_declines_fails_with_the_decline(tmp_path: Pa
     assert receipt.error == {
         "kind": "tool_failure",
         "message": "[TOOL CALL DECLINED]\n"
-        "Tool: add\n"
+        "Tool: calculate\n"
         "Reason: Calculations are paused\n\n"
         "Adjust your approach — try a different tool or different arguments.",
         "retryable": False,
@@ -755,7 +770,7 @@ async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
     class SessionKeyedCalculator(_Calculator):
         async def add(self, a: int, b: int) -> str:
             del a, b
-            return await claude.claude_session_status()
+            return await claude.claude_agent_status()
 
     _replace_calculator_toolkit(monkeypatch, SessionKeyedCalculator)
     broker, token = _broker(tmp_path, events=[])
@@ -929,9 +944,9 @@ async def test_script_broker_judges_a_call_by_the_rules_of_the_function_its_alia
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rule auto-approves ``add``, yet the run grants no shell, so an ``add`` the calculator calls a shell command asks."""
+    """A rule auto-approves ``calculate``, yet the run grants no shell, so an ``calculate`` the calculator calls a shell command asks."""
     events: list[str] = []
-    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "calculate")
     broker, token = _broker(
         tmp_path,
         events=events,
@@ -1076,7 +1091,7 @@ async def test_script_broker_returns_existing_receipt_without_reexecution(tmp_pa
     second = await _call_through_gateway(broker, request, token)
 
     assert second == first
-    assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
+    assert events == ["tool:before_call", "tool:environment:calculator.calculate", "tool:after_call"]
 
 
 @pytest.mark.asyncio
@@ -1096,9 +1111,9 @@ async def test_script_broker_records_background_origin_and_durable_request_prove
     assert record["call_id"] == "audited-call"
     assert record["requester_id"] == "@alice:example.test"
     assert record["toolkit_name"] == "calculator"
-    assert record["function_name"] == "add"
-    assert record["tool_name"] == "add"
-    assert record["arguments"] == {"a": 1, "b": 2}
+    assert record["function_name"] == "calculate"
+    assert record["tool_name"] == "calculate"
+    assert record["arguments"] == {"action": "add", "a": 1, "b": 2}
     assert record["correlation_id"] == "background-script:run-1:audited-call"
     assert token not in json.dumps(record)
 
@@ -1196,7 +1211,7 @@ async def test_script_broker_leaves_a_worker_routed_toolkit_s_connection_to_the_
 
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == "3"
-    assert lifecycle == ["worker calculator.add"]
+    assert lifecycle == ["worker calculator.calculate"]
 
 
 @pytest.mark.asyncio
@@ -2349,7 +2364,7 @@ def test_script_broker_refuses_a_call_outside_its_launch_grants(tmp_path: Path) 
     broker, _token = _broker(tmp_path, events=[])
     call = _claim_unowned(broker, _request()).call
     run = broker.store.get_run(call.run_id)
-    forged = replace(call, grant=ScriptToolGrant("calculator", "subtract"))
+    forged = replace(call, grant=ScriptToolGrant("calculator", "other"))
 
     with pytest.raises(broker_module._CurrentGrantRevokedError):
         broker._prepare_execution(run, forged, "background-script:forged")

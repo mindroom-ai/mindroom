@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from mindroom.logging_config import get_logger
@@ -17,15 +17,25 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from mindroom.tools.native_helpers import reject_unexpected_args
 
 logger = get_logger(__name__)
 
 _MAX_DOMAIN_CODE_LEN = 10
 _ASIN_LEN = 10
 _MAX_PARSED_HTML_LEN = 1000
+
+_OxylabsAction = Literal["search_google", "amazon_product", "search_amazon", "scrape"]
+_ACTION_FIELDS: dict[str, str] = {
+    "search_google": "query domain_code",
+    "amazon_product": "asin domain_code",
+    "search_amazon": "query domain_code",
+    "scrape": "url render_javascript markdown",
+}
+
+
+def _field(obj: Any, key: str, default: Any = "") -> Any:  # noqa: ANN401
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
 
 def _extract_google_results(result: Any) -> list[dict[str, Any]]:  # noqa: ANN401
@@ -51,75 +61,50 @@ def _extract_google_results(result: Any) -> list[dict[str, Any]]:  # noqa: ANN40
 
 
 def _extract_amazon_product(result: Any) -> dict[str, Any]:  # noqa: ANN401
-    if getattr(result, "content", None) and isinstance(result.content, dict):
-        content = result.content
-        return {
-            "found": True,
-            "title": content.get("title", "").strip(),
-            "price": content.get("price", 0),
-            "currency": content.get("currency", ""),
-            "rating": content.get("rating", 0),
-            "reviews_count": content.get("reviews_count", 0),
-            "url": content.get("url", ""),
-            "description": content.get("description", "").strip(),
-            "stock_status": content.get("stock", "").strip(),
-            "brand": content.get("brand", "").strip(),
-            "images": content.get("images", [])[:3],
-            "bullet_points": content.get("bullet_points", [])[:5] if content.get("bullet_points") else [],
-        }
-    if getattr(result, "content_parsed", None):
-        content = result.content_parsed
-        bullet_points = getattr(content, "bullet_points", None)
-        return {
-            "found": True,
-            "title": getattr(content, "title", "").strip(),
-            "price": getattr(content, "price", 0),
-            "currency": getattr(content, "currency", ""),
-            "rating": getattr(content, "rating", 0),
-            "reviews_count": getattr(content, "reviews_count", 0),
-            "url": getattr(content, "url", ""),
-            "description": getattr(content, "description", "").strip(),
-            "stock_status": getattr(content, "stock", "").strip(),
-            "brand": getattr(content, "brand", "").strip(),
-            "images": getattr(content, "images", [])[:3],
-            "bullet_points": bullet_points[:5] if bullet_points else [],
-        }
-    return {}
+    raw_content = getattr(result, "content", None)
+    content = raw_content if isinstance(raw_content, dict) and raw_content else getattr(result, "content_parsed", None)
+    if not content:
+        return {}
+    bullet_points = _field(content, "bullet_points", None)
+    return {
+        "found": True,
+        "title": _field(content, "title", "").strip(),
+        "price": _field(content, "price", 0),
+        "currency": _field(content, "currency", ""),
+        "rating": _field(content, "rating", 0),
+        "reviews_count": _field(content, "reviews_count", 0),
+        "url": _field(content, "url", ""),
+        "description": _field(content, "description", "").strip(),
+        "stock_status": _field(content, "stock", "").strip(),
+        "brand": _field(content, "brand", "").strip(),
+        "images": _field(content, "images", [])[:3],
+        "bullet_points": bullet_points[:5] if bullet_points else [],
+    }
 
 
 def _extract_amazon_search_results(result: Any) -> list[dict[str, Any]]:  # noqa: ANN401
-    if getattr(result, "content", None) and isinstance(result.content, dict) and "results" in result.content:
-        return [
-            {
-                "title": item.get("title", "").strip(),
-                "asin": item.get("asin", "").strip(),
-                "price": item.get("price", 0),
-                "currency": item.get("currency", ""),
-                "rating": item.get("rating", 0),
-                "reviews_count": item.get("reviews_count", 0),
-                "url": item.get("url", "").strip(),
-                "position": item.get("pos", 0),
-                "image": item.get("image", "").strip(),
-            }
-            for item in result.content["results"].get("organic", [])
-        ]
-    if getattr(result, "content_parsed", None):
+    raw_content = getattr(result, "content", None)
+    if isinstance(raw_content, dict) and "results" in raw_content:
+        items = raw_content["results"].get("organic", [])
+    elif getattr(result, "content_parsed", None):
         parsed_results = getattr(result.content_parsed, "results", None)
-        return [
-            {
-                "title": getattr(item, "title", "").strip(),
-                "asin": getattr(item, "asin", "").strip(),
-                "price": getattr(item, "price", 0),
-                "currency": getattr(item, "currency", ""),
-                "rating": getattr(item, "rating", 0),
-                "reviews_count": getattr(item, "reviews_count", 0),
-                "url": getattr(item, "url", "").strip(),
-                "position": getattr(item, "pos", 0),
-                "image": getattr(item, "image", "").strip(),
-            }
-            for item in getattr(parsed_results, "organic", []) or []
-        ]
-    return []
+        items = getattr(parsed_results, "organic", []) or []
+    else:
+        return []
+    return [
+        {
+            "title": _field(item, "title", "").strip(),
+            "asin": _field(item, "asin", "").strip(),
+            "price": _field(item, "price", 0),
+            "currency": _field(item, "currency", ""),
+            "rating": _field(item, "rating", 0),
+            "reviews_count": _field(item, "reviews_count", 0),
+            "url": _field(item, "url", "").strip(),
+            "position": _field(item, "pos", 0),
+            "image": _field(item, "image", "").strip(),
+        }
+        for item in items
+    ]
 
 
 class _OxylabsTools(Toolkit):
@@ -145,25 +130,54 @@ class _OxylabsTools(Toolkit):
             raise ValueError(msg)
 
         self.client = RealtimeClient(self.username, self.password)
-        tools: list[Callable[..., Any]] = [
-            self.search_google,
-            self.get_amazon_product,
-            self.search_amazon_products,
-            self.scrape_website,
-        ]
-        super().__init__(name="oxylabs_web_scraping", tools=tools)
+        super().__init__(name="oxylabs_web_scraping", tools=(self.oxylabs,))
 
-    def search_google(self, query: str, domain_code: str = "com") -> str:
-        """Search Google for a query.
+    def oxylabs(
+        self,
+        action: _OxylabsAction,
+        query: str | None = None,
+        asin: str | None = None,
+        url: str | None = None,
+        domain_code: str | None = None,
+        render_javascript: bool | None = None,
+        markdown: bool | None = None,
+    ) -> str:
+        """Query Google SERP, Amazon products, or universal web scraping via Oxylabs and return JSON.
 
-        Args:
-            query: Search query.
-            domain_code: Google domain to search (e.g., "com", "co.uk", "de", default: "com").
-
-        Returns:
-            JSON of search results.
-
+        - `search_google`: Google search for `query` on `domain_code` (default `"com"`).
+        - `amazon_product`: Amazon product details for 10-char `asin` on `domain_code` (default `"com"`).
+        - `search_amazon`: Search Amazon products for `query` on `domain_code` (default `"com"`).
+        - `scrape`: Scrape `url` (http/https; optional `render_javascript`, default False, `markdown`).
         """
+        if (
+            unexpected := reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {
+                    "query": query is not None,
+                    "asin": asin is not None,
+                    "url": url is not None,
+                    "domain_code": domain_code is not None,
+                    "render_javascript": render_javascript is not None,
+                    "markdown": markdown is not None,
+                },
+            )
+        ) is not None:
+            return self._error_response(action, unexpected)
+        resolved_domain = "com" if domain_code is None else domain_code
+        if action == "search_google":
+            return self._search_google(query or "", resolved_domain)
+        if action == "amazon_product":
+            return self._amazon_product(asin or "", resolved_domain)
+        if action == "search_amazon":
+            return self._search_amazon(query or "", resolved_domain)
+        return self._scrape(
+            url or "",
+            render_javascript=False if render_javascript is None else render_javascript,
+            markdown=markdown,
+        )
+
+    def _search_google(self, query: str, domain_code: str) -> str:
         if not query or not query.strip():
             return self._error_response("search_google", "Query cannot be empty", {"query": query})
         if len(domain_code) > _MAX_DOMAIN_CODE_LEN:
@@ -177,17 +191,7 @@ class _OxylabsTools(Toolkit):
             logger.exception("oxylabs_google_search_failed")
             return self._error_response("search_google", f"Google search failed: {exc}", {"query": query})
 
-    def get_amazon_product(self, asin: str, domain_code: str = "com") -> str:
-        """Get detailed information about an Amazon product by ASIN.
-
-        Args:
-            asin: Amazon Standard Identification Number (10 alphanumeric characters, e.g., "B07FZ8S74R").
-            domain_code: Amazon domain (e.g., "com", "co.uk", "de", default: "com").
-
-        Returns:
-            JSON of product details.
-
-        """
+    def _amazon_product(self, asin: str, domain_code: str) -> str:
         if not asin:
             return self._error_response("get_amazon_product", "ASIN is required and must be a string")
         cleaned_asin = asin.strip().upper()
@@ -218,17 +222,7 @@ class _OxylabsTools(Toolkit):
                 {"asin": cleaned_asin},
             )
 
-    def search_amazon_products(self, query: str, domain_code: str = "com") -> str:
-        """Search Amazon for products and return search results.
-
-        Args:
-            query: Product search query.
-            domain_code: Amazon domain (e.g., "com", "co.uk", "de", default: "com").
-
-        Returns:
-            JSON string with search results.
-
-        """
+    def _search_amazon(self, query: str, domain_code: str) -> str:
         if not query or not query.strip():
             return self._error_response("search_amazon_products", "Query cannot be empty")
         if len(domain_code) > _MAX_DOMAIN_CODE_LEN:
@@ -248,18 +242,7 @@ class _OxylabsTools(Toolkit):
             logger.exception("oxylabs_amazon_search_failed")
             return self._error_response("search_amazon_products", f"Amazon search failed: {exc}", {"query": query})
 
-    def scrape_website(self, url: str, render_javascript: bool = False, markdown: bool | None = None) -> str:
-        """Scrape content from any website URL.
-
-        Args:
-            url: Website URL to scrape (must start with http:// or https://).
-            render_javascript: Whether to enable JavaScript rendering for dynamic content (default: False).
-            markdown: Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting).
-
-        Returns:
-            JSON containing scraped content (Markdown if markdown=True, otherwise parsed HTML).
-
-        """
+    def _scrape(self, url: str, *, render_javascript: bool, markdown: bool | None) -> str:
         cleaned_url = url.strip() if url else ""
         if not cleaned_url.startswith(("http://", "https://")) or not urlparse(cleaned_url).netloc:
             return self._error_response(
@@ -322,7 +305,6 @@ class _OxylabsTools(Toolkit):
     icon="FaGlobe",
     icon_color="text-blue-600",  # Web/scraping theme
     config_fields=[
-        # Authentication credentials
         ConfigField(
             name="username",
             env=("OXYLABS_USERNAME",),
@@ -350,7 +332,8 @@ class _OxylabsTools(Toolkit):
     ],
     dependencies=["oxylabs"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#oxylabs",
-    function_names=("get_amazon_product", "scrape_website", "search_amazon_products", "search_google"),
+    function_names=("oxylabs",),
+    action_scoped_grants=("oxylabs",),
 )
 def oxylabs_tools() -> type[Toolkit]:
     """Return Oxylabs tools for web scraping and data extraction."""

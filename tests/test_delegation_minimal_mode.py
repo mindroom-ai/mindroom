@@ -303,8 +303,8 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 ) -> None:
     """A minimal child sees one Bash tool and a short prompt, never gated tools; its follow-up stays minimal."""
     config = _config(
-        helper_tools=["shell", "calculator"],
-        approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="factorial", action="require_approval")]),
+        helper_tools=["shell", "calculator", "sleep"],
+        approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="sleep", action="require_approval")]),
     )
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
@@ -377,7 +377,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         assert "mindroom-agent" in system
     assert len(listings) == 2
     # Native callers support approval, but a minimal child must never pause for it.
-    assert all("is_prime" in listing and "factorial" not in listing for listing in listings), listings
+    assert all("calculate" in listing and "sleep" not in listing for listing in listings), listings
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
             overlay = base.model_copy(
                 update={
                     "tool_approval": ToolApprovalConfig(
-                        rules=[ApprovalRuleConfig(match="factorial", action="require_approval")],
+                        rules=[ApprovalRuleConfig(match="sleep", action="require_approval")],
                     ),
                 },
             )
@@ -488,7 +488,7 @@ _RELOAD_STOPPED = "MindRoom's configuration was reloaded while this turn ran, so
 _CALL_REFUSED = "This MindRoom call did not run: the configuration was reloaded"
 # The control call a completed `switch_thread_model` call for the current response reports.
 _SWITCHED = {"tool": "thread_model", "action": "switch", "status": "ok", "when": "after-toolcall", "model": "default"}
-_SWITCH_CALL = ReportedCall("switch", "switch_thread_model", None, json.dumps(_SWITCHED))
+_SWITCH_CALL = ReportedCall("switch", "thread_model_write", None, json.dumps(_SWITCHED))
 
 
 @dataclass
@@ -564,8 +564,8 @@ async def _run_minimal_turn_through_a_reload(
             operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="calculator",
-                function="is_prime",
-                arguments={"n": 7},
+                function="calculate",
+                arguments={"action": "is_prime", "a": 7},
                 call_id=call_id,
             ),
         )

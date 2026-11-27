@@ -1240,7 +1240,7 @@ SCENARIOS: dict[str, Scenario] = {
         "toolkit instructions, workspace context, file memory, delegation, a natively deferred toolkit, and hook "
         "enrichment; it calls one tool, so the second request carries the tool result.",
         lambda root: _run_turn(_full_agent_turn(root, _ANTHROPIC)),
-        answer_after_one_tool_call("add", {"a": 2, "b": 3}),
+        answer_after_one_tool_call("calculate", {"action": "add", "a": 2, "b": 3}),
         turn=lambda root: _full_agent_turn(root, _ANTHROPIC),
     ),
     "agent_openai_chat": Scenario(

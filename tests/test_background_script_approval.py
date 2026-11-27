@@ -90,8 +90,8 @@ async def test_launch_preapproval_does_not_expand_from_live_script_config(
     request = ScriptToolCallRequest(
         run_id=durable_run.run_id,
         call_id="live-allowlist",
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
     )
 
     receipt = await _call_through_gateway(broker, request, token_path.read_text(encoding="utf-8"))
@@ -115,7 +115,7 @@ def _origin(*, run_id: str = "run-1", call_id: str = "call-1") -> BackgroundScri
         call_id=call_id,
         requester_id="@alice:localhost",
         toolkit_name="calculator",
-        function_name="add",
+        function_name="calculate",
     )
 
 
@@ -193,8 +193,8 @@ async def test_background_approval_fails_closed_when_room_departure_is_fenced(tm
                 agent_name="watcher",
                 requester_id="@alice:localhost",
                 approver_user_id="@alice:localhost",
-                tool_name="add",
-                arguments={"a": 1, "b": 2},
+                tool_name="calculate",
+                arguments={"action": "add", "a": 1, "b": 2},
                 timeout_seconds=30.0,
             ),
             timeout=1.0,
@@ -243,8 +243,8 @@ async def test_background_script_approval_uses_exact_matrix_actor_and_first_deci
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=30.0,
         ),
     )
@@ -325,8 +325,8 @@ async def test_background_script_approval_expires_and_retires_without_a_response
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=0.01,
         )
 
@@ -360,8 +360,8 @@ async def test_a_job_card_names_the_reply_whose_call_started_the_job(
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=0.01,
             response_event_id=response_event_id,
         )
@@ -388,8 +388,8 @@ async def test_background_script_terminal_edit_is_recovered_after_restart(tmp_pa
         agent_name="watcher",
         requester_id="@alice:localhost",
         approver_user_id="@alice:localhost",
-        tool_name="add",
-        arguments={"a": 1, "b": 2},
+        tool_name="calculate",
+        arguments={"action": "add", "a": 1, "b": 2},
         timeout_seconds=0.01,
     )
     assert decision.status == "expired"
@@ -424,8 +424,8 @@ async def test_cancelled_background_call_is_denied_retired_and_pruned_with_run(t
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=30.0,
         ),
     )
@@ -485,8 +485,8 @@ async def test_a_waiting_call_wakes_as_its_decision_commits(
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=30.0,
         ),
     )
@@ -547,8 +547,8 @@ async def test_an_ended_jobs_card_shows_its_denial_as_the_end_commits(
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=30.0,
         ),
     )
@@ -589,8 +589,8 @@ async def test_a_decision_the_manager_writes_sends_its_cards_terminal_edit_once(
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=30.0,
         ),
     )
@@ -642,7 +642,7 @@ async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Pa
     assert await approvals.reserve_detached_card(
         call=other,
         owner_kind="script",
-        tool_name="add",
+        tool_name="calculate",
         toolkit_name="calculator",
         invoking_agent="watcher",
         room_id="!room:localhost",
@@ -654,7 +654,7 @@ async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Pa
             event_type="io.mindroom.tool_approval",
             approver_user_id="@alice:localhost",
             approvable=True,
-            payload={"tool_name": "add", "status": "pending"},
+            payload={"tool_name": "calculate", "status": "pending"},
         ),
     )
     assert (await approvals.resolve_approval_call(other, requested_status="denied", reason="decided")).recorded
@@ -667,8 +667,8 @@ async def test_a_detached_ending_delivers_only_the_cards_it_decided(tmp_path: Pa
             agent_name="watcher",
             requester_id="@alice:localhost",
             approver_user_id="@alice:localhost",
-            tool_name="add",
-            arguments={"a": 1, "b": 2},
+            tool_name="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
             timeout_seconds=0.2 if ending == "timeout" else 30.0,
         ),
     )
@@ -727,7 +727,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
                         "approval_target": "background_script",
                         "background_run_id": "run-1",
                         "background_call_id": call_id,
-                        "tool_name": "add",
+                        "tool_name": "calculate",
                         "status": "pending",
                     },
                 ),
@@ -748,8 +748,8 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
                 agent_name="watcher",
                 requester_id="@alice:localhost",
                 approver_user_id="@alice:localhost",
-                tool_name="add",
-                arguments={"a": 1, "b": 2},
+                tool_name="calculate",
+                arguments={"action": "add", "a": 1, "b": 2},
                 timeout_seconds=30.0,
             ),
         )
@@ -762,7 +762,7 @@ async def test_run_settlement_denies_only_pending_calls_without_revisiting_histo
                 agent_name="watcher",
                 requester_id="@alice:localhost",
                 approver_user_id="@alice:localhost",
-                tool_name="add",
+                tool_name="calculate",
                 arguments={"a": 2, "b": 3},
                 timeout_seconds=30.0,
             ),

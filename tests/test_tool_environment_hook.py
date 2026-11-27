@@ -933,7 +933,7 @@ async def test_the_reply_s_record_of_a_call_never_holds_a_given_secret(
     [
         ("shell", "run_shell_command", True),
         ("shell", "check_shell_command", False),
-        ("terminal", "terminal_open", False),
+        ("terminal", "terminal_write", False),
     ],
 )
 async def test_a_given_secret_is_a_variable_of_shell_commands_only(

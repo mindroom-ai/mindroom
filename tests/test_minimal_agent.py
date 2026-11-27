@@ -262,7 +262,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
     )
     functions = _function_names(standard)
     assert "run_shell_command" in functions
-    assert "add" not in functions
+    assert "calculate" not in functions
 
 
 @pytest.mark.parametrize("memory_backend", ["file", "mem0"])
@@ -685,9 +685,9 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         try:
             metadata = catalog.metadata()
             assert any(item["toolkit"] == "calculator" and item.get("deferred") for item in metadata)
-            binding = await catalog.bind(ToolKey("calculator", "add"))
+            binding = await catalog.bind(ToolKey("calculator", "calculate"))
             assert binding.catalog.runtime_context.agent_name == "helper"
-            assert binding.function.name == "add"
+            assert binding.function.name == "calculate"
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:
             await catalog.close()
@@ -728,8 +728,8 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
             operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="calculator",
-                function="add",
-                arguments={"a": 2, "b": 3},
+                function="calculate",
+                arguments={"action": "add", "a": 2, "b": 3},
                 call_id=call_id,
             ),
         )
@@ -742,8 +742,8 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
                 operation=ToolCallOperation(
                     operation="tools.call",
                     toolkit="thread_model",
-                    function="switch_thread_model",
-                    arguments={"model_name": "other", "when": "after-toolcall"},
+                    function="thread_model_write",
+                    arguments={"action": "switch", "model_name": "other", "when": "after-toolcall"},
                     call_id=switch_id,
                 ),
             )
@@ -808,7 +808,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     replay = replying.requests[-1].messages
     replayed_ids = {call["id"] for message in replay for call in message.tool_calls or ()}
     assert any(message.tool_call_id in replayed_ids for message in replay), replay
-    assert all("add" not in str(message.tool_calls or []) for message in replay)
+    assert all("calculate" not in str(message.tool_calls or []) for message in replay)
 
 
 @pytest.mark.asyncio

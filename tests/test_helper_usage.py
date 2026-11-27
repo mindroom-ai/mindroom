@@ -139,7 +139,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     config.models["helper"] = ModelConfig(provider="openai", id="helper-model")
     config.agents["helper"] = AgentConfig(display_name="Helper", model="helper")
     config.tool_approval = ToolApprovalConfig.model_validate(
-        {"default": "auto_approve", "rules": [{"match": "add", "action": "require_approval"}]},
+        {"default": "auto_approve", "rules": [{"match": "calculate", "action": "require_approval"}]},
     )
     config.agents["general"].private = (
         AgentPrivateConfig(per="user", root="mind_data") if caller in {"private_agent", "private_cli_agent"} else None
@@ -158,7 +158,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         agent_name="general",
     )
     identity = context.execution_identity
-    turns = [calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]
+    turns = [calls(tool_call("calculate", "approved", action="add", a=2, b=3)), _resumed_turn(outcome)]
     if caller == "team":
         # The leader and its members share the default model: the leader delegates, the member's approved call
         # pauses the run, and the resume answers as the member, then as the leader.
@@ -171,10 +171,10 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             "helper": ScriptedModel([answer("Sample helper output.", owned_usage(20, 2))]),
         },
     )
-    original_add = CalculatorTools.add
+    original_calculate = CalculatorTools.calculate
     helper_results: list[object] = []
 
-    async def add(self: CalculatorTools, a: float, b: float) -> str:
+    async def calculate(self: CalculatorTools, action: str, a: float, b: float | None = None) -> str:
         owner = get_helper_usage_owner()
         assert owner is not None
         await record_helper_usage(
@@ -191,9 +191,9 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         helper_results.append("Sample helper output.")
         if outcome == "cancel":
             raise asyncio.CancelledError
-        return original_add(self, a, b)
+        return original_calculate(self, action, a, b)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
     scope = HistoryScope(
         kind="team" if caller == "team" else "agent",
         scope_id="reviewers" if caller == "team" else "general",
@@ -253,22 +253,22 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
     calls_ = (
         ApprovalCall(
             "approved",
-            "add",
+            "calculate",
             "general",
             2**62,
             decision=ApprovalDecision.APPROVED,
             toolkit_name="calculator",
-            arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            arguments_digest=approval_arguments_digest({"action": "add", "a": 2, "b": 3}),
         ),
     )
     cli_call = None
     if is_cli:
         cli_call = CliApprovalCall(
             toolkit="calculator",
-            function="add",
+            function="calculate",
             call_id="approved",
             parent_bash_call_id="interrupted-bash",
-            arguments={"a": 2, "b": 3},
+            arguments={"action": "add", "a": 2, "b": 3},
             requirements=tuple(paused.requirements),
             delegation_depth=0,
         ).to_dict()

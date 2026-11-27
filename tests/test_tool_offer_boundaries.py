@@ -108,7 +108,7 @@ def _offered(build: AgentBuild) -> str:
     [
         pytest.param({"tools": ["shell", "file", _CALC]}, ("shell", "calculator"), "calculator shell", id="deferred"),
         pytest.param(_MESSAGES, ("matrix_message", "attachments"), "attachments matrix_message", id="implied"),
-        pytest.param(_FILE_CALC, ("calculator.add",), "calculator", id="function-entry"),
+        pytest.param(_FILE_CALC, ("calculator.calculate",), "calculator", id="function-entry"),
         pytest.param(_DELEGATE, ("delegate",), "delegate", id="injected-delegate"),
         pytest.param(_FILE_CALC, None, "calculator dynamic_tools filesystem", id="no-tool-list"),
     ],

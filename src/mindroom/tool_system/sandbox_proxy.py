@@ -1111,7 +1111,7 @@ def _call_proxy_sync(
                         auto_background=shell_scope is not None,
                     ),
                     browser_request_budget_seconds(tool_name, function_name),
-                    trafilatura_request_budget_seconds(tool_name, function_name),
+                    trafilatura_request_budget_seconds(tool_name, function_name, args=wire_args, kwargs=wire_kwargs),
                 ),
             ),
             request=request,

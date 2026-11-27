@@ -155,7 +155,7 @@ def test_ordinary_json_is_opaque_across_worker_transport(
     result = call_proxy_sync_for_test(
         runtime_paths=paths,
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         args=(),
         kwargs={"a": 1, "b": 2},
         credentials_manager=None,
@@ -638,7 +638,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         call_proxy_sync_for_test(
             runtime_paths=paths,
             tool_name="calculator",
-            function_name="add",
+            function_name="calculate",
             args=(value,) if shape == "positional" else (),
             kwargs={} if shape == "positional" else {"value": value},
             credentials_manager=None,

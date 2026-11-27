@@ -64,7 +64,13 @@ _ANSWER = "The real answer."
 def _switch(index: int, *, content: str | None) -> list[ScriptStep]:
     """Return a turn that switches the current response to the ``large`` model, which forces one more attempt."""
     return calls(
-        tool_call("switch_thread_model", f"call-switch-{index}", model_name="large", when="after-toolcall"),
+        tool_call(
+            "thread_model_write",
+            f"call-switch-{index}",
+            action="switch",
+            model_name="large",
+            when="after-toolcall",
+        ),
         content=content,
     )
 

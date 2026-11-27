@@ -317,8 +317,8 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
         request = ExecuteRequest(
             protocol=WORKER_PROTOCOL_VERSION,
             tool_name="calculator",
-            function_name="add",
-            args=[1, 2],
+            function_name="calculate",
+            args=["add", 1, 2],
         )
         route = sandbox_runner._prepare_route_with_config(
             request,

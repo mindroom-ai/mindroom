@@ -640,7 +640,7 @@ def test_scheduled_call_helpers_hidden_without_gated_tools(monkeypatch: pytest.M
             models={"default": ModelConfig(provider="openai", id="test-model")},
             # Even an approval rule on a controls_run function or delegation does not enable scheduled-call helpers.
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="switch_thread_model", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="thread_model_write", action="require_approval")],
             ),
         ),
     )
@@ -666,7 +666,7 @@ def test_scheduled_call_helpers_included_when_agent_has_policy_gated_tool(monkey
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="add", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="calculate", action="require_approval")],
             ),
         ),
     )
@@ -711,7 +711,7 @@ def test_scheduled_call_helpers_included_for_deferred_gated_tool(monkeypatch: py
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="add", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="calculate", action="require_approval")],
             ),
         ),
     )
@@ -779,7 +779,7 @@ async def test_scheduled_call_helpers_in_minimal_mode_respect_cli_deferred_gated
             },
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="add", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="calculate", action="require_approval")],
             ),
         ),
     )

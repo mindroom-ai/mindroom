@@ -203,14 +203,10 @@ class _DockerTools(Toolkit):
         all_containers: bool = False,
         tail: int = 100,
     ) -> str:
-        """Read-only inspection of Docker containers, images, volumes, and networks.
+        """Read-only Docker inspection (`target` for inspect/logs).
 
-        Actions:
-        - `list_containers`: list containers (`all_containers=True` includes stopped).
-        - `inspect_container` / `get_container_logs`: inspect or fetch last `tail` log lines of `target`.
-        - `list_images` / `inspect_image`: list images or inspect `target`.
-        - `list_volumes` / `inspect_volume`: list volumes or inspect `target`.
-        - `list_networks` / `inspect_network`: list networks or inspect `target`.
+        - `list_containers` (`all_containers`), `inspect_container`, `get_container_logs` (`tail`)
+        - `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`
         """
         try:
             result = self._inspect_dispatch(action, target=target, all_containers=all_containers, tail=tail)
@@ -287,13 +283,12 @@ class _DockerTools(Toolkit):
         force: bool = False,
         remove_volumes: bool = False,
     ) -> str:
-        """Run, execute inside, start, stop, or remove Docker containers.
+        """Manage Docker containers.
 
-        Actions:
-        - `run`: start a container from `image` (optional `command`, `name`, `detach`, `ports`, `volumes`, `environment`, `network`).
-        - `exec`: run `command` inside running `container_id`.
-        - `start` / `stop`: start or stop `container_id` (optional `timeout` seconds for `stop`).
-        - `remove`: remove `container_id` (`force`, `remove_volumes`).
+        - `run`: `image` (`command`, `name`, `detach`, `ports`, `volumes`, `environment`, `network`)
+        - `exec`: `container_id`, `command`
+        - `start` / `stop`: `container_id` (`timeout` s for `stop`)
+        - `remove`: `container_id` (`force`, `remove_volumes`)
         """
         try:
             result = self._container_dispatch(
@@ -407,15 +402,14 @@ class _DockerTools(Toolkit):
         force: bool = False,
         rm: bool = True,
     ) -> str:
-        """Manage Docker images, volumes, and networks.
+        """Manage Docker images, volumes, and networks by `name`.
 
-        Actions:
-        - `pull_image`: pull `name` with `tag` (default `latest`).
-        - `build_image`: build `tag` from `path` and `dockerfile` (`rm=True` removes intermediates).
-        - `tag_image` / `remove_image`: tag `name` into `repository`[:`tag`] or remove `name` (`force`).
-        - `create_volume` / `remove_volume`: create (`driver`, `labels`) or remove (`force`) volume `name`.
-        - `create_network` / `remove_network`: create (`driver`, `internal`, `labels`) or remove network `name`.
-        - `connect_network` / `disconnect_network`: attach or detach `container_id` on network `name`.
+        - `pull_image`: `tag` (`latest`)
+        - `build_image`: `path`, `tag`, `dockerfile` (`rm`)
+        - `tag_image` (`repository`, `tag`) / `remove_image` (`force`)
+        - `create_volume` (`driver`, `labels`) / `remove_volume` (`force`)
+        - `create_network` (`driver`, `internal`, `labels`) / `remove_network`
+        - `connect_network` / `disconnect_network`: `container_id`
         """
         try:
             result = self._resource_dispatch(

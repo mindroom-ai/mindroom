@@ -16,7 +16,7 @@ import pytest
 from mindroom import agents, ai
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, _cli_callable
 from mindroom.agent_cli.lifetime import current_cli_lifetime
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, ToolConfigEntry
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
@@ -96,10 +96,10 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     runtime = _helper_runtime(tmp_path, running_api, memory_backend=memory_backend)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    arguments = json.dumps({"a": 2, "b": 3})
+    arguments = json.dumps({"action": "add", "a": 2, "b": 3})
     call_id = "00000000-0000-4000-8000-000000000001"
     command = (
-        f"mindroom-agent tools call calculator add --call-id {call_id} --json '{arguments}'; "
+        f"mindroom-agent tools call calculator calculate --call-id {call_id} --json '{arguments}'; "
         f"mindroom-agent calls wait {call_id}"
     )
     provider.steps = [[("run_shell_command", {"args": command})], "done"]
@@ -107,7 +107,7 @@ async def test_standard_shell_command_calls_another_tool_through_mindroom_agent(
     assert "done" in await _respond(runtime)
 
     first = provider.requests[0]
-    assert {"run_shell_command", "add"} <= set(offered_tools(first))
+    assert {"run_shell_command", "calculate"} <= set(offered_tools(first))
     assert STANDARD_CLI_NOTE in str(first.messages)
     output = _tool_output(provider)
     assert '"status":"completed"' in output.replace(" ", ""), output
@@ -157,9 +157,9 @@ async def test_cli_calls_count_against_the_agent_s_configured_call_limit(
     provider.install(monkeypatch)
     first, second = "00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"
     command = (
-        _call_and_wait(first, "calculator", "add", {"a": 2, "b": 3})
+        _call_and_wait(first, "calculator", "calculate", {"action": "add", "a": 2, "b": 3})
         + "; "
-        + _call_and_wait(second, "calculator", "add", {"a": 4, "b": 5})
+        + _call_and_wait(second, "calculator", "calculate", {"action": "add", "a": 4, "b": 5})
     )
     provider.steps = [[("run_shell_command", {"args": command})], "done"]
 
@@ -224,8 +224,8 @@ async def test_parallel_native_shell_calls_each_reach_the_cli(
                     + _call_and_wait(
                         f"00000000-0000-4000-8000-00000000001{index}",
                         "calculator",
-                        "add",
-                        {"a": index, "b": 10},
+                        "calculate",
+                        {"action": "add", "a": index, "b": 10},
                     ),
                 },
             )
@@ -288,8 +288,9 @@ async def test_approval_gated_tools_stay_native_only(
 ) -> None:
     """A tool that may need approval keeps its native confirmation, or asks as its job, and is not offered to the CLI."""
     runtime = _helper_runtime(tmp_path, running_api)
+    runtime.config.agents["helper"].tools.append(ToolConfigEntry(name="sleep"))
     runtime.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="add", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="calculate", action="require_approval")],
     )
     runtime.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=jobs)
     provider = ScriptedProvider()
@@ -298,15 +299,15 @@ async def test_approval_gated_tools_stay_native_only(
 
     assert "done" in await _respond(runtime)
 
-    assert "add" in offered_tools(provider.requests[0])
+    assert "calculate" in offered_tools(provider.requests[0])
     listing = _tool_output(provider).replace(" ", "")
-    assert '"function":"subtract"' in listing, listing
-    assert '"function":"add"' not in listing, listing
+    assert '"function":"sleep"' in listing, listing
+    assert '"function":"calculate"' not in listing, listing
 
 
 def test_the_model_switch_is_not_offered_to_the_cli() -> None:
     """A switch for the current response stops the run, which a call a shell command makes cannot do."""
-    assert not _cli_callable(toolkit_offers(ThreadModelTools(), "switch_thread_model"))
+    assert not _cli_callable(toolkit_offers(ThreadModelTools(), "thread_model_write"))
 
 
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:

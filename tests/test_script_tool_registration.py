@@ -11,13 +11,7 @@ def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> Non
 
     assert metadata.default_execution_target is ToolExecutionTarget.PRIMARY
     assert metadata.requires_room_context is True
-    assert metadata.function_names == (
-        "start_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "cancel_script",
-        "list_scripts",
-    )
+    assert metadata.function_names == ("script_read", "script_write")
     assert {field.name for field in metadata.config_fields or ()} == {
         "allowed_tools",
         "max_concurrent_runs",

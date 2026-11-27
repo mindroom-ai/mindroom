@@ -160,3 +160,112 @@ def test_exa_research_handles_text_output_failed_and_timeout(monkeypatch: pytest
         ),
     )
     assert json.loads(tool.research("Explain Exa")) == {"error": "Research task timed out"}
+
+
+def test_exa_lookup_actions_option_whitelists_and_toggle_narrowing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """exa_lookup dispatches search/contents/similar/answer, preserves SDK option whitelists, and narrows schema."""
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class _RichExaClient(_FakeExaClient):
+        def __init__(self, api_key: str | None, *, timeout: float | None = None) -> None:
+            super().__init__(api_key, timeout=timeout, runs=SimpleNamespace())  # type: ignore[arg-type]
+
+        def search_and_contents(self, query: str, **kwargs: Any) -> Any:  # noqa: ANN401
+            calls.append(("search", {"query": query, **kwargs}))
+            return SimpleNamespace(
+                results=[
+                    SimpleNamespace(
+                        url="https://example.com",
+                        title="Example",
+                        author="Alice",
+                        published_date="2026-01-01",
+                        text="abcdefghij",
+                        summary="Short",
+                        highlights=["hi"],
+                    ),
+                ],
+            )
+
+        def get_contents(self, *, urls: list[str], **kwargs: Any) -> Any:  # noqa: ANN401
+            calls.append(("contents", {"urls": urls, **kwargs}))
+            return SimpleNamespace(results=[])
+
+        def find_similar_and_contents(self, *, url: str, **kwargs: Any) -> Any:  # noqa: ANN401
+            calls.append(("similar", {"url": url, **kwargs}))
+            return SimpleNamespace(results=[])
+
+        def answer(self, *, query: str, **kwargs: Any) -> Any:  # noqa: ANN401
+            calls.append(("answer", {"query": query, **kwargs}))
+            return SimpleNamespace(
+                answer="42",
+                citations=[
+                    SimpleNamespace(
+                        id="c1",
+                        url="https://example.com",
+                        title="T",
+                        published_date=None,
+                        author=None,
+                        text="full body",
+                    ),
+                ],
+            )
+
+    monkeypatch.setattr(
+        exa_module,
+        "_require_exa",
+        lambda: exa_module._ExaImports(exa_cls=_RichExaClient, timeout_error_cls=ExaTimeoutError),
+    )
+
+    tool = exa_module.exa_tools()(api_key="k", text_length_limit=4, summary=True, include_domains=["example.com"])
+    assert list(tool.functions) == ["exa_lookup"]
+
+    search_out = json.loads(tool.exa_lookup("search", query="matrix", category="news"))
+    assert search_out == [
+        {
+            "url": "https://example.com",
+            "title": "Example",
+            "author": "Alice",
+            "published_date": "2026-01-01",
+            "text": "abcd",
+            "summary": "Short",
+            "highlights": ["hi"],
+        },
+    ]
+    assert json.loads(tool.exa_lookup("contents", urls=["https://example.com"])) == []
+    assert json.loads(tool.exa_lookup("similar", url="https://example.com", num_results=3)) == []
+    ans = json.loads(tool.exa_lookup("answer", query="why?", text=True))
+    assert ans["answer"] == "42"
+    assert ans["citations"][0]["text"] == "full body"
+    assert "include_domains" in calls[0][1]
+    assert "include_domains" not in calls[1][1]
+    assert "include_domains" in calls[2][1]
+    assert calls[2][1]["num_results"] == 3
+    call_count_before = len(calls)
+    assert "cannot be used" in tool.exa_lookup("contents", urls=["https://example.com"], query="x")
+    assert "cannot be used" in tool.exa_lookup("search", query="coffee", text=False)
+    assert "cannot be used" in tool.exa_lookup("search", query="coffee", text=True)
+    assert len(calls) == call_count_before
+
+    only_contents = exa_module.exa_tools()(
+        api_key="k",
+        enable_search=False,
+        enable_find_similar=False,
+        enable_answer=False,
+    )
+    offered = adapt_toolkit(only_contents).functions[0]
+    assert offered.parameters["properties"]["action"]["enum"] == ["contents"]
+    assert set(offered.parameters["properties"]) == {"action", "urls"}
+    assert "`search`" not in (offered.description or "")
+    assert "linkedin profile" not in (offered.description or "")
+    assert "disabled" in only_contents.exa_lookup("search", query="x").lower()
+
+    none_enabled = exa_module.exa_tools()(
+        api_key="k",
+        enable_search=False,
+        enable_get_contents=False,
+        enable_find_similar=False,
+        enable_answer=False,
+    )
+    assert list(none_enabled.functions) == []

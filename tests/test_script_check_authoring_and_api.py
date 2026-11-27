@@ -542,7 +542,9 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
         True,
         False,
     )
-    assert len(triggers_alias.judge({"action": "watch_script", "source": _SRC}) or []) == 1
+    assert triggers_alias.judged_as == "script_write"
+    judged = triggers_alias.judge({"action": "watch_script", "source": _SRC})
+    assert judged == [{"action": "start", "source": _SRC, "path": None, "name": None}]
     assert (
         triggers_alias.judge({"action": "update", "trigger_id": "t1"}),
         triggers_alias.judge({"action": "list"}),
@@ -555,7 +557,7 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
 
     approval_cfg = ToolApprovalConfig(
         default="auto_approve",
-        rules=[ApprovalRuleConfig(match="start_script", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="script_write", action="require_approval")],
     )
     ctx, _ = _make_ctx(tmp_path, tool_approval=approval_cfg)
     assert grant_operation(ctx.config, "triggers", {"action": "watch_script", "source": _SRC}) is None
@@ -610,7 +612,7 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
     )
     assert desk_offered.functions == ()
 
-    # Astra #4: Voice responder allows triggers(list) and refuses triggers(watch_script) when start_script requires approval
+    # Astra #4: Voice responder allows triggers(list) and refuses triggers(watch_script) when script_write requires approval
     def _voice_build(cfg: Config) -> AgentBuild:
         chat = create_agent(
             "coder",
@@ -708,7 +710,7 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
         assert reenable_err["status"] == "error"
         assert "start_workflow" in reenable_err["message"]
 
-        # An agent that ALSO has 'script' is judged by start_script and remains allowed.
+        # An agent that ALSO has 'script' is judged by script_write and remains allowed.
         ctx_both, _ = _make_ctx(tmp_path / f"both_{idx}", agent_name="both", tool_approval=approval_cfg)
         ok_both = await _call(tool, ctx_both, action="watch_script", prompt="Alert", source=_SRC)
         assert ok_both["status"] == "ok"

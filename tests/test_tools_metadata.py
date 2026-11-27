@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args, get_type_hints
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
@@ -645,7 +646,7 @@ def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> 
     ("tool_function", "error"),
     [
         pytest.param(
-            lambda: trafilatura_tools()().extract_text,
+            lambda: lambda url: trafilatura_tools()().trafilatura_extract("text", url=url),
             "Error: Could not fetch content from URL: http://93.184.216.34/slow",
             id="trafilatura",
         ),
@@ -1110,9 +1111,18 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
 
     with _recording_loopback_server() as (url, connections):
         for function_name, parameter in _url_functions(tool_name):
+            method = getattr(toolkit, function_name)
             argument = [url] if parameter.endswith("urls") else url
-            with contextlib.suppress(ServerFetchUrlError, PublicFetchError):
-                getattr(toolkit, function_name)(**{parameter: argument})
+            action_hint = get_type_hints(method).get("action")
+            action_values = get_args(action_hint) if action_hint is not None else ()
+            call_kwargs_list = (
+                [{"action": action, parameter: argument} for action in action_values]
+                if action_values
+                else [{parameter: argument}]
+            )
+            for call_kwargs in call_kwargs_list:
+                with contextlib.suppress(ServerFetchUrlError, PublicFetchError):
+                    method(**call_kwargs)
 
     assert connections == []
 

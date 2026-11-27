@@ -29,11 +29,13 @@ from mindroom.desktop.credentials import (
 )
 from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
+from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -853,7 +855,7 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_s
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
@@ -1366,7 +1368,7 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_portable
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
@@ -1428,7 +1430,7 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     assert agent.request_template.deferred_tools.names == frozenset()
     assert "tool_search" not in function_names
     assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
@@ -1475,7 +1477,7 @@ def test_unsupported_models_use_portable_tool_search(
     agent = _code_agent(config, tmp_path)
 
     function_names = _function_names(agent)
-    assert {"sleep", "add", "tool_search", "call_tool"} <= function_names
+    assert {"sleep", "calculate", "tool_search", "call_tool"} <= function_names
     assert "load_tool" not in function_names
     # initial tools stay ordinary eager tools, so only sleep is hidden behind call_tool.
     assert _portable_deferred_names(agent) == frozenset({"sleep"})
@@ -1786,19 +1788,48 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     deferred_first: bool,
 ) -> None:
     """The registry uses the first toolkit's function for a name; deferral follows that owner and search offers only it."""
+    plugin_root = tmp_path / "colliding_plugin"
+    plugin_root.mkdir()
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "colliding_plugin", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool\n"
+        "class _FirstTools(Toolkit):\n"
+        "    name = 'first_search'\n"
+        "    @tool\n"
+        "    def shared_search(self, query: str) -> str:\n"
+        "        return query\n"
+        "class _SecondTools(Toolkit):\n"
+        "    name = 'second_search'\n"
+        "    @tool\n"
+        "    def shared_search(self, query: str) -> str:\n"
+        "        return query\n"
+        "@register_tool_with_metadata(name='first_search', display_name='First', description='First', "
+        "category=ToolCategory.RESEARCH, file_access=ToolFileAccess.NONE, function_names=('shared_search',))\n"
+        "def first_tools(): return _FirstTools\n"
+        "@register_tool_with_metadata(name='second_search', display_name='Second', description='Second', "
+        "category=ToolCategory.RESEARCH, file_access=ToolFileAccess.NONE, function_names=('shared_search',))\n"
+        "def second_tools(): return _SecondTools\n",
+        encoding="utf-8",
+    )
     raw = _base_config_data()
+    raw["plugins"] = [{"path": str(plugin_root)}]
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["duckduckgo", {"googlesearch": {"defer": True}}]
+    tools: list[object] = ["first_search", {"second_search": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
 
+    refresh_plugins(config, _runtime_paths(tmp_path))
     agent = _code_agent(config, tmp_path)
 
-    assert ("web_search" in agent.request_template.deferred_tools.names) is deferred_first
+    assert ("shared_search" in agent.request_template.deferred_tools.names) is deferred_first
     if "tool_search" in _function_names(agent):
-        matches = (await _search(agent, "web_search"))["matches"]
-        offered = [match["toolkit"] for match in matches if match["name"] == "web_search"]
-        assert offered == (["googlesearch"] if deferred_first else [])
+        matches = (await _search(agent, "shared_search"))["matches"]
+        offered = [match["toolkit"] for match in matches if match["name"] == "shared_search"]
+        assert offered == (["second_search"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:
@@ -1934,7 +1965,9 @@ def test_call_tool_wire_definition_has_a_description() -> None:
     """Providers read the wrapper's description, and some (Cerebras) fail without one."""
     function = toolkit_offers(_search_toolkit(), "call_tool")
 
-    assert function.definition().description
+    assert function.definition().description == (
+        "Call a deferred function from tool_search with top-level name and arguments object."
+    )
 
 
 def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
@@ -1943,6 +1976,117 @@ def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
 
     assert "tool_search" in _tool_payload(entrypoint(customer_id=7))["message"]
     assert "'crm_lookpu' was not called" in _tool_payload(entrypoint(name="crm_lookpu", customer_id=7))["message"]
+
+
+def test_call_tool_fallback_diagnostics_never_echo_payload_secrets() -> None:
+    """Fallback diagnostics classify malformed wrapper calls without echoing values, extra keys, or container names."""
+    entrypoint = toolkit_offers(_search_toolkit(), "call_tool").entrypoint
+    nested_both = {"name": "SECRET_FN", "arguments": {"token": "SECRET_VAL"}}
+    nested_name = {"name": "SECRET_FN", "token": "SECRET_VAL"}
+    cases: list[tuple[dict[str, object], str]] = [
+        ({"arguments": nested_both}, "found 'name' and 'arguments' nested inside 'arguments'"),
+        (
+            {"name": "   ", "arguments": json.dumps(nested_both)},
+            "found 'name' and 'arguments' nested inside 'arguments'",
+        ),
+        ({"name": None, "arguments": nested_name}, "found 'name' inside 'arguments'"),
+        ({"arguments": json.dumps(nested_name)}, "found 'name' inside 'arguments'"),
+        ({"arguments": {"token": "SECRET_VAL"}, "SECRET_EXTRA_KEY": "SECRET_EXTRA_VAL"}, "missing top-level 'name'."),
+        (
+            {"name": {"name": "SECRET_DICT_VAL"}, "arguments": {"token": "SECRET_VAL"}},
+            "top-level 'name' must be a string",
+        ),
+        ({"name": ["SECRET_LIST_VAL"], "arguments": [1]}, "top-level 'name' must be a string"),
+        ({"name": ("SECRET_TUPLE_VAL",)}, "top-level 'name' must be a string"),
+        ({"name": {"SECRET_SET_VAL"}}, "top-level 'name' must be a string"),
+        ({"name": frozenset({"SECRET_FSET_VAL"})}, "top-level 'name' must be a string"),
+        ({"name": "call_tool", "arguments": nested_name}, "exact name from tool_search, not 'call_tool'"),
+        (
+            {"name": "crm_lookup", "arguments": ["SECRET_VAL"]},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        (
+            {"name": "crm_lookup", "arguments": "SECRET_VAL"},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        (
+            {"name": "crm_lookup", "arguments": '["SECRET_VAL"]'},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        ({"name": "crm_lookup", "arguments": 42}, "'crm_lookup' was not called: 'arguments' must be a JSON object."),
+    ]
+    for kwargs, expected_fragment in cases:
+        message = _tool_payload(entrypoint(**kwargs))["message"]
+        assert isinstance(message, str)
+        assert expected_fragment in message
+        for secret in (
+            "SECRET_FN",
+            "SECRET_VAL",
+            "SECRET_EXTRA_KEY",
+            "SECRET_EXTRA_VAL",
+            "SECRET_DICT_VAL",
+            "SECRET_LIST_VAL",
+            "SECRET_TUPLE_VAL",
+            "SECRET_SET_VAL",
+            "SECRET_FSET_VAL",
+        ):
+            assert secret not in message
+
+    default_cases: list[tuple[object, object]] = [
+        ("crm_lookpu", None),
+        ("crm_lookpu", ""),
+        ("crm_lookpu", []),
+        ("crm_lookpu", {}),
+        ("crm_lookpu", "{}"),
+        ("crm_lookpu", "[]"),
+        ("crm_lookpu", "{'a': 1}"),
+        (0, None),
+        (False, None),
+    ]
+    for name, arguments in default_cases:
+        expected = (
+            f"'{name}' was not called. Use an exact function name from tool_search and pass arguments as a JSON object."
+        )
+        assert _tool_payload(entrypoint(name=name, arguments=arguments))["message"] == expected
+
+
+def test_call_tool_malformed_wire_calls_end_to_end() -> None:
+    """Malformed call_tool wire calls survive resolve_call_tool_calls and parse_tool_arguments to safe diagnostics."""
+    call_tool_fn = toolkit_offers(_search_toolkit(), "call_tool")
+    cases = [
+        (
+            json.dumps({"arguments": {"name": "crm_lookup", "arguments": {"token": "SECRET"}}}),
+            "found 'name' and 'arguments' nested inside 'arguments'",
+            "SECRET",
+        ),
+        (
+            json.dumps({"arguments": "{'name': 'crm_lookup', 'token': 'SECRET'}"}),
+            "found 'name' inside 'arguments'",
+            "SECRET",
+        ),
+        ("{'name': ('SECRET',)}", "top-level 'name' must be a string", "SECRET"),
+        ("{'name': {'SECRET'}}", "top-level 'name' must be a string", "SECRET"),
+        (
+            json.dumps({"name": "crm_lookpu", "arguments": "[]"}),
+            "'crm_lookpu' was not called. Use an exact function name",
+            "must be a JSON object",
+        ),
+        (
+            json.dumps({"name": "crm_lookpu", "arguments": "{'a': 1}"}),
+            "'crm_lookpu' was not called. Use an exact function name",
+            "must be a JSON object",
+        ),
+    ]
+    for raw_arguments, expected, forbidden in cases:
+        call = {"id": "c1", "type": "function", "function": {"name": "call_tool", "arguments": raw_arguments}}
+        [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+        assert resolved["function"]["name"] == "call_tool"
+        parsed = parse_tool_arguments(resolved["function"]["arguments"], call_tool_fn)
+        assert isinstance(parsed, dict)
+        message = _tool_payload(call_tool_fn.entrypoint(**parsed))["message"]
+        assert isinstance(message, str)
+        assert expected in message
+        assert forbidden not in message
 
 
 def test_search_toolkit_results_are_never_redirected_to_output_files(

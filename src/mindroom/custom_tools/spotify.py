@@ -297,13 +297,11 @@ class SpotifyTools(Toolkit):
         target_danceability: float | None = None,
         target_tempo: float | None = None,
     ) -> str:
-        """Search Spotify catalog, get recommendations, or inspect album/artist tracks.
+        """Search Spotify catalog or fetch recommendations/tracks.
 
-        Actions:
-        - `search`: Search by `query` and `search_type` (`track`/`playlist`/`artist`/`album`, `limit`, `market`).
-        - `recommendations`: Recommend tracks from `seed_tracks`/`seed_artists`/`seed_genres` and audio targets (`limit`).
-        - `album_tracks`: Fetch tracks for album `item_id` (`market`).
-        - `artist_top_tracks`: Fetch top tracks for artist `item_id` (`market`).
+        - `search`: `query`, `search_type` (`track`/`playlist`/`artist`/`album`), `limit`, `market`
+        - `recommendations`: `seed_tracks`/`seed_artists`/`seed_genres`, audio targets, `limit`
+        - `album_tracks` / `artist_top_tracks`: `item_id`, `market`
         """
         try:
             if action == "search":
@@ -410,15 +408,12 @@ class SpotifyTools(Toolkit):
         time_range: _TimeRange = "medium_term",
         include_tracks: bool = True,
     ) -> str:
-        """Read the user's Spotify profile, playback state, playlists, and top items.
+        """Read Spotify profile, playback, playlists, and top items.
 
-        Actions:
-        - `current_user`: Authenticated user profile.
-        - `currently_playing`: Current track, device, and playback progress.
-        - `user_playlists`: Current user's playlists (`limit`).
-        - `playlist`: Details and optional track list for `playlist_id` (`include_tracks`, `limit`, `offset`).
-        - `my_top_tracks`: User's top tracks (`time_range`, `limit`).
-        - `my_top_artists`: User's top artists (`time_range`, `limit`).
+        - `current_user` / `currently_playing`
+        - `user_playlists` (`limit`)
+        - `playlist`: `playlist_id` (`include_tracks`, `limit`, `offset`)
+        - `my_top_tracks` / `my_top_artists` (`time_range`, `limit`)
         """
         try:
             capped = max(1, min(limit, 50))
@@ -528,11 +523,10 @@ class SpotifyTools(Toolkit):
     ) -> str:
         """Create or modify Spotify playlists.
 
-        Actions:
-        - `create`: Create a playlist (`name`; optional `description`, `public`, `track_uris`).
-        - `update`: Update `playlist_id` details (`name`, `description`, or `public`).
-        - `add_tracks`: Add `track_uris` (max 100) to `playlist_id` (optional 0-indexed `position`).
-        - `remove_tracks`: Remove `track_uris` from `playlist_id`.
+        - `create`: `name` (`description`, `public`, `track_uris`)
+        - `update`: `playlist_id` (`name`, `description`, `public`)
+        - `add_tracks`: `playlist_id`, `track_uris` (max 100; optional 0-indexed `position`)
+        - `remove_tracks`: `playlist_id`, `track_uris`
         """
         try:
             if action == "create":

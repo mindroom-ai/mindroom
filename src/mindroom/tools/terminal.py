@@ -28,7 +28,8 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#terminal",
-    function_names=("terminal_open", "terminal_run", "terminal_send", "terminal_read", "terminal_list"),
+    function_names=("terminal_read", "terminal_write"),
+    action_scoped_grants=("terminal_read", "terminal_write"),
 )
 def terminal_tools() -> type[TerminalTools]:
     """Return the persistent terminal toolkit."""

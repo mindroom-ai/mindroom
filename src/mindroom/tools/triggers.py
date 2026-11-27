@@ -39,6 +39,7 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
     if normalized == "watch_script":
         return [
             {
+                "action": "start",
                 "source": arguments.get("source"),
                 "path": arguments.get("path"),
                 "name": arguments.get("trigger_id") or arguments.get("description"),
@@ -65,7 +66,7 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
     function_names=("triggers",),
     approval_aliases={
         "triggers": ApprovalAlias(
-            judged_as="start_script",
+            judged_as="script_write",
             judge=_judge_triggers_script_check,
             allow_non_resumable_passthrough=True,
         ),
