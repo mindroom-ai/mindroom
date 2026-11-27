@@ -43,7 +43,7 @@ from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_fa
 from mindroom.failure_text import failure_text
 from mindroom.hooks import HookBindings
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
-from mindroom.llm.provider import DeferredTools, ModelRequest
+from mindroom.llm.provider import DeferredTools, ModelRequest, RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
@@ -2185,7 +2185,14 @@ def create_agent(
     return AgentBuild(
         spec=spec,
         prompt=prompt,
-        request_template=ModelRequest(messages=(), deferred_tools=deferred_tools),
+        request_template=ModelRequest(
+            messages=(),
+            deferred_tools=deferred_tools,
+            overrides=RequestOverrides(
+                wait_for_connectivity=not outside_matrix
+                and (execution_identity is None or execution_identity.channel == "matrix"),
+            ),
+        ),
         history_settings=agent.history_settings,
         tool_policy=bind_live_tools(spec.functions, tool_assembly.tool_middleware),
         tool_jobs=tool_jobs,

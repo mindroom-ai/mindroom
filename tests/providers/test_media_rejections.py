@@ -11,6 +11,9 @@ without any of the media.
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +25,7 @@ import pytest
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
-from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.media import Audio, File, Image, Video, image_format
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
@@ -32,9 +35,11 @@ from mindroom.providers.gemini import adapter as gemini_adapter
 from mindroom.providers.gemini.wire import rejected_media as gemini_rejected_media
 from mindroom.providers.openai import chat as chat_adapter
 from mindroom.providers.openai import responses as responses_adapter
+from mindroom.providers.openai.errors import provider_error as openai_provider_error
 from mindroom.providers.openai.errors import rejected_media as openai_rejected_media
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline import webp as webp_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES, prompt_text, sends, user_parts
 from tests.providers.golden_support import Wire, hide_provider_environment, pipeline_provider
@@ -311,6 +316,360 @@ async def test_openrouter_404_video_rejection_preserves_other_media_and_learns_g
     assert not sends(second, b"mp4 video")
 
 
+def _webp_photo(*, animated: bool = False) -> Image:
+    from PIL import Image as PILImage  # noqa: PLC0415
+
+    buf = io.BytesIO()
+    if animated:
+        frame0 = PILImage.new("RGB", (10, 8), (220, 40, 30))
+        frame1 = PILImage.new("RGB", (10, 8), (30, 40, 220))
+        frame0.save(buf, format="WEBP", save_all=True, append_images=[frame1], duration=50, loop=0)
+    else:
+        PILImage.new("RGB", (10, 8), (30, 140, 220)).save(buf, format="WEBP")
+    return Image(id="att_webp", content=buf.getvalue(), mime_type="image/webp")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_message",
+    ["Unsupported MIME type: image/webp", "Only JPEG and PNG are supported"],
+    ids=["mime-webp", "format-list-without-image-word"],
+)
+async def test_openrouter_upstream_webp_rejection_transcodes_and_learns_proactively(
+    upstream_message: str,
+    tmp_path: Path,
+) -> None:
+    """OpenRouter's ``metadata.raw`` upstream format rejection triggers WebP transcoding and per-route learning."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "x-ai/grok-4", "api_key": "test-key"},
+    )
+    webp = _webp_photo()
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {
+                "raw": json.dumps({"error": {"message": upstream_message}}),
+                "provider_name": "xAI",
+            },
+        },
+    )
+    wire = Wire(rejection, spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp])
+
+    turn_1 = await complete(provider, ModelRequest(messages=[message]))
+    turn_2 = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    for idx in (1, 2):
+        url = user_parts(wire.body(idx))[1]["image_url"]["url"]
+        assert prompt_text(wire.body(idx)) == _PROMPT
+        assert url.startswith("data:image/png;base64,")
+        assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+
+
+@pytest.mark.asyncio
+async def test_chat_image_parse_error_code_with_generic_message_transcodes_webp(tmp_path: Path) -> None:
+    """OpenAI wire ``code: image_parse_error`` triggers WebP transcoding via ``error.provider_code``."""
+    webp = _webp_photo()
+    rejection = _rejected(
+        {"message": "Bad request", "type": "invalid_request_error", "param": None, "code": "image_parse_error"},
+    )
+    message = Message(role="user", content=_PROMPT, images=[webp])
+
+    first, retry = await _sent_after("openai_chat", tmp_path, rejection, message)
+
+    assert user_parts(first)[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert prompt_text(retry) == _PROMPT
+    url = user_parts(retry)[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_chat_animated_webp_with_allowlist_including_webp_retries_without_learning(
+    tmp_path: Path,
+) -> None:
+    """OpenAI's allowlist naming ``webp`` retries one animated WebP as PNG without learning WebP unsupported."""
+    spec = FAMILIES["openai_chat"]
+    animated = _webp_photo(animated=True)
+    still = _webp_photo()
+    wire = Wire(_rejected(_CHAT_SVG_IMAGE), spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    turn_1 = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[animated])]))
+    turn_2 = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[still])]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert user_parts(wire.body(1))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+    assert (
+        user_parts(wire.body(2))[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(still.content or b'').decode()}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_http_415_webp_rejection_transcodes_preserves_pdf_and_learns(tmp_path: Path) -> None:
+    """HTTP 415 Unsupported Media Type for ``image/webp`` transcodes to PNG, keeps the PDF, and learns."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(415, json={"error": {"message": "Unsupported MIME type: image/webp"}})
+    wire = Wire(rejection, spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn_1 = await complete(provider, ModelRequest(messages=[message]))
+    turn_2 = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn_1.content, turn_2.content, len(wire.requests)) == ("ok", "ok", 3)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    for idx in (1, 2):
+        assert prompt_text(wire.body(idx)) == _PROMPT
+        url = user_parts(wire.body(idx))[1]["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+        assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+        assert sends(wire.body(idx), b"%PDF-1.4 report")
+    assert webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_chat_attributed_http_415_on_webp_transcodes_and_preserves_pdf(tmp_path: Path) -> None:
+    """An attributed HTTP 415 naming an image part transcodes the WebP to PNG and preserves the PDF."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(
+        415,
+        json={"error": {"message": "Unsupported Media Type", "param": "messages[0].content[1].image_url"}},
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert prompt_text(wire.body(1)) == _PROMPT
+    url = user_parts(wire.body(1))[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(url.split(",", 1)[1])) == "png"
+    assert sends(wire.body(1), b"%PDF-1.4 report")
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_learned_webp_route_attributed_413_on_pdf_drops_only_pdf_and_keeps_image(
+    tmp_path: Path,
+) -> None:
+    """An attributed 413 naming an oversized PDF on a learned WebP route drops only the PDF, keeping the image."""
+    spec = FAMILIES["openai_chat"]
+    webp = _webp_photo()
+    rejection = httpx.Response(
+        413,
+        json={
+            "error": {
+                "message": "File too large",
+                "type": "invalid_request_error",
+                "param": "messages[0].content[2].file.file_data",
+                "code": "invalid_value",
+            },
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    webp_stage.LEARNED_WEBP_UNSUPPORTED.add(webp_stage.media_route(adapter))
+    provider = pipeline_provider(adapter)
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert prompt_text(wire.body(1)) == _named("report.pdf (att_report)")
+    assert [part["type"] for part in user_parts(wire.body(1))] == ["text", "image_url"]
+    assert user_parts(wire.body(1))[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert not sends(wire.body(1), b"%PDF-1.4 report")
+
+
+@pytest.mark.asyncio
+async def test_chat_image_url_timeout_beside_webp_drops_only_url_and_preserves_webp(tmp_path: Path) -> None:
+    """A URL download timeout beside a local WebP drops only the failed URL without transcoding or learning."""
+    webp = _webp_photo()
+    fetched = Image(id="att_map", url="https://media.test/map.png")
+    message = Message(role="user", content=_PROMPT, images=[webp, fetched])
+
+    _first, retry = await _sent_after("openai_chat", tmp_path, _rejected(_CHAT_IMAGE_URL_TIMEOUT), message)
+
+    assert prompt_text(retry) == _named("image (att_map)")
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url"]
+    assert (
+        user_parts(retry)[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(webp.content or b'').decode()}"
+    )
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_chat_rejecting_markdown_file_beside_webp_image_does_not_transcode_webp(tmp_path: Path) -> None:
+    """A file-only MIME rejection beside a WebP image drops only the file and leaves the WebP bytes untouched."""
+    webp = _webp_photo()
+    notes = File(id="att_notes", content=b"# notes", filename="notes.md", mime_type="text/markdown")
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[notes])
+
+    _first, retry = await _sent_after("openai_chat", tmp_path, _rejected(_CHAT_MARKDOWN_FILE), message)
+
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url"]
+    assert (
+        user_parts(retry)[1]["image_url"]["url"]
+        == f"data:image/webp;base64,{base64.b64encode(webp.content or b'').decode()}"
+    )
+    assert not sends(retry, b"# notes")
+
+
+@pytest.mark.parametrize(
+    ("provider", "metadata", "expected"),
+    [
+        (
+            "OpenRouter",
+            {"raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}})},
+            "Provider returned error: Unsupported MIME type: image/webp",
+        ),
+        (
+            "OpenRouter",
+            {"raw": json.dumps({"message": "Only JPEG and PNG are supported"})},
+            "Provider returned error: Only JPEG and PNG are supported",
+        ),
+        (
+            "OpenRouter",
+            {"raw": json.dumps([{"error": {"message": "Unsupported MIME type: image/webp"}}])},
+            "Provider returned error: Unsupported MIME type: image/webp",
+        ),
+        (
+            "OpenRouter",
+            {"raw": "  Upstream rejected image/webp  "},
+            "Provider returned error: Upstream rejected image/webp",
+        ),
+        (
+            "OpenRouter",
+            {"raw": json.dumps({"detail": [{"input": "private prompt"}]})},
+            "Provider returned error",
+        ),
+        (
+            "OpenAI",
+            {"raw": "Upstream rejected image/webp"},
+            "Provider returned error",
+        ),
+        ("OpenRouter", {"raw": "   "}, "Provider returned error"),
+        ("OpenRouter", None, "Provider returned error"),
+    ],
+    ids=[
+        "json-error-message",
+        "json-message",
+        "json-single-element-list",
+        "plain-text",
+        "unrecognized-json",
+        "non-openrouter",
+        "blank",
+        "absent",
+    ],
+)
+def test_openrouter_upstream_error_detail_is_surfaced(
+    provider: str,
+    metadata: dict[str, Any] | None,
+    expected: str,
+) -> None:
+    """Only OpenRouter surfaces recognized ``metadata.raw`` details; unrecognized JSON and other providers stay untouched."""
+    body: dict[str, Any] = {"message": "Provider returned error", "code": 400}
+    if metadata is not None:
+        body["metadata"] = metadata
+    failure = openai_provider_error(_sdk_rejection(body), provider=provider)
+    assert str(failure) == expected
+
+
+def test_openrouter_upstream_error_detail_redacts_before_truncation() -> None:
+    """Credential-bearing URLs spanning the truncation boundary are redacted before truncating."""
+    credential = "top-example-value-123"
+    raw = f"{'a' * 485} https://user:{credential}@example.com/path"
+    body: dict[str, Any] = {"message": "Provider returned error", "code": 400, "metadata": {"raw": raw}}
+    failure = openai_provider_error(_sdk_rejection(body), provider="OpenRouter")
+    text = str(failure)
+    assert text.startswith("Provider returned error: ")
+    assert credential not in text
+    assert len(text) <= len("Provider returned error: ") + 500
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_upstream_webp_rejection_transcodes_on_responses_wire(
+    tmp_path: Path,
+) -> None:
+    """OpenRouter Responses (``provider=openai`` + OpenRouter ``base_url``) surfaces ``metadata.raw`` and transcodes."""
+    spec = replace(
+        FAMILIES["openai_responses"],
+        config={
+            "provider": "openai",
+            "api": "responses",
+            "id": "x-ai/grok-4",
+            "api_key": "test-key",
+            "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1"},
+        },
+    )
+    webp = _webp_photo()
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"raw": json.dumps({"error": {"message": "Unsupported MIME type: image/webp"}})},
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    turn = await complete(provider, ModelRequest(messages=[Message(role="user", content=_PROMPT, images=[webp])]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert wire.requests[0].url.path.endswith("/responses")
+    assert user_parts(wire.body(0))[1]["image_url"].startswith("data:image/webp;base64,")
+    retry_url = user_parts(wire.body(1))[1]["image_url"]
+    assert retry_url.startswith("data:image/png;base64,")
+    assert image_format(base64.b64decode(retry_url.split(",", 1)[1])) == "png"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_webp_url_download_timeout_beside_local_webp_does_not_transcode(
+    tmp_path: Path,
+) -> None:
+    """A ``.webp`` URL download timeout on OpenRouter does not transcode a local WebP or learn WebP unsupported."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "x-ai/grok-4", "api_key": "test-key"},
+    )
+    webp = _webp_photo()
+    fetched = Image(id="att_map", url="https://media.test/map.webp")
+    rejection = _rejected(
+        {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"raw": "Timeout while downloading https://media.test/map.webp"},
+        },
+    )
+    wire = Wire(rejection, spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content=_PROMPT, images=[webp, fetched])
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 2)
+    assert user_parts(wire.body(0))[1]["image_url"]["url"].startswith("data:image/webp;base64,")
+    assert wire.body(1)["messages"][-1]["content"] == f"{_PROMPT}\n\n{_NOTE}"
+    assert not webp_stage.LEARNED_WEBP_UNSUPPORTED
+
+
 # --- OpenAI Responses ---------------------------------------------------------------------------------------------
 
 
@@ -499,6 +858,23 @@ async def test_gemini_rejecting_an_invalid_argument_retries_without_any_media(tm
     _first, retry = await _sent_after("gemini", tmp_path, _rejected(_GEMINI_INVALID_ARGUMENT), message)
 
     assert user_parts(retry) == [{"text": f"{_PROMPT}\n\n{_NOTE}"}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_webp_mime_rejection_transcodes_inline_image(tmp_path: Path) -> None:
+    """Gemini's ``Unsupported MIME type: image/webp`` retries with transcoded PNG while preserving other media."""
+    webp = _webp_photo()
+    rejection = _rejected({"code": 400, "message": "Unsupported MIME type: image/webp", "status": "INVALID_ARGUMENT"})
+    message = Message(role="user", content=_PROMPT, images=[webp], files=[_REPORT])
+
+    first, retry = await _sent_after("gemini", tmp_path, rejection, message)
+
+    assert user_parts(first)[1]["inlineData"]["mime_type"] == "image/webp"
+    assert prompt_text(retry) == _PROMPT
+    inline = user_parts(retry)[1]["inlineData"]
+    assert inline["mime_type"] == "image/png"
+    assert image_format(base64.b64decode(inline["data"])) == "png"
+    assert sends(retry, b"%PDF-1.4 report")
 
 
 # --- A wrong naming -------------------------------------------------------------------------------------------------

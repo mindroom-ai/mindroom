@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -55,7 +56,7 @@ if TYPE_CHECKING:
     )
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts", "commits_attempt"]
+__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts", "commits_attempt", "with_carried_usage"]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 
@@ -148,10 +149,18 @@ class Retry:
     delay_seconds: float = 0.0
 
 
+async def _resolve_retry(
+    retry: Callable[[ProviderError], Retry | None | Awaitable[Retry | None]],
+    error: ProviderError,
+) -> Retry | None:
+    result = retry(error)
+    return await result if inspect.isawaitable(result) else result
+
+
 async def attempts(
     inner: ModelProvider,
     request: ModelRequest,
-    retry: Callable[[ProviderError], Retry | None],
+    retry: Callable[[ProviderError], Retry | None | Awaitable[Retry | None]],
     *,
     next_event: Callable[[AsyncIterator[StreamEvent]], Awaitable[StreamEvent]] = anext,
 ) -> AsyncIterator[StreamEvent]:
@@ -185,7 +194,7 @@ async def attempts(
                         # The attempt was another request than the caller's, so its usage sizes none of the caller's.
                         message = event.message
                         message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
-                    yield _with_carried_usage(event, carried)
+                    yield with_carried_usage(event, carried)
             if finished:
                 return
             raise incomplete_stream_error(provider=inner.identity.provider)
@@ -194,12 +203,12 @@ async def attempts(
             # stages around this one, and every reissue after it goes without that state too, with the retries the
             # retry stage has left for it.
             error.replay_stripped = stripped = error.replay_stripped or request.strip_encrypted_replay
-            if committed or (reissue := retry(error)) is None:
+            if committed or (reissue := await _resolve_retry(retry, error)) is None:
                 raise
             # A failure raised above the retry stage, such as a download, carries no budget; the request's stays.
             budget = error.retry_budget or request.retry_budget
         if (report := usage.settle()) is not None:
-            yield _with_carried_usage(report, carried)
+            yield with_carried_usage(report, carried)
         if reissue.delay_seconds:
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
@@ -220,7 +229,7 @@ def commits_attempt(event: StreamEvent) -> bool:
     return isinstance(event, ToolCallReady)
 
 
-def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
+def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
     """Add the failed attempts' usage to a reissued attempt's finished turn, marking its usage as summing attempts.
 
     The mark goes on the attempt's reports and its finished turn alike, once the failed attempts reported tokens.

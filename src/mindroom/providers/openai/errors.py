@@ -6,6 +6,7 @@ codes are preserved so user-facing messages and compaction can still tell failur
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Mapping
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import ProviderError
+from mindroom.model_defaults import OPENROUTER_BASE_URL_DEFAULT
 from mindroom.providers.errors import (
     classify_provider_error,
     media_ids,
@@ -22,6 +24,7 @@ from mindroom.providers.errors import (
     retry_after_seconds,
 )
 from mindroom.providers.openai.media import file_part_name
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -61,6 +64,9 @@ _FILE_WORDING = ("you uploaded an invalid file", "the file type you uploaded is 
 # Responses' reported rejection of a file by its extension: "Expected file type to be a supported format: .pdf but got
 # .md."
 _REJECTED_EXTENSION = re.compile(r"but got (\.[a-z0-9]{1,16})(?![a-z0-9])")
+# OpenRouter wraps upstream 400s in this generic message and puts the upstream payload in ``metadata.raw``.
+_OPENROUTER_PROVIDER_ERROR = "Provider returned error"
+_MAX_UPSTREAM_DETAIL_CHARS = 500
 
 
 def sdk_failures() -> type[Exception]:
@@ -73,14 +79,52 @@ def sdk_failures() -> type[Exception]:
     return openai.OpenAIError
 
 
-def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
+def _is_openrouter(provider: str, endpoint: str | None) -> bool:
+    return provider.casefold() == "openrouter" or (endpoint or "").rstrip("/") == OPENROUTER_BASE_URL_DEFAULT
+
+
+def _upstream_error_detail(metadata: object) -> str | None:
+    """Extract a redacted, concise upstream error detail from OpenRouter's ``metadata.raw`` payload."""
+    if (
+        not isinstance(metadata, Mapping)
+        or not isinstance(raw := metadata.get("raw"), str)
+        or not (stripped := raw.strip())
+    ):
+        return None
+    detail: str | None = stripped
+    try:
+        parsed = json.loads(stripped)
+    except ValueError:
+        pass
+    else:
+        detail = None
+        if isinstance(parsed, list) and len(parsed) == 1:
+            parsed = parsed[0]
+        if isinstance(parsed, Mapping):
+            nested = parsed.get("error")
+            for candidate in (
+                nested.get("message") if isinstance(nested, Mapping) else None,
+                parsed.get("message"),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    detail = candidate.strip()
+                    break
+    if not detail:
+        return None
+    return redact_sensitive_text(detail, max_length=_MAX_UPSTREAM_DETAIL_CHARS)
+
+
+def _error_fields(body: object, *, openrouter: bool = False) -> tuple[str | None, str | None, str | None]:
     """Return the message, code, and type of an error body the SDK already unwrapped from its ``error`` envelope."""
     if not isinstance(body, Mapping):
         return (body if isinstance(body, str) and body else None), None, None
     fields = cast("Mapping[str, Any]", body)
     message, code, error_type = fields.get("message"), fields.get("code"), fields.get("type")
+    text = message if isinstance(message, str) else None
+    if openrouter and text == _OPENROUTER_PROVIDER_ERROR and (detail := _upstream_error_detail(fields.get("metadata"))):
+        text = f"{text}: {detail}"
     return (
-        message if isinstance(message, str) else None,
+        text,
         str(code) if code is not None else None,
         error_type if isinstance(error_type, str) else None,
     )
@@ -100,14 +144,15 @@ def body_retry_after(body: object) -> float | None:
     return None
 
 
-def provider_error(error: Exception, *, provider: str) -> ProviderError:
+def provider_error(error: Exception, *, provider: str, endpoint: str | None = None) -> ProviderError:
     """Return the normalized error for one SDK or transport failure; ``provider`` is the route's provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
     if (failure := provider_failure(error, provider=provider)) is not None:
         return failure
+    openrouter = _is_openrouter(provider, endpoint)
     if isinstance(error, openai.APIStatusError):
-        message, code, error_type = _error_fields(error.body)
+        message, code, error_type = _error_fields(error.body, openrouter=openrouter)
         if message is None:
             message = error.response.text or str(error)
         retry_after = retry_after_seconds(error.response.headers)
@@ -121,7 +166,7 @@ def provider_error(error: Exception, *, provider: str) -> ProviderError:
         )
     if isinstance(error, openai.APIError):
         # The SDK raises an error chunk inside a stream as an ``APIError`` that carries the chunk's ``error`` body.
-        message, code, error_type = _error_fields(error.body)
+        message, code, error_type = _error_fields(error.body, openrouter=openrouter)
         return classify_provider_error(
             message or error.message,
             provider=provider,
@@ -138,6 +183,8 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
     messages: Sequence[Message],
     *,
     chat: bool,
+    provider: str = "",
+    endpoint: str | None = None,
 ) -> frozenset[str]:
     """Return the ids of the attachments an SDK rejection names, among ``messages``, the ones the request ``body`` sent.
 
@@ -156,7 +203,7 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
 
     if not isinstance(error, openai.APIError):
         return frozenset()
-    message, code, _error_type = _error_fields(error.body)
+    message, code, _error_type = _error_fields(error.body, openrouter=_is_openrouter(provider, endpoint))
     text = message or ""
     lowered = text.casefold()
     if isinstance(error.param, str):

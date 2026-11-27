@@ -20,10 +20,13 @@ from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.calls import CallsConfig, LiveCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, ModelConfig, ModelPricing
 from mindroom.config.personal_agents import PersonalAgentInstance, PersonalAgentTemplateConfig
+from mindroom.config.personal_rooms import PersonalRoomsConfig
+from mindroom.config.slack import SlackConfig
 from mindroom.llm.media import Image
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
@@ -1085,6 +1088,46 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         lambda config: config.mcp_servers.__setitem__("demo", MCPServerConfig(transport="stdio", command="npx")),
         False,
     ),
+    "voice_stt_host": (lambda config: setattr(config.voice.stt, "host", "http://127.0.0.1:10301"), True),
+    "debug_log_llm_requests": (lambda config: setattr(config.debug, "log_llm_requests", True), True),
+    "prompts_override": (
+        lambda config: config.prompts.__setitem__("CURRENT_MESSAGE_PROMPT_INTRO", "Next:\n"),
+        True,
+    ),
+    "matrix_space_name": (lambda config: setattr(config.matrix_space, "name", "Team Space"), True),
+    "server_emoji_enabled": (lambda config: setattr(config.server_emoji, "enabled", True), True),
+    "event_journal_backend": (lambda config: setattr(config.event_journal, "backend", "postgres"), True),
+    "budgets": (
+        lambda config: setattr(config, "budgets", BudgetsConfig(monthly_limit_usd=25.0, fallback_model="spare")),
+        False,
+    ),
+    "slack_identity_mapping": (
+        lambda config: setattr(
+            config,
+            "slack",
+            SlackConfig(email_domain="example.com", matrix_user_id_template="@{localpart}:test"),
+        ),
+        True,
+    ),
+    "tailnet_ssh_logins": (
+        lambda config: config.tailnet_ssh.logins.__setitem__("@alice:test", "alice@example.com"),
+        True,
+    ),
+    "scheduler_catch_up_grace_seconds": (
+        lambda config: setattr(config, "scheduler_catch_up_grace_seconds", 600),
+        True,
+    ),
+    "email_invites_approvers": (lambda config: config.email_invites.approvers.append("@alice:test"), False),
+    "personal_rooms": (
+        lambda config: setattr(
+            config,
+            "personal_rooms",
+            PersonalRoomsConfig(agent="helper", onboarding_rooms=["lobby"]),
+        ),
+        False,
+    ),
+    "matrix_sync_mode": (lambda config: setattr(config.matrix_sync, "mode", "sliding"), False),
+    "own_tailnet_ssh": (lambda config: setattr(config.agents["helper"], "tailnet_ssh", True), False),
 }
 
 

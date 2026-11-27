@@ -956,9 +956,17 @@ class ApprovalContinuationRunner:
             else nullcontext()
         )
         async with lease_cm:
-            await self.locked.refresh_mid_turn_context_for_approval(request)
             # The resume writes into the reply it continues from its first step.
             progress = TurnProgress(delivery_started=True)
+            refreshed = await self.locked.run_stoppable(
+                request,
+                self.locked.refresh_mid_turn_context_for_approval(request),
+                delivery_started=progress.delivery_started,
+                target=target,
+            )
+            if isinstance(refreshed, FinalDeliveryOutcome):
+                await self._settle_claimed_resume_ending(claimed, refreshed.ending, target=target)
+                return refreshed.ending
             lifecycle = self.locked.build_lifecycle(request, response_kind=continuation_response_kind(claimed))
             post_effect_continuation = claimed
             # A FINAL the resume queued is owed: the approval finishes it once Matrix has it, so the turn has answered.
@@ -1005,26 +1013,36 @@ class ApprovalContinuationRunner:
             )
             ending = progress.ending
             assert ending is not None, "a settled resume has its ending"
-            match ending:
-                case Completed():
-                    step = next_step(await self._facts(post_effect_continuation, recover=True), Resumed("completed"))
-                    if not await self._run_step(post_effect_continuation, step, target=target):
-                        msg = "Approval continuation final delivery was not durably acknowledged"
-                        raise RuntimeError(msg)
-                case Cancelled() | Failed() | Suppressed():
-                    # A hook's suppression of a resumed answer fails the approval, as an error does.
-                    step = next_step(
-                        await self._facts(post_effect_continuation, recover=True),
-                        Resumed("failed", approval_failure(ending)),
-                    )
-                    await self._run_step(
-                        post_effect_continuation,
-                        step,
-                        target=continuation_target(post_effect_continuation),
-                    )
-                case AwaitingApproval() | Owed():
-                    pass
+            await self._settle_claimed_resume_ending(post_effect_continuation, ending, target=target)
         return ending
+
+    async def _settle_claimed_resume_ending(
+        self,
+        continuation: ApprovalContinuation,
+        ending: TurnEnding,
+        *,
+        target: MessageTarget,
+    ) -> None:
+        """Apply the post-lifecycle continuation step for one claimed resume ending."""
+        match ending:
+            case Completed():
+                step = next_step(await self._facts(continuation, recover=True), Resumed("completed"))
+                if not await self._run_step(continuation, step, target=target):
+                    msg = "Approval continuation final delivery was not durably acknowledged"
+                    raise RuntimeError(msg)
+            case Cancelled() | Failed() | Suppressed():
+                # A hook's suppression of a resumed answer fails the approval, as an error does.
+                step = next_step(
+                    await self._facts(continuation, recover=True),
+                    Resumed("failed", approval_failure(ending)),
+                )
+                await self._run_step(
+                    continuation,
+                    step,
+                    target=continuation_target(continuation),
+                )
+            case AwaitingApproval() | Owed():
+                pass
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL and the reply it answered."""

@@ -174,7 +174,9 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
+from mindroom.providers.pipeline import connectivity as connectivity_pipeline
 from mindroom.providers.pipeline import media as media_pipeline
+from mindroom.providers.pipeline import webp as webp_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
@@ -4397,10 +4399,33 @@ def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_jobs_instances, "_instances", {})
 
 
+@pytest.fixture
+def real_connectivity_probe() -> None:
+    """Keep provider connectivity probes on their real httpx client for tests that stub httpx directly."""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_connectivity_probes(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None]:
+    """Keep provider connectivity probes online and isolated per test unless a test opts into the real probe."""
+    connectivity_pipeline._homeserver_probes.clear()
+    if "real_connectivity_probe" not in request.fixturenames:
+
+        async def _always_online(_url: str, _verify: object, _timeout_seconds: float) -> bool:
+            return True
+
+        monkeypatch.setattr(connectivity_pipeline, "_http_probe_homeserver", _always_online)
+    yield
+    connectivity_pipeline._homeserver_probes.clear()
+
+
 @pytest.fixture(autouse=True)
 def _reset_model_media_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep process-local learned media support isolated per test."""
     monkeypatch.setattr(media_pipeline, "_LEARNED_UNSUPPORTED", {})
+    monkeypatch.setattr(webp_pipeline, "LEARNED_WEBP_UNSUPPORTED", set())
 
 
 @pytest.fixture(autouse=True)

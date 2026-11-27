@@ -28,7 +28,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.reasoning import ReasoningTools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.tool_system.authoring import Toolkit
@@ -165,7 +165,7 @@ def test_create_agent_builds_the_spec_prompt_and_owners(tmp_path: Path) -> None:
     assert build.prompt.tool_instructions == ()
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
-    assert build.request_template == ModelRequest(messages=())
+    assert build.request_template == ModelRequest(messages=(), overrides=RequestOverrides(wait_for_connectivity=True))
     assert build.history_settings == config.resolve_scope("assistant").history_settings
     # Large CLI results and their media are saved in the agent's own workspace.
     assert build.surface.output_file_policy is not None

@@ -574,7 +574,7 @@ async def _start_command(
     stderr: int = asyncio.subprocess.PIPE,
 ) -> asyncio.subprocess.Process:
     """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    launch = _idle_launch_argv(argv, env, cwd)
+    launch = await asyncio.to_thread(_idle_launch_argv, argv, env, cwd)
     process = await asyncio.create_subprocess_exec(
         *launch.argv,
         stdin=stdin,
@@ -1362,13 +1362,58 @@ def _idle_io_launcher() -> str | None:
     return None
 
 
-@functools.cache
+_SYSTEMD_UNAVAILABLE_STATES = frozenset({"stopping", "offline"})
+
+
+def _systemd_bus_env(runtime_dir: str | None, dbus_addr: str | None) -> dict[str, str]:
+    """Return the minimal bus environment passed to user-systemd probe commands."""
+    return {
+        key: value
+        for key, value in (("XDG_RUNTIME_DIR", runtime_dir), ("DBUS_SESSION_BUS_ADDRESS", dbus_addr))
+        if value is not None
+    }
+
+
+def _user_manager_generation(runtime_dir: str | None, dbus_addr: str | None) -> int | None:
+    """Return the active ``systemd --user`` monotonic startup timestamp, or ``None`` if unavailable."""
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return None
+    systemctl = str(Path(systemctl).absolute())  # commands run in other directories
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = subprocess.run(
+            [systemctl, "--user", "show", "--property=UserspaceTimestampMonotonic", "--property=SystemState"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env=_systemd_bus_env(runtime_dir, dbus_addr),
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        props = {
+            key: value.strip()
+            for line in result.stdout.splitlines()
+            for key, sep, value in (line.partition("="),)
+            if sep
+        }
+        if props.get("SystemState") in _SYSTEMD_UNAVAILABLE_STATES:
+            return None
+        raw_generation = props.get("UserspaceTimestampMonotonic", "")
+        if raw_generation.isascii() and raw_generation.isdigit() and (generation := int(raw_generation)) > 0:
+            return generation
+    return None
+
+
+@functools.lru_cache(maxsize=4)
 def _probe_systemd_slice_launcher(
     slice_name: str,
     runtime_dir: str | None,
     dbus_addr: str | None,
+    generation: int,
 ) -> _SystemdSliceLauncher | None:
     """Return a ``systemd-run --user --scope`` launcher when probing *slice_name* succeeds, else ``None``."""
+    del generation  # cache key only; re-probes when the user manager restarts
     systemd_run = shutil.which("systemd-run")
     env_bin = shutil.which("env")
     if systemd_run is None or env_bin is None:
@@ -1391,14 +1436,13 @@ def _probe_systemd_slice_launcher(
         ("XDG_RUNTIME_DIR", runtime_dir),
         ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
     )
-    probe_env = {k: v for k, v in bus_env if v is not None}
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         probe = subprocess.run(
             [*prefix, env_bin, "-u", "MINDROOM_PROBE_UNSET", "--", "MINDROOM_PROBE_SET=1", systemd_run, "--version"],
             capture_output=True,
             timeout=5,
             check=False,
-            env=probe_env,
+            env=_systemd_bus_env(runtime_dir, dbus_addr),
         )
         if probe.returncode == 0:
             return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
@@ -1416,11 +1460,13 @@ def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
         or any(ch.isspace() or ch == "\x00" for ch in slice_name)
     ):
         return None
-    return _probe_systemd_slice_launcher(
-        slice_name,
-        os.environ.get("XDG_RUNTIME_DIR") or None,
-        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None,
-    )
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or None
+    dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None
+    generation = _user_manager_generation(runtime_dir, dbus_addr)
+    if generation is None:
+        _probe_systemd_slice_launcher.cache_clear()
+        return None
+    return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
 
 
 def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:

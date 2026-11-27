@@ -91,11 +91,9 @@ class SpanRegistry:
     def cancel(self, span_id: str, *, cancel_source: TaskCancelSource | None) -> bool:
         """Cancel exactly the named span's task; a span whose task has not registered is cancelled when it does."""
         live = self._spans.get(span_id)
-        if live is None:
-            if span_id in self._expected:
+        if live is None or live.task.done():
+            if span_id in self._expected and self._cancel_on_start.get(span_id) != "user_stop":
                 self._cancel_on_start[span_id] = cancel_source
-            return False
-        if live.task.done():
             return False
         self._cancel(span_id, live, cancel_source)
         return True
