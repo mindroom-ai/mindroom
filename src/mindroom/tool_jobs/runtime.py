@@ -24,7 +24,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
-from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobSnapshotUpdate
+from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobExistsError, ToolJobSnapshotUpdate
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.shell.background_scope import bind_shell_background_scope
@@ -1150,7 +1150,9 @@ class ToolJobRuntime:
                 reply_stop_order=reply_stop_order,
             )
             readable = True
-            existing = await self._find_exact_entry(job_id)
+            existing = self._entries.get(job_id)
+            if existing is None and reattach:
+                existing = await self._find_exact_entry(job_id)
             if reattach and existing is not None:
                 entry, readable = self._check_waited_entry(existing, owner, depth)
                 if _ADMITTED_OPERATION(entry.job) != _ADMITTED_OPERATION(job):
@@ -1158,9 +1160,9 @@ class ToolJobRuntime:
                 if readable:
                     self._ensure_hot(entry)
             else:
-                if existing is not None or await self._store.load_by_id(job_id) is not None:
+                if existing is not None:
                     msg = "Tool job already exists."
-                    raise ValueError(msg)
+                    raise ToolJobExistsError(msg)
                 if not owner.session_id or depth < 0 or self._grant(job) != "allowed":
                     raise JobAccessError(_UNAVAILABLE)
                 entry = _Entry(job, cancel=cancel)

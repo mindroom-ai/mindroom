@@ -66,7 +66,9 @@ from mindroom.tool_jobs.results import (
 from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundJob,
+    BackgroundOutcome,
     JobAccessError,
+    JobSpec,
     job_summary,
     register_background_runtime,
 )
@@ -2042,5 +2044,107 @@ async def test_failed_managed_job_delivers_media_inline_wait_and_collect_and_dro
             assert wh_r.tools
             assert (wh_r.tools[0].is_error, _follow_up_images(wh_m)) == (True, [])
             assert "was withheld" in str(wh_r.tools[0].result)
+    finally:
+        await runtime.shutdown()
+
+
+def _patch_refusable_call_job(monkeypatch: pytest.MonkeyPatch, refused_log: list[str]) -> None:
+    async def undo_prepared() -> None:
+        refused_log.append("refused")
+
+    async def fake_call_job(*_args: object, **_kwargs: object) -> JobSpec:
+        async def noop() -> BackgroundOutcome:
+            return BackgroundOutcome("completed", "ok")
+
+        return JobSpec(tool_name="write_note", adapter={}, operation=noop, refused=undo_prepared)
+
+    monkeypatch.setattr(execution, "_call_job", fake_call_job)
+
+
+@pytest.mark.asyncio
+async def test_refusal_cleanup_preserves_start_error_when_has_job_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB read failure during has_job logs and skips refused() without masking the original start() error."""
+    context, runtime = await _managed_context(tmp_path)
+    refused_log: list[str] = []
+    _patch_refusable_call_job(monkeypatch, refused_log)
+
+    async def write_note() -> str:
+        return "never"
+
+    async def fail_start(*_args: object, **_kwargs: object) -> Never:
+        msg = "original start failure"
+        raise RuntimeError(msg)
+
+    async def fail_has_job(_job_id: str) -> Never:
+        msg = "db read exploded"
+        raise OSError(msg)
+
+    monkeypatch.setattr(runtime, "start", fail_start)
+    monkeypatch.setattr(runtime, "has_job", fail_has_job)
+    model = ScriptedModel([calls(tool_call("write_note", "c-db-err")), answer("done")])
+
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                record = await run_job_turn(job_actor(job_tool(write_note)), model, "Note")
+        assert record.tools
+        assert record.tools[0].is_error
+        assert "original start failure" in str(record.tools[0].result)
+        assert "db read exploded" not in str(record.tools[0].result)
+        assert refused_log == []
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_refusal_cleanup_shields_has_job_and_refused_across_repeated_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancellation while has_job is in flight still completes job.refused() inside one shielded task."""
+    context, runtime = await _managed_context(tmp_path)
+    refused_log: list[str] = []
+    _patch_refusable_call_job(monkeypatch, refused_log)
+    start_entered = asyncio.Event()
+    has_job_entered = asyncio.Event()
+    release_has_job = asyncio.Event()
+
+    async def write_note() -> str:
+        return "never"
+
+    async def hanging_start(*_args: object, **_kwargs: object) -> Never:
+        start_entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def slow_has_job(_job_id: str) -> bool:
+        has_job_entered.set()
+        await release_has_job.wait()
+        return False
+
+    monkeypatch.setattr(runtime, "start", hanging_start)
+    monkeypatch.setattr(runtime, "has_job", slow_has_job)
+    model = ScriptedModel([calls(tool_call("write_note", "c-cancel")), answer("done")])
+
+    async def run_turn() -> None:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                await run_job_turn(job_actor(job_tool(write_note)), model, "Note")
+
+    try:
+        turn_task = asyncio.create_task(run_turn())
+        await asyncio.wait_for(start_entered.wait(), timeout=JOB_TEST_TIMEOUT)
+        turn_task.cancel()
+        await asyncio.wait_for(has_job_entered.wait(), timeout=JOB_TEST_TIMEOUT)
+        turn_task.cancel()
+        await asyncio.sleep(0.02)
+        assert not turn_task.done()
+        release_has_job.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn_task, timeout=JOB_TEST_TIMEOUT)
+        assert refused_log == ["refused"]
     finally:
         await runtime.shutdown()

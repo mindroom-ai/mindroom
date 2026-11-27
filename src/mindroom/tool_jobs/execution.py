@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.failure_text import failure_text
@@ -494,10 +494,12 @@ async def _run_managed_call(
                     span_stopped=None if span is None else span.stopped,
                 )
             except BaseException:
-                if job.refused is not None and not await run_coroutine_until_complete(runtime.has_job(job_id)):
+                if job.refused is not None:
                     # No job has this ID, so nothing owns what preparing it wrote: a refused or cancelled start
-                    # takes it back, and holds the lock until it is gone.
-                    await wait_for_future_until_complete(asyncio.ensure_future(job.refused()))
+                    # checks and takes it back inside one shielded task, holding the lock until it is gone.
+                    await wait_for_future_until_complete(
+                        asyncio.ensure_future(_undo_refused_job(runtime, job_id, job.refused)),
+                    )
                 raise
         waited = await runtime.wait(
             job_id,
@@ -540,6 +542,21 @@ async def _run_managed_call(
         if reference is not None and job is not None and not admitted:
             await reference.release()
     return result
+
+
+async def _undo_refused_job(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    refused: Callable[[], Awaitable[object]],
+) -> None:
+    """Undo prepared side effects when *runtime* holds no job for *job_id*."""
+    try:
+        exists = await runtime.has_job(job_id)
+    except Exception:
+        logger.exception("Tool job existence check failed during refusal cleanup; skipping refusal", job_id=job_id)
+        return
+    if not exists:
+        await refused()
 
 
 async def _releasing(

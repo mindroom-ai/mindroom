@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+    from mindroom.event_journal import ToolJobStore
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -3039,5 +3040,85 @@ async def test_cold_job_expiry_and_ended_rooms_parity(tmp_path: Path) -> None:
         expired_31d = await restored.expire_ended(now=now + timedelta(days=29), source_finished=always_finished)
         assert [job.job_id for job in expired_31d] == [cold_unique_id]
         assert ("parent", "!cold:test") not in restored.ended_rooms()
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_start_avoids_redundant_load_by_id_reads_on_new_admissions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New non-reattach admissions skip load_by_id, and reattach admissions read load_by_id at most once."""
+    owner = job_owner()
+    cold_id = "aaaa1111" + "0" * 56
+
+    async def done() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "ok")
+
+    runtime = await tool_job_runtime(tmp_path)
+    try:
+        await _finish_and_ack(runtime, cold_id, owner=owner, adapter={"k": 1})
+    finally:
+        await runtime.shutdown()
+
+    restored = await tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        assert restored._entries == {}
+
+        reads: list[str] = []
+        store_cls = type(restored._store)
+        original_load_by_id = store_cls.load_by_id
+
+        async def tracked_load_by_id(store: ToolJobStore, job_id: str) -> object:
+            reads.append(job_id)
+            return await original_load_by_id(store, job_id)
+
+        monkeypatch.setattr(store_cls, "load_by_id", tracked_load_by_id)
+
+        # Brand-new admission with reattach=False performs zero load_by_id reads.
+        _, claim_new = await restored.start(
+            "brand-new-1",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=done,
+        )
+        assert reads == []
+        await restored.release_wait("brand-new-1", claim_new)
+
+        # Duplicate cold ID with reattach=False is rejected atomically by accept without load_by_id.
+        with pytest.raises(ValueError, match="already exists"):
+            await restored.start(cold_id, tool_name="tool", depth=0, adapter={"k": 1}, owner=owner, operation=done)
+        assert reads == []
+
+        # Brand-new admission with reattach=True performs a single load_by_id read (never two).
+        _, claim_reattach_new = await restored.start(
+            "brand-new-2",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=done,
+            reattach=True,
+        )
+        assert reads == ["brand-new-2"]
+        await restored.release_wait("brand-new-2", claim_reattach_new)
+
+        # Reattaching to a cold job performs one read and hydrates it cleanly.
+        reattached, claim_cold = await restored.start(
+            cold_id,
+            tool_name="tool",
+            depth=0,
+            adapter={"k": 1},
+            owner=owner,
+            operation=done,
+            reattach=True,
+        )
+        assert (reattached.job_id, claim_cold is not None) == (cold_id, True)
+        assert reads == ["brand-new-2", cold_id]
+        await restored.release_wait(cold_id, claim_cold)
     finally:
         await restored.shutdown()
