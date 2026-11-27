@@ -532,7 +532,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
 
         async def run_shell_command(
             self,
-            args: list[str] | str,
+            args: str | list[str],
             tail: int = 100,
             timeout: int | None = None,  # noqa: ASYNC109
             worker: str | None = None,
@@ -553,7 +553,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             ignoring ``tail`` (managed top-level jobs save on completion; stopped/in-turn-backgrounded calls save none).
 
             Args:
-                args: Shell command string or argv list of strings.
+                args: Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax).
                 tail: Output lines to return.
                 timeout: Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s).
                 worker: Named worker (1-32 lowercase letters/digits/hyphens); null uses normal worker.

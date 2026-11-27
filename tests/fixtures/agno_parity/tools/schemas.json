@@ -5067,16 +5067,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
@@ -5884,7 +5884,7 @@
       },
       {
         "name": "call_tool",
-        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "description": "Call a deferred function from tool_search with top-level name and arguments object.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -16094,16 +16094,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
