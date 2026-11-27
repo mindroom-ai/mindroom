@@ -10,9 +10,16 @@ import httpx
 from pydantic import BaseModel, Field
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import error_json, format_http_error, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -28,16 +35,6 @@ _WhatsAppSendAction = Literal[
     "location",
     "reaction",
 ]
-_ALL_SEND_ACTIONS: tuple[_WhatsAppSendAction, ...] = (
-    "text",
-    "template",
-    "reply_buttons",
-    "list",
-    "image",
-    "document",
-    "location",
-    "reaction",
-)
 
 
 _SEND_FIELDS = {
@@ -296,26 +293,19 @@ class _WhatsAppTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``whatsapp_send``'s action schema to enabled send actions."""
-        if function.name == "whatsapp_send" and len(self._enabled_actions) < len(_ALL_SEND_ACTIONS):
-            return restrict_actions(function, self._enabled_actions, _SEND_FIELDS, common=("recipient",))
+        if function.name == "whatsapp_send":
+            return restrict_actions(
+                function,
+                self._enabled_actions,
+                action_fields=_SEND_FIELDS,
+                common_fields=("recipient",),
+            )
         return function
 
     def _safe_error(self, exc: Exception) -> str:
-        if isinstance(exc, httpx.HTTPStatusError):
-            status = exc.response.status_code
-            detail = ""
-            try:
-                body = exc.response.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict) and isinstance(body.get("error"), dict):
-                raw_msg = body["error"].get("message")
-                if isinstance(raw_msg, str):
-                    detail = raw_msg.strip().replace(self.access_token, "[REDACTED]")
-            return json.dumps(
-                {"error": f"WhatsApp API error ({status}): {detail}" if detail else f"WhatsApp API error ({status})"},
-            )
-        return json.dumps({"error": f"WhatsApp request failed: {type(exc).__name__}"})
+        return error_json(
+            format_http_error("WhatsApp", exc, secrets=(self.access_token,), detail_path=("error", "message")),
+        )
 
     def _send_message(self, data: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}/{quote(self.version, safe='')}/{quote(self.phone_number_id, safe='')}/messages"
@@ -508,78 +498,48 @@ class _WhatsAppTools(Toolkit):
             placeholder="+1234567890",
             description="Default recipient WhatsApp ID or phone number (optional)",
         ),
-        ConfigField(
-            name="enable_send_text_message",
-            label="Enable Send Text Message",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "enable_send_text_message",
+            "Enable Send Text Message",
             description="Enable plain text WhatsApp messages",
         ),
-        ConfigField(
-            name="enable_send_template_message",
-            label="Enable Send Template Message",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "enable_send_template_message",
+            "Enable Send Template Message",
             description="Enable WhatsApp template messages",
         ),
-        ConfigField(
-            name="enable_send_reply_buttons",
-            label="Enable Send Reply Buttons",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_reply_buttons",
+            "Enable Send Reply Buttons",
             default=False,
             description="Enable interactive reply button messages",
         ),
-        ConfigField(
-            name="enable_send_list_message",
-            label="Enable Send List Message",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_list_message",
+            "Enable Send List Message",
             default=False,
             description="Enable interactive list messages",
         ),
-        ConfigField(
-            name="enable_send_image",
-            label="Enable Send Image",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable image messages",
-        ),
-        ConfigField(
-            name="enable_send_document",
-            label="Enable Send Document",
-            type="boolean",
-            required=False,
+        bool_config_field("enable_send_image", "Enable Send Image", default=False, description="Enable image messages"),
+        bool_config_field(
+            "enable_send_document",
+            "Enable Send Document",
             default=False,
             description="Enable document messages",
         ),
-        ConfigField(
-            name="enable_send_location",
-            label="Enable Send Location",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_location",
+            "Enable Send Location",
             default=False,
             description="Enable location messages",
         ),
-        ConfigField(
-            name="enable_send_reaction",
-            label="Enable Send Reaction",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_reaction",
+            "Enable Send Reaction",
             default=False,
             description="Enable reaction messages",
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable all WhatsApp tools",
-        ),
+        bool_config_field("all", "All", default=False, description="Enable all WhatsApp tools"),
         ConfigField(
             name="timeout",
             label="Timeout",

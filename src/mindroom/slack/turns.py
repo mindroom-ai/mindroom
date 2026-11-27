@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.slack.app import SlackAppCredentials, SlackBotIdentity
     from mindroom.slack.delivery import SlackRuntime
     from mindroom.slack.events import SlackMessageEvent
@@ -85,7 +84,6 @@ class SlackAttempt:
     runtime: SlackRuntime
     config: Config
     runtime_paths: RuntimePaths
-    credentials_manager: CredentialsManager
     client: httpx.AsyncClient
     app: SlackAppCredentials
     identity: SlackBotIdentity

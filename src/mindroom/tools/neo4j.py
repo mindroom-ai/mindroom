@@ -7,14 +7,21 @@ from typing import TYPE_CHECKING, Any, Literal, LiteralString, cast
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -70,7 +77,7 @@ class _Neo4jTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``neo4j_inspect`` actions to the ones enabled on this instance."""
         if function.name == "neo4j_inspect":
-            return narrow_action_enum(function, self._inspect_actions)
+            return restrict_actions(function, self._inspect_actions)
         return function
 
     def neo4j_inspect(self, action: _Neo4jInspectAction) -> str:
@@ -168,41 +175,11 @@ class _Neo4jTools(Toolkit):
             default=None,
             placeholder="neo4j",
         ),
-        ConfigField(
-            name="enable_list_labels",
-            label="Enable List Labels",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_relationships",
-            label="Enable List Relationships",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_schema",
-            label="Enable Get Schema",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_run_cypher",
-            label="Enable Run Cypher",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_list_labels", "Enable List Labels"),
+        bool_config_field("enable_list_relationships", "Enable List Relationships"),
+        bool_config_field("enable_get_schema", "Enable Get Schema"),
+        bool_config_field("enable_run_cypher", "Enable Run Cypher"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["neo4j"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#neo4j",

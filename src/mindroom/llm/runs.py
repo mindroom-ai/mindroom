@@ -94,6 +94,8 @@ class ToolExecution:
     # call (``advance_delegation_call``), or kept from its requirement for a call an earlier release paused
     # (``legacy_run_requirements``); a provider may reuse a call id within one run, so the call id cannot be it.
     pause_id: str | None = None
+    # Whether an errored call counts toward the consecutive-tool-failure circuit breaker; transient (not persisted).
+    counts_as_tool_failure: bool = field(default=True, compare=False, repr=False)
 
     @property
     def is_paused(self) -> bool:
@@ -110,7 +112,7 @@ class ToolExecution:
         return {
             _STORED_TOOL_KEYS.get(name, name): value
             for name, value in asdict(self).items()
-            if value != _TOOL_DEFAULTS[name]
+            if name in _TOOL_DEFAULTS and value != _TOOL_DEFAULTS[name]
         }
 
     @classmethod
@@ -154,10 +156,11 @@ class ToolExecution:
         return cls(**values)
 
 
+_STORED_TOOL_FIELDS = tuple(item for item in fields(ToolExecution) if item.name != "counts_as_tool_failure")
 # Each tool-execution field by its stored key.
-_TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in fields(ToolExecution)}
+_TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in _STORED_TOOL_FIELDS}
 # Each tool-execution field's default, ``MISSING`` for the call's id and name, which every stored dict holds.
-_TOOL_DEFAULTS = {item.name: item.default for item in fields(ToolExecution)}
+_TOOL_DEFAULTS = {item.name: item.default for item in _STORED_TOOL_FIELDS}
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"
 

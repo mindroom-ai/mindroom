@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus, bool_config_field
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +30,11 @@ _YFinanceAction = Literal[
     "technical_indicators",
     "historical_prices",
 ]
+_YFINANCE_ACTION_FIELDS: dict[str, str] = {
+    "company_news": "num_stories",
+    "technical_indicators": "period",
+    "historical_prices": "period interval",
+}
 
 
 def _clean_company_info(info: dict[str, Any]) -> dict[str, Any]:
@@ -125,31 +129,12 @@ class _YFinanceTools(Toolkit):
         """Restrict ``yfinance_get`` schema and description to enabled actions."""
         if function.name != "yfinance_get":
             return function
-        narrowed = narrow_action_enum(function, self._enabled_actions)
-        enabled = set(self._enabled_actions)
-        unused_params = set()
-        if not (enabled & {"technical_indicators", "historical_prices"}):
-            unused_params.add("period")
-        if "historical_prices" not in enabled:
-            unused_params.add("interval")
-        if "company_news" not in enabled:
-            unused_params.add("num_stories")
-        props = {k: v for k, v in narrowed.parameters["properties"].items() if k not in unused_params}
-        action_docs = {
-            "stock_price": "- `stock_price`: current/regular market stock price.",
-            "company_info": "- `company_info`: company profile and key metrics.",
-            "fundamentals": "- `fundamentals`: valuation and summary fundamentals.",
-            "income_statements": "- `income_statements`: income statement table as JSON.",
-            "financial_ratios": "- `financial_ratios`: full ticker info/ratios JSON.",
-            "analyst_recommendations": "- `analyst_recommendations`: analyst recommendation history.",
-            "company_news": "- `company_news`: recent news items (capped by `num_stories`).",
-            "technical_indicators": "- `technical_indicators`: OHLCV history for `period` (default `3mo`).",
-            "historical_prices": "- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
-        }
-        desc = "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n" + "\n".join(
-            action_docs[a] for a in self._enabled_actions if a in action_docs
+        return restrict_actions(
+            function,
+            self._enabled_actions,
+            action_fields=_YFINANCE_ACTION_FIELDS,
+            common_fields=("symbol",),
         )
-        return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
 
     def _dispatch(
         self,
@@ -229,76 +214,16 @@ class _YFinanceTools(Toolkit):
     icon="FaChartLine",
     icon_color="text-purple-600",
     config_fields=[
-        ConfigField(
-            name="enable_stock_price",
-            label="Enable Stock Price",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_company_info",
-            label="Enable Company Info",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_stock_fundamentals",
-            label="Enable Stock Fundamentals",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_income_statements",
-            label="Enable Income Statements",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_key_financial_ratios",
-            label="Enable Key Financial Ratios",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_analyst_recommendations",
-            label="Enable Analyst Recommendations",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_company_news",
-            label="Enable Company News",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_technical_indicators",
-            label="Enable Technical Indicators",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_historical_prices",
-            label="Enable Historical Prices",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_stock_price", "Enable Stock Price"),
+        bool_config_field("enable_company_info", "Enable Company Info", default=False),
+        bool_config_field("enable_stock_fundamentals", "Enable Stock Fundamentals", default=False),
+        bool_config_field("enable_income_statements", "Enable Income Statements", default=False),
+        bool_config_field("enable_key_financial_ratios", "Enable Key Financial Ratios", default=False),
+        bool_config_field("enable_analyst_recommendations", "Enable Analyst Recommendations", default=False),
+        bool_config_field("enable_company_news", "Enable Company News", default=False),
+        bool_config_field("enable_technical_indicators", "Enable Technical Indicators", default=False),
+        bool_config_field("enable_historical_prices", "Enable Historical Prices", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["yfinance"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#yfinance",

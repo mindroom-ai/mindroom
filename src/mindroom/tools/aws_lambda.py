@@ -14,6 +14,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import UNSET, UnsetType, require_non_empty, resolve_toggle
@@ -108,27 +109,9 @@ class _AWSLambdaTools(Toolkit):
             required=False,
             default="us-east-1",
         ),
-        ConfigField(
-            name="enable_list_functions",
-            label="Enable List Functions",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_invoke_function",
-            label="Enable Invoke Function",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_list_functions", "Enable List Functions"),
+        bool_config_field("enable_invoke_function", "Enable Invoke Function"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["boto3"],

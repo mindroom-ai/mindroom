@@ -5,7 +5,14 @@ from __future__ import annotations
 import json
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
@@ -19,12 +26,8 @@ class _WebexTools(Toolkit):
         all: bool = False,  # noqa: A002
         access_token: str | None = None,
     ) -> None:
-        try:
-            from webexpythonsdk import WebexAPI
-            from webexpythonsdk.exceptions import ApiError
-        except ImportError as exc:
-            msg = "Webex tools require `webexpythonsdk`. Install with `pip install webexpythonsdk`."
-            raise ImportError(msg) from exc
+        from webexpythonsdk import WebexAPI
+        from webexpythonsdk.exceptions import ApiError
 
         if not access_token:
             msg = "Webex access token is not set. Please set the WEBEX_ACCESS_TOKEN environment variable."
@@ -97,27 +100,9 @@ class _WebexTools(Toolkit):
     icon="SiWebex",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="enable_send_message",
-            label="Enable Send Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_rooms",
-            label="Enable List Rooms",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_send_message", "Enable Send Message"),
+        bool_config_field("enable_list_rooms", "Enable List Rooms"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="access_token",
             env=("WEBEX_ACCESS_TOKEN",),

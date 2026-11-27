@@ -3,15 +3,32 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.failure_text import failure_text
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit, current_call
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import current_execution_identity
-from mindroom.tools.native_helpers import UNSET, UnsetType, json_dumps, require_non_empty, resolve_toggle
+from mindroom.tools.native_helpers import (
+    UNSET,
+    UnsetType,
+    json_dumps,
+    require_non_empty,
+    resolve_toggle,
+    restrict_actions,
+)
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _ReadAction = Literal["search", "get_all"]
 
@@ -104,18 +121,27 @@ class _Mem0Tools(Toolkit):
 
         enable_all = resolve_toggle(all, default=False)
         self._allow_add = resolve_toggle(enable_add_memory, default=True, enable_all=enable_all)
-        self._allow_search = resolve_toggle(enable_search_memory, default=True, enable_all=enable_all)
-        self._allow_get_all = resolve_toggle(enable_get_all_memories, default=True, enable_all=enable_all)
         self._allow_delete_all = resolve_toggle(enable_delete_all_memories, default=True, enable_all=enable_all)
+        self._read_actions: tuple[_ReadAction, ...] = tuple(
+            action
+            for action, value in (("search", enable_search_memory), ("get_all", enable_get_all_memories))
+            if resolve_toggle(value, default=True, enable_all=enable_all)
+        )
 
         tools: list[Any] = []
-        if self._allow_search or self._allow_get_all:
+        if self._read_actions:
             tools.append(self.mem0_read)
         if self._allow_add:
             tools.append(self.mem0_add)
         if self._allow_delete_all:
             tools.append(self.mem0_delete_all)
         super().__init__(name="mem0", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``mem0_read`` schema and description to enabled actions."""
+        if function.name == "mem0_read":
+            return restrict_actions(function, self._read_actions, action_fields={"search": "query"})
+        return function
 
     def _get_client(self) -> Any:  # noqa: ANN401
         if self.client is None:
@@ -162,12 +188,12 @@ class _Mem0Tools(Toolkit):
         try:
             user_id = self._require_user_id("mem0_read")
             if action == "search":
-                if not self._allow_search:
+                if "search" not in self._read_actions:
                     return "Error searching memory: Searching Mem0 memories is disabled."
                 clean_query = require_non_empty(query, "query")
                 results = self._get_client().search(clean_query, filters={"user_id": user_id})
                 return json_dumps(_extract_memory_list(results))
-            if not self._allow_get_all:
+            if "get_all" not in self._read_actions:
                 return "Error getting all memories: Listing Mem0 memories is disabled."
             results = self._get_client().get_all(filters={"user_id": user_id})
             return json_dumps(_extract_memory_list(results))
@@ -245,48 +271,12 @@ class _Mem0Tools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="infer",
-            label="Infer",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_add_memory",
-            label="Enable Add Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_memory",
-            label="Enable Search Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_all_memories",
-            label="Enable Get All Memories",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_delete_all_memories",
-            label="Enable Delete All Memories",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("infer", "Infer"),
+        bool_config_field("enable_add_memory", "Enable Add Memory"),
+        bool_config_field("enable_search_memory", "Enable Search Memory"),
+        bool_config_field("enable_get_all_memories", "Enable Get All Memories"),
+        bool_config_field("enable_delete_all_memories", "Enable Delete All Memories"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["mem0ai"],
     docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#mem0",

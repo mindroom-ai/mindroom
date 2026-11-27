@@ -6,7 +6,7 @@ from typing import Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus, bool_config_field
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import UNSET, resolve_bool_toggle
 
@@ -116,27 +116,9 @@ class _PandasTools(Toolkit):
     icon="Database",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="enable_create_pandas_dataframe",
-            label="Enable Create Pandas Dataframe",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_run_dataframe_operation",
-            label="Enable Run Dataframe Operation",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_create_pandas_dataframe", "Enable Create Pandas Dataframe"),
+        bool_config_field("enable_run_dataframe_operation", "Enable Run Dataframe Operation"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["pandas"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#pandas",

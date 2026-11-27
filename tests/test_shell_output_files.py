@@ -7,7 +7,9 @@ import contextlib
 import json
 import os
 import signal
+import sys
 import tempfile
+from ast import literal_eval
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
@@ -19,9 +21,11 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.shell.execution import kill_all_records, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
+from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
@@ -161,7 +165,9 @@ async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: Toolkit) -> 
     result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
 
     assert result.status == "success"
-    assert str(result.result).splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert result.result.content.splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
 
 
 @pytest.mark.asyncio
@@ -214,7 +220,9 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
     )
 
     assert result.status == "success"
-    assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
+    assert isinstance(result.result, ToolOutcome)
+    assert (result.result.is_error, result.result.counts_as_tool_failure) == (True, False)
+    assert json.loads(result.result.content)["mindroom_tool_output"]["exit_code"] == 3
     assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
 
@@ -269,7 +277,9 @@ async def test_capture_limit_error_keeps_the_exit_code(tmp_path: Path) -> None:
         },
     )
 
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Redirected shell output exceeds the 60000 byte limit.",
@@ -286,7 +296,9 @@ async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: Tool
     destination.write_text("keep existing")
     result = await _run(shell_toolkit, {"args": "echo building; kill -KILL $$", "mindroom_output_path": "killed.txt"})
 
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Shell command or output capture was interrupted; no complete output file was saved.",
@@ -368,7 +380,9 @@ async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: T
             "mindroom_output_path": "killed.txt",
         },
     )
-    assert json.loads(str(result.result)) == {
+    assert isinstance(result.result, ToolOutcome)
+    assert result.result.is_error
+    assert json.loads(result.result.content) == {
         "mindroom_tool_output": {
             "status": "error",
             "error": "Stopped after 1s. No output file was saved.\nOutput:\ncompiling\nStderr:\nerror: missing header",
@@ -749,3 +763,30 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         kill_all_records(registry)
         with contextlib.suppress(asyncio.CancelledError):
             await record._monitor_task
+
+
+@pytest.mark.asyncio
+async def test_failed_shell_auto_save_preserves_is_error_and_saved_output(
+    shell_toolkit: Toolkit,
+    tmp_path: Path,
+) -> None:
+    """Large failed shell output auto-saves while keeping is_error=True, counts_as_tool_failure=False, and saved_output."""
+    configure_toolkit_functions(
+        shell_toolkit,
+        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=64),
+    )
+    fn = toolkit_function(shell_toolkit, "run_shell_command")
+    assert fn is not None
+    outcome = await execute_tool_call(
+        fn,
+        {"args": [sys.executable, "-c", "import sys; print('x' * 200); sys.exit(2)"]},
+        ToolCallContext(run_id="r", session_id="s", user_id="@a:t", call_id="auto"),
+        middleware=(),
+    )
+    assert (outcome.is_error, outcome.counts_as_tool_failure) == (True, False)
+    assert outcome.saved_output is not None
+    receipt = outcome.saved_output["mindroom_tool_output"]
+    assert isinstance(receipt, dict)
+    assert (receipt["status"], receipt["auto_saved"]) == ("saved_to_file", True)
+    assert literal_eval(outcome.content) == client_tool_result(outcome) == outcome.saved_output
+    assert (tmp_path / str(receipt["path"])).read_text().startswith("Exit code 2\nOutput:\n" + "x" * 200)

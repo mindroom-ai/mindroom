@@ -10,9 +10,16 @@ from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -20,18 +27,6 @@ if TYPE_CHECKING:
 _TelegramReadAction = Literal["get_chat", "get_file"]
 _TelegramSendAction = Literal["message", "photo", "document", "video", "audio", "animation", "sticker"]
 _TelegramManageAction = Literal["edit", "delete", "react", "pin"]
-
-_ALL_READ_ACTIONS: tuple[_TelegramReadAction, ...] = ("get_chat", "get_file")
-_ALL_SEND_ACTIONS: tuple[_TelegramSendAction, ...] = (
-    "message",
-    "photo",
-    "document",
-    "video",
-    "audio",
-    "animation",
-    "sticker",
-)
-_ALL_MANAGE_ACTIONS: tuple[_TelegramManageAction, ...] = ("edit", "delete", "react", "pin")
 
 
 _SEND_FIELDS = {
@@ -98,13 +93,9 @@ class _TelegramTools(Toolkit):
         enable_get_file: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        try:
-            from telebot import TeleBot
-            from telebot.apihelper import ApiTelegramException
-            from telebot.types import ReactionTypeEmoji
-        except ImportError as exc:
-            msg = "`pyTelegramBotAPI` not installed. Install with `pip install pytelegrambotapi`."
-            raise ImportError(msg) from exc
+        from telebot import TeleBot
+        from telebot.apihelper import ApiTelegramException
+        from telebot.types import ReactionTypeEmoji
 
         if not token:
             msg = "TELEGRAM_TOKEN not set. Please set the TELEGRAM_TOKEN environment variable."
@@ -166,16 +157,20 @@ class _TelegramTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict action enums on offered Telegram functions to enabled actions."""
-        if function.name == "telegram_read" and len(self._read_actions) < len(_ALL_READ_ACTIONS):
-            return restrict_actions(function, self._read_actions, {"get_chat": "", "get_file": "file_id"})
-        if function.name == "telegram_send" and len(self._send_actions) < len(_ALL_SEND_ACTIONS):
-            return restrict_actions(function, self._send_actions, _SEND_FIELDS)
-        if function.name == "telegram_manage" and len(self._manage_actions) < len(_ALL_MANAGE_ACTIONS):
+        if function.name == "telegram_read":
+            return restrict_actions(
+                function,
+                self._read_actions,
+                action_fields={"get_file": "file_id"},
+            )
+        if function.name == "telegram_send":
+            return restrict_actions(function, self._send_actions, action_fields=_SEND_FIELDS)
+        if function.name == "telegram_manage":
             return restrict_actions(
                 function,
                 self._manage_actions,
-                {"edit": "text", "delete": "", "react": "emoji", "pin": "disable_notification"},
-                common=("message_id",),
+                action_fields={"edit": "text", "react": "emoji", "pin": "disable_notification"},
+                common_fields=("message_id",),
             )
         return function
 
@@ -440,111 +435,21 @@ class _TelegramTools(Toolkit):
             default=None,
             description="Directory where downloaded Telegram files are saved when save_downloads is enabled",
         ),
-        ConfigField(
-            name="save_downloads",
-            label="Save Downloads",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_message",
-            label="Enable Send Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_send_photo",
-            label="Enable Send Photo",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_document",
-            label="Enable Send Document",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_video",
-            label="Enable Send Video",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_audio",
-            label="Enable Send Audio",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_animation",
-            label="Enable Send Animation",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_sticker",
-            label="Enable Send Sticker",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_edit_message",
-            label="Enable Edit Message",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_delete_message",
-            label="Enable Delete Message",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_react_with_emoji",
-            label="Enable React With Emoji",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_pin_message",
-            label="Enable Pin Message",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_chat",
-            label="Enable Get Chat",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_file",
-            label="Enable Get File",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("save_downloads", "Save Downloads", default=False),
+        bool_config_field("enable_send_message", "Enable Send Message"),
+        bool_config_field("enable_send_photo", "Enable Send Photo", default=False),
+        bool_config_field("enable_send_document", "Enable Send Document", default=False),
+        bool_config_field("enable_send_video", "Enable Send Video", default=False),
+        bool_config_field("enable_send_audio", "Enable Send Audio", default=False),
+        bool_config_field("enable_send_animation", "Enable Send Animation", default=False),
+        bool_config_field("enable_send_sticker", "Enable Send Sticker", default=False),
+        bool_config_field("enable_edit_message", "Enable Edit Message", default=False),
+        bool_config_field("enable_delete_message", "Enable Delete Message", default=False),
+        bool_config_field("enable_react_with_emoji", "Enable React With Emoji", default=False),
+        bool_config_field("enable_pin_message", "Enable Pin Message", default=False),
+        bool_config_field("enable_get_chat", "Enable Get Chat", default=False),
+        bool_config_field("enable_get_file", "Enable Get File", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["pytelegrambotapi"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#telegram",

@@ -42,6 +42,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -51,6 +52,7 @@ from mindroom.tool_system.output_files import (
 from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
@@ -140,10 +142,10 @@ _NO_WORKER_ERROR = (
 _SHELL_NAMESPACE = "shell"
 
 
-def _not_started(refusal: str) -> str:
+def _not_started(refusal: str) -> ToolOutcome:
     """Answer a call refused before any command ran, and report that, so a caller that stores results can tell."""
     report_tool_metadata(not_started=True)
-    return refusal
+    return ToolOutcome(content=refusal, is_error=True)
 
 
 def shell_refuses_commands(runtime_paths: RuntimePaths, *, allow_without_worker: bool) -> bool:
@@ -309,20 +311,8 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
             default=None,
             authored_override=False,
         ),
-        ConfigField(
-            name="enable_run_shell_command",
-            label="Enable Run Shell Command",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_run_shell_command", "Enable Run Shell Command"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="extra_env_passthrough",
             label="Extra Env Passthrough",
@@ -526,7 +516,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             sandbox: bool | None = None,
             mount_dir: str | None = None,
             mount_read_only: bool | None = None,
-        ) -> str | ToolOutputFileHandled:
+        ) -> str | ToolOutcome | ToolOutputFileHandled:
             """Run a command via non-login Bash (prepared env; pass ``["bash", "-lc", cmd]`` only if login startup is needed).
 
             Returns last ``tail`` lines of stdout then stderr (all stderr on non-zero exit). Waits up to 120s in foreground:
@@ -572,10 +562,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 return refused
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                msg = _not_started("timeout must be a positive number of seconds; omit it for the default limit.")
+                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                refused = _not_started(f"Error: {msg}")
                 if worker is not None:
                     raise ValueError(msg)
-                return f"Error: {msg}"
+                return refused
             subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
@@ -624,6 +615,15 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 report_tool_metadata(exit_code=result.return_code)
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
-            return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
+            value: str | ToolOutcome = (
+                ToolOutcome(
+                    content=result.message,
+                    is_error=True,
+                    counts_as_tool_failure=result.execution_error or result.background_rejected,
+                )
+                if result.failed
+                else result.message
+            )
+            return ToolOutputFileHandled(value) if result.output_file_handled else value
 
     return MindRoomShellTools

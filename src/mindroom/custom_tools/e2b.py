@@ -23,7 +23,7 @@ from mindroom.path_confinement import (
 )
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tools.native_helpers import prepare_python_code, require_non_empty
+from mindroom.tools.native_helpers import prepare_python_code, require_non_empty, status_error_json
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -120,10 +120,6 @@ def _reject_ambient_e2b_debug() -> None:
         raise ValueError(msg)
 
 
-def _error_json(message: str) -> str:
-    return json.dumps({"status": "error", "message": message})
-
-
 class MindRoomE2BTools(Toolkit):
     """Run code, shell commands, and confined file transfers in an E2B sandbox.
 
@@ -188,7 +184,7 @@ class MindRoomE2BTools(Toolkit):
         try:
             execution = _run_code_within_read_limit(self.sandbox, prepare_python_code(code))
         except Exception as exc:
-            return _error_json(f"Error executing code: {exc}")
+            return status_error_json(f"Error executing code: {exc}")
         self.last_execution = execution
         if (error := execution.error) is not None:
             return f"Error: {error.name}\n{error.value}\n{error.traceback}"
@@ -229,7 +225,7 @@ class MindRoomE2BTools(Toolkit):
                 background=False,
             )
         except Exception as exc:
-            return _error_json(f"Error executing command: {exc}")
+            return status_error_json(f"Error executing command: {exc}")
         if collect_stream:
             return json.dumps(streamed) if streamed else "Command completed with no output."
         output = [
@@ -269,7 +265,7 @@ class MindRoomE2BTools(Toolkit):
                 return json.dumps({"status": "started", "pid": handle.pid})
             if action == "kill_background":
                 if pid is None or pid not in self._background_commands:
-                    return _error_json(f"Unknown background command pid: {pid}")
+                    return status_error_json(f"Unknown background command pid: {pid}")
                 handle = self._background_commands[pid]
                 killed = handle.kill()
                 self._background_commands.pop(pid, None)
@@ -281,14 +277,14 @@ class MindRoomE2BTools(Toolkit):
             if action == "server":
                 cmd = require_non_empty(command, "command")
                 if port is None:
-                    return _error_json("port is required for server")
+                    return status_error_json("port is required for server")
                 handle = self.sandbox.commands.run(cmd, background=True)
                 self._background_commands[handle.pid] = handle
                 time.sleep(2)
                 return json.dumps({"url": f"http://{self.sandbox.get_host(port)}", "pid": handle.pid})
         except Exception as exc:
-            return _error_json(f"Error in e2b_run ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in e2b_run ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
     def e2b_inspect(  # noqa: C901, PLR0911
         self,
@@ -359,13 +355,13 @@ class MindRoomE2BTools(Toolkit):
                 return json.dumps({"status": "success", "sandboxes": info}, indent=2)
             if action == "public_url":
                 return (
-                    _error_json("port is required for public_url")
+                    status_error_json("port is required for public_url")
                     if port is None
                     else f"http://{self.sandbox.get_host(port)}"
                 )
         except Exception as exc:
-            return _error_json(f"Error in e2b_inspect ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in e2b_inspect ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
     def _execution_result(self, result_index: int) -> tuple[Any | None, str | None]:
         if self.last_execution is None:
@@ -447,7 +443,7 @@ class MindRoomE2BTools(Toolkit):
             if action == "write":
                 dest = require_non_empty(sandbox_path or file_path, "sandbox_path")
                 if content is None:
-                    return _error_json("Error writing file: content is required")
+                    return status_error_json("Error writing file: content is required")
                 return str(self.sandbox.files.write(dest, content.encode("utf-8")).path)
             if action == "upload":
                 src = require_non_empty(file_path, "file_path")
@@ -468,8 +464,8 @@ class MindRoomE2BTools(Toolkit):
                 return dest
         except Exception as exc:
             verb = {"write": "writing", "upload": "uploading", "download": "downloading"}.get(action, action)
-            return _error_json(f"Error {verb} file: {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error {verb} file: {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
     def e2b_lifecycle(
         self,
@@ -485,7 +481,7 @@ class MindRoomE2BTools(Toolkit):
         try:
             if action == "set_timeout":
                 if timeout is None or timeout <= 0:
-                    return _error_json("timeout must be a positive integer")
+                    return status_error_json("timeout must be a positive integer")
                 self.sandbox.set_timeout(timeout)
                 return str(timeout)
             if action == "shutdown":
@@ -494,5 +490,5 @@ class MindRoomE2BTools(Toolkit):
                 self._background_commands.clear()
                 return json.dumps({"status": "success", "message": "Sandbox shut down successfully", "content": result})
         except Exception as exc:
-            return _error_json(f"Error in e2b_lifecycle ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in e2b_lifecycle ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")

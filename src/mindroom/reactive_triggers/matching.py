@@ -28,7 +28,6 @@ REACTIVE_TRIGGER_DEDUPE_KEY = "io.mindroom.reactive_trigger.dedupe_key"
 _EXTERNAL_TRIGGER_ID_KEY = "io.mindroom.external_trigger.id"
 _MAX_PATTERN_SEARCH_CHARS = 4_096
 _PATTERN_SEARCH_TIMEOUT_SECONDS = 0.05
-_MISSING = object()
 
 
 def is_reactive_trigger_event_content(content: Mapping[str, object]) -> bool:
@@ -67,8 +66,11 @@ def matches_external_event(spec: ExternalEventSourceSpec, event: TriggerEvent) -
     if event.source_type != "external_event" or event.source_id != spec.source_id or event.kind != spec.kind:
         return False
     for key, expected in spec.match.items():
-        actual = lookup_data_key(event.data, key, _MISSING)
-        if actual is _MISSING or type(actual) is not type(expected) or actual != expected:
+        actual = lookup_data_key(event.data, key)
+        if isinstance(expected, list):
+            if not isinstance(actual, str) or actual not in expected:
+                return False
+        elif type(actual) is not type(expected) or actual != expected:
             return False
     return True
 

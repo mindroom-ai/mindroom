@@ -44,6 +44,7 @@ from mindroom.shell.supervisor import (
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolOutcome
 from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_shell_async import _get_toolkit, _make_runtime_paths
@@ -100,6 +101,8 @@ def test_supervisor_kill_parser_is_canonical(message: str, outcome: str) -> None
         {"message": "Started", "handle": 123, "output_file_handled": True},
         {"message": {}, "handle": None, "output_file_handled": False},
         {"message": "Missing ownership metadata"},
+        {"message": "ok", "handle": None, "output_file_handled": False, "timed_out": "yes"},
+        {"message": "ok", "handle": None, "output_file_handled": False, "background_rejected": "yes"},
     ],
 )
 def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str, object]) -> None:
@@ -262,7 +265,10 @@ async def test_a_launch_failure_exits_as_a_shell_reports_it_only_for_a_caller_th
     async with _running_server({}) as socket_path:
         asked, unasked = await run(launch_failure_exits=True), await run()
 
-    assert asked == ShellRunResult(message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory")
+    assert asked == ShellRunResult(
+        message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory",
+        return_code=127,
+    )
     assert unasked.execution_error
     assert unasked.message.startswith("Error: [Errno 2]")
 
@@ -1201,7 +1207,11 @@ async def test_toolkit_stops_a_supervised_command_past_its_timeout(
 
     result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=1)
 
-    assert result == "Stopped after 1s.\nOutput:\nclient-mode"
+    assert result == ToolOutcome(
+        content="Stopped after 1s.\nOutput:\nclient-mode",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1224,9 @@ async def test_toolkit_reports_unavailable_supervisor(
     tool = _get_toolkit(tmp_path)
     run_fn = tool.functions["run_shell_command"]
     result = await run_fn(["echo", "hi"])
-    assert result.startswith("Error: Shell supervisor is unavailable")
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert result.content.startswith("Error: Shell supervisor is unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -1461,3 +1473,22 @@ def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
         120.0,
     )
     assert timeout_seconds == 150.0
+
+
+def test_shell_run_result_failed_and_supervisor_flags_round_trip() -> None:
+    """ShellRunResult.failed and supervisor response parsing preserve timed_out and background_rejected flags."""
+    assert not ShellRunResult(message="ok", return_code=0).failed
+    assert not ShellRunResult(message="bg", handle="shell:1").failed
+    for res in (
+        ShellRunResult("s", return_code=-9),
+        ShellRunResult("t", timed_out=True),
+        ShellRunResult("b", background_rejected=True),
+        ShellRunResult("e", execution_error=True),
+    ):
+        assert res.failed
+    base = {"message": "ok", "handle": None, "output_file_handled": False}
+    assert shell_supervisor._parse_supervisor_response(json.dumps(base).encode()) == ShellRunResult(message="ok")
+    flagged = shell_supervisor._parse_supervisor_response(
+        json.dumps({**base, "return_code": -15, "timed_out": True, "background_rejected": True}).encode(),
+    )
+    assert (flagged.timed_out, flagged.background_rejected, flagged.failed) == (True, True, True)

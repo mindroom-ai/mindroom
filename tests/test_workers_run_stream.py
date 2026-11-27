@@ -356,7 +356,7 @@ async def test_frames_carry_at_most_32_kib_and_the_exit_follows_the_last_output(
     }
     assert output == {"out": bytes(200000), "err": b"late\n"}
     assert max(len(base64.b64decode(frame["b"])) for frame in frames if "b" in frame) <= 32 * 1024
-    assert (frames[-1]["status"], frames[-1]["call_id"]) == ("completed", operation["call_id"])
+    assert (frames[-1]["status"], frames[-1]["call_id"]) == ("failed", operation["call_id"])
     # The receipt, which the reply's tool trace shows, names the exit and holds none of the output.
     assert "Exit code 3" in frames[-1]["outcome"]
     assert len(frames[-1]["outcome"]) < 200
@@ -494,7 +494,7 @@ async def test_a_call_that_does_not_stream_answers_as_it_did(tmp_path: Path, mod
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while receipt.get("status") in (None, "queued", "running"):
                 receipt = (await http.get(f"{route}?wait=5", headers=stack.headers)).json()
-        assert (receipt["status"], receipt["outcome"]) == ("completed", _MODEL_RESULT)
+        assert (receipt["status"], receipt["outcome"]) == ("failed", _MODEL_RESULT)
         assert (await http.get(f"{route}/stream", headers=stack.headers)).status_code == 401
         long = stack.submit("seq 1 150")
         long["arguments"] = {**long["arguments"], "tail": 10}  # type: ignore[dict-item]

@@ -110,6 +110,7 @@ from mindroom.tool_system.progress import report_tool_progress, structured_tool_
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
@@ -1370,6 +1371,13 @@ async def _execute_prepared_request_inprocess(
             structured = structured_tool_result() if prepared.structured_result else nullcontext()
             with collected_tool_environment(call_environment), structured as metadata:
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
+            is_error = False
+            counts_as_tool_failure = True
+            if isinstance(result, ToolOutcome):
+                is_error = result.is_error
+                counts_as_tool_failure = result.counts_as_tool_failure
+                if not any(result.media()):
+                    result = result.saved_output if result.saved_output is not None else result.content
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
             return _oauth_connection_required_response(prepared, exc)
@@ -1386,7 +1394,13 @@ async def _execute_prepared_request_inprocess(
                 failure_kind="tool",
             )
 
-    return ExecuteResponse(ok=True, result=result, metadata=metadata or None)
+    return ExecuteResponse(
+        ok=True,
+        result=result,
+        is_error=is_error,
+        counts_as_tool_failure=counts_as_tool_failure,
+        metadata=metadata or None,
+    )
 
 
 _inprocess_shell_records: dict[str, ProcessRecord] = {}
@@ -1549,9 +1563,15 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
         return ExecuteResponse(ok=False, error=f"Error: {exc}", failure_kind="tool")
     finally:
         _command_stdins.pop(request.request_id or "", None)
+    failed = bool(sent["timed_out"] or sent["code"])
     result = f"Stopped after {stop_after:g}s." if sent["timed_out"] else f"Exit code {sent['code']}"
     streamed = f"Streamed {sent['out']} bytes of stdout and {sent['err']} bytes of stderr to the caller."
-    return ExecuteResponse(ok=True, result=f"{result}\n{streamed}" if sent["timed_out"] or sent["code"] else streamed)
+    return ExecuteResponse(
+        ok=True,
+        result=f"{result}\n{streamed}" if failed else streamed,
+        is_error=failed,
+        counts_as_tool_failure=not failed,
+    )
 
 
 def _cancelled_response() -> ExecuteResponse:

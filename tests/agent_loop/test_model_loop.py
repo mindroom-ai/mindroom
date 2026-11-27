@@ -22,7 +22,10 @@ from mindroom.agent_loop.model_loop import (
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import resumed_record, run_agent
 from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES
-from mindroom.constants import TOOL_TRACE_CONTENT_KEY
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
+from mindroom.constants import TOOL_TRACE_CONTENT_KEY, resolve_runtime_paths
 from mindroom.error_handling import describe_reply_error
 from mindroom.llm.errors import (
     ContextWindowExceeded,
@@ -53,7 +56,10 @@ from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus,
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_loop.helpers import (
     add,
     boom,
@@ -70,6 +76,7 @@ from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, answer, 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.model_loop import LoopEvent
     from mindroom.agent_loop.tools import PlannedCall
@@ -1594,3 +1601,54 @@ async def test_abnormal_stop_reasons_and_partial_tool_calls_fail_without_running
         await run_loop(spec(ScriptedModel([incomplete_call]), toolkit(probe)), _prompt())
     assert incomplete_exc.value.provider_code == "OTHER"
     assert ran == []
+
+
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_real_shell_nonzero_exits_never_trip_breaker_while_refusals_do(tmp_path: Path) -> None:
+    """9+ failing shell commands never trip MAX_CONSECUTIVE_TOOL_FAILURES; 8 refusals or bad args trip call 9."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "c.yaml", storage_path=tmp_path / "s", process_env={})
+
+    def shell_kit(*, allow: bool) -> object:
+        cfg = Config(
+            defaults=DefaultsConfig(allow_shell_without_worker=allow),
+            agents={"c": AgentConfig(display_name="C", tools=["shell"])},
+        )
+        tool = get_tool_by_name(
+            "shell",
+            paths,
+            runs_in_worker=False,
+            worker_target=None,
+            runtime_config=cfg,
+            tool_init_overrides={"base_dir": str(tmp_path)},
+            tools=builtin_tool_registry(),
+        )
+        return adapt_toolkit(tool, key="shell")
+
+    n = MAX_CONSECUTIVE_TOOL_FAILURES
+    ok_turns = [
+        *[calls(tool_call("run_shell_command", f"e-{i}", args=f"echo {i}; exit 1")) for i in range(n + 1)],
+        answer("ok"),
+    ]
+    _, ok_rec = await run_loop(spec(ScriptedModel(ok_turns), shell_kit(allow=True)), _prompt())
+    assert ok_rec.tools is not None
+    assert (ok_rec.content, len(ok_rec.tools), not ok_rec.failing_tools, all(t.is_error for t in ok_rec.tools)) == (
+        "ok",
+        n + 1,
+        True,
+        True,
+    )
+
+    for allow, extra in ((True, {"timeout": 0}), (False, {})):
+        ref_turns = [
+            *[calls(tool_call("run_shell_command", f"r-{i}", args="echo hi", **extra)) for i in range(n)],
+            calls(tool_call("run_shell_command", "x", args="echo blocked")),
+            answer("done"),
+        ]
+        _, ref_rec = await run_loop(spec(ScriptedModel(ref_turns), shell_kit(allow=allow)), _prompt())
+        assert ref_rec.tools is not None
+        last = str(ref_rec.tools[-1].result)
+        assert (len(ref_rec.tools), f"failed in {n} requests of this turn" in last, "blocked" in last) == (
+            n + 1,
+            True,
+            False,
+        )

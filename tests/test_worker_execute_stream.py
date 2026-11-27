@@ -13,9 +13,12 @@ from typing import TYPE_CHECKING, Any, Self
 import httpx
 import pytest
 
+from mindroom.llm.media import Image
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import worker_proxy_client
+from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.worker_proxy_client import (
     WorkerCallCancellation,
     WorkerProxyClientConfig,
@@ -24,7 +27,7 @@ from mindroom.tool_system.worker_proxy_client import (
 )
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import WorkerHandle
-from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, ExecuteResponse
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -337,3 +340,43 @@ def test_streamed_lines_survive_any_chunk_boundary() -> None:
     chunks = [b'{"a": "\xe2\x80', b'\xa8x"}\n{"b"', b": 1}\n", b'{"c": 2}']
 
     assert list(_ndjson_lines(iter(chunks))) == ['{"a": "\u2028x"}', '{"b": 1}', '{"c": 2}']
+
+
+def test_worker_error_response_reconstructs_tool_outcome() -> None:
+    """ExecuteResponse(is_error=True) reconstructs ToolOutcome across plain text, refusals, receipts, and media."""
+    receipt: dict[str, object] = {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "mindroom_tool_outputs/f.txt",
+            "bytes": 100,
+            "format": "text",
+        },
+    }
+    media_env = encode_media_result(
+        ToolValue(content="Exit code 2", images=(Image(content=b"png", mime_type="image/png"),)),
+    )
+    cfg = WorkerProxyClientConfig(None, None, 7.0, 60, {}, False)
+    for wire, counts, content, saved, imgs in (
+        ("Exit code 2\nStderr:\nboom", False, "Exit code 2\nStderr:\nboom", None, []),
+        ("Error: refused", True, "Error: refused", None, []),
+        (receipt, False, str(receipt), receipt, []),
+        (media_env, False, "Exit code 2", None, [b"png"]),
+    ):
+        line = ExecuteResponse(ok=True, result=wire, is_error=True, counts_as_tool_failure=counts).model_dump_json()
+        res = execute_worker_proxy_request(
+            config=cfg,
+            request=_REQUEST,
+            credentials_manager=None,
+            worker_target=None,
+            worker_handle=_HANDLE,
+            worker_manager=_Manager(),
+            client_factory=_client(lambda _p, payload=line: iter([payload]), []),
+        )
+        assert isinstance(res, ToolOutcome)
+        assert (res.content, res.is_error, res.counts_as_tool_failure, res.saved_output) == (
+            content,
+            True,
+            counts,
+            saved,
+        )
+        assert [img.content for img in res.images] == imgs

@@ -442,8 +442,8 @@ async def check_for_injection(ctx: ToolResultTransformContext) -> str | None:
 - `ctx.result` is the text the model would read for the result.
   A hook returns a `str` to replace it or `None` to keep it.
   Hooks run one after another in priority order, and each sees the text the hook before it returned.
-- The hooks run only for a call that returned a result, not for one that raised, answered with a failed `ToolOutcome`, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
-  Failure text, such as the text of an MCP server's `isError` result, is not checked.
+- The hooks run for every call that returned a result, including tool-returned failed `ToolOutcome`s (such as failed shell commands), not for one that raised, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
+  Raised failure text, such as an unhandled exception or an MCP server's `isError` exception, is not checked.
 - What the hooks leave is what the model, the reply's record of the call (which an interrupted reply replays to its next attempt), the tool-call log, and `tool:after_call` hooks read.
   The hooks run after the call's shell commands, outside the environment they had, on the result with given secrets masked.
   A Stop while a hook runs leaves no result recorded, even when the hook catches it.

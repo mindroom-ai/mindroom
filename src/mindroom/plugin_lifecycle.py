@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_sources import EventSource, EventSourceEmitter, EventSourceRegistry
     from mindroom.tool_system.plugins import PluginRoutesApp
 
 logger = get_logger(__name__)
@@ -40,9 +41,12 @@ class PluginLifecycle:
     process_state: dict[str, Any]
     _runtime_paths: RuntimePaths = field(repr=False)
     _current_config: Callable[[], Config] = field(repr=False)
+    _event_sources: EventSourceRegistry | None = field(default=None, repr=False)
     # Set before the stop code runs: a newer lifespan of the plugin started and can take over ``process_state``
     # (``reload``), none did (``disabled``), or MindRoom stops (``shutdown``).
     stop_reason: _StopReason | None = field(default=None, init=False)
+    _registered_event_sources: list[EventSourceEmitter] = field(default_factory=list, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def context(self) -> PluginContext:
         """Return the plugin's context under the config MindRoom serves now."""
@@ -52,6 +56,28 @@ class PluginLifecycle:
             self._runtime_paths,
             self._current_config,
         )
+
+    def register_event_source(self, source: EventSource) -> EventSourceEmitter:
+        """Register an EventSource owned by this plugin for the duration of this lifespan."""
+        if self._event_sources is None:
+            msg = "Event sources are only available in the primary runtime"
+            raise RuntimeError(msg)
+        if self._closed or self.stop_reason is not None:
+            msg = f"Plugin {self.plugin_name!r} lifespan has ended"
+            raise RuntimeError(msg)
+        emitter = self._event_sources.register(source, owner_plugin=self.plugin_name)
+        self._registered_event_sources.append(emitter)
+        return emitter
+
+    def _unregister_event_sources(self) -> None:
+        """Unregister every EventSource token recorded on this lifespan, leaving newer reload tokens intact."""
+        self._closed = True
+        if self._event_sources is None:
+            self._registered_event_sources.clear()
+            return
+        registered, self._registered_event_sources = self._registered_event_sources, []
+        for emitter in reversed(registered):
+            self._event_sources.unregister(emitter.source_id, emitter.token)
 
 
 @dataclass(eq=False)
@@ -68,9 +94,12 @@ async def _run(
     started: asyncio.Future[None],
     stopping: asyncio.Event,
 ) -> None:
-    async with lifespan(lifecycle):
-        started.set_result(None)
-        await stopping.wait()
+    try:
+        async with lifespan(lifecycle):
+            started.set_result(None)
+            await stopping.wait()
+    finally:
+        lifecycle._unregister_event_sources()
 
 
 async def _start(lifespan: PluginLifespan, lifecycle: PluginLifecycle) -> _RunningLifespan | None:
@@ -87,6 +116,7 @@ async def _start(lifespan: PluginLifespan, lifecycle: PluginLifecycle) -> _Runni
     if started.done():
         return _RunningLifespan(lifecycle, task, stopping)
     _log_failure("Plugin lifespan failed to start", lifecycle.plugin_name, task)
+    lifecycle._unregister_event_sources()
     return None
 
 
@@ -94,8 +124,11 @@ async def _stop(running: _RunningLifespan, reason: _StopReason) -> None:
     """Run the lifespan's code after its ``yield`` with ``reason``, logging a stop that raises or overruns."""
     running.lifecycle.stop_reason = reason
     running.stopping.set()
-    await asyncio.wait({running.task}, timeout=_LIFESPAN_DEADLINE_SECONDS)
-    _log_failure("Plugin lifespan failed to stop", running.lifecycle.plugin_name, running.task, stop_reason=reason)
+    try:
+        await asyncio.wait({running.task}, timeout=_LIFESPAN_DEADLINE_SECONDS)
+        _log_failure("Plugin lifespan failed to stop", running.lifecycle.plugin_name, running.task, stop_reason=reason)
+    finally:
+        running.lifecycle._unregister_event_sources()
 
 
 def _log_failure(event: str, plugin_name: str, task: asyncio.Task[None], **fields: object) -> None:
@@ -125,6 +158,8 @@ class PluginLifespans:
     runtime_paths: RuntimePaths
     # The config the runtime serves now.
     current_config: Callable[[], Config]
+    # Primary runtime registry for plugin EventSources, or None outside the primary runtime.
+    event_sources: EventSourceRegistry | None = None
     # The generation whose lifespans run.
     _published: PluginGeneration = field(default_factory=PluginGeneration, init=False)
     _running: dict[str, _RunningLifespan] = field(default_factory=dict, init=False)
@@ -147,6 +182,8 @@ class PluginLifespans:
                 return
             previous, self._published = self._published, generation
             replaced, self._running = self._running, {}
+            for running in replaced.values():
+                running.lifecycle._closed = True
             # The new code may start services as it starts, so those the replaced code started stop first.
             await stop_started_worker_services()
             for plugin in generation.plugins.values():
@@ -157,6 +194,7 @@ class PluginLifespans:
                     plugin_process_state(plugin.name),
                     self.runtime_paths,
                     self.current_config,
+                    self.event_sources,
                 )
                 running = await _start(plugin.lifespan, lifecycle)
                 if running is not None:

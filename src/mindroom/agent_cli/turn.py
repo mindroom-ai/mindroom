@@ -147,12 +147,13 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
 
 def _with_media(content: object, media_results: list[ToolValue]) -> ToolValue:
     """Attach media that CLI calls returned during one shell command to its text result."""
-    return ToolValue(
-        content=str(content),
-        images=tuple(item for media in media_results for item in media.images),
-        audios=tuple(item for media in media_results for item in media.audios),
-        videos=tuple(item for media in media_results for item in media.videos),
-        files=tuple(item for media in media_results for item in media.files),
+    base = content if isinstance(content, ToolValue) else ToolValue(content=str(content))
+    return replace(
+        base,
+        images=(*base.images, *(item for media in media_results for item in media.images)),
+        audios=(*base.audios, *(item for media in media_results for item in media.audios)),
+        videos=(*base.videos, *(item for media in media_results for item in media.videos)),
+        files=(*base.files, *(item for media in media_results for item in media.files)),
     )
 
 
@@ -634,21 +635,23 @@ class LiveTurnTools(TurnToolBridge):
             )
             media_results = []
             async with closing_async_stream(events):
-                terminal = None
+                terminal: AgentToolCallStep | None = None
                 async for event in events:
                     if isinstance(event, AgentToolCallMedia):
                         media_results.append(event.media)
                     elif isinstance(event, AgentToolCallStep):
-                        terminal = event.call
+                        terminal = event
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
             # A control tool this command ran ends the run after its batch, so the next attempt runs with it, and a
             # failed shell call answers as failed, so Claude and Gemini read it as one.
             outcome = tool_outcome(
-                _with_media(str(terminal.result or ""), media_results),
+                _with_media(str(terminal.call.result or ""), media_results),
                 stop_after_call=bool(self.control_calls),
-                is_error=bool(terminal.is_error),
+                is_error=bool(terminal.call.is_error),
+                counts_as_tool_failure=terminal.counts_as_tool_failure,
+                saved_output=terminal.saved_output,
             )
             self.checkpoint.complete(call_id, outcome)
             return outcome
@@ -667,8 +670,12 @@ class LiveTurnTools(TurnToolBridge):
         self._media.pop(parent, None)
 
         async def leaf(values: dict[str, object]) -> object:
-            async with self._window(parent):
-                return await self._invoke_shell(binding, values, window=parent)
+            try:
+                async with self._window(parent):
+                    return await self._invoke_shell(binding, values, window=parent)
+            except BaseException:
+                self._media.pop(parent, None)
+                raise
 
         events = self._execute(
             binding,
@@ -679,12 +686,16 @@ class LiveTurnTools(TurnToolBridge):
             shell_leaf=leaf,
             requirement=requirement,
         )
+        drop_media = False
         async with closing_async_stream(events):
             async for event in events:
                 self._check_control(event)
+                if isinstance(event, AgentToolCallStep) and event.call.is_error and event.counts_as_tool_failure:
+                    drop_media = True
                 yield event
         for media in self._media.pop(parent, []):
-            yield AgentToolCallMedia(media)
+            if not drop_media:
+                yield AgentToolCallMedia(media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
         """Run one standard-mode native shell call inside its own CLI window and environment."""

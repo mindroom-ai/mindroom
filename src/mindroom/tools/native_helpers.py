@@ -9,8 +9,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import httpx
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -54,14 +56,58 @@ def resolve_toggle(
     return bool(value)
 
 
-def narrow_action_enum(function: ToolFunction, allowed_actions: Sequence[str]) -> ToolFunction:
-    """Restrict a tool function's ``action`` JSON schema enum to ``allowed_actions``."""
+def restrict_actions(
+    function: ToolFunction,
+    allowed_actions: Sequence[str],
+    *,
+    action_fields: Mapping[str, str] | None = None,
+    common_fields: Sequence[str] = (),
+) -> ToolFunction:
+    """Narrow an action-dispatched tool function's schema and docstring bullets to ``allowed_actions``.
+
+    Preserves the function's declared ``action`` enum order and returns ``function`` unchanged when all
+    declared actions remain allowed. When ``action_fields`` is ``None``, only the ``action`` enum and
+    ``- `<action>`: ...`` docstring bullets are narrowed; when provided, ``properties`` and ``required``
+    are also pruned to ``action``, ``common_fields``, and the fields declared for allowed actions.
+    """
     properties = function.parameters.get("properties")
     if not isinstance(properties, dict) or "action" not in properties:
         return function
+
+    current_enum = properties["action"].get("enum")
+    if isinstance(current_enum, list):
+        allowed_set = set(allowed_actions)
+        ordered_allowed = [action for action in current_enum if action in allowed_set]
+        if len(ordered_allowed) < len(allowed_set):
+            current_set = set(current_enum)
+            ordered_allowed.extend(dict.fromkeys(action for action in allowed_actions if action not in current_set))
+        if ordered_allowed == current_enum:
+            return function
+    else:
+        ordered_allowed = list(allowed_actions)
+
     updated_properties = dict(properties)
-    updated_properties["action"] = {**updated_properties["action"], "enum": list(allowed_actions)}
-    return replace(function, parameters={**function.parameters, "properties": updated_properties})
+    updated_properties["action"] = {**updated_properties["action"], "enum": ordered_allowed}
+    if action_fields is not None:
+        keep = {
+            "action",
+            *common_fields,
+            *(field for action in ordered_allowed for field in action_fields.get(action, "").split()),
+        }
+        updated_properties = {name: value for name, value in updated_properties.items() if name in keep}
+
+    description = function.description
+    if description is not None:
+        description = "\n".join(
+            line
+            for line in description.splitlines()
+            if not line.startswith("- `") or any(f"`{action}`" in line.partition(":")[0] for action in ordered_allowed)
+        )
+
+    parameters = {**function.parameters, "properties": updated_properties}
+    if action_fields is not None and "required" in parameters:
+        parameters["required"] = [name for name in parameters["required"] if name in updated_properties]
+    return replace(function, description=description, parameters=parameters)
 
 
 def format_tabular_rows(
@@ -159,6 +205,40 @@ def json_dumps(payload: Any) -> str:  # noqa: ANN401
 def error_json(message: str, **extra: Any) -> str:  # noqa: ANN401
     """Return a JSON error payload."""
     return json_dumps({"error": message, **extra})
+
+
+def status_error_json(message: str) -> str:
+    """Return a JSON status/message error payload."""
+    return json.dumps({"status": "error", "message": message})
+
+
+def format_http_error(
+    service: str,
+    exc: Exception,
+    *,
+    secrets: Iterable[str | None] = (),
+    detail_path: tuple[str, ...] = ("message",),
+) -> str:
+    """Format an HTTP/JSON error with optional nested detail extraction and secret redaction."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        detail = ""
+        try:
+            body: Any = exc.response.json()
+        except ValueError:
+            body = None
+        for key in detail_path:
+            if not isinstance(body, dict):
+                body = None
+                break
+            body = body.get(key)
+        if isinstance(body, str):
+            detail = body.strip()
+            for secret in secrets:
+                if secret:
+                    detail = detail.replace(secret, "[REDACTED]")
+        return f"{service} API error ({status}): {detail}" if detail else f"{service} API error ({status})"
+    return f"{service} request failed: {type(exc).__name__}"
 
 
 def prepare_python_code(code: str) -> str:

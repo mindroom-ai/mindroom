@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.failure_text import failure_text
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -17,7 +24,11 @@ from mindroom.tools.native_helpers import (
     require_non_blank_text,
     require_non_empty,
     resolve_toggle,
+    restrict_actions,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _ReadAction = Literal["context", "messages", "search"]
 _SearchScope = Literal["edges", "nodes"]
@@ -50,15 +61,26 @@ class _ZepTools(Toolkit):
 
         enable_all = resolve_toggle(all, default=False)
         self._allow_add = resolve_toggle(enable_add_zep_message, default=True, enable_all=enable_all)
-        self._allow_get = resolve_toggle(enable_get_zep_memory, default=True, enable_all=enable_all)
-        self._allow_search = resolve_toggle(enable_search_zep_memory, default=True, enable_all=enable_all)
+        allow_get = resolve_toggle(enable_get_zep_memory, default=True, enable_all=enable_all)
+        allow_search = resolve_toggle(enable_search_zep_memory, default=True, enable_all=enable_all)
+        self._read_actions: tuple[_ReadAction, ...] = tuple(
+            action
+            for action, enabled in (("context", allow_get), ("messages", allow_get), ("search", allow_search))
+            if enabled
+        )
 
         tools: list[Any] = []
-        if self._allow_get or self._allow_search:
+        if self._read_actions:
             tools.append(self.zep_read)
         if self._allow_add:
             tools.append(self.zep_add_message)
         super().__init__(name="zep", tools=tools, instructions=instructions)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``zep_read`` schema and description to enabled actions."""
+        if function.name == "zep_read":
+            return restrict_actions(function, self._read_actions, action_fields={"search": "query search_scope"})
+        return function
 
     def initialize(self) -> bool:
         """Lazily initialize the Zep client and ensure the user and thread exist."""
@@ -118,7 +140,7 @@ class _ZepTools(Toolkit):
             return f"Message from '{role}' added successfully to session {self.session_id}."
 
     def _read_session_memory(self, action: Literal["context", "messages"]) -> str:
-        if not self._allow_get:
+        if action not in self._read_actions:
             return "Error: Reading Zep session memory is disabled."
         assert self.session_id is not None
         if action == "context":
@@ -128,7 +150,7 @@ class _ZepTools(Toolkit):
         return str(messages_list.messages) if messages_list.messages else "No messages available."
 
     def _search_graph(self, query: str | None, search_scope: _SearchScope) -> str:
-        if not self._allow_search:
+        if "search" not in self._read_actions:
             return "Error: Searching Zep memory is disabled."
         if not self.user_id:
             return "Error: Zep user not initialized."
@@ -199,34 +221,10 @@ class _ZepTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="ignore_assistant_messages",
-            label="Ignore Assistant Messages",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_add_zep_message",
-            label="Enable Add Zep Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_zep_memory",
-            label="Enable Get Zep Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_zep_memory",
-            label="Enable Search Zep Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("ignore_assistant_messages", "Ignore Assistant Messages", default=False),
+        bool_config_field("enable_add_zep_message", "Enable Add Zep Message"),
+        bool_config_field("enable_get_zep_memory", "Enable Get Zep Memory"),
+        bool_config_field("enable_search_zep_memory", "Enable Search Zep Memory"),
         ConfigField(
             name="instructions",
             label="Instructions",
@@ -234,13 +232,7 @@ class _ZepTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["zep-cloud"],
     docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#zep",

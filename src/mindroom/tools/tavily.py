@@ -7,23 +7,20 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = get_logger(__name__)
-
-
-def _require_tavily() -> type[Any]:
-    """Import and return ``tavily.TavilyClient``, raising a helpful ImportError when absent."""
-    try:
-        from tavily import TavilyClient
-    except ImportError as exc:
-        msg = "`tavily-python` not installed. Please install using `pip install tavily-python`"
-        raise ImportError(msg) from exc
-    return TavilyClient
 
 
 class _TavilyTools(Toolkit):
@@ -58,13 +55,14 @@ class _TavilyTools(Toolkit):
         chunks_per_source: int | None = None,
         search_params: dict[str, Any] | None = None,
     ) -> None:
-        tavily_client_cls = _require_tavily()
+        from tavily import TavilyClient
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("tavily_api_key_missing")
         self.api_base_url = api_base_url
 
-        self.client = tavily_client_cls(api_key=self.api_key, api_base_url=self.api_base_url)
+        self.client = TavilyClient(api_key=self.api_key, api_base_url=self.api_base_url)
         self.search_depth = search_depth
         self.extract_depth = extract_depth
         self.max_tokens = max_tokens
@@ -278,34 +276,10 @@ class _TavilyTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_search",
-            label="Enable Search",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_context",
-            label="Enable Search Context",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_extract",
-            label="Enable Extract",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_search", "Enable Search"),
+        bool_config_field("enable_search_context", "Enable Search Context", default=False),
+        bool_config_field("enable_extract", "Enable Extract", default=False),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="max_tokens",
             label="Max Tokens",
@@ -313,13 +287,7 @@ class _TavilyTools(Toolkit):
             required=False,
             default=6000,
         ),
-        ConfigField(
-            name="include_answer",
-            label="Include Answer",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("include_answer", "Include Answer"),
         ConfigField(
             name="search_depth",
             label="Search Depth",
@@ -334,20 +302,8 @@ class _TavilyTools(Toolkit):
             required=False,
             default="basic",
         ),
-        ConfigField(
-            name="include_images",
-            label="Include Images",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="include_favicon",
-            label="Include Favicon",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("include_images", "Include Images", default=False),
+        bool_config_field("include_favicon", "Include Favicon", default=False),
         ConfigField(
             name="extract_timeout",
             label="Extract Timeout",
@@ -433,11 +389,9 @@ class _TavilyTools(Toolkit):
             default=None,
             description="Boost results from this country (e.g. united states)",
         ),
-        ConfigField(
-            name="auto_parameters",
-            label="Auto Parameters",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "auto_parameters",
+            "Auto Parameters",
             default=False,
             description="Let Tavily auto-tune search parameters; explicitly set parameters take precedence",
         ),
@@ -456,5 +410,4 @@ class _TavilyTools(Toolkit):
 )
 def tavily_tools() -> type[Toolkit]:
     """Return Tavily tools for real-time web search."""
-    _require_tavily()
     return _TavilyTools
