@@ -424,7 +424,6 @@ get_presets  # FastAPI route (src/mindroom/api/egress_broker.py, src/mindroom/ap
 _._reject_non_finite_numbers  # Pydantic field validator (src/mindroom/api/script_gateway.py)
 _.audio_total_tokens  # Token counter read by name in the stored, reported, and published usage dicts (src/mindroom/llm/usage.py)
 _.desktop  # Toolkit function its passthrough_tool mark offers (src/mindroom/custom_tools/desktop.py)
-_.tool_search  # Toolkit function its @tool mark offers (src/mindroom/custom_tools/dynamic_tools.py)
 _.discord_manage  # Toolkit function its @tool mark offers (src/mindroom/tools/discord.py)
 _.discord_read  # Toolkit function its @tool mark offers (src/mindroom/tools/discord.py)
 _.discord_send  # Toolkit function its @tool mark offers (src/mindroom/tools/discord.py)
