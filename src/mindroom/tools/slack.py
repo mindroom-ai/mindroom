@@ -80,8 +80,8 @@ if TYPE_CHECKING:
         "Store the app's client ID and secret in the slack_oauth_client credential service, "
         "and its bot token, signing secret and, for Slack event triggers, app-level token in slack_app."
     ),
-    function_names=("slack_read", "slack_send", "slack_manage"),
-    action_scoped_grants=("slack_read", "slack_send", "slack_manage"),
+    function_names=("slack_inspect", "slack_send", "slack_manage"),
+    action_scoped_grants=("slack_inspect", "slack_send", "slack_manage"),
 )
 def slack_tools() -> type[SlackTools]:
     """Return Slack tools that act as the requester or as the MindRoom Slack app in a project's channels."""

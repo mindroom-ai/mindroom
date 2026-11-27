@@ -641,7 +641,7 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "slack_read",
+        "slack_inspect",
         "slack_send",
         "slack_manage"
       ],

@@ -289,15 +289,15 @@ Use [tool approval](../tool-approval.md) rules to require a Matrix approval card
 ```yaml
 tool_approval:
   rules:
-    - match: "*jira_write"
+    - match: jira_write
       action: require_approval
-    - match: "*confluence_write"
+    - match: confluence_write
       action: require_approval
 ```
 
-The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_write`.
+For additional connections, add explicit rules for their prefixed function names (for example, `partner_jira_write` and `partner_confluence_write`) rather than wildcards, because config validation requires exact function names when gating consolidated Atlassian tools.
 Timed approval grants for these consolidated functions are scoped per `action` (for example, approving `jira_write(action="comment")` does not auto-approve `jira_write(action="transition")`).
-Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_read` and `*confluence_read` instead.
+Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for exact read function names (`jira_read` and `confluence_read`, plus prefixed names such as `partner_jira_read` and `partner_confluence_read` for additional connections) instead.
 To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments

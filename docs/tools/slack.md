@@ -21,7 +21,7 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 
 | Function | Actions | Personal | Project |
 | --- | --- | --- | --- |
-| `slack_read` | `search` (messages, conversations, or people), `recent` (newest-first DMs or channels within `days`), `read` (latest messages or a thread), and `download` (up to 50 MB into `slack-downloads/`) | all actions; `search` supports `messages`, `conversations`, and `people`; `recent` lists `dms` or `channels` | `search` (`conversations` only), `read`, and `download` within the agent's channels (`recent` is hidden) |
+| `slack_inspect` | `search` (messages, conversations, or people), `recent` (newest-first DMs or channels within `days`), `read` (latest messages or a thread), and `download` (up to 50 MB into `slack-downloads/`) | all actions; `search` supports `messages`, `conversations`, and `people`; `recent` lists `dms` or `channels` | `search` (`conversations` only), `read`, and `download` within the agent's channels (`recent` is hidden) |
 | `slack_send` | `post` (message or thread reply) and `upload` (workspace file up to 50 MB with optional `title` and `comment`) | as the person; a user ID opens a direct message | as the app, in the agent's channels |
 | `slack_manage` | `edit` (replace message text), `delete` (delete a message), and `react` (add an emoji reaction) | as the person (only messages Slack allows them to edit/delete) | as the app, in the agent's channels |
 
@@ -278,7 +278,7 @@ tool_approval:
       action: require_approval
 ```
 
-Timed approval grants for `slack_read`, `slack_send`, and `slack_manage` are scoped per `action` (for example, approving `slack_manage(action="react")` does not auto-approve `slack_manage(action="delete")`).
+Timed approval grants for `slack_inspect`, `slack_send`, and `slack_manage` are scoped per `action` (for example, approving `slack_manage(action="react")` does not auto-approve `slack_manage(action="delete")`).
 
 The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool calls, so these rules do not gate them.
 
@@ -288,7 +288,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
 - While anyone's watch takes direct messages, every direct message that a connected person sends or receives costs one Slack request to check who can see it, which counts against Slack's rate limits.
-- `slack_read(action="recent")` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
+- `slack_inspect(action="recent")` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
   The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
 
 ## Troubleshooting
@@ -299,12 +299,12 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
 | `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
 | `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
-| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_read(action="download")` takes files, not canvases or posts. |
+| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_inspect(action="download")` takes files, not canvases or posts. |
 | `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
 | `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
-| `Slack did not answer; the message may have been sent, so check with slack_read(action="read") before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
+| `Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
 | `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
 | `path '<path>' must be an existing file inside the agent workspace` | `slack_send(action="upload")` reads only workspace files under the default `file_access`; save the file in the workspace first. |
 | `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_send(action="upload")` takes files of up to 50 MB. |

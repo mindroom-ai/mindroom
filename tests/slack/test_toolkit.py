@@ -218,7 +218,7 @@ async def test_personal_mode_uses_requester_token(paths: RuntimePaths, monkeypat
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("read", target=CHANNEL, limit=10))
+    result = json.loads(await _tools(paths).slack_inspect("read", target=CHANNEL, limit=10))
 
     assert result["status"] == "ok"
     assert result["next_cursor"] == "c2"
@@ -269,7 +269,7 @@ async def test_read_names_why_the_bot_lookup_failed(
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("read", target=CHANNEL))
+    result = json.loads(await _tools(paths).slack_inspect("read", target=CHANNEL))
 
     assert result == {"status": "error", "tool": "slack", "message": error}
 
@@ -281,7 +281,7 @@ async def test_personal_mode_without_connection_returns_connect_link(
 ) -> None:
     fake = FakeSlack().install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("search", query="launch"))
+    result = json.loads(await _tools(paths).slack_inspect("search", query="launch"))
 
     assert result["status"] == "error"
     assert result["oauth_connection_required"] is True
@@ -299,7 +299,7 @@ async def test_personal_mode_without_slack_app_is_not_configured(
     get_runtime_credentials_manager(paths).delete_credentials("slack_app")
     fake = FakeSlack().install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("read", target=CHANNEL))
+    result = json.loads(await _tools(paths).slack_inspect("read", target=CHANNEL))
 
     assert result == {"status": "error", "tool": "slack", "message": "The MindRoom Slack app is not configured"}
     assert fake.requests == []
@@ -312,7 +312,7 @@ async def test_project_mode_refuses_unlisted_channel_without_api_call(
 ) -> None:
     fake = FakeSlack({"conversations.info": _member(UNLISTED), "auth.test": AUTH_TEST}).install(monkeypatch)
 
-    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_read("read", target=f"{UNLISTED}:{ROOT_TS}"))
+    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_inspect("read", target=f"{UNLISTED}:{ROOT_TS}"))
 
     assert result["message"] == "Not one of this agent's Slack channels"
     assert fake.requests == []
@@ -322,7 +322,7 @@ async def test_project_mode_refuses_unlisted_channel_without_api_call(
 async def test_project_mode_requires_bot_membership(paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeSlack({"conversations.info": _member(is_member=False)}).install(monkeypatch)
 
-    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_read("read", target=CHANNEL))
+    result = json.loads(await _tools(paths, channels=[CHANNEL]).slack_inspect("read", target=CHANNEL))
 
     assert result["message"] == f"Invite the MindRoom app to <#{CHANNEL}>"
     assert fake.methods() == ["conversations.info"]
@@ -337,7 +337,7 @@ async def test_project_mode_refuses_group_dm_even_if_listed(
     group_dm = "G0123ABCD"
     fake = FakeSlack({"conversations.info": _member(group_dm, is_mpim=True)}).install(monkeypatch)
 
-    result = json.loads(await _tools(paths, channels=[group_dm]).slack_read("read", target=group_dm))
+    result = json.loads(await _tools(paths, channels=[group_dm]).slack_inspect("read", target=group_dm))
 
     assert result["message"] == "Not one of this agent's Slack channels"
     assert fake.methods() == ["conversations.info"]
@@ -365,7 +365,7 @@ async def test_project_download_requires_allowlisted_share(
     workspace.mkdir()
 
     tools = _tools(paths, channels=[CHANNEL], tool_output_workspace_root=workspace)
-    result = json.loads(await tools.slack_read("download", file_id=FILE_ID))
+    result = json.loads(await tools.slack_inspect("download", file_id=FILE_ID))
 
     assert result["message"] == "This file is not in one of this agent's Slack channels"
     assert fake.methods() == ["files.info"]
@@ -400,7 +400,7 @@ async def test_project_download_from_a_member_channel_uses_the_bot_token(
     workspace.mkdir()
 
     tools = _tools(paths, channels=[CHANNEL], tool_output_workspace_root=workspace)
-    result = json.loads(await tools.slack_read("download", file_id=FILE_ID))
+    result = json.loads(await tools.slack_inspect("download", file_id=FILE_ID))
 
     saved = workspace / "slack-downloads" / f"{FILE_ID}-plan.pdf"
     assert result["path"] == str(saved)
@@ -436,7 +436,7 @@ async def test_download_stops_once_the_stream_passes_the_cap(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert result["message"] == "The file is larger than 8 bytes"
@@ -459,7 +459,7 @@ async def test_download_link_off_slack_is_refused_without_the_token(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert result["message"] == "Slack returned no download link for this file"
@@ -489,7 +489,7 @@ async def test_read_thread_from_permalink(paths: RuntimePaths, monkeypatch: pyte
     ).install(monkeypatch)
     permalink = f"{WORKSPACE_URL}archives/{CHANNEL}/p1714000100000200?thread_ts={ROOT_TS}&cid={CHANNEL}"
 
-    result = json.loads(await _tools(paths).slack_read("read", target=permalink))
+    result = json.loads(await _tools(paths).slack_inspect("read", target=permalink))
 
     assert _form(fake.calls("conversations.replies")[0]) == {"channel": CHANNEL, "ts": ROOT_TS, "limit": "50"}
     assert result["thread_ts"] == ROOT_TS
@@ -506,7 +506,7 @@ async def test_search_people_by_email_uses_lookup(paths: RuntimePaths, monkeypat
     dana = {**DANA, "profile": {**DANA["profile"], "email": "dana@example.com"}}
     fake = FakeSlack({"users.lookupByEmail": {"ok": True, "user": dana}}).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("search", query="dana@example.com", kind="people"))
+    result = json.loads(await _tools(paths).slack_inspect("search", query="dana@example.com", kind="people"))
 
     assert fake.methods() == ["users.lookupByEmail"]
     assert _form(fake.requests[0]) == {"email": "dana@example.com"}
@@ -540,7 +540,7 @@ async def test_search_people_by_name_stops_after_five_pages(
 
     fake = FakeSlack({"users.list": users_list}).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("search", query="DANA", kind="people"))
+    result = json.loads(await _tools(paths).slack_inspect("search", query="DANA", kind="people"))
 
     assert [_form(request).get("limit") for request in fake.requests] == ["200"] * 5
     assert [person["id"] for person in result["people"]] == [DANA["id"]]
@@ -567,7 +567,7 @@ async def test_download_stays_in_workspace(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     saved = workspace / "slack-downloads" / f"{FILE_ID}-.._.._x"
@@ -605,7 +605,7 @@ async def test_download_refuses_a_page_instead_of_the_file(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert result["message"] == "Slack returned a page instead of the file; reconnect Slack and try again"
@@ -629,7 +629,7 @@ async def test_download_keeps_an_html_file(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert (workspace / "slack-downloads" / f"{FILE_ID}-page.html").read_text() == page
@@ -691,7 +691,7 @@ async def test_download_refuses_a_slack_document_without_fetching_it(
     workspace.mkdir()
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert result["message"] == _DOCUMENT_REFUSAL
@@ -723,7 +723,7 @@ async def test_download_of_a_slack_document_leaves_an_earlier_download_untouched
     earlier.write_text("<html>Launch plan</html>")
 
     result = json.loads(
-        await _tools(paths, tool_output_workspace_root=workspace).slack_read("download", file_id=FILE_ID),
+        await _tools(paths, tool_output_workspace_root=workspace).slack_inspect("download", file_id=FILE_ID),
     )
 
     assert result["message"] == _DOCUMENT_REFUSAL
@@ -737,7 +737,7 @@ async def test_project_search_messages_refused(paths: RuntimePaths, monkeypatch:
     tools = _tools(paths, channels=[CHANNEL])
 
     for kind in ("messages", "people"):
-        result = json.loads(await tools.slack_read("search", query="launch", kind=kind))
+        result = json.loads(await tools.slack_inspect("search", query="launch", kind=kind))
         assert result["message"] == "Message and people search need a personal Slack connection"
     assert fake.requests == []
 
@@ -758,7 +758,7 @@ async def test_rate_limit_reports_retry_after(
         {"search.messages": lambda _request: httpx.Response(429, headers={"Retry-After": retry_after})},
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("search", query="launch"))
+    result = json.loads(await _tools(paths).slack_inspect("search", query="launch"))
 
     assert result["message"] == message
 
@@ -807,7 +807,7 @@ async def test_recent_lists_direct_messages_newest_first_with_the_other_persons_
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent"))
+    result = json.loads(await _tools(paths).slack_inspect("recent"))
 
     assert result == {
         "status": "ok",
@@ -880,7 +880,7 @@ async def test_recent_keeps_conversations_active_within_the_window(
     ).install(monkeypatch)
 
     window = {} if days is None else {"days": days}
-    result = json.loads(await _tools(paths).slack_read("recent", kind="channels", **window))
+    result = json.loads(await _tools(paths).slack_inspect("recent", kind="channels", **window))
 
     assert [conversation["channel_id"] for conversation in result["conversations"]] == listed
     assert {conversation["kind"] for conversation in result["conversations"]} == {"channel"}
@@ -904,7 +904,7 @@ async def test_recent_returns_the_newest_limit_conversations(
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent", kind="channels", limit=2))
+    result = json.loads(await _tools(paths).slack_inspect("recent", kind="channels", limit=2))
 
     assert [conversation["name"] for conversation in result["conversations"]] == ["c0", "c1"]
     assert result["complete"] is True
@@ -920,7 +920,7 @@ async def test_recent_refuses_a_window_it_cannot_read(
     _connect_alice(paths)
     fake = FakeSlack().install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent", days=days))
+    result = json.loads(await _tools(paths).slack_inspect("recent", days=days))
 
     assert result["message"] == "days must be an integer from 1 to 365"
     assert fake.requests == []
@@ -938,8 +938,8 @@ async def test_listings_refuse_a_limit_outside_one_to_a_hundred(
     tools = _tools(paths)
 
     for result in (
-        await tools.slack_read("search", query="launch", limit=limit),
-        await tools.slack_read("recent", limit=limit),
+        await tools.slack_inspect("search", query="launch", limit=limit),
+        await tools.slack_inspect("recent", limit=limit),
     ):
         assert json.loads(result)["message"] == "limit must be an integer from 1 to 100"
     assert fake.requests == []
@@ -949,12 +949,12 @@ async def test_listings_refuse_a_limit_outside_one_to_a_hundred(
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
-        ("slack_read", {"action": "recent", "days": 1.5}),
-        ("slack_read", {"action": "recent", "kind": "groups"}),
-        ("slack_read", {"action": "recent", "limit": "many"}),
-        ("slack_read", {"action": "search", "query": "launch", "kind": "files"}),
-        ("slack_read", {"action": "search", "query": "launch", "limit": 2.5}),
-        ("slack_read", {"action": "bogus"}),
+        ("slack_inspect", {"action": "recent", "days": 1.5}),
+        ("slack_inspect", {"action": "recent", "kind": "groups"}),
+        ("slack_inspect", {"action": "recent", "limit": "many"}),
+        ("slack_inspect", {"action": "search", "query": "launch", "kind": "files"}),
+        ("slack_inspect", {"action": "search", "query": "launch", "limit": 2.5}),
+        ("slack_inspect", {"action": "bogus"}),
         ("slack_send", {"action": "bogus", "target": CHANNEL}),
         ("slack_manage", {"action": "bogus", "target": f"{CHANNEL}:{ROOT_TS}"}),
     ],
@@ -1019,14 +1019,14 @@ async def test_recent_continues_after_a_rate_limit_with_the_conversations_it_did
     ).install(monkeypatch)
     tools = _tools(paths)
 
-    first = json.loads(await tools.slack_read("recent", kind="channels"))
+    first = json.loads(await tools.slack_inspect("recent", kind="channels"))
 
     assert sorted(conversation["name"] for conversation in first["conversations"]) == ["a", "b"]
     assert (first["complete"], first["skipped"], first["retry_after"]) == (False, 2, 30)
     assert _history_reads(fake) == ["C000000aA", "C000000bA", "C000000cA"]
 
     fake.requests.clear()
-    second = json.loads(await tools.slack_read("recent", kind="channels", cursor=first["next_cursor"]))
+    second = json.loads(await tools.slack_inspect("recent", kind="channels", cursor=first["next_cursor"]))
 
     assert sorted(conversation["name"] for conversation in second["conversations"]) == ["c", "d"]
     assert second["complete"] is True
@@ -1063,8 +1063,8 @@ async def test_recent_batches_never_overlap(paths: RuntimePaths, monkeypatch: py
     )
     tools = _tools(paths)
 
-    first = json.loads(await tools.slack_read("recent", kind="channels", limit=100))
-    second = json.loads(await tools.slack_read("recent", kind="channels", limit=100, cursor=first["next_cursor"]))
+    first = json.loads(await tools.slack_inspect("recent", kind="channels", limit=100))
+    second = json.loads(await tools.slack_inspect("recent", kind="channels", limit=100, cursor=first["next_cursor"]))
 
     first_ids = {entry["channel_id"] for entry in first["conversations"]}
     second_ids = {entry["channel_id"] for entry in second["conversations"]}
@@ -1098,7 +1098,7 @@ async def test_recent_stops_its_reads_when_slack_cannot_be_reached(
     ).install(monkeypatch)
     tools = _tools(paths)
 
-    result = json.loads(await tools.slack_read("recent", kind="channels"))
+    result = json.loads(await tools.slack_inspect("recent", kind="channels"))
 
     assert [conversation["name"] for conversation in result["conversations"]] == ["a"]
     assert (result["complete"], result["skipped"], result["retry_after"]) == (False, 2, None)
@@ -1106,7 +1106,7 @@ async def test_recent_stops_its_reads_when_slack_cannot_be_reached(
 
     fake.answers["conversations.history"] = sent
     fake.requests.clear()
-    resumed = json.loads(await tools.slack_read("recent", kind="channels", cursor=result["next_cursor"]))
+    resumed = json.loads(await tools.slack_inspect("recent", kind="channels", cursor=result["next_cursor"]))
 
     assert sorted(conversation["name"] for conversation in resumed["conversations"]) == ["b", "c"]
     assert _history_reads(fake) == ["C000000bA", "C000000cA"]
@@ -1135,7 +1135,7 @@ async def test_recent_skips_a_conversation_slack_refuses_and_reads_the_rest(
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent", kind="channels"))
+    result = json.loads(await _tools(paths).slack_inspect("recent", kind="channels"))
 
     assert sorted(conversation["name"] for conversation in result["conversations"]) == ["a", "c"]
     # Reading it again would meet the same refusal, so there is nothing to continue with.
@@ -1165,7 +1165,7 @@ async def test_recent_reports_a_missing_permission_or_a_revoked_connection(
         {"users.conversations": {"ok": True, "channels": [DM_DANA, GROUP_DM]}, "conversations.history": refusal},
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent"))
+    result = json.loads(await _tools(paths).slack_inspect("recent"))
 
     assert result["status"] == "error"
     assert {key: result.get(key) for key in expected} == expected
@@ -1187,7 +1187,7 @@ async def test_recent_never_reads_a_direct_message_with_a_deleted_person(
         },
     ).install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent"))
+    result = json.loads(await _tools(paths).slack_inspect("recent"))
 
     assert [conversation["channel_id"] for conversation in result["conversations"]] == [DM_DANA["id"]]
     assert result["complete"] is True
@@ -1211,7 +1211,7 @@ async def test_recent_continues_past_its_page_cap(paths: RuntimePaths, monkeypat
     ).install(monkeypatch)
     tools = _tools(paths)
 
-    first = json.loads(await tools.slack_read("recent", kind="channels", limit=100))
+    first = json.loads(await tools.slack_inspect("recent", kind="channels", limit=100))
 
     assert len(fake.calls("users.conversations")) == 5
     assert (len(first["conversations"]), first["complete"], first["skipped"], first["retry_after"]) == (
@@ -1222,7 +1222,7 @@ async def test_recent_continues_past_its_page_cap(paths: RuntimePaths, monkeypat
     )
 
     fake.requests.clear()
-    second = json.loads(await tools.slack_read("recent", kind="channels", limit=100, cursor=first["next_cursor"]))
+    second = json.loads(await tools.slack_inspect("recent", kind="channels", limit=100, cursor=first["next_cursor"]))
 
     assert [_form(request).get("cursor") for request in fake.calls("users.conversations")] == ["page-5", "page-6"]
     assert sorted(conversation["name"] for conversation in second["conversations"]) == ["c5", "c6"]
@@ -1239,9 +1239,9 @@ async def test_recent_refuses_a_cursor_it_did_not_give(
     _connect_alice(paths)
     fake = FakeSlack().install(monkeypatch)
 
-    result = json.loads(await _tools(paths).slack_read("recent", cursor=cursor))
+    result = json.loads(await _tools(paths).slack_inspect("recent", cursor=cursor))
 
-    assert result["message"] == 'cursor must be the next_cursor of the previous slack_read(action="recent") call'
+    assert result["message"] == 'cursor must be the next_cursor of the previous slack_inspect(action="recent") call'
     assert fake.requests == []
 
 
@@ -1272,7 +1272,7 @@ async def test_recent_reads_at_most_eight_conversations_at_once(
         lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle), follow_redirects=False),
     )
 
-    result = json.loads(await _tools(paths).slack_read("recent", kind="channels", limit=100))
+    result = json.loads(await _tools(paths).slack_inspect("recent", kind="channels", limit=100))
 
     assert len(result["conversations"]) == 20
     assert peak == 8
@@ -1285,7 +1285,7 @@ async def test_project_recent_needs_a_personal_connection(paths: RuntimePaths, m
     tools = _tools(paths, channels=[CHANNEL])
 
     for kind in ("channels", "dms"):
-        result = json.loads(await tools.slack_read("recent", kind=kind))
+        result = json.loads(await tools.slack_inspect("recent", kind=kind))
         assert result["message"] == "Recent conversations need a personal Slack connection"
     assert fake.requests == []
 
@@ -1327,11 +1327,11 @@ async def test_mcp_gateway_lists_slack(tmp_path: Path) -> None:
 
     # The gateway answers at most 10 results per search.
     result = await gateway.search_tools(context, toolkit="slack", limit=10)
-    schema = await gateway.get_tool(context, toolkit="slack", function="slack_read")
+    schema = await gateway.get_tool(context, toolkit="slack", function="slack_inspect")
 
     assert "error" not in result
     assert [item["function"] for item in result["results"]] == [
-        "slack_read",
+        "slack_inspect",
         "slack_send",
         "slack_manage",
     ]
@@ -1365,11 +1365,11 @@ def _write_names(tools: SlackTools) -> set[str]:
 def test_write_false_hides_write_functions(paths: RuntimePaths) -> None:
     assert _write_names(_tools(paths)) == {"slack_send", "slack_manage"}
     assert _write_names(_tools(paths, write=False)) == set()
-    assert set(_tools(paths, write=False).functions) == {"slack_read"}
+    assert set(_tools(paths, write=False).functions) == {"slack_inspect"}
 
 
 def test_instructions_name_the_mirrored_reply_only_for_a_project_agent_offered_slack_send(paths: RuntimePaths) -> None:
-    offered = ["slack_read", "slack_send", "slack_manage"]
+    offered = ["slack_inspect", "slack_send", "slack_manage"]
     project = _tools(paths, channels=[CHANNEL], room="lobby")
 
     assert 'do not call slack_send(action="post", ...)' in project.instructions_for(offered)
@@ -1912,28 +1912,34 @@ async def test_unanswered_write_warns_it_may_have_been_sent_and_a_read_does_not(
     tools = _tools(paths, tool_output_workspace_root=notes_workspace)
 
     results = [json.loads(await write(tools))["message"] for write, _ in writes]
-    read = json.loads(await tools.slack_read("read", target=CHANNEL))["message"]
+    read = json.loads(await tools.slack_inspect("read", target=CHANNEL))["message"]
 
     assert results == [
-        'Slack did not answer; the message may have been sent, so check with slack_read(action="read") before retrying',
+        'Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying',
     ] * len(writes)
     assert read == "Slack could not be reached; try again"
     assert fake.methods() == [*first_methods, "conversations.history"]
 
 
 def test_slack_meta_schema_opt_outs_and_project_mode_narrowing(paths: RuntimePaths) -> None:
-    """slack_read opts into meta-schemas (and hides recent/days in project mode); write tools opt out."""
+    """slack_inspect opts into meta-schemas (and hides recent/days in project mode); write tools opt out."""
     personal = {fn.name: fn for fn in adapt_toolkit(_tools(paths)).functions}
-    assert personal["slack_read"].offer_background_after is True
-    assert personal["slack_read"].offer_output_path is True
-    assert personal["slack_read"].parameters["properties"]["action"]["enum"] == ["search", "recent", "read", "download"]
-    assert "days" in personal["slack_read"].parameters["properties"]
-    for write_name in ("slack_send", "slack_manage"):
-        assert personal[write_name].offer_background_after is False
-        assert personal[write_name].offer_output_path is False
+    assert personal["slack_inspect"].offer_background_after is True
+    assert personal["slack_inspect"].offer_output_path is True
+    assert personal["slack_inspect"].parameters["properties"]["action"]["enum"] == [
+        "search",
+        "recent",
+        "read",
+        "download",
+    ]
+    assert "days" in personal["slack_inspect"].parameters["properties"]
+    assert personal["slack_send"].offer_background_after is True
+    assert personal["slack_send"].offer_output_path is False
+    assert personal["slack_manage"].offer_background_after is False
+    assert personal["slack_manage"].offer_output_path is False
 
     project = {fn.name: fn for fn in adapt_toolkit(_tools(paths, channels=[CHANNEL])).functions}
-    read_fn = project["slack_read"]
+    read_fn = project["slack_inspect"]
     assert read_fn.offer_background_after is True
     assert read_fn.offer_output_path is True
     assert read_fn.parameters["properties"]["action"]["enum"] == ["search", "read", "download"]
@@ -1946,11 +1952,21 @@ def test_slack_meta_schema_opt_outs_and_project_mode_narrowing(paths: RuntimePat
 @pytest.mark.parametrize(
     ("call", "expected_message"),
     [
-        (lambda t: t.slack_read("search", kind="dms"), "For search, kind must be messages, conversations, or people"),
-        (lambda t: t.slack_read("recent", kind="messages"), "For recent, kind must be dms or channels"),
-        (lambda t: t.slack_read("recent", days=True), "days must be an integer from 1 to 365"),
-        (lambda t: t.slack_read("read"), "target is required for read"),
-        (lambda t: t.slack_read("download"), "file_id must be a Slack file ID such as F0123ABCD"),
+        (
+            lambda t: t.slack_inspect("search", kind="dms"),
+            "For search, kind must be messages, conversations, or people",
+        ),
+        (lambda t: t.slack_inspect("recent", kind="messages"), "For recent, kind must be dms or channels"),
+        (lambda t: t.slack_inspect("recent", days=True), "days must be an integer from 1 to 365"),
+        (lambda t: t.slack_inspect("read"), "target is required for read"),
+        (lambda t: t.slack_inspect("download"), "file_id must be a Slack file ID such as F0123ABCD"),
+        (
+            lambda t: t.slack_inspect("search", query="launch", target=CHANNEL),
+            "target is not used for action 'search'",
+        ),
+        (lambda t: t.slack_inspect("recent", query="launch"), "query is not used for action 'recent'"),
+        (lambda t: t.slack_inspect("read", target=CHANNEL, days=7), "days is not used for action 'read'"),
+        (lambda t: t.slack_inspect("download", file_id=FILE_ID, limit=5), "limit is not used for action 'download'"),
         (lambda t: t.slack_send("post", CHANNEL, comment="hi"), "Use text, not comment, to post a message"),
         (lambda t: t.slack_send("post", CHANNEL), "text is required to post a message"),
         (

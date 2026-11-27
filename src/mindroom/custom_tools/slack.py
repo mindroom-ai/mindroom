@@ -89,7 +89,7 @@ _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connect
 _PERSONAL_RECENT_ONLY = "Recent conversations need a personal Slack connection"
 # Slack may have received the write before the connection failed, so a blind retry could post twice.
 _WRITE_UNANSWERED = (
-    'Slack did not answer; the message may have been sent, so check with slack_read(action="read") before retrying'
+    'Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying'
 )
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
@@ -106,6 +106,13 @@ class _SlackRefusalError(Exception):
 
 def _refuse(message: str) -> NoReturn:
     raise _SlackRefusalError(message)
+
+
+def _reject_unexpected_args(action: str, allowed: Collection[str], provided: Mapping[str, object]) -> None:
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
+    if unexpected:
+        verb = "is" if len(unexpected) == 1 else "are"
+        _refuse(f"{', '.join(unexpected)} {verb} not used for action {action!r}")
 
 
 @dataclass(frozen=True)
@@ -164,7 +171,7 @@ def _recent_cursor(cursor: str | None) -> tuple[int, str | None]:
         return 0, None
     match = _RECENT_CURSOR.fullmatch(cursor)
     if match is None:
-        msg = 'cursor must be the next_cursor of the previous slack_read(action="recent") call'
+        msg = 'cursor must be the next_cursor of the previous slack_inspect(action="recent") call'
         raise _SlackRefusalError(msg)
     return int(match.group(1)), match.group(2) or None
 
@@ -398,12 +405,14 @@ class SlackTools(Toolkit):
         self.project_channels = frozenset(channels) if channels else None
         # A project agent answers a Slack-started thread in its room, and MindRoom mirrors that reply to Slack itself.
         self._reply_mirrored = self.project_channels is not None and bool(room)
-        tools = [self.slack_read, self.slack_send, self.slack_manage] if write else [self.slack_read]
+        tools = [self.slack_inspect, self.slack_send, self.slack_manage] if write else [self.slack_inspect]
         super().__init__(name=_TOOL_NAME, tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Opt ``slack_read`` into meta-schemas and hide ``recent``/``days`` in project mode."""
-        if function.name != "slack_read":
+        """Set per-function meta-schema flags and hide ``recent``/``days`` in project mode."""
+        if function.name == "slack_send":
+            return replace(function, offer_background_after=True, offer_output_path=False)
+        if function.name != "slack_inspect":
             return function
         offered = replace(function, offer_background_after=True, offer_output_path=True)
         if self.project_channels is None:
@@ -741,7 +750,7 @@ class SlackTools(Toolkit):
             "path": str(path),
         }
 
-    async def slack_read(
+    async def slack_inspect(
         self,
         action: Literal["search", "recent", "read", "download"],
         query: str | None = None,
@@ -774,20 +783,33 @@ class SlackTools(Toolkit):
             cursor: The next_cursor of the previous call.
 
         """
+        provided: dict[str, object] = {
+            "query": query,
+            "kind": kind,
+            "target": target,
+            "file_id": file_id,
+            "limit": limit,
+            "days": days,
+            "before": before,
+            "cursor": cursor,
+        }
 
         async def operation(session: _Session) -> Mapping[str, object]:
             if action == "search":
+                _reject_unexpected_args(action, ("query", "kind", "limit", "cursor"), provided)
                 return await self._do_search(session, query, kind, limit, cursor)
             if action == "recent":
+                _reject_unexpected_args(action, ("kind", "days", "limit", "cursor"), provided)
                 return await self._do_recent(session, kind, days, limit, cursor)
             if action == "read":
+                _reject_unexpected_args(action, ("target", "limit", "before", "cursor"), provided)
                 return await self._do_read(session, target, limit, before, cursor)
             if action == "download":
+                _reject_unexpected_args(action, ("file_id",), provided)
                 return await self._do_download(session, file_id)
-            msg = f"Unsupported slack_read action: {action!r}"
-            raise _SlackRefusalError(msg)
+            _refuse(f"Unsupported slack_inspect action: {action!r}")
 
-        return await self._run("slack_read", operation)
+        return await self._run("slack_inspect", operation)
 
     async def slack_send(
         self,
@@ -805,7 +827,7 @@ class SlackTools(Toolkit):
 
         A personal connection acts as the connected person (and accepts a user ID to open a DM); a project agent
         acts as the MindRoom app in its own channels only. Writes are sent once and never retried; check
-        slack_read(action="read") before retrying after an error.
+        slack_inspect(action="read") before retrying after an error.
 
         Args:
             action: Send operation (`post` or `upload`).
@@ -879,7 +901,7 @@ class SlackTools(Toolkit):
         - `react`: `target`, `emoji` (name such as `eyes` or `white_check_mark`, with or without colons).
 
         A personal connection acts as the connected person; a project agent acts as the MindRoom app in its own
-        channels only. Writes are sent once and never retried; check slack_read(action="read") before retrying after
+        channels only. Writes are sent once and never retried; check slack_inspect(action="read") before retrying after
         an error.
 
         Args:

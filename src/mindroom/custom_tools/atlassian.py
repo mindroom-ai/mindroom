@@ -69,7 +69,7 @@ from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_
 from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
@@ -184,6 +184,23 @@ def _extra_fields(value: dict | None) -> dict[str, object]:
     if value is None:
         return {}
     return dict(value)
+
+
+def _reject_unexpected_args(
+    action: str,
+    allowed: Collection[str],
+    provided: Mapping[str, object],
+    *,
+    hints: Mapping[str, str] | None = None,
+) -> None:
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
+    if not unexpected:
+        return
+    names = ", ".join(unexpected)
+    verb = "is" if len(unexpected) == 1 else "are"
+    hint = next((hints[name] for name in unexpected if hints and name in hints), "")
+    msg = f"{names} {verb} not used for action {action!r}." + (f" {hint}" if hint else "")
+    raise _InvalidArgumentError(msg)
 
 
 def _adf_document(text: str) -> dict[str, object]:
@@ -593,13 +610,18 @@ class AtlassianToolkit(Toolkit):
         self,
         product: AtlassianProduct,
         action: str,
-        builders: Mapping[str, Callable[[], _Operation]],
+        builders: Mapping[str, tuple[Collection[str], Callable[[], _Operation]]],
+        provided: Mapping[str, object],
+        *,
+        hints: Mapping[str, Mapping[str, str]] | None = None,
     ) -> str:
-        builder = builders.get(action)
-        if builder is None:
+        entry = builders.get(action)
+        if entry is None:
             expected = ", ".join(repr(name) for name in builders)
             return self._error(_InvalidArgumentError(f"Unsupported action {action!r}; expected one of: {expected}."))
+        allowed, builder = entry
         try:
+            _reject_unexpected_args(action, allowed, provided, hints=(hints or {}).get(action))
             operation = builder()
         except AtlassianError as exc:
             return self._error(exc)
@@ -609,14 +631,14 @@ class AtlassianToolkit(Toolkit):
         self,
         jql: str | None,
         fields: list[str] | None,
-        max_results: int,
+        max_results: int | None,
         next_page_token: str | None,
     ) -> _Operation:
         requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS)
         adds_space_field = self._adds_space_field(requested)
         body: dict[str, object] = {
             "jql": self._restricted_query("jira", _required_text(jql, "jql"), "jql"),
-            "maxResults": _page_size(max_results, "max_results"),
+            "maxResults": _page_size(20 if max_results is None else max_results, "max_results"),
             "fields": [*requested, "project"] if adds_space_field else requested,
         }
         if token := _cursor(next_page_token, "next_page_token"):
@@ -674,7 +696,7 @@ class AtlassianToolkit(Toolkit):
         jql: str | None = None,
         issue_key: str | None = None,
         fields: list[str] | None = None,
-        max_results: int = 20,
+        max_results: int | None = None,
         next_page_token: str | None = None,
     ) -> str:
         """Search Jira issues or get one issue with its available transitions.
@@ -689,7 +711,7 @@ class AtlassianToolkit(Toolkit):
             jql: Jira Query Language expression, for example "project = PROJ AND statusCategory != Done ORDER BY updated DESC".
             issue_key: Issue key such as PROJ-123, or a numeric issue ID.
             fields: Jira field IDs to include, such as ["summary", "labels"], or ["*all"] for every field.
-            max_results: Maximum issues to return for `search`; values above 50 are capped.
+            max_results: Maximum issues to return for `search` (defaults to 20; values above 50 are capped).
             next_page_token: The next_page_token from a previous `search` call, to fetch the next page.
 
         """
@@ -697,8 +719,18 @@ class AtlassianToolkit(Toolkit):
             "jira",
             action,
             {
-                "search": lambda: self._jira_search_op(jql, fields, max_results, next_page_token),
-                "get": lambda: self._jira_get_op(issue_key, fields),
+                "search": (
+                    ("jql", "fields", "max_results", "next_page_token"),
+                    lambda: self._jira_search_op(jql, fields, max_results, next_page_token),
+                ),
+                "get": (("issue_key", "fields"), lambda: self._jira_get_op(issue_key, fields)),
+            },
+            {
+                "jql": jql,
+                "issue_key": issue_key,
+                "fields": fields,
+                "max_results": max_results,
+                "next_page_token": next_page_token,
             },
         )
 
@@ -838,10 +870,26 @@ class AtlassianToolkit(Toolkit):
             "jira",
             action,
             {
-                "create": lambda: self._jira_create_op(project_key, summary, issue_type, description, fields),
-                "update": lambda: self._jira_update_op(issue_key, summary, description, fields),
-                "comment": lambda: self._jira_comment_op(issue_key, comment),
-                "transition": lambda: self._jira_transition_op(issue_key, transition),
+                "create": (
+                    ("project_key", "summary", "issue_type", "description", "fields"),
+                    lambda: self._jira_create_op(project_key, summary, issue_type, description, fields),
+                ),
+                "update": (
+                    ("issue_key", "summary", "description", "fields"),
+                    lambda: self._jira_update_op(issue_key, summary, description, fields),
+                ),
+                "comment": (("issue_key", "comment"), lambda: self._jira_comment_op(issue_key, comment)),
+                "transition": (("issue_key", "transition"), lambda: self._jira_transition_op(issue_key, transition)),
+            },
+            {
+                "project_key": project_key,
+                "issue_key": issue_key,
+                "summary": summary,
+                "issue_type": issue_type,
+                "description": description,
+                "fields": fields,
+                "comment": comment,
+                "transition": transition,
             },
         )
 
@@ -1029,7 +1077,7 @@ class AtlassianToolkit(Toolkit):
         - `list_attachments`: `page_id` (optional: `limit` default 25, `cursor`).
         - `download_attachment`: `page_id`, `attachment_id` (optional: `filename`). Returns a turn-scoped context
           attachment ID (`att_...`); open it with `attachment(action="get", attachment_id=...)` or save with
-          `mindroom_output_path`.
+          `attachment(action="get", attachment_id=..., mindroom_output_path=...)`.
 
         Args:
             action: Read operation (`search`, `get`, `list_attachments`, or `download_attachment`).
@@ -1045,10 +1093,24 @@ class AtlassianToolkit(Toolkit):
             "confluence",
             action,
             {
-                "search": lambda: self._confluence_search_op(cql, limit, cursor),
-                "get": lambda: self._confluence_get_op(page_id),
-                "list_attachments": lambda: self._confluence_list_attachments_op(page_id, limit, cursor),
-                "download_attachment": lambda: self._confluence_download_op(page_id, attachment_id, filename),
+                "search": (("cql", "limit", "cursor"), lambda: self._confluence_search_op(cql, limit, cursor)),
+                "get": (("page_id",), lambda: self._confluence_get_op(page_id)),
+                "list_attachments": (
+                    ("page_id", "limit", "cursor"),
+                    lambda: self._confluence_list_attachments_op(page_id, limit, cursor),
+                ),
+                "download_attachment": (
+                    ("page_id", "attachment_id", "filename"),
+                    lambda: self._confluence_download_op(page_id, attachment_id, filename),
+                ),
+            },
+            {
+                "cql": cql,
+                "page_id": page_id,
+                "attachment_id": attachment_id,
+                "filename": filename,
+                "limit": limit,
+                "cursor": cursor,
             },
         )
 
@@ -1204,16 +1266,31 @@ class AtlassianToolkit(Toolkit):
             "confluence",
             action,
             {
-                "create": lambda: self._confluence_create_op(space_key, title, body_storage, parent_page_id),
-                "update": lambda: self._confluence_update_op(
-                    page_id,
-                    title,
-                    body_storage,
-                    version_number,
-                    version_message,
+                "create": (
+                    ("space_key", "title", "parent_page_id"),
+                    lambda: self._confluence_create_op(space_key, title, body_storage, parent_page_id),
                 ),
-                "comment": lambda: self._confluence_comment_op(page_id, body_storage),
+                "update": (
+                    ("page_id", "title", "version_number", "version_message"),
+                    lambda: self._confluence_update_op(
+                        page_id,
+                        title,
+                        body_storage,
+                        version_number,
+                        version_message,
+                    ),
+                ),
+                "comment": (("page_id",), lambda: self._confluence_comment_op(page_id, body_storage)),
             },
+            {
+                "space_key": space_key,
+                "page_id": page_id,
+                "title": title,
+                "parent_page_id": parent_page_id,
+                "version_number": version_number,
+                "version_message": version_message,
+            },
+            hints={"create": {"page_id": "Use parent_page_id to create a child page."}},
         )
 
     @staticmethod

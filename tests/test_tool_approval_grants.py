@@ -3355,7 +3355,7 @@ def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) ->
         ("atlassian", "jira_write", ("create", "update", "comment", "transition")),
         ("atlassian", "confluence_read", ("search", "get", "list_attachments", "download_attachment")),
         ("atlassian", "confluence_write", ("create", "update", "comment")),
-        ("slack", "slack_read", ("search", "recent", "read", "download")),
+        ("slack", "slack_inspect", ("search", "recent", "read", "download")),
         ("slack", "slack_send", ("post", "upload")),
         ("slack", "slack_manage", ("edit", "delete", "react")),
     ],
@@ -3379,16 +3379,18 @@ def test_atlassian_and_slack_action_scoped_grants_bind_per_action(
 
 
 @pytest.mark.parametrize(
-    ("tools", "rules", "error_pattern"),
+    ("tools", "default", "rules", "error_pattern"),
     [
         (
             ["atlassian"],
+            "auto_approve",
             [{"match": "jira_create_issue", "action": "require_approval"}],
             r"jira_create_issue.*jira_write",
         ),
-        (["atlassian"], [{"match": "jira_*", "script": "check.py"}], r"check\.py.*jira_"),
+        (["atlassian"], "auto_approve", [{"match": "jira_*", "script": "check.py"}], r"check\.py.*jira_"),
         (
             ["atlassian"],
+            "auto_approve",
             [
                 {"match": "jira_read", "script": "check.py"},
                 {"match": "jira_write", "script": "check.py"},
@@ -3396,35 +3398,56 @@ def test_atlassian_and_slack_action_scoped_grants_bind_per_action(
             ],
             None,
         ),
+        # Documented Atlassian approval examples (exact function names) load cleanly under both defaults.
+        (
+            ["atlassian"],
+            "auto_approve",
+            [
+                {"match": "jira_write", "action": "require_approval"},
+                {"match": "confluence_write", "action": "require_approval"},
+            ],
+            None,
+        ),
+        (
+            ["atlassian"],
+            "require_approval",
+            [
+                {"match": "jira_read", "action": "auto_approve"},
+                {"match": "confluence_read", "action": "auto_approve"},
+            ],
+            None,
+        ),
+        # Retired slack_read fails closed under require_approval default and with slack_* catch-all.
         (
             ["slack"],
-            [
-                {"match": "slack_read", "action": "auto_approve"},
-                {"match": "slack_download", "action": "require_approval"},
-            ],
-            r"slack_download.*slack_read",
+            "require_approval",
+            [{"match": "slack_read", "action": "auto_approve"}],
+            r"slack_read.*slack_inspect",
         ),
         (
             ["slack"],
-            [
-                {"match": "slack_send", "action": "auto_approve"},
-                {"match": "slack_post", "action": "require_approval"},
-            ],
-            r"slack_post.*slack_send",
-        ),
-        (
-            ["slack"],
+            "auto_approve",
             [
                 {"match": "slack_read", "action": "auto_approve"},
                 {"match": "slack_*", "action": "require_approval"},
             ],
-            None,
+            r"slack_read.*slack_inspect",
         ),
-        (["slack"], [{"match": "slack_*", "script": "check.py"}], r"check\.py.*slack_"),
         (
             ["slack"],
+            "auto_approve",
             [
-                {"match": "slack_read", "script": "check.py"},
+                {"match": "slack_inspect", "action": "auto_approve"},
+                {"match": "slack_*", "action": "require_approval"},
+            ],
+            None,
+        ),
+        (["slack"], "auto_approve", [{"match": "slack_*", "script": "check.py"}], r"check\.py.*slack_"),
+        (
+            ["slack"],
+            "auto_approve",
+            [
+                {"match": "slack_inspect", "script": "check.py"},
                 {"match": "slack_send", "script": "check.py"},
                 {"match": "slack_manage", "script": "check.py"},
                 {"match": "slack_*", "script": "check.py"},
@@ -3436,10 +3459,11 @@ def test_atlassian_and_slack_action_scoped_grants_bind_per_action(
 def test_atlassian_and_slack_retired_approval_rules_fail_closed(
     tmp_path: Path,
     tools: list[str],
+    default: str,
     rules: list[dict[str, str]],
     error_pattern: str | None,
 ) -> None:
-    """Retired Atlassian/Slack approval rules, Slack name-reuse conflicts, and wildcard scripts fail closed."""
+    """Retired Atlassian/Slack approval rules (including slack_read) and wildcard scripts fail closed."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
@@ -3448,7 +3472,7 @@ def test_atlassian_and_slack_retired_approval_rules_fail_closed(
         "models": {"default": {"provider": "openai", "id": "x"}},
         "defaults": {"tools": []},
         "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
-        "tool_approval": {"default": "auto_approve", "rules": rules},
+        "tool_approval": {"default": default, "rules": rules},
     }
     if error_pattern is not None:
         with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
@@ -3509,7 +3533,12 @@ def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_pat
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     runtime_paths = test_runtime_paths(tmp_path)
 
-    def _cfg(tools: list[object], rules: list[dict[str, str]] | None = None) -> dict[str, object]:
+    def _cfg(
+        tools: list[object],
+        rules: list[dict[str, str]] | None = None,
+        *,
+        default: str = "auto_approve",
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "models": {"default": {"provider": "openai", "id": "x"}},
             "defaults": {"tools": []},
@@ -3517,7 +3546,7 @@ def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_pat
             "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         }
         if rules is not None:
-            payload["tool_approval"] = {"default": "auto_approve", "rules": rules}
+            payload["tool_approval"] = {"default": default, "rules": rules}
         return payload
 
     # Single-product partner_atlassian fails closed on retired Confluence names and wildcard scripts,
@@ -3534,6 +3563,19 @@ def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_pat
         )
     Config.validate_with_runtime(
         _cfg(["partner_atlassian"], [{"match": "partner_jira_search_issues", "action": "require_approval"}]),
+        runtime_paths,
+    )
+    # Exact documented rules for prefixed connections load cleanly under both defaults.
+    Config.validate_with_runtime(
+        _cfg(["partner_atlassian"], [{"match": "partner_confluence_write", "action": "require_approval"}]),
+        runtime_paths,
+    )
+    Config.validate_with_runtime(
+        _cfg(
+            ["partner_atlassian"],
+            [{"match": "partner_confluence_read", "action": "auto_approve"}],
+            default="require_approval",
+        ),
         runtime_paths,
     )
 
@@ -3599,16 +3641,50 @@ def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_pat
     assert get_op.key != dl_op.key
 
 
+def test_plugin_declared_retired_functions_fail_closed_on_wildcard_scripts(tmp_path: Path) -> None:
+    """Any plugin toolkit declaring retired_functions rejects wildcard script rules until exact rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    plugin_root = _write_consolidated_plugin(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    base_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "plugins": [{"path": str(plugin_root)}],
+        "agents": {"a": {"display_name": "A", "tools": ["demo_consolidated"], "include_default_tools": False}},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*demo_action_tool"):
+        Config.validate_with_runtime(
+            {**base_data, "tool_approval": {"rules": [{"match": "*demo*", "script": "check.py"}]}},
+            runtime_paths,
+        )
+    Config.validate_with_runtime(
+        {
+            **base_data,
+            "tool_approval": {
+                "rules": [
+                    {"match": "demo_action_tool", "script": "check.py"},
+                    {"match": "*demo*", "script": "check.py"},
+                ],
+            },
+        },
+        runtime_paths,
+    )
+
+
 @pytest.mark.parametrize(
     ("tool_entry", "error_pattern"),
     [
         ({"atlassian": {"include_tools": ["jira_search_issues"]}}, r"atlassian\.include_tools.*jira_read"),
         ({"atlassian": {"exclude_tools": ["confluence_update_page"]}}, r"atlassian\.exclude_tools.*confluence_write"),
+        ({"slack": {"include_tools": ["slack_read"]}}, r"slack\.include_tools.*slack_inspect"),
+        ({"slack": {"exclude_tools": ["slack_read"]}}, r"slack\.exclude_tools.*slack_inspect"),
         ({"slack": {"include_tools": ["slack_post"]}}, r"slack\.include_tools.*slack_send"),
-        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_read"),
+        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_inspect"),
         ({"slack": {"exclude_tools": ["slack_watch"]}}, r"subscribe_event"),
         ({"atlassian": {"exclude_tools": ["jira_write"]}}, None),
-        ({"slack": {"include_tools": ["slack_read"]}}, None),
+        ({"slack": {"include_tools": ["slack_inspect"]}}, None),
     ],
 )
 def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(

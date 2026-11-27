@@ -1221,3 +1221,40 @@ def test_atlassian_meta_schema_opt_outs_and_product_filtering(tmp_path: Path) ->
         ).functions
     }
     assert no_confluence == {"jira_read", "jira_write"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("function_name", "kwargs", "expected_substring"),
+    [
+        ("jira_read", {"action": "get", "issue_key": "PROJ-1", "max_results": 5}, "max_results"),
+        ("jira_read", {"action": "search", "jql": "project = PROJ", "issue_key": "PROJ-1"}, "issue_key"),
+        ("jira_write", {"action": "create", "project_key": "PROJ", "summary": "x", "comment": "y"}, "comment"),
+        ("confluence_read", {"action": "get", "page_id": "123", "cql": "type = page"}, "cql"),
+        (
+            "confluence_write",
+            {"action": "create", "space_key": "DOCS", "page_id": "123", "title": "T", "body_storage": "<p>x</p>"},
+            "parent_page_id",
+        ),
+        (
+            "confluence_write",
+            {"action": "comment", "page_id": "123", "body_storage": "<p>x</p>", "title": "T"},
+            "title",
+        ),
+    ],
+)
+async def test_unexpected_cross_action_arguments_are_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+    kwargs: dict[str, object],
+    expected_substring: str,
+) -> None:
+    """Non-None arguments belonging to another action fail with invalid_argument before any network call."""
+    tool, gateway = _connected(tmp_path, monkeypatch)
+
+    result = json.loads(await getattr(tool, function_name)(**kwargs))
+
+    assert result["code"] == "invalid_argument"
+    assert expected_substring in result["message"]
+    assert gateway.requests == []

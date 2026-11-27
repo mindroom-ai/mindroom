@@ -909,9 +909,10 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "confluence_add_comment": "confluence_write",
     },
     "slack": {
-        "slack_search": "slack_read",
-        "slack_recent": "slack_read",
-        "slack_download": "slack_read",
+        "slack_search": "slack_inspect",
+        "slack_recent": "slack_inspect",
+        "slack_read": "slack_inspect",
+        "slack_download": "slack_inspect",
         "slack_post": "slack_send",
         "slack_upload": "slack_send",
         "slack_react": "slack_manage",
@@ -920,9 +921,6 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
 }
 _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments", "atlassian", "slack"})
-# Synthetic probe matching broad globs like `slack_*` without matching any retired Slack function name,
-# so explicit retired rules (e.g. `slack_download` or `slack_post`) still conflict with reused `slack_read`/`slack_send`.
-_BROAD_PROBE_BY_TOOLKIT: dict[str, str] = {"slack": "slack__probe"}
 
 
 def _effective_approval_decision(
@@ -1061,7 +1059,6 @@ def retired_consolidated_approval_error(
     renames: Mapping[str, str] | None = None,
     *,
     reject_wildcard_scripts: bool | None = None,
-    broad_probe: str | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
@@ -1077,7 +1074,6 @@ def retired_consolidated_approval_error(
             if reject_wildcard_scripts is None
             else reject_wildcard_scripts
         ),
-        broad_probe=_BROAD_PROBE_BY_TOOLKIT.get(toolkit_name) if broad_probe is None else broad_probe,
     )
 
 

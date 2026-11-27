@@ -198,15 +198,15 @@ def test_a_background_script_calls_tools_with_its_own_capability(capsys, monkeyp
     # Arguments may share a name with the SDK's own parameters.
     arguments = {"query": "launch", "function_name": "kept"}
 
-    assert main(["tools", "call", "slack.slack_read", json.dumps(arguments)]) == 0
+    assert main(["tools", "call", "slack.slack_inspect", json.dumps(arguments)]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "toolkit": "slack",
-        "function": "slack_read",
+        "function": "slack_inspect",
         "status": "completed",
         "outcome": {"messages": 3},
     }
     assert [(call["toolkit_name"], call["function_name"], call["arguments"]) for call in submitted] == [
-        ("slack", "slack_read", arguments),
+        ("slack", "slack_inspect", arguments),
     ]
 
 
@@ -226,11 +226,11 @@ def test_an_unfinished_background_script_call_prints_its_error(
     _in_background_script(monkeypatch, tmp_path)
     _script_gateway(monkeypatch, state, error={"kind": kind, "message": "boom", "retryable": False})
 
-    assert main(["tools", "call", "slack", "slack_read", "{}"]) == exit_code
+    assert main(["tools", "call", "slack", "slack_inspect", "{}"]) == exit_code
     assert json.loads(capsys.readouterr().out) == {
         "call_id": "call-1",
         "toolkit": "slack",
-        "function": "slack_read",
+        "function": "slack_inspect",
         "status": state,
         "outcome": {"error": "boom", "kind": kind},
     }
