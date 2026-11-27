@@ -3192,3 +3192,79 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     assert star_op is not None
     assert del_op is not None
     assert star_op != del_op
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "tool_name", "actions"),
+    [
+        ("outlook_mail", "outlook_mail_read", ("search", "get_message", "get_automatic_replies")),
+        ("outlook_mail", "outlook_mail_send", ("send", "reply")),
+        ("outlook_mail", "outlook_mail_manage", ("mark_read", "move", "set_automatic_replies")),
+        ("outlook_calendar", "outlook_calendar_read", ("list_calendars", "list_events", "get_free_busy")),
+        ("outlook_calendar", "outlook_calendar_write", ("create_event", "delete_event", "respond_to_event")),
+    ],
+)
+def test_microsoft_365_registry_action_scoped_grants_bind_per_action(
+    toolkit_name: str,
+    tool_name: str,
+    actions: tuple[str, ...],
+) -> None:
+    """Consolidated Microsoft 365 action-dispatched tools bind timed grants to their action via registry metadata."""
+    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    assert tool_name in registry.entries[toolkit_name].action_scoped_grants
+    config = Config()
+    ops = [
+        grant_operation(config, tool_name, {"action": action}, tools=registry, toolkit_name=toolkit_name)
+        for action in actions
+    ]
+    assert all(op is not None for op in ops)
+    assert len({op.key for op in ops if op is not None}) == len(actions)
+    assert grant_operation(config, tool_name, {}, tools=registry, toolkit_name=toolkit_name) is None
+
+
+def test_outlook_mail_create_draft_keeps_tool_wide_grants() -> None:
+    """Single-operation outlook_mail_create_draft without an action enum uses normal tool-wide grants."""
+    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    assert "outlook_mail_create_draft" not in registry.entries["outlook_mail"].action_scoped_grants
+    op = grant_operation(Config(), "outlook_mail_create_draft", {}, tools=registry, toolkit_name="outlook_mail")
+    assert op is not None
+    assert op.tool_name == "outlook_mail_create_draft"
+    assert op.mcp_server_id is None
+    assert op.mcp_tool_name is None
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "retired_fn", "replacement_fn"),
+    [
+        ("outlook_mail", "outlook_mail_reply", "outlook_mail_send"),
+        ("outlook_mail", "outlook_mail_set_automatic_replies", "outlook_mail_manage"),
+        ("outlook_calendar", "outlook_calendar_create_event", "outlook_calendar_write"),
+    ],
+)
+def test_microsoft_365_retired_approval_rules_fail_closed(
+    tmp_path: Path,
+    toolkit_name: str,
+    retired_fn: str,
+    replacement_fn: str,
+) -> None:
+    """Approval rules targeting retired Microsoft 365 function names fail closed until migrated."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    base_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=replacement_fn):
+        Config.validate_with_runtime(
+            {**base_data, "tool_approval": {"rules": [{"match": retired_fn, "action": "require_approval"}]}},
+            runtime_paths,
+        )
+    Config.validate_with_runtime(
+        {**base_data, "tool_approval": {"rules": [{"match": replacement_fn, "action": "require_approval"}]}},
+        runtime_paths,
+    )

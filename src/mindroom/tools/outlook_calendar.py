@@ -49,14 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "outlook_calendar_list_calendars",
-        "outlook_calendar_list_events",
-        "outlook_calendar_get_event",
-        "outlook_calendar_get_free_busy",
-        "outlook_calendar_create_event",
-        "outlook_calendar_update_event",
-        "outlook_calendar_delete_event",
-        "outlook_calendar_respond_to_event",
+        "outlook_calendar_read",
+        "outlook_calendar_write",
+    ),
+    action_scoped_grants=(
+        "outlook_calendar_read",
+        "outlook_calendar_write",
     ),
 )
 def outlook_calendar_tools() -> type[OutlookCalendarTools]:

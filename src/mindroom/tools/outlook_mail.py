@@ -53,16 +53,15 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "outlook_mail_search",
-        "outlook_mail_get_message",
-        "outlook_mail_download_attachment",
-        "outlook_mail_get_automatic_replies",
+        "outlook_mail_read",
         "outlook_mail_create_draft",
         "outlook_mail_send",
-        "outlook_mail_reply",
-        "outlook_mail_mark_read",
-        "outlook_mail_move",
-        "outlook_mail_set_automatic_replies",
+        "outlook_mail_manage",
+    ),
+    action_scoped_grants=(
+        "outlook_mail_read",
+        "outlook_mail_send",
+        "outlook_mail_manage",
     ),
 )
 def outlook_mail_tools() -> type[OutlookMailTools]:
