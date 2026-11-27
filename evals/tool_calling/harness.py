@@ -23,8 +23,8 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths, workspace_home_identity_env
-from mindroom.custom_tools.thread_tags import validate_thread_tags_params
-from mindroom.custom_tools.workflow import validate_workflow_params
+from mindroom.custom_tools.thread_tags import _validate_thread_tags_params
+from mindroom.custom_tools.workflow import _validate_workflow_params
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -144,9 +144,9 @@ def _check_attachment(action: str, kw: Mapping[str, Any], ws: Path) -> None:
 def _check_workflow_or_tags(name: str, action: str, kw: Mapping[str, Any]) -> None:
     args = {k: v for k, v in kw.items() if k != "action"}
     if name == "thread_tags":
-        _need(not (err := validate_thread_tags_params(action, args)), err or "")
+        _need(not (err := _validate_thread_tags_params(action, args)), err or "")
         return
-    validate_workflow_params(action, args)
+    _validate_workflow_params(action, args)
     if action == "start":
         sources = sum(_str(args.get(k)) for k in ("source", "path", "name"))
         _need(sources >= 1, "Missing required parameter: give one of source, path, or name.")
