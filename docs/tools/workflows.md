@@ -76,7 +76,7 @@ workflow(action="save", run_id=..., name=..., description=None)
 - `action="cancel"` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
   Cancelling the run's job, for example with `!cancel_job`, does the same.
   A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
-  The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
+  The plain `script` tool's `script_read` and `script_write(action="cancel")` neither list nor stop a run's script.
 - `action="resume"` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
 - `action="list"` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
 - `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).

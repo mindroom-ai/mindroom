@@ -344,7 +344,7 @@ async def test_a_subagent_that_waited_for_an_approval_counts_the_subagents_it_ra
     """
     report = calls(tool_call("write_report", "report"), metrics=_CHILD_REQUEST)
     delegate = calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST)
-    switch = tool_call("switch_thread_model", "switch", model_name="cheap", when="after-toolcall")
+    switch = tool_call("thread_model_write", "switch", action="switch", model_name="cheap", when="after-toolcall")
     steps = {
         "before": (delegate, report),
         "after": (report, delegate),

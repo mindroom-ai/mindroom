@@ -297,14 +297,17 @@ async def test_run_shell_command_accepts_single_item_shell_command_line(tmp_path
 
 
 def test_run_shell_command_schema_accepts_string_or_string_array(tmp_path: Path) -> None:
-    """The tool schema should expose both natural command strings and argv lists."""
+    """The tool schema should prefer command strings before argv lists and explain shell syntax."""
     tool = _get_toolkit(tmp_path)
     args_schema = _get_run_shell_command_function(tool).parameters["properties"]["args"]
 
     assert args_schema["anyOf"] == [
-        {"type": "array", "items": {"type": "string"}},
         {"type": "string"},
+        {"type": "array", "items": {"type": "string"}},
     ]
+    assert args_schema["description"] == (
+        "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
+    )
 
 
 @pytest.mark.asyncio

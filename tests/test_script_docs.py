@@ -8,10 +8,12 @@ def test_background_script_docs_cover_security_and_lifecycle() -> None:
     text = Path("docs/tools/background-scripts.md").read_text(encoding="utf-8")
 
     for required in (
-        "start_script",
-        "get_script",
-        "cancel_script",
-        "list_scripts",
+        "script_read",
+        "script_write",
+        'action="start"',
+        'action="get"',
+        'action="cancel"',
+        'action="list"',
         "allowed_tools",
         "MindRoomTools.call",
         "recipient=AGENT_NAME",

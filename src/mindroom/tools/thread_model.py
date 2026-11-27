@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     icon="Cpu",
     icon_color="text-purple-500",
     docs_url="https://docs.mindroom.chat/configuration/models/#thread_model",
-    function_names=("list_models", "get_thread_model", "switch_thread_model", "reset_thread_model"),
+    function_names=("thread_model_read", "thread_model_write"),
+    action_scoped_grants=("thread_model_read", "thread_model_write"),
 )
 def thread_model_tools() -> type[ThreadModelTools]:
     """Return per-thread model switching tools."""

@@ -1000,16 +1000,6 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         ("x", "x_read", ("search_posts", "get_home_timeline")),
         ("x", "x_write", ("create_post", "reply_to_post", "send_dm")),
         (None, "attachment", ("list", "get", "register", "inline_image")),
-        (
-            "shared_directories",
-            "shared_directories_write",
-            ("create", "invite", "accept", "decline", "remove", "delete"),
-        ),
-        ("contacts", "contacts_write", ("request", "accept", "decline", "update", "remove")),
-        ("knowledge_graph", "knowledge_graph_read", ("search", "entity")),
-        ("knowledge_graph", "knowledge_graph_write", ("update_summary", "merge", "delete_fact", "delete_entity")),
-        ("agent_manager", "agent_manager_write", ("create", "update", "set_avatar", "delete")),
-        ("email_invite", "email_invite_write", ("invite", "revoke")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
@@ -1234,6 +1224,27 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         (None, "get_skill_instructions", "skill"),
         (None, "get_skill_reference", "skill"),
         (None, "get_skill_script", "skill"),
+        ("script", "start_script", "script_write"),
+        ("script", "cancel_script", "script_write"),
+        ("script", "get_script", "script_read"),
+        ("script", "list_scripts", "script_read"),
+        ("script", "get_script_resource_profiles", "script_read"),
+        ("terminal", "terminal_open", "terminal_write"),
+        ("terminal", "terminal_run", "terminal_write"),
+        ("terminal", "terminal_send", "terminal_write"),
+        ("terminal", "terminal_list", "terminal_read"),
+        ("claude_agent", "claude_session_status", "claude_agent_status"),
+        ("claude_agent", "claude_start_session", "claude_agent_write"),
+        ("claude_agent", "claude_send", "claude_agent_write"),
+        ("claude_agent", "claude_interrupt", "claude_agent_write"),
+        ("claude_agent", "claude_end_session", "claude_agent_write"),
+        ("thread_model", "list_models", "thread_model_read"),
+        ("thread_model", "get_thread_model", "thread_model_read"),
+        ("thread_model", "switch_thread_model", "thread_model_write"),
+        ("thread_model", "reset_thread_model", "thread_model_write"),
+        ("usage_stats", "get_my_usage", "usage_stats"),
+        ("usage_stats", "get_my_private_usage", "usage_stats"),
+        ("usage_stats", "get_all_usage", "usage_stats"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
@@ -3488,6 +3499,142 @@ def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) ->
         runtime_paths,
     )
     assert valid.agents["a"].tools[0].overrides == {"exclude_tools": ["view_file"]}
+
+
+def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:
+    """Consolidated runtime/session/thread CRUD tools enforce action-scoped grants, wildcard scripts, and filter migration."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    config = Config()
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    action_cases = (
+        ("script", "script_read", "list", "get"),
+        ("script", "script_write", "start", "cancel"),
+        ("terminal", "terminal_read", "list", "read"),
+        ("terminal", "terminal_write", "open", "run"),
+        ("claude_agent", "claude_agent_write", "start", "send"),
+        ("thread_model", "thread_model_read", "list", "get"),
+        ("thread_model", "thread_model_write", "switch", "reset"),
+        ("usage_stats", "usage_stats", "self", "all"),
+    )
+    for toolkit_name, tool_name, first_action, second_action in action_cases:
+        assert tool_name in registry.entries[toolkit_name].action_scoped_grants
+        op_a = grant_operation(config, tool_name, {"action": first_action}, tools=registry, toolkit_name=toolkit_name)
+        op_b = grant_operation(config, tool_name, {"action": second_action}, tools=registry, toolkit_name=toolkit_name)
+        assert op_a is not None
+        assert op_b is not None
+        assert op_a != op_b
+        assert (op_a.mcp_server_id, op_a.mcp_tool_name) == (toolkit_name, first_action)
+        assert grant_operation(config, tool_name, {}, tools=registry, toolkit_name=toolkit_name) is None
+        assert grant_operation(config, tool_name, {"action": "  "}, tools=registry, toolkit_name=toolkit_name) is None
+        assert not scheduled_call_offers_any_arguments(
+            config,
+            tool_name,
+            {"action": first_action},
+            requester_id="@alice:example.org",
+            approver_id="@alice:example.org",
+            authored_confirmation=False,
+            tools=registry,
+            toolkit_name=toolkit_name,
+        )
+
+    # Single-verb claude_agent_status has no action= param and is NOT action-scoped.
+    assert "claude_agent_status" not in registry.entries["claude_agent"].action_scoped_grants
+    status_op = grant_operation(config, "claude_agent_status", {}, tools=registry, toolkit_name="claude_agent")
+    assert status_op is not None
+    assert (status_op.tool_name, status_op.mcp_server_id, status_op.mcp_tool_name) == (
+        "claude_agent_status",
+        None,
+        None,
+    )
+    assert scheduled_call_offers_any_arguments(
+        config,
+        "claude_agent_status",
+        {},
+        requester_id="@alice:example.org",
+        approver_id="@alice:example.org",
+        authored_confirmation=False,
+        tools=registry,
+        toolkit_name="claude_agent",
+    )
+
+    # Wildcard approval scripts fail closed for all 5 toolkits until explicit rules precede `*`.
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    wildcard_cases = (
+        ("script", ["script_read", "script_write"]),
+        ("terminal", ["terminal_read", "terminal_write"]),
+        ("claude_agent", ["claude_agent_status", "claude_agent_write"]),
+        ("thread_model", ["thread_model_read", "thread_model_write"]),
+        ("usage_stats", ["usage_stats"]),
+    )
+    for toolkit_name, explicit_matches in wildcard_cases:
+        stale = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
+            "tool_approval": {
+                "rules": [
+                    {"match": "skill", "script": "check.py"},
+                    {"match": "*", "script": "check.py"},
+                ],
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py"):
+            Config.validate_with_runtime(stale, runtime_paths)
+        explicit = {
+            **stale,
+            "tool_approval": {
+                "rules": [
+                    {"match": "skill", "script": "check.py"},
+                    *[{"match": match, "script": "check.py"} for match in explicit_matches],
+                    {"match": "*", "script": "check.py"},
+                ],
+            },
+        }
+        loaded = Config.validate_with_runtime(explicit, runtime_paths)
+        assert [rule.match for rule in loaded.tool_approval.rules] == ["skill", *explicit_matches, "*"]
+
+    # Retired include_tools/exclude_tools filters fail closed on the 4 filterable toolkits.
+    retired_filter_cases = (
+        ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
+        ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
+        ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
+        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_status"),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
+        ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
+    )
+    for toolkit_name, overrides, replacement in retired_filter_cases:
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        expected_verb = "enables" if "include_tools" in overrides else "disables"
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}.*{expected_verb} all of `{replacement}`'s actions",
+        ):
+            Config.validate_with_runtime(bad, runtime_paths)
+
+    # Kept name `terminal_read` in terminal include_tools still loads cleanly.
+    valid_terminal = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {
+                    "display_name": "A",
+                    "tools": [{"terminal": {"include_tools": ["terminal_read"]}}],
+                    "include_default_tools": False,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    assert valid_terminal.agents["a"].tools[0].overrides == {"include_tools": ["terminal_read"]}
 
 
 def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:

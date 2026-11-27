@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.llm.tool_search import arguments_object
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition
 
@@ -23,7 +25,7 @@ _LISTING_BYTE_LIMIT = 16 * 1024
 _LISTED_DESCRIPTION_LENGTH = 256
 # Room for the status, usage, and truncation message around the listed functions.
 _LISTING_ENVELOPE_BYTES = 512
-_CALL_TOOL_DESCRIPTION = "Call a deferred function found with tool_search, passing its arguments as a JSON object."
+_CALL_TOOL_DESCRIPTION = "Call a deferred function from tool_search with top-level name and arguments object."
 _CALL_TOOL_PARAMETERS = {
     "type": "object",
     "properties": {
@@ -134,17 +136,59 @@ class DynamicToolsToolkit(Toolkit):
     # A typed dict would render its argument values as empty objects, and Gemini conversion drops the description of
     # an optional object, so the wrapper declares the same shape as the MCP call_tool bridge.
     @passthrough_tool(description=_CALL_TOOL_DESCRIPTION, parameters=_CALL_TOOL_PARAMETERS)
-    def call_tool(self, name: str = "", arguments: object = None, **_extra: object) -> str:
+    def call_tool(self, name: object = "", arguments: object = None, **_extra: object) -> str:
         """Report a wrapper call that could not be routed to a deferred function.
 
         Resolvable calls never reach this method: they run the named function directly.
         """
-        del arguments
-        subject = f"'{name}' was not called" if name else "Nothing was called"
-        return self._payload(
-            "error",
-            message=f"{subject}. Use an exact function name from tool_search and pass arguments as a JSON object.",
+        return self._payload("error", message=_call_tool_error(name, arguments))
+
+
+def _argument_keys(arguments: object) -> frozenset[str] | None:
+    if isinstance(arguments, Mapping):
+        return frozenset(key for key in arguments if isinstance(key, str))
+    if isinstance(arguments, str) and (parsed := arguments_object(arguments)) is not None:
+        return frozenset(key for key in parsed if isinstance(key, str))
+    return None
+
+
+def _call_tool_error(name: object, arguments: object) -> str:
+    if name is None or name == "" or (isinstance(name, str) and not name.strip()):
+        arg_keys = _argument_keys(arguments)
+        if arg_keys is not None and {"name", "arguments"} <= arg_keys:
+            message = (
+                "Nothing was called: missing top-level 'name' (found 'name' and 'arguments' nested inside 'arguments'). "
+                'Pass both at top level: call_tool(name="<function>", arguments={...}) using an exact name from tool_search.'
+            )
+        elif arg_keys is not None and "name" in arg_keys:
+            message = (
+                "Nothing was called: missing top-level 'name' (found 'name' inside 'arguments'). "
+                "Move 'name' to the top level and keep only the function's parameters in 'arguments': "
+                'call_tool(name="<function>", arguments={...}) using an exact name from tool_search.'
+            )
+        else:
+            message = (
+                "Nothing was called: missing top-level 'name'. "
+                'Pass call_tool(name="<function>", arguments={...}) using an exact function name from tool_search '
+                "and a JSON object for arguments."
+            )
+        return message
+    if isinstance(name, Mapping | list | tuple | set | frozenset):
+        return (
+            "Nothing was called: top-level 'name' must be a string from tool_search. "
+            'Pass call_tool(name="<function>", arguments={...}).'
         )
+    if name == "call_tool":
+        return (
+            "'call_tool' was not called: pass the deferred function's exact name from tool_search, "
+            "not 'call_tool', with arguments as a JSON object."
+        )
+    if arguments not in (None, "") and not isinstance(arguments, Mapping) and arguments_object(arguments) is None:
+        return (
+            f"'{name}' was not called: 'arguments' must be a JSON object. "
+            "Use an exact function name from tool_search and pass arguments as a JSON object."
+        )
+    return f"'{name}' was not called. Use an exact function name from tool_search and pass arguments as a JSON object."
 
 
 def _within_listing_limit(entries: list[dict[str, str]]) -> list[dict[str, str]]:

@@ -216,7 +216,15 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
     if continuation == "model_switch":
         turns.insert(
             0,
-            calls(tool_call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall")),
+            calls(
+                tool_call(
+                    "thread_model_write",
+                    "switch-model",
+                    action="switch",
+                    model_name="alternate",
+                    when="after-toolcall",
+                ),
+            ),
         )
     if continuation == "nested_deferred_tool":
         turns.insert(0, calls(tool_call("run_subagent", "nested", agent_name="child", task="Add then list files")))
@@ -225,7 +233,15 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
     if continuation == "preparation_error":
         # The continuation after this switch rebuilds the child, whose model preparation then fails.
         turns.append(
-            calls(tool_call("switch_thread_model", "switch-model", model_name="default", when="after-toolcall")),
+            calls(
+                tool_call(
+                    "thread_model_write",
+                    "switch-model",
+                    action="switch",
+                    model_name="default",
+                    when="after-toolcall",
+                ),
+            ),
         )
     if continuation == "nested_subagent":
         turns.extend(
@@ -391,7 +407,15 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
     model = ScriptedModel(
         [
             calls(tool_call("calculate", "approved-add", action="add", a=1, b=2)),
-            calls(tool_call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall")),
+            calls(
+                tool_call(
+                    "thread_model_write",
+                    "switch-model",
+                    action="switch",
+                    model_name="alternate",
+                    when="after-toolcall",
+                ),
+            ),
             answer("Child finished the requested work."),
             answer("Child started over."),
         ],

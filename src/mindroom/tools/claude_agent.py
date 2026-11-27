@@ -107,14 +107,9 @@ if TYPE_CHECKING:
     ],
     dependencies=["claude-agent-sdk"],
     docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#claude_agent",
-    function_names=(
-        "claude_end_session",
-        "claude_interrupt",
-        "claude_send",
-        "claude_session_status",
-        "claude_start_session",
-    ),
-    workspace_writers=("claude_send", "claude_start_session"),
+    function_names=("claude_agent_status", "claude_agent_write"),
+    workspace_writers=("claude_agent_write",),
+    action_scoped_grants=("claude_agent_write",),
 )
 def claude_agent_tools() -> type[ClaudeAgentTools]:
     """Return tools for managing persistent Claude Agent SDK sessions."""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
@@ -12,12 +12,15 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
 )
+from mindroom.tools.native_helpers import restrict_actions
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.config.main import Config
+    from mindroom.tool_system.tool_function import ToolFunction
+
+_UsageAction = Literal["self", "private", "all"]
+_STANDARD_ACTIONS: tuple[_UsageAction, ...] = ("self", "private")
 
 
 class UsageStatsTools(Toolkit):
@@ -26,10 +29,13 @@ class UsageStatsTools(Toolkit):
     def __init__(self, *, agent_name: str | None = None, admin_scope: bool = False) -> None:
         self._agent_name = agent_name
         self._admin_scope = admin_scope
-        functions: list[Callable[..., Awaitable[str]]] = [self.get_my_usage, self.get_my_private_usage]
-        if admin_scope:
-            functions.append(self.get_all_usage)
-        super().__init__(name="usage_stats", tools=functions)
+        super().__init__(name="usage_stats", tools=[self.usage_stats])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Hide the admin-only `all` action from model schemas when `admin_scope` is disabled."""
+        if function.name == "usage_stats" and not self._admin_scope:
+            return restrict_actions(function, _STANDARD_ACTIONS)
+        return function
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -71,13 +77,27 @@ class UsageStatsTools(Toolkit):
             )
         return resolved, config
 
-    async def get_my_usage(self, include_daily: bool = False) -> str:
-        """Return retained usage for the current agent and canonical requester.
+    async def usage_stats(self, action: _UsageAction, include_daily: bool = False) -> str:
+        """Return retained token usage summaries.
+
+        - `self`: current agent and canonical requester usage.
+        - `private`: requester's private agents usage.
+        - `all`: all sources (requires admin scope and platform administrator).
 
         Args:
-            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
+            action: Scope.
+            include_daily: Include daily UTC totals and breakdowns.
 
         """
+        if action == "self":
+            return await self._self_usage(include_daily=include_daily)
+        if action == "private":
+            return await self._private_usage(include_daily=include_daily)
+        if action == "all":
+            return await self._all_usage(include_daily=include_daily)
+        return self._error("invalid_action", f"Unsupported usage_stats action {action!r}.")
+
+    async def _self_usage(self, *, include_daily: bool = False) -> str:
         resolved = self._context_or_error()
         if isinstance(resolved, str):
             return resolved
@@ -104,13 +124,7 @@ class UsageStatsTools(Toolkit):
         )
         return self._payload("ok", **report.to_dict())
 
-    async def get_my_private_usage(self, include_daily: bool = False) -> str:
-        """Return usage for all of the current requester's private agents.
-
-        Args:
-            include_daily: Include retained token totals and per-model breakdowns by UTC date.
-
-        """
+    async def _private_usage(self, *, include_daily: bool = False) -> str:
         context = self._context_or_error()
         if isinstance(context, str):
             return context
@@ -123,13 +137,7 @@ class UsageStatsTools(Toolkit):
         )
         return self._payload("ok", **report.to_dict())
 
-    async def get_all_usage(self, include_daily: bool = False) -> str:
-        """Return retained usage for all sources when both admin gates grant access.
-
-        Args:
-            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
-
-        """
+    async def _all_usage(self, *, include_daily: bool = False) -> str:
         resolved = self._admin_context_or_error()
         if isinstance(resolved, str):
             return resolved

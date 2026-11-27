@@ -61,9 +61,9 @@ READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 # The functions of each built-in toolkit that change the workspace's files, by writing them or by running code there.
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file"),
-    "script": ("start_script",),
+    "script": ("script_write",),
     "workflow": ("workflow",),
-    "claude_agent": ("claude_start_session", "claude_send"),
+    "claude_agent": ("claude_agent_write",),
     "docker": ("docker_container", "docker_resource"),
 }
 
@@ -590,6 +590,68 @@ async def test_old_settings_copied_under_filesystem_stop_the_toolkit_and_its_wor
     assert _access(await room.agents(ALICE)) == []
     with pytest.raises(ToolConfigOverrideError, match=re.escape(replacement)):
         get_tool_by_name("filesystem", room.paths, tools=builtin_tool_registry(), worker_target=None)
+
+
+@pytest.mark.asyncio
+async def test_retired_stored_claude_agent_filters_fail_closed_and_block_workspace_write_grant(
+    tmp_path: Path,
+) -> None:
+    """Stored dashboard filters naming retired claude_agent writers fail closed instead of granting write access."""
+    room = _room(
+        tmp_path,
+        {"helper": AgentConfig(display_name="Helper", tools=["claude_agent"], access={"users": [ALICE]})},
+    )
+    manager = get_runtime_credentials_manager(room.paths)
+    assert _access(await room.agents(ALICE)) == [("helper", "write", "none")]
+
+    manager.save_credentials(
+        "claude_agent",
+        {"_source": "ui", "exclude_tools": ["claude_start_session", "claude_send"]},
+    )
+
+    assert _access(await room.agents(ALICE)) == []
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"claude_agent: stored setting exclude_tools:.*claude_agent_write",
+    ):
+        await room.agent(ALICE, room.ids["helper"])
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"claude_agent: stored setting exclude_tools:.*claude_agent_write",
+    ):
+        get_tool_by_name("claude_agent", room.paths, tools=builtin_tool_registry(), worker_target=None)
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "stored", "replacement"),
+    [
+        ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
+        ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
+        ("attachments", {"exclude_tools": ["register_attachment"]}, "attachment"),
+        ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers"),
+        ("slack", {"exclude_tools": ["slack_watch"]}, "triggers"),
+    ],
+)
+def test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits(
+    tmp_path: Path,
+    toolkit_name: str,
+    stored: dict[str, object],
+    replacement: str,
+) -> None:
+    """Stored dashboard settings naming retired consolidated functions fail closed in resolve_tool_settings."""
+    paths = test_runtime_paths(tmp_path)
+    manager = get_runtime_credentials_manager(paths)
+    manager.save_credentials(toolkit_name, {"_source": "ui", **stored})
+
+    with pytest.raises(ToolConfigOverrideError, match=rf"{toolkit_name}: stored setting exclude_tools:.*{replacement}"):
+        get_tool_by_name(
+            toolkit_name,
+            paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=None,
+        )
 
 
 @pytest.mark.asyncio

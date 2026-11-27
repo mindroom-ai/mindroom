@@ -80,6 +80,8 @@ def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
         return False
+    if execution.tool_name == "claude_agent_write" and (execution.tool_args or {}).get("action") == "send":
+        return False
     if execution.tool_name == KNOWLEDGE_SEARCH_TOOL_NAME:
         return bool(_observed(execution))
     # A shell or `mindroom-agent` call can look the graph up too, directly or through the knowledge search, and returns

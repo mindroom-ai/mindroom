@@ -3512,35 +3512,12 @@
     "guidance": null,
     "functions": [
       {
-        "name": "claude_start_session",
-        "description": "Start or reuse a persistent Claude coding session for this conversation.",
+        "name": "claude_agent_status",
+        "description": "Show age, idle time, and Claude session ID for the current persistent Claude session.",
         "parameters": {
           "type": "object",
           "properties": {
             "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "resume": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "fork_session": {
-              "type": "boolean"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -3558,13 +3535,31 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "claude_send",
-        "description": "Send a prompt to a persistent Claude session and return Claude's response.",
+        "name": "claude_agent_write",
+        "description": "Start, message, interrupt, or close a persistent Claude coding session.\n- `start`: start or reuse session (`resume`/`fork_session` apply on creation only).\n- `send`: send `prompt` and return response (creates session if needed).\n- `interrupt`: interrupt active session.\n- `end`: close active session.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "send",
+                "interrupt",
+                "end"
+              ],
+              "description": "Action."
+            },
             "prompt": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt text (send)."
             },
             "session_label": {
               "anyOf": [
@@ -3574,7 +3569,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Optional label."
             },
             "resume": {
               "anyOf": [
@@ -3584,10 +3580,19 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Claude session ID to resume (start, send)."
             },
             "fork_session": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fork resumed session (start, send)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3601,107 +3606,8 @@
             }
           },
           "required": [
-            "prompt"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_session_status",
-        "description": "Show status information for the current persistent Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_interrupt",
-        "description": "Send an interrupt signal to an active Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_end_session",
-        "description": "Close and remove an active Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -5061,16 +4967,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
@@ -5878,7 +5784,7 @@
       },
       {
         "name": "call_tool",
-        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "description": "Call a deferred function from tool_search with top-level name and arguments object.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -15300,11 +15206,75 @@
     "guidance": null,
     "functions": [
       {
-        "name": "start_script",
-        "description": "Run a Python script in the background.\nProvide exactly one of `source` or `path`.\nA path is relative to this agent's workspace and is snapshotted before execution.\nThe script gets no command-line arguments.\nIt calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{\"argument\": \"value\"}'`,\nwhich waits for the result, or with `from mindroom.script_sdk import MindRoomTools`\nand `MindRoomTools().call(\"toolkit\", \"function\", argument=\"value\")`.",
+        "name": "script_read",
+        "description": "Inspect background Python scripts.\n- `list`: list owned runs.\n- `get`: state and recent output for one run.\n- `resource_profiles`: Kubernetes CPU/memory profiles.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "get",
+                "resource_profiles"
+              ],
+              "description": "Action."
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run ID (get)."
+            },
+            "include_finished": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Include finished runs (list, default true)."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "script_write",
+        "description": "Start or cancel a background Python script.\n- `start`: provide exactly one of `source` or `path` (snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call(\"toolkit\", \"function\", ...)`.\n- `cancel`: revoke tool access and stop one owned run.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "cancel"
+              ],
+              "description": "Action."
+            },
             "source": {
               "anyOf": [
                 {
@@ -15314,7 +15284,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Inline Python source code."
+              "description": "Inline Python code (start)."
             },
             "path": {
               "anyOf": [
@@ -15325,7 +15295,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Workspace-relative path to a Python source file."
+              "description": "Workspace-relative .py file (start)."
             },
             "name": {
               "anyOf": [
@@ -15336,7 +15306,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional short label shown by status and list operations."
+              "description": "Short label (start)."
             },
             "resource_profile": {
               "type": "string",
@@ -15345,59 +15315,9 @@
                 "standard",
                 "large"
               ],
-              "description": "Optional bounded Kubernetes profile. Call get_script_resource_profiles to inspect the\nexact resources, or omit it to use the configured default."
+              "description": "Profile from `script_read(action=\"resource_profiles\")`; omit `resource_profile` for default (start)."
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_script_resource_profiles",
-        "description": "Return the exact CPU and memory reservations available to background scripts.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_script",
-        "description": "Return durable state and recent process output for one owned script.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "run_id": {
-              "type": "string",
-              "description": "Identifier returned by `start_script`."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -15405,72 +15325,24 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": [
-            "run_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_script",
-        "description": "Cancel one owned background script after revoking its tool capability.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "Identifier returned by `start_script`."
+              ],
+              "description": "Run ID (cancel)."
             },
             "force": {
-              "type": "boolean",
-              "description": "Force-kill the supervised process instead of requesting graceful termination."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "boolean"
                 },
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Force-kill (cancel, default false)."
             }
           },
           "required": [
-            "run_id"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_scripts",
-        "description": "List background scripts owned by this requester and agent.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_finished": {
-              "type": "boolean",
-              "description": "Include terminal runs in addition to active runs."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -15966,16 +15838,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
@@ -17404,8 +17276,8 @@
     ]
   },
   "terminal": {
-    "instructions": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent output; terminal_list shows them all.",
-    "guidance": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent output; terminal_list shows them all.",
+    "instructions": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
+    "guidance": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
     "functions": []
   },
   "thread_model": {
@@ -17413,11 +17285,18 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_models",
-        "description": "List the configured model aliases available for selection.",
+        "name": "thread_model_read",
+        "description": "List configured models or inspect this thread's model override.\n- `list`: list configured models, providers, and reasoning levels (works outside a thread).\n- `get`: inspect this thread's current active/stale model override.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "get"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -17429,33 +17308,38 @@
               ]
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_thread_model",
-        "description": "Return the current thread's model override for each entity it applies to and the available model names.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "switch_thread_model",
-        "description": "Switch the model that the agents and teams the requester may address use in the current thread.\nThe override persists for this thread until reset. It can take effect\nafter this tool call or from the next message in the thread.",
+        "name": "thread_model_write",
+        "description": "Switch or reset this thread's model override.\n- `switch`: set thread model to `model_name` until reset.\n- `reset`: clear override, restoring room selection.",
         "parameters": {
           "type": "object",
           "properties": {
-            "model_name": {
+            "action": {
               "type": "string",
-              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\"), or `name@level`\nfor one of the reasoning levels `list_models` shows (for example \"sol@high\")."
+              "enum": [
+                "switch",
+                "reset"
+              ],
+              "description": "Action."
+            },
+            "model_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model name or `name@level` (switch)."
             },
             "when": {
               "type": "string",
@@ -17463,24 +17347,12 @@
                 "after-toolcall",
                 "next-turn"
               ],
-              "description": "Whether the current response continues with the new model or\nthe change starts on the next turn."
+              "description": "`next-turn` (default) or `after-toolcall` to continue now (switch)."
             }
           },
           "required": [
-            "model_name"
+            "action"
           ]
-        },
-        "strict": null,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reset_thread_model",
-        "description": "Remove the thread override of the requester's agents and teams, restoring room-level model selection.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -19268,14 +19140,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_my_usage",
-        "description": "Return retained usage for the current agent and canonical requester.",
+        "name": "usage_stats",
+        "description": "Return retained token usage summaries.\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "self",
+                "private"
+              ],
+              "description": "Scope."
+            },
             "include_daily": {
               "type": "boolean",
-              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
+              "description": "Include daily UTC totals and breakdowns."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19288,34 +19168,9 @@
               ]
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_my_private_usage",
-        "description": "Return usage for all of the current requester's private agents.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_daily": {
-              "type": "boolean",
-              "description": "Include retained token totals and per-model breakdowns by UTC date."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
