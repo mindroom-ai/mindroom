@@ -896,8 +896,15 @@ async def test_a_refused_stdin_chunk_is_sent_again_or_ends_the_command(
     sent = os.urandom(300_000)
     leader = tmp_path / "leader"
     async with _stack(tmp_path) as stack:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            code, stdout, stderr = await stack.run("--", f"echo $$ > {leader}; cat", stdin=sent)
+        process = await stack.spawn("--", f"echo $$ > {leader}; cat", stdin=asyncio.subprocess.PIPE)
+        try:
+            pid = await _pid(leader)
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                stdout, stderr = await process.communicate(sent)
+        finally:
+            with suppress(ProcessLookupError):
+                process.kill()
+        code = process.returncode
         if status == 429:
             assert (code, hashlib.sha256(stdout).hexdigest(), stderr) == (0, hashlib.sha256(sent).hexdigest(), b"")
         else:
@@ -905,7 +912,7 @@ async def test_a_refused_stdin_chunk_is_sent_again_or_ends_the_command(
             assert code == 255
             assert stderr.startswith(b"mindroom-agent: the command's stdin was refused")
             assert sent.startswith(stdout)
-            assert not _alive(await _pid(leader))
+            assert not _alive(pid)
 
 
 async def test_a_stdout_that_fails_its_writes_is_reported_and_stops_the_command(tmp_path: Path) -> None:
@@ -979,9 +986,10 @@ async def test_a_refused_stdin_chunk_stops_the_command_before_the_cli_writes_to_
         finally:
             os.close(writing)
         try:
+            pid = await _pid(leader)
             assert process.stdin is not None
             process.stdin.write(b"data\n")
-            pid = await _pid(leader)
+            await process.stdin.drain()
             await _until(lambda: not _alive(pid), what="the command ran on while the CLI could not write")
             assert process.returncode is None
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
