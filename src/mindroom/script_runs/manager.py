@@ -98,6 +98,7 @@ __all__ = [
     "script_execution_uses_worker",
     "script_gateway_isolated",
     "unsupported_private_script_worker_scope_message",
+    "unsupported_script_worker_backend_message",
     "workflow_placement",
 ]
 
@@ -110,6 +111,14 @@ _WORKFLOW_ATTEMPT_SECONDS = 30 * 24 * 3600
 _WORKFLOW_PLACEMENT_REFUSAL = (
     "Workflows run code. Route this agent to a worker, "
     "or set defaults.allow_shell_without_worker: true to run it on this machine."
+)
+_STATIC_RUNNER_SCRIPT_ERROR = (
+    "Background scripts cannot use the shared static sandbox runner; configure explicit "
+    "unsafe-local mode or a dedicated Docker or isolated Kubernetes worker backend."
+)
+_KUBERNETES_GATEWAY_SCRIPT_ERROR = (
+    "Kubernetes background scripts require a gateway-only listener; "
+    "use Docker or explicit unsafe-local mode until that boundary is configured."
 )
 
 
@@ -164,9 +173,13 @@ def workflow_placement(config: Config, runtime_paths: RuntimePaths) -> str:
     A configured dedicated backend or sandbox proxy always wins, so a backend that is down fails the launch
     instead of moving the script to the host.
     """
+    try:
+        dedicated_backend = worker_backend_kind(runtime_paths).dedicated
+    except WorkerBackendError as exc:
+        return str(exc)
     if script_execution_uses_worker(
         runtime_paths,
-        worker_backend_configured=worker_backend_kind(runtime_paths).dedicated,
+        worker_backend_configured=dedicated_backend,
     ):
         return "worker"
     local_allowed = (
@@ -1372,6 +1385,26 @@ def _raise_concurrent_run_limit() -> None:
     raise ScriptRunManagerError(msg)
 
 
+def _unsupported_script_worker_backend_for_kind(
+    backend_kind: WorkerBackendKind,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    if backend_kind is WorkerBackendKind.STATIC_RUNNER:
+        return _STATIC_RUNNER_SCRIPT_ERROR
+    if backend_kind is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(runtime_paths):
+        return _KUBERNETES_GATEWAY_SCRIPT_ERROR
+    return None
+
+
+def unsupported_script_worker_backend_message(runtime_paths: RuntimePaths) -> str | None:
+    """Return an error sentence if configured worker backend cannot launch background scripts."""
+    try:
+        backend_kind = worker_backend_kind(runtime_paths)
+    except WorkerBackendError as exc:
+        return str(exc)
+    return _unsupported_script_worker_backend_for_kind(backend_kind, runtime_paths)
+
+
 def _require_script_worker_backend(
     backend: WorkerBackend | None,
 ) -> RetiringWorkerBackend:
@@ -1379,11 +1412,7 @@ def _require_script_worker_backend(
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
     if isinstance(backend, StaticSandboxRunnerBackend):
-        msg = (
-            "Background scripts cannot use the shared static sandbox runner; configure explicit "
-            "unsafe-local mode or a dedicated Docker or isolated Kubernetes worker backend."
-        )
-        raise ScriptRunManagerError(msg)
+        raise ScriptRunManagerError(_STATIC_RUNNER_SCRIPT_ERROR)
     if backend.cleanup_locator is None:
         msg = "Background script worker backend has no durable cleanup locator."
         raise ScriptRunManagerError(msg)
@@ -1398,14 +1427,10 @@ def _require_script_launch_backend(
     runtime_paths: RuntimePaths,
 ) -> RetiringWorkerBackend:
     admitted_backend = _require_script_worker_backend(backend)
-    if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(
-        runtime_paths,
-    ):
-        msg = (
-            "Kubernetes background scripts require a gateway-only listener; "
-            "use Docker or explicit unsafe-local mode until that boundary is configured."
-        )
-        raise ScriptRunManagerError(msg)
+    if (backend_kind := worker_backend_kind(runtime_paths)) is WorkerBackendKind.KUBERNETES and (
+        message := _unsupported_script_worker_backend_for_kind(backend_kind, runtime_paths)
+    ) is not None:
+        raise ScriptRunManagerError(message)
     return admitted_backend
 
 

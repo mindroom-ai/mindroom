@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import socket
@@ -996,3 +997,81 @@ async def test_script_check_hook_veto_and_approval_script_failure_block_commit_w
             assert cp_appr is not None
             assert (cp_appr.state, cp_appr.last_error_code, cp_appr.consecutive_errors) == ({}, "tool_denied", 1)
             assert h_appr.trig_store.list_firings(trigger_id="sc_appr_fail") == []
+
+
+@pytest.mark.asyncio
+async def test_stop_respects_drain_deadline_with_unreleased_stalled_launch(tmp_path: Path) -> None:
+    """stop() cancels cleanup cleanly when drain deadline expires even if a stalled launch is still unreleased."""
+    ctx = _script_ctx(tmp_path, tools=["triggers", "script"], allow_local=True)
+    bot, memberships = _FakeBot(ctx, send_log=[]), AgentReplyMembershipIndex()
+    script_store, resolver = ScriptRunStore(ctx.runtime_paths), _SimpleResolver(ctx)
+    broker = ScriptToolBroker(store=script_store, runtime_resolver=resolver)
+    manager = ScriptRunManager(
+        store=script_store,
+        broker=broker,
+        worker_client=ScriptWorkerClient(),
+        worker_backend=None,
+        gateway_url="http://127.0.0.1:8765",
+    )
+    trig_store = ReactiveTriggerStore(ctx.runtime_paths)
+    runner = build_script_check_tick_runner(
+        runtime_paths=ctx.runtime_paths,
+        bots=lambda: {"coder": bot},  # type: ignore[arg-type,return-value]
+        memberships=memberships,
+        manager_provider=lambda: manager,
+        broker=broker,
+    )
+    r1 = _create_live_rule(SimpleNamespace(ctx=ctx, trig_store=trig_store), "sc_stalled_stop", _SRC)
+    release_launch, launch_finished = asyncio.Event(), asyncio.Event()
+    reconcile_called = False
+
+    async def stalled_launch(self_mgr: ScriptRunManager, *args: object, **kwargs: object) -> ScriptRunRecord:
+        del self_mgr, args, kwargs
+        try:
+            while not release_launch.is_set():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await release_launch.wait()
+        finally:
+            launch_finished.set()
+        msg = "stalled launch cancelled"
+        raise asyncio.CancelledError(msg)
+
+    async def slow_reconcile(self_mgr: ScriptRunManager, *, run_id: str) -> ScriptRunRecord:
+        del self_mgr, run_id
+        nonlocal reconcile_called
+        reconcile_called = True
+        await asyncio.sleep(30)
+        msg = "unreachable"
+        raise AssertionError(msg)
+
+    with (
+        patch("mindroom.script_runs.manager.background_script_supervision_supported", return_value=True),
+        patch.object(sc_mod, "_LAUNCH_TIMEOUT_SECONDS", 0.1),
+        patch.object(sc_mod, "_STOP_DRAIN_TIMEOUT_SECONDS", 0.15),
+        patch.object(ScriptRunManager, "run", stalled_launch),
+        patch.object(ScriptRunManager, "reconcile_durable", slow_reconcile),
+    ):
+        poller = ScriptCheckPoller(
+            store=trig_store,
+            config_provider=lambda: ctx.config,
+            runtime_paths=ctx.runtime_paths,
+            tick_runner=runner,
+            max_concurrency=1,
+        )
+        try:
+            assert await poller.poll_due_once(now=1000.0) == 0
+            cp = trig_store.get_script_check_checkpoint(r1.trigger_id)
+            assert cp is not None
+            assert cp.last_error_code == "launch_timeout"
+            assert not launch_finished.is_set()
+
+            t_stop = time.monotonic()
+            await poller.stop()
+            elapsed = time.monotonic() - t_stop
+
+            assert elapsed < 1.0
+            assert not launch_finished.is_set()
+            assert not reconcile_called
+        finally:
+            release_launch.set()
+            await asyncio.wait_for(launch_finished.wait(), timeout=2.0)

@@ -7,13 +7,16 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from fastapi.testclient import TestClient
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import apply_tool_approval_capability, create_agent
+from mindroom.api import room_triggers
+from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -63,6 +66,8 @@ from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.triggers import _NON_CODE_TRIGGER_ACTIONS
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
+from tests.access_schema_support import joined_members_response
+from tests.api.test_plugin_room_readers import _bound, _client
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -72,9 +77,12 @@ from tests.conftest import (
     parsed_route,
     runtime_paths_for,
 )
+from tests.test_plugin_routes import _api_state, _signed_in
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -101,14 +109,17 @@ def _make_ctx(
     tool_approval: ToolApprovalConfig | None = None,
     worker_placement_mode: bool = False,
     extra_agents: dict[str, dict[str, Any]] | None = None,
+    extra_env: dict[str, str] | None = None,
     **ctx_kwargs: object,
 ) -> tuple[ToolRuntimeContext, MagicMock]:
     storage = tmp_path / "data"
     env = {"MATRIX_HOMESERVER": "https://example.org", "MATRIX_SERVER_NAME": "example.org"}
-    if allow_local and not worker_placement_mode:
+    if allow_local and not worker_placement_mode and not extra_env:
         env["MINDROOM_ALLOW_UNSAFE_LOCAL_SCRIPTS"] = "1"
     if worker_placement_mode:
-        env["MINDROOM_SANDBOX_PROXY_URL"] = "http://sandbox-proxy.test"
+        env["MINDROOM_WORKER_BACKEND"] = "docker"
+    if extra_env:
+        env.update(extra_env)
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env=env)
     agents: dict[str, dict[str, Any]] = {
         "coder": {
@@ -859,3 +870,125 @@ async def test_private_per_user_worker_scope_rejected_at_create_and_reenable(tmp
     )
     ok_local = await _call(tool, ctx_local_ok, action="watch_script", prompt="Alert", source=_SRC)
     assert ok_local["status"] == "ok"
+
+
+def _patch_room_trigger(ctx: ToolRuntimeContext, trigger_id: str, *, enabled: bool) -> Response:
+    client = _client(joined_rooms=(_ROOM,))
+    client.joined_members.side_effect = lambda rid: (
+        joined_members_response(rid, client.user_id, _OWNER) if rid == _ROOM else nio.JoinedMembersError("not joined")
+    )
+    app = _bound(client)
+    app.include_router(room_triggers.router)
+    state = ensure_app_state(app)
+    state.api_state = _api_state(ctx.config, ctx.runtime_paths)
+    state.external_trigger_runtime = ExternalTriggerRuntime(
+        target_bot=lambda _name: None,
+        config_generation=1,
+        on_reactive_event=MagicMock(),
+    )
+    http = TestClient(app)
+    return http.patch(
+        f"/api/rooms/{_ROOM}/triggers/{trigger_id}",
+        headers=_signed_in(app, _OWNER),
+        json={"enabled": enabled},
+    )
+
+
+@pytest.mark.asyncio
+async def test_unsupported_worker_backend_rejected_at_create_and_reenable(tmp_path: Path) -> None:
+    """Static worker-backend launch check rejects static_runner and non-isolated Kubernetes at create and re-enable."""
+    tool = TriggersTools()
+    rejected_cases = [
+        ("static_default_selective", {"MINDROOM_SANDBOX_EXECUTION_MODE": "selective"}, "shared static sandbox runner"),
+        (
+            "static_explicit_selective",
+            {"MINDROOM_WORKER_BACKEND": "static_runner", "MINDROOM_SANDBOX_EXECUTION_MODE": "selective"},
+            "shared static sandbox runner",
+        ),
+        ("k8s_no_gateway", {"MINDROOM_WORKER_BACKEND": "kubernetes"}, "gateway-only listener"),
+        (
+            "k8s_flag_without_url",
+            {"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true"},
+            "gateway-only listener",
+        ),
+    ]
+    for label, env_overrides, expected_error in rejected_cases:
+        ctx, _ = _make_ctx(tmp_path / label, allow_local=False, extra_env=env_overrides)
+        store = ReactiveTriggerStore(ctx.runtime_paths)
+        resolve_spy = AsyncMock(side_effect=AssertionError("resolve_source must not read path when placement fails"))
+        with patch.object(ScriptRunManager, "resolve_source", resolve_spy):
+            err_create = await _call(
+                tool,
+                ctx,
+                action="watch_script",
+                prompt="Alert",
+                path="checks/secret.py",
+            )
+        assert err_create["status"] == "error", label
+        assert expected_error in err_create["message"], (label, err_create["message"])
+        assert not resolve_spy.called, label
+        assert store.list_triggers(include_disabled=True) == [], label
+        assert store.get_script_check_checkpoint("sc_never_created") is None
+
+        # Pre-seed a disabled rule and verify set_enabled, update(enabled=True), and Room Triggers PATCH all reject it.
+        tid = f"sc_disabled_{label}"
+        store.create_trigger(
+            ReactiveTriggerRecord(
+                trigger_id=tid,
+                owner_user_id=_OWNER,
+                source=ScriptCheckSourceSpec(
+                    agent="coder",
+                    room_id=_ROOM,
+                    source_digest=hashlib.sha256(_SRC.encode()).hexdigest(),
+                ),
+                target=TriggerTargetSpec(agent="coder", room_id=_ROOM, prompt="Alert"),
+                enabled=False,
+                disabled_reason="manual",
+                created_at=1000.0,
+                updated_at=1000.0,
+            ),
+            initial_script_check_checkpoint=ScriptCheckCheckpoint(
+                revision=2,
+                source_utf8=_SRC,
+                identity_json={"channel": "matrix"},
+                next_poll_at=1000.0,
+                updated_at=1000.0,
+            ),
+        )
+        err_set = await _call(tool, ctx, action="set_enabled", trigger_id=tid, enabled=True)
+        err_upd = await _call(tool, ctx, action="update", trigger_id=tid, enabled=True)
+        patch_resp = _patch_room_trigger(ctx, tid, enabled=True)
+
+        assert err_set["status"] == "error", label
+        assert expected_error in err_set["message"], (label, err_set["message"])
+        assert err_upd["status"] == "error", label
+        assert expected_error in err_upd["message"], (label, err_upd["message"])
+        assert patch_resp.status_code == 409, (label, patch_resp.text)
+        assert expected_error in patch_resp.json()["detail"], (label, patch_resp.json())
+
+        after = store.get_trigger(tid)
+        cp_after = store.get_script_check_checkpoint(tid)
+        assert after is not None, label
+        assert not after.enabled, label
+        assert cp_after is not None, label
+        assert cp_after.revision == 2, label
+
+    # Positive controls: dedicated Docker (even with worker_backend=None) and isolated Kubernetes succeed.
+    allowed_cases = [
+        ("docker_static_ok", {"MINDROOM_WORKER_BACKEND": "docker"}),
+        (
+            "k8s_isolated_ok",
+            {
+                "MINDROOM_WORKER_BACKEND": "kubernetes",
+                "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
+                "MINDROOM_SCRIPT_GATEWAY_URL": "http://script-gateway.test/api/script-gateway",
+            },
+        ),
+    ]
+    for label, env_overrides in allowed_cases:
+        ctx_ok, _ = _make_ctx(tmp_path / label, allow_local=False, extra_env=env_overrides)
+        created = await _call(tool, ctx_ok, action="watch_script", prompt="Alert", source=_SRC)
+        assert created["status"] == "ok", (label, created)
+        tid = created["trigger"]["trigger_id"]
+        assert (await _call(tool, ctx_ok, action="set_enabled", trigger_id=tid, enabled=False))["status"] == "ok"
+        assert (await _call(tool, ctx_ok, action="set_enabled", trigger_id=tid, enabled=True))["status"] == "ok"

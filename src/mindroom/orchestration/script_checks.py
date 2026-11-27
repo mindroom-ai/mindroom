@@ -62,6 +62,17 @@ def _is_clean_exit(final: ScriptRunRecord | None) -> bool:
     )
 
 
+async def _wait_for_launch_task(launch_task: asyncio.Task[ScriptRunRecord]) -> None:
+    try:
+        await asyncio.shield(launch_task)
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if (current is not None and current.cancelling() > 0) or not launch_task.cancelled():
+            raise
+    except Exception:
+        logger.debug("script_check launch failed during cleanup", exc_info=True)
+
+
 async def _retire_and_prune(
     manager: ScriptRunManager,
     run_id: str,
@@ -71,8 +82,7 @@ async def _retire_and_prune(
 ) -> None:
     async def _run() -> None:
         if launch_task is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.shield(launch_task)
+            await _wait_for_launch_task(launch_task)
         try:
             if reason is not None:
                 with contextlib.suppress(ScriptRunNotFoundError):

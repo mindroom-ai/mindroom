@@ -14,7 +14,11 @@ from mindroom.reactive_triggers.models import (
     TriggerEvent,
 )
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
-from mindroom.script_runs.manager import unsupported_private_script_worker_scope_message, workflow_placement
+from mindroom.script_runs.manager import (
+    unsupported_private_script_worker_scope_message,
+    unsupported_script_worker_backend_message,
+    workflow_placement,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -293,10 +297,11 @@ def check_script_check_access(
         placement = workflow_placement(config, runtime_paths)
         if placement not in {"worker", "local"}:
             failure = _ScriptCheckAccessFailure("placement_unavailable", "placement", placement)
-        elif placement == "worker" and (
-            scope_error := unsupported_private_script_worker_scope_message(config, agent_name)
-        ):
-            failure = _ScriptCheckAccessFailure("unsupported_worker_scope", "placement", scope_error)
+        elif placement == "worker":
+            if backend_error := unsupported_script_worker_backend_message(runtime_paths):
+                failure = _ScriptCheckAccessFailure("unsupported_worker_backend", "placement", backend_error)
+            elif scope_error := unsupported_private_script_worker_scope_message(config, agent_name):
+                failure = _ScriptCheckAccessFailure("unsupported_worker_scope", "placement", scope_error)
     return failure
 
 
