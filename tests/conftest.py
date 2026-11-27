@@ -53,7 +53,6 @@ import pytest
 import pytest_asyncio
 import structlog
 import yaml
-from agno.utils import log as agno_log
 from aioresponses import aioresponses
 from openai import AsyncOpenAI, OpenAI
 from structlog.testing import ReturnLoggerFactory
@@ -175,6 +174,7 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
+from mindroom.providers.pipeline import connectivity as connectivity_pipeline
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.providers.pipeline import webp as webp_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
@@ -647,8 +647,8 @@ def call_proxy_sync_for_test(
 ) -> object:
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the stand-in options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
-    execution env, extra passthrough, or resolved worker target, and the built-in tools.
+    The others take a plain call's values: no overrides, execution env, extra passthrough, or resolved worker target,
+    and the built-in tools.
     """
     return sandbox_proxy_module._call_proxy_sync(
         stand_ins=sandbox_proxy_module.WorkerStandIns(
@@ -657,7 +657,6 @@ def call_proxy_sync_for_test(
         function_name=function_name,
         args=args,
         kwargs=kwargs,
-        function_entrypoint=lambda *_args, **_kwargs: None,
     )
 
 
@@ -2807,9 +2806,7 @@ def write_demo_tool_plugin(plugin_root: Path, tool_name: str) -> None:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
         "\n"
         "class DemoTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -3001,9 +2998,7 @@ def write_generation_probe_plugin(plugin_root: Path, generation: int) -> list[tu
     )
     header = f"import sys\n\nGENERATION = {generation}\n_seen = sys.modules[{_GENERATION_PROBE_MODULE!r}].seen\n\n"
     (plugin_root / "tools.py").write_text(
-        header + "from agno.tools import Toolkit\n"
-        "\n"
-        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+        header + "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
         "\n"
         "class GenerationProbeTools(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -3918,11 +3913,6 @@ def _isolate_structlog_configuration(
     monkeypatch.setattr(logging_config, "_library_logging", False)
     if request.node.path.name != "test_logging_config.py":
         monkeypatch.setattr(structlog, "configure", _configure_uncached_structlog)
-    # `setup_logging` reroutes Agno's loggers; give later tests on this worker Agno's own setup back.
-    agno_loggers = [
-        (agno_logger, agno_logger.handlers[:], agno_logger.filters[:], agno_logger.level, agno_logger.propagate)
-        for agno_logger in (agno_log.agent_logger, agno_log.team_logger, agno_log.workflow_logger)
-    ]
     # `setup_logging` also sets the root level and handlers; a DEBUG root makes every later test on this worker
     # render and capture each debug record, which took team turns past the timeout.
     root_logger = logging.getLogger()
@@ -3935,11 +3925,6 @@ def _isolate_structlog_configuration(
     root_logger.handlers[:] = root_handlers
     root_logger.setLevel(root_level)
     _configure_quiet_structlog()
-    for agno_logger, handlers, filters, level, propagate in agno_loggers:
-        agno_logger.handlers[:] = handlers
-        agno_logger.filters[:] = filters
-        agno_logger.setLevel(level)
-        agno_logger.propagate = propagate
 
 
 @pytest.fixture(autouse=True)
@@ -4411,6 +4396,28 @@ def _reset_runtime_paths() -> Generator[None]:
 def _isolate_tool_job_registrations(monkeypatch: pytest.MonkeyPatch) -> None:
     """Separate each test's pinned instances; tests still own shutdown of live resources."""
     monkeypatch.setattr(tool_jobs_instances, "_instances", {})
+
+
+@pytest.fixture
+def real_connectivity_probe() -> None:
+    """Keep provider connectivity probes on their real httpx client for tests that stub httpx directly."""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_connectivity_probes(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None]:
+    """Keep provider connectivity probes online and isolated per test unless a test opts into the real probe."""
+    connectivity_pipeline._homeserver_probes.clear()
+    if "real_connectivity_probe" not in request.fixturenames:
+
+        async def _always_online(_url: str, _verify: object, _timeout_seconds: float) -> bool:
+            return True
+
+        monkeypatch.setattr(connectivity_pipeline, "_http_probe_homeserver", _always_online)
+    yield
+    connectivity_pipeline._homeserver_probes.clear()
 
 
 @pytest.fixture(autouse=True)

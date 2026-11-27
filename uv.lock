@@ -58,42 +58,6 @@ wheels = [
 ]
 
 [[package]]
-name = "agno"
-version = "3.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "agnoctl" },
-    { name = "docstring-parser" },
-    { name = "h11" },
-    { name = "httpx", extra = ["http2"] },
-    { name = "packaging" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "rich" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/78/b3/85f3577178c27ebd66d79e9c63d0e1f2115bba756ddb768b45ca3606e3fd/agno-3.2.1.tar.gz", hash = "sha256:d5be3f4511a532d71301c45c956f5316e7a5d0ae465e1e39a2d0b9e8d93f0882", size = 4569987, upload-time = "2026-11-17T17:06:52.221Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/10/4557be57feb932886e4d99f18354a71b2113868aa3f4553bcd8f165705c6/agno-3.2.1-py3-none-any.whl", hash = "sha256:9d34f753761647fe44604389e6709df0a318a63e8bb1f994ac2bee129b926ade", size = 5138067, upload-time = "2026-11-17T17:06:48.794Z" },
-]
-
-[[package]]
-name = "agnoctl"
-version = "0.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "questionary" },
-    { name = "rich" },
-    { name = "typer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e8/f4/40418c3bbdc10079f01a6ac223b117ece9e16640bfa9d4680a3fbca5b81b/agnoctl-0.2.1.tar.gz", hash = "sha256:b53e9b3a4081548ac15233c5f52f70de5702c830a87a304c7797c1e22691530c", size = 101388, upload-time = "2026-09-16T17:41:39.485Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/e6/126f7fa607b422980986d368f691f0f8649179108e23023b3a048d6dd16c/agnoctl-0.2.1-py3-none-any.whl", hash = "sha256:b748ad43deb5d7acbf7f14988a868e22433c76fe059d6b955c34b5044e0e1ea4", size = 76512, upload-time = "2026-09-16T17:41:38.192Z" },
-]
-
-[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3962,7 +3926,6 @@ wheels = [
 name = "mindroom"
 source = { editable = "." }
 dependencies = [
-    { name = "agno" },
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "anyio" },
@@ -4411,7 +4374,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentql", marker = "extra == 'agentql'" },
-    { name = "agno", specifier = "==3.2.1" },
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "anthropic", specifier = ">=2.11,<3" },
     { name = "anyio", specifier = ">=4.10" },
@@ -4444,7 +4406,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'duckdb'" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'" },
     { name = "elevenlabs", marker = "extra == 'eleven-labs'" },
-    { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.29.0" },
+    { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.29" },
     { name = "fal-client", marker = "extra == 'fal'" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = ">=3" },

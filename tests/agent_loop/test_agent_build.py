@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from structlog.testing import capture_logs
 
 import mindroom.agents as agents_module
@@ -30,9 +28,10 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.reasoning import ReasoningTools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.llm.provider import ModelRequest
+from mindroom.llm.provider import ModelRequest, RequestOverrides
 from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.tool_function import ToolGate
@@ -166,7 +165,7 @@ def test_create_agent_builds_the_spec_prompt_and_owners(tmp_path: Path) -> None:
     assert build.prompt.tool_instructions == ()
     assert build.prompt.turn_context is not None
     assert build.prompt.turn_context.startswith("<mindroom_session_context>")
-    assert build.request_template == ModelRequest(messages=())
+    assert build.request_template == ModelRequest(messages=(), overrides=RequestOverrides(wait_for_connectivity=True))
     assert build.history_settings == config.resolve_scope("assistant").history_settings
     # Large CLI results and their media are saved in the agent's own workspace.
     assert build.surface.output_file_policy is not None
@@ -551,77 +550,6 @@ def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers
     assert not [log for log in logs if log["event"].startswith("Configured toolkit exposes no unique")]
 
 
-def test_a_function_asking_for_prompt_instructions_loads_only_in_a_deferred_toolkit(tmp_path: Path) -> None:
-    """Tool search shows a deferred function's instructions; an eager toolkit offering one is refused, not the agent."""
-    config, runtime_paths = _config(tmp_path, tools=[{"wikipedia": {"defer": True}}, "arxiv"])
-
-    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        function = Function(name=f"{tool_name}_lookup", entrypoint=ping, instructions="Look up named pages only.")
-        return Toolkit(name=tool_name, tools=[function])
-
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
-        build = _build(config, runtime_paths)
-
-    assert [toolkit.name for toolkit in build.spec.toolkits] == ["wikipedia", "skills"]
-    assert build.request_template.deferred_tools.names == frozenset({"wikipedia_lookup"})
-    [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert (warning["tool"], warning["error"]) == (
-        "arxiv",
-        (
-            "Tool function 'arxiv_lookup' sets instructions for Agno to add to the system prompt, which MindRoom adds"
-            " only per toolkit; set them on the toolkit instead"
-        ),
-    )
-
-
-def _no_hook(*_args: object, **_kwargs: object) -> None:
-    return None
-
-
-_REFUSED_FIELDS = [
-    {"pre_hook": _no_hook},
-    {"requires_user_input": True},
-    {"external_execution": True},
-    {"instructions": "Look up named pages."},
-]
-
-
-@pytest.mark.parametrize(
-    ("agent_mode", "narrowed_by"),
-    [("standard", "caller"), ("standard", "persona"), ("minimal", "caller")],
-)
-@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "external_execution", "instructions"])
-def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
-    tmp_path: Path,
-    agent_mode: str,
-    narrowed_by: str,
-    refused: dict[str, object],
-) -> None:
-    """A function setting a field MindRoom refuses fails its toolkit only when the agent offers it."""
-    config, runtime_paths = _config(tmp_path, tools=["wikipedia"])
-
-    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        return Toolkit(name=tool_name, tools=[Function(name="lookup", entrypoint=ping, **refused), ping])
-
-    narrowing: dict[str, Any] = (
-        {"tool_function_filter": lambda function: function.name != "lookup"}
-        if narrowed_by == "caller"
-        else {
-            "persona": SubagentPersona(
-                source_kind="inline",
-                source_name="",
-                system_prompt="You ping.",
-                tools=("wikipedia.ping",),
-            ),
-        }
-    )
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
-        build = _build(config, runtime_paths, agent_mode=agent_mode, **narrowing)
-
-    assert not [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert [function.name for function in build.spec.toolkits[0].functions] == ["ping"]
-
-
 def test_a_toolkit_s_instructions_show_whenever_it_offers_a_function(tmp_path: Path) -> None:
     """A toolkit's instructions reach the prompt whenever it offers a function."""
     config, runtime_paths = _config(tmp_path, tools=["reasoning"])
@@ -750,8 +678,12 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
     def build_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name != "wikipedia":
             return build_agent_toolkit(tool_name, **kwargs)
+
+        def bad_search(agent: object = None) -> str:
+            return str(agent)
+
         toolkit = Toolkit(name="wikipedia", tools=[ping])
-        toolkit.functions["search_wikipedia"] = Function(name="search_wikipedia")
+        toolkit.functions["search_wikipedia"] = bad_search
         return toolkit
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
@@ -761,7 +693,8 @@ def test_a_toolkit_that_cannot_be_adapted_drops_only_itself_and_its_deferral(tmp
     assert build.request_template.deferred_tools.names == frozenset()
     assert not any("Deferred Tool Discovery" in instruction for instruction in build.prompt.instructions)
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
-    assert (warning["tool"], warning["error"]) == ("wikipedia", "Tool function 'search_wikipedia' has no entrypoint")
+    assert warning["tool"] == "wikipedia"
+    assert "'search_wikipedia' takes agent" in warning["error"]
 
 
 def test_a_persona_build_offers_only_its_tools_and_speaks_with_its_prompt(tmp_path: Path) -> None:

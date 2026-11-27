@@ -42,13 +42,13 @@ from mindroom.thread_models import (
     resolve_thread_model_override,
     set_thread_model_override,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.agent_tool_helpers import toolkit_offers
@@ -1529,11 +1529,13 @@ def _configured_thread_model_functions(context: ToolRuntimeContext, workspace: P
 
 
 def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
-    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for the other calls."""
+    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for list_models."""
     functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
 
     assert OUTPUT_PATH_ARGUMENT not in functions["switch_thread_model"].parameters["properties"]
-    assert OUTPUT_PATH_ARGUMENT in functions["get_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT not in functions["get_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT not in functions["reset_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT in functions["list_models"].parameters["properties"]
 
 
 @pytest.mark.asyncio

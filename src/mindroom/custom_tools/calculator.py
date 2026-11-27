@@ -20,6 +20,8 @@ class CalculatorTools(Toolkit):
     """Mathematical calculator with basic and advanced operations bounded for the shared runtime."""
 
     name = "calculator"
+    offer_background_after = False
+    offer_output_path = False
 
     def __init__(self) -> None:
         super().__init__(

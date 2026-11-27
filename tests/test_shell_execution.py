@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,7 +36,7 @@ from mindroom.shell.execution import (
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 _FD0_IDENTITY = "import os, sys; info = os.fstat(0); sys.stdout.write(f'{info.st_dev}:{info.st_ino}')"
 
@@ -646,37 +647,59 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     assert no_chrt.uses_chrt is False
 
 
+def _stub_systemd_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    show_response: Callable[[], tuple[int, str]],
+    probe_rc: Callable[[], int] = lambda: 0,
+) -> tuple[list[tuple[list[str], dict[str, str]]], list[tuple[list[str], dict[str, str]]]]:
+    real_which = shutil.which
+    bins = {"systemctl": "/systemctl", "systemd-run": "/systemd-run", "env": "/env"}
+
+    def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
+        return bins[name] if name in bins else real_which(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    show_calls: list[tuple[list[str], dict[str, str]]] = []
+    probe_calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[object]:
+        run_env = kwargs["env"]
+        assert isinstance(run_env, dict)
+        if cmd[0] == "/systemctl":
+            show_calls.append((cmd, dict(run_env)))
+            rc, stdout = show_response()
+            return subprocess.CompletedProcess(cmd, rc, stdout=stdout)
+        probe_calls.append((cmd, dict(run_env)))
+        return subprocess.CompletedProcess(cmd, probe_rc())
+
+    monkeypatch.setattr("mindroom.shell.execution.shutil.which", fake_which)
+    monkeypatch.setattr("mindroom.shell.execution.subprocess.run", fake_run)
+    return show_calls, probe_calls
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
 def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_rejected_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe passes --description and --expand-environment=no, keys cache on bus env, and fails open on errors."""
-    real_which = shutil.which
-
-    def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
-        if name == "systemd-run":
-            return "/systemd-run"
-        if name == "env":
-            return "/env"
-        return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr("mindroom.shell.execution.shutil.which", fake_which)
-    probe_calls: list[tuple[list[str], dict[str, str]]] = []
+    """The probe checks user-manager generation, keys cache on bus env, and fails open on errors."""
     probe_rc = 0
-
-    def fake_probe(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        probe_env = kwargs["env"]
-        assert isinstance(probe_env, dict)
-        probe_calls.append((cmd, dict(probe_env)))
-        return subprocess.CompletedProcess(cmd, probe_rc)
-
-    monkeypatch.setattr("mindroom.shell.execution.subprocess.run", fake_probe)
+    show_calls, probe_calls = _stub_systemd_tools(
+        monkeypatch,
+        lambda: (0, "UserspaceTimestampMonotonic=100\nSystemState=running\n"),
+        lambda: probe_rc,
+    )
     _probe_systemd_slice_launcher.cache_clear()
     try:
         xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", " s.slice ")
         monkeypatch.setenv("XDG_RUNTIME_DIR", xdg)
         monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", bus)
+        expected_show = [
+            "/systemctl",
+            "--user",
+            "show",
+            "--property=UserspaceTimestampMonotonic",
+            "--property=SystemState",
+        ]
         expected_prefix = (
             "/systemd-run",
             "--user",
@@ -695,6 +718,7 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
 
         assert _systemd_slice_launcher() == expected
         assert _systemd_slice_launcher() == expected
+        assert show_calls == [(expected_show, {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus})] * 2
         assert probe_calls == [
             (
                 [
@@ -717,16 +741,82 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
             env_bin="/env",
             bus_env=(("XDG_RUNTIME_DIR", "/run/user/99"), ("DBUS_SESSION_BUS_ADDRESS", bus)),
         )
+        assert len(show_calls) == 3
         assert len(probe_calls) == 2
 
         for invalid in ("", "   ", "mindroom.service", ".slice", "-bad.slice", "a/b.slice", "a b.slice", "a\tb.slice"):
             monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", invalid)
             assert _systemd_slice_launcher() is None
+        assert len(show_calls) == 3
         assert len(probe_calls) == 2
 
         probe_rc = 1
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
         assert _systemd_slice_launcher() is None
+    finally:
+        _probe_systemd_slice_launcher.cache_clear()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+def test_systemd_slice_recovers_after_user_manager_outage_and_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outages fail open and clear the cache; manager recovery or restart re-probes once per generation."""
+    show_state: tuple[int, str] = (1, "")
+    _, probe_calls = _stub_systemd_tools(monkeypatch, lambda: show_state)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "s.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/42")
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    _probe_systemd_slice_launcher.cache_clear()
+    try:
+        # Unavailable at startup -> fails open without caching outage; G1 comes up (order-independent Key=Value).
+        assert _systemd_slice_launcher() is None
+        assert probe_calls == []
+        show_state = (0, "SystemState=running\nUserspaceTimestampMonotonic=100\n")
+        launcher = _systemd_slice_launcher()
+        assert launcher is not None
+        assert _systemd_slice_launcher() == launcher
+        assert len(probe_calls) == 1
+
+        # Outage clears the cache and fails open; recovery at the same generation still re-probes once.
+        show_state = (1, "")
+        assert _systemd_slice_launcher() is None
+        assert _probe_systemd_slice_launcher.cache_info().currsize == 0
+        show_state = (0, "UserspaceTimestampMonotonic=100\nSystemState=running\n")
+        assert _systemd_slice_launcher() == launcher
+        assert _systemd_slice_launcher() == launcher
+        assert len(probe_calls) == 2
+
+        # Direct generation change (restart without observed downtime, G1 -> G2) triggers a fresh probe.
+        show_state = (0, "UserspaceTimestampMonotonic=200\nSystemState=running\n")
+        assert _systemd_slice_launcher() == launcher
+        assert _systemd_slice_launcher() == launcher
+        assert len(probe_calls) == 3
+    finally:
+        _probe_systemd_slice_launcher.cache_clear()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+def test_systemd_user_manager_states_and_invalid_generations_fail_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stopping/offline states and missing/zero/non-integer generations fail open; degraded remains active."""
+    show_state: tuple[int, str] = (0, "UserspaceTimestampMonotonic=500\nSystemState=degraded\n")
+    _, probe_calls = _stub_systemd_tools(monkeypatch, lambda: show_state)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "s.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/42")
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    _probe_systemd_slice_launcher.cache_clear()
+    try:
+        assert _systemd_slice_launcher() is not None
+        for rejected in (
+            "UserspaceTimestampMonotonic=500\nSystemState=stopping\n",
+            "UserspaceTimestampMonotonic=500\nSystemState=offline\n",
+            "SystemState=running\n",
+            "UserspaceTimestampMonotonic=0\nSystemState=running\n",
+            "UserspaceTimestampMonotonic=-5\nSystemState=running\n",
+            "UserspaceTimestampMonotonic=not-a-number\nSystemState=running\n",
+        ):
+            show_state = (0, rejected)
+            assert _systemd_slice_launcher() is None
+        assert len(probe_calls) == 1
+        assert _probe_systemd_slice_launcher.cache_info().currsize == 0
     finally:
         _probe_systemd_slice_launcher.cache_clear()
 
@@ -811,6 +901,57 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
         f"['$$', '$MINDROOM_TEST_VAR', '${{MINDROOM_TEST_VAR}}'] {custom_xdg} {custom_dbus} ",
     )
     assert "/app.slice/" in custom_result.message
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
+@pytest.mark.asyncio
+async def test_systemd_slice_live_outage_fails_open_and_recovers(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mid-run loss of the systemd --user socket fails open cleanly and resumes slicing on recovery."""
+    live_xdg = os.environ.get("XDG_RUNTIME_DIR") or (
+        f"/run/user/{os.getuid()}" if Path(f"/run/user/{os.getuid()}/bus").exists() else None
+    )
+    if live_xdg is None:
+        pytest.skip("requires a live systemd --user runtime directory")
+
+    with tempfile.TemporaryDirectory(prefix="mr-") as runtime_parent:
+        runtime_link = Path(runtime_parent) / "rt"
+        runtime_link.symlink_to(live_xdg)
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_link))
+        monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+        _probe_systemd_slice_launcher.cache_clear()
+        try:
+            if _systemd_slice_launcher() is None:
+                pytest.skip("requires a live systemd --user bus supporting --expand-environment=no")
+
+            self_cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
+            argv = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; print(Path('/proc/self/cgroup').read_text().strip())",
+            ]
+
+            initial = await _run(registry, argv, tmp_path)
+            assert "/app.slice/" in initial
+            assert initial != self_cgroup
+
+            # Repoint the same XDG_RUNTIME_DIR symlink to a missing dir (simulating user@<uid> socket disappearing).
+            runtime_link.unlink()
+            runtime_link.symlink_to(tmp_path / "dead-runtime-dir")
+            assert await _run(registry, argv, tmp_path) == self_cgroup
+            assert _probe_systemd_slice_launcher.cache_info().currsize == 0
+
+            runtime_link.unlink()
+            runtime_link.symlink_to(live_xdg)
+            recovered = await _run(registry, argv, tmp_path)
+            assert "/app.slice/" in recovered
+            assert recovered != self_cgroup
+        finally:
+            _probe_systemd_slice_launcher.cache_clear()
 
 
 def _process_group_threads(pgid: int) -> list[int]:

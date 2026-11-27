@@ -8,9 +8,9 @@ from typing import Any
 import pytest
 
 from mindroom.custom_tools.reasoning import ReasoningTools
-from mindroom.tool_system.agno_toolkits import FunctionScopedInstructions, adapt_toolkit, with_offered_instructions
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.toolkits import FunctionScopedInstructions, adapt_toolkit, with_offered_instructions
 from mindroom.tools.reasoning import reasoning_tools
 
 

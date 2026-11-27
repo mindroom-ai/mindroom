@@ -314,7 +314,6 @@ def test_registered_replicate_function_exposes_prompt_only(
     """The native function exposes only prompt with no injected framework parameter."""
     function = toolkit_offers(_tool(tmp_path, "stored-key"), "generate_media")
     assert set(function.parameters["properties"]) == {"prompt"}
-    assert function.injected_params == {}
 
     result = function.entrypoint(prompt="A red fox")
 

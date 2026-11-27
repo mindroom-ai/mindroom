@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
+from collections.abc import Iterator  # noqa: TC003 - tool schema reads annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import ToolResult
 
 import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
@@ -65,7 +63,9 @@ from mindroom.script_runs.store import (
     mint_script_capability,
 )
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.progress import report_tool_metadata
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate, ToolValue
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -89,11 +89,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.tools.function import Function
-
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
 
 _WORKER_RUN_ID = f"script-{'a' * 32}"
 
@@ -157,7 +154,7 @@ def _context(
     require_approval: bool = False,
     log_tool_calls: bool = False,
     preapprove_script_tool: bool = False,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     worker_scope: WorkerScope | None = None,
     private: bool = False,
     worker_tools: list[str] | None = None,
@@ -306,7 +303,7 @@ def _broker(
     live_worker_id: str | None = None,
     live_private_agent_names: frozenset[str] | None = None,
     preapprove_script_tool: bool = False,
-    tool_function_filter: Callable[[Function], bool] | None = None,
+    tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     durable_local_unsafe: bool | None = None,
     live_local_unsafe: bool | None = None,
     worker_scope: WorkerScope | None = None,
@@ -585,7 +582,7 @@ class _Calculator(Toolkit):
 class _ConnectedCalculator(_Calculator):
     """A replacement ``calculator`` with a connection lifecycle whose steps do nothing unless overridden."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def connect(self) -> None:
         pass
@@ -1038,9 +1035,8 @@ async def test_script_broker_honors_function_authored_confirmation_when_overlay_
     events: list[str] = []
 
     class ConfirmingToolkit(_Calculator):
-        def __init__(self) -> None:
-            super().__init__()
-            self.functions["add"].requires_confirmation = True
+        def offered_function(self, function: ToolFunction) -> ToolFunction:
+            return replace(function, gate=ToolGate.CONFIRM)
 
         def add(self, a: int, b: int) -> int:
             events.append("tool:body")
@@ -1115,8 +1111,8 @@ async def test_script_call_result_is_the_text_of_a_tool_result(
     """A tool that returns a tool result, as MCP-backed tools do, gives the script its text, not the object's repr."""
 
     class ToolResultCalculator(_Calculator):
-        def add(self, a: int, b: int) -> ToolResult:
-            return ToolResult(content=f"sum={a + b}")
+        def add(self, a: int, b: int) -> ToolValue:
+            return ToolValue(content=f"sum={a + b}")
 
     _replace_calculator_toolkit(monkeypatch, ToolResultCalculator)
     broker, token = _broker(tmp_path, events=[])
@@ -1253,7 +1249,7 @@ async def test_script_broker_reports_why_a_call_failed(
     lifecycle: list[str] = []
 
     class FailingToolkit(_ConnectedCalculator):
-        _requires_connect = stage == "connect"
+        requires_connect = stage == "connect"
 
         def connect(self) -> None:
             lifecycle.append("connect")

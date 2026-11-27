@@ -825,8 +825,23 @@ def test_status_preserves_actionable_display_mapping_error() -> None:
         msg = "macOS display mapping is unavailable; reconnect displays and request fresh app state."
         raise DisplayMappingError(msg)
 
+    called: list[str] = []
+    provider._pyautogui = SimpleNamespace(
+        size=lambda: called.append("size") or SimpleNamespace(width=1920, height=1080),
+        position=lambda: called.append("position") or SimpleNamespace(x=0, y=0),
+    )
     provider._display_geometry = unavailable
     with pytest.raises(DesktopProviderError, match="reconnect displays and request fresh app state"):
+        provider.status()
+    assert called == []
+
+    # Screen/cursor probe errors are also wrapped in DesktopProviderError.
+    provider._display_geometry = lambda: ()
+    provider._pyautogui = SimpleNamespace(
+        size=lambda: (_ for _ in ()).throw(RuntimeError("no screen available")),
+        position=lambda: SimpleNamespace(x=0, y=0),
+    )
+    with pytest.raises(DesktopProviderError, match="no screen available"):
         provider.status()
 
 

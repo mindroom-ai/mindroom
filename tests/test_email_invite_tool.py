@@ -16,9 +16,9 @@ from mindroom.custom_tools.email_invite import EmailInviteTools
 from mindroom.email_invites import store
 from mindroom.email_invites.mail import EmailInviteMailError, invite_link
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,

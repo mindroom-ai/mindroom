@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog
-from agno.tools import Toolkit
 
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.config.agent import AgentConfig
@@ -26,6 +25,7 @@ from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction

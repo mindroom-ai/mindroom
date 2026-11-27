@@ -27,9 +27,9 @@ from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
 from mindroom.slack import files as slack_files
 from mindroom.slack.oauth import slack_oauth_provider
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit, with_offered_instructions
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials

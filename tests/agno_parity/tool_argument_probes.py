@@ -113,17 +113,6 @@ async def probe_async(count: int) -> str:
     return _received(count=count)
 
 
-def probe_agent(query: str, agent: object = None) -> str:
-    """Record an argument of a tool that also receives the calling agent.
-
-    Args:
-        query: Free text.
-        agent: The calling agent, which the framework supplies.
-
-    """
-    return _received(query=query, agent=agent)
-
-
 def probe_raises(message: str) -> str:
     """Fail with the given message.
 
@@ -142,6 +131,5 @@ PROBES = (
     probe_model,
     probe_no_arguments,
     probe_async,
-    probe_agent,
     probe_raises,
 )

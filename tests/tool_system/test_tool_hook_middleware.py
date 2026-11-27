@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.agent_loop.tools import PlannedCall, dispatch_tool_calls
 from mindroom.config.plugin import PluginEntryConfig
@@ -20,9 +19,10 @@ from mindroom.hooks import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, complete
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, current_tool_call, execute_tool_call
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_loop.helpers import context
 from tests.agent_tool_helpers import detached_policy
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES

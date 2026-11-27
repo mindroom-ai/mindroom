@@ -3,7 +3,7 @@
 The parity tests compare each golden with what its family's support functions compute; these tests cover what the
 command adds: writing a file, routing every provider family to its own adapter, and each family's file layout.
 Rebuilding every registered tool takes too long for this module, so the tool schemas are left to
-``tests/tool_system/test_agno_toolkits.py``, which compares every tool's entry and each schema file's text.
+``tests/tool_system/test_toolkits.py``, which compares every tool's entry and each schema file's text.
 """
 
 from __future__ import annotations

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 ALICE = "@alice:example.org"
@@ -109,7 +109,7 @@ def raw_path(request: httpx.Request) -> str:
     return request.url.raw_path.split(b"?")[0].decode("ascii")
 
 
-def model_description(tools: AnyToolkit, name: str) -> str:
+def model_description(tools: Toolkit, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
     return " ".join((toolkit_offers(tools, name).description or "").split())
 
@@ -142,7 +142,7 @@ class FakeGraph:
 
 
 def assert_refused_by_call_validation(
-    tools: AnyToolkit,
+    tools: Toolkit,
     graph: FakeGraph,
     name: str,
     arguments: dict[str, object],

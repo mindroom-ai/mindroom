@@ -14,10 +14,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from agno.media import Image
-from agno.run import RunContext as AgnoRunContext  # noqa: TC002 - Agno resolves tool annotations
-from agno.tools.function import Function, ToolResult
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import offered_toolkits
@@ -31,21 +27,22 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, M
 from mindroom.config.personal_agents import PersonalAgentInstance, PersonalAgentTemplateConfig
 from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.config.slack import SlackConfig
+from mindroom.llm.media import Image
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.registry import ToolRegistry
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
-from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import gc_paused, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
@@ -62,14 +59,16 @@ def _toolkit(name: str, *tools: Callable[..., object], instructions: str | None 
     return adapt_toolkit(Toolkit(name=name, tools=list(tools), instructions=instructions), key=name)
 
 
-def _function(entrypoint: Callable[..., object], *, gate: ToolGate | None = None, **flags: object) -> AdaptedToolkit:
-    """Adapt ``entrypoint`` as an Agno function with ``flags`` set on it; ``gate`` replaces the gate they give."""
-    function = Function.from_callable(entrypoint)
-    for name, value in flags.items():
-        setattr(function, name, value)
-    adapted = offered_agno_function(function)
-    if gate is not None:
-        adapted = replace(adapted, gate=gate)
+def _function(
+    entrypoint: Callable[..., object],
+    *,
+    gate: ToolGate | None = None,
+    requires_confirmation: bool = False,
+    stop_after_tool_call: bool = False,
+) -> AdaptedToolkit:
+    """Adapt ``entrypoint`` with the given gate and stop flag."""
+    resolved_gate = gate if gate is not None else (ToolGate.CONFIRM if requires_confirmation else None)
+    adapted = replace(adapt_callable(entrypoint), gate=resolved_gate, stop_after_call=stop_after_tool_call)
     return AdaptedToolkit(name="actions", functions=(adapted,), instructions=None)
 
 
@@ -231,13 +230,15 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
     seen = []
     policy = []
 
-    def inspect_binding(run_context: AgnoRunContext) -> str:
-        seen.append((run_context.run_id, get_tool_runtime_context(), current_tool_call()))
+    def inspect_binding() -> str:
+        tool_call = current_tool_call()
+        assert tool_call is not None
+        seen.append((tool_call.context.run_id, get_tool_runtime_context(), tool_call))
         identity = current_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:test"
         assert identity.session_id == "session"
-        run_context.session_state["changed"] = True
+        tool_call.context.session_state["changed"] = True
         return "bound"
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
@@ -281,14 +282,16 @@ async def test_sync_async_generators_media_and_generated_functions(tmp_path: Pat
         yield "one"
         yield "two"
 
-    async def async_generator(run_context: AgnoRunContext) -> AsyncIterator[str]:
+    async def async_generator() -> AsyncIterator[str]:
         yield "three"
         assert get_tool_runtime_context() is not None
-        run_context.session_state["streamed"] = True
+        call = current_call()
+        assert call is not None
+        call.session_state["streamed"] = True
         yield "four"
 
-    def media() -> ToolResult:
-        return ToolResult(content="picture", images=[Image(url="https://example.org/image.png")])
+    def media() -> ToolValue:
+        return ToolValue(content="picture", images=(Image(url="https://example.org/image.png"),))
 
     async def search_knowledge_base(query: str) -> str:
         return f"Knowledge about {query}"
@@ -681,8 +684,12 @@ async def test_generator_failure_is_terminal_and_does_not_leak_context(tmp_path:
 @pytest.mark.asyncio
 async def test_a_deferred_toolkit_whose_functions_collide_is_refused(tmp_path: Path) -> None:
     """A materialized toolkit that names one function twice binds nothing."""
+
+    def duplicate() -> str:
+        return "first"
+
     catalog = await _catalog(tmp_path, [])
-    function = offered_agno_function(Function(name="duplicate", entrypoint=lambda: "first"))
+    function = adapt_callable(duplicate)
 
     async def materialize() -> AdaptedToolkit:
         return AdaptedToolkit(name="deferred", functions=(function, function), instructions=None)
@@ -702,9 +709,9 @@ async def test_canonical_shell_releases_only_shell_leaf_and_retains_middleware(t
         del args
         pytest.fail("only the owner's shell leaf runs the command")
 
-    async def mutate(run_context: AgnoRunContext) -> str:
+    async def mutate() -> str:
         seen.append("mutate")
-        run_context.session_state["changed"] = True
+        current_call().session_state["changed"] = True
         return "changed"
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
@@ -1351,7 +1358,11 @@ async def test_generated_cli_authorization_keeps_exact_owner(
         current.agents["helper"].tools = ["shell"]
         catalog.runtime_context = replace(runtime, config_provider=lambda: current)
     if revocation == "forged":
-        binding = replace(binding, function=offered_agno_function(Function(name="arbitrary", entrypoint=lambda: "bad")))
+
+        def arbitrary() -> str:
+            return "bad"
+
+        binding = replace(binding, function=adapt_callable(arbitrary))
     if revocation == "stale":
         await catalog.close()
     if revocation:

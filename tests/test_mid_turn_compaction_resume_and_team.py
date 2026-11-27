@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
@@ -42,6 +41,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot

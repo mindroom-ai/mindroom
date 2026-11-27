@@ -76,13 +76,12 @@ from tests.turn_model_helpers import turn_model
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools.function import ToolResult
-
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.manager import _MCPAuthorizationLease
     from mindroom.mcp.types import MCPServerCatalog
     from mindroom.oauth.credential_lifecycle import OAuthCredentialsSnapshot
+    from mindroom.tool_system.tool_function import ToolValue
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
 
 
@@ -952,7 +951,7 @@ async def test_mcp_manager_rejects_stale_oauth_session_publication_and_retries_c
         include_tools: Collection[str] | None = None,
         exclude_tools: Collection[str] | None = None,
         before_dispatch: Callable[[], Awaitable[None]] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         if replacement_task is not None:
             await replacement_task
         return await original_call(

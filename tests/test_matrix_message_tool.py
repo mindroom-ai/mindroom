@@ -45,12 +45,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.teams.members import _as_member
 from mindroom.thread_summary import automatic as thread_summary_automatic
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,

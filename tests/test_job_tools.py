@@ -11,7 +11,6 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from mindroom.agent_loop.spec import RunContext  # noqa: TC001 - inspected by toolkit_function schema.
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -36,11 +35,12 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
@@ -917,10 +917,10 @@ async def test_collect_preserves_concurrent_sibling_session_state_update_and_rep
             await sibling_updated.wait()
         return payload
 
-    async def update_state(run_context: RunContext) -> str:
+    async def update_state() -> str:
         await first_read_done.wait()
-        run_context.session_state["shared"] = "from-sibling"
-        run_context.session_state["sibling_only"] = True
+        current_call().session_state["shared"] = "from-sibling"
+        current_call().session_state["sibling_only"] = True
         sibling_updated.set()
         return "updated"
 

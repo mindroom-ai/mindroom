@@ -184,7 +184,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\nBreak work into ordered steps.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.\n\nNumber every step.",
+          "content": "<your_role>\n## Your Identity\nYou are Planner (Matrix ID: @mindroom_planner:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\nBreak work into ordered steps.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.\n\n- Number every step.\n- Tools with `mindroom_output_path` accept an optional workspace-relative file path to save full supported output and return a receipt.",
           "role": "system"
         },
         {
@@ -210,18 +210,6 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -243,18 +231,6 @@
               "b": {
                 "type": "number",
                 "description": "(float) Denominator."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -276,18 +252,6 @@
               "b": {
                 "type": "number",
                 "description": "(float) Exponent."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -305,18 +269,6 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to calculate the factorial of, at most 1558."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -333,18 +285,6 @@
               "n": {
                 "type": "integer",
                 "description": "(int) Number to check if prime, at most 10**12."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -365,18 +305,6 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -534,9 +462,7 @@
                   {
                     "type": "null"
                   }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+                ]
               }
             },
             "required": [
@@ -553,18 +479,6 @@
               "n": {
                 "type": "number",
                 "description": "(float) Number to calculate the square root of."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -585,18 +499,6 @@
               "b": {
                 "type": "number",
                 "description": "(float) Second number."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
               }
             },
             "required": [
@@ -617,7 +519,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\nWrite clear announcements.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.",
+          "content": "<your_role>\n## Your Identity\nYou are Writer (Matrix ID: @mindroom_writer:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\nWrite clear announcements.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- Single newlines break lines; add a language tag to fenced code blocks; supports GFM tables, Mermaid fences (```mermaid), GitHub callouts (`> [!NOTE]`, `TIP`, `IMPORTANT`, `WARNING`, `CAUTION`), footnotes (`[^1]` / `[^1]: ...`), `<details><summary>...</summary>...</details>` (blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (not `||spoiler||`).\n- Math: `$inline$` (no spaces immediately inside `$`) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, `[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional `?via=server`).\n- External image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- MindRoom Chat collapses earlier text and tool calls up through your last tool call once your reply finishes; write a self-contained final answer after your last tool call.\n\nTools with `mindroom_output_path` accept an optional workspace-relative file path to save full supported output and return a receipt.",
           "role": "system"
         },
         {
@@ -779,9 +681,7 @@
                   {
                     "type": "null"
                   }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+                ]
               }
             },
             "required": [

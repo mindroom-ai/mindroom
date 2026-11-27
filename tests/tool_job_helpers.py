@@ -69,10 +69,11 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     _parse_saved_job,
 )
-from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.conftest import FakeApprovalTransport, bind_runtime_paths, test_runtime_paths

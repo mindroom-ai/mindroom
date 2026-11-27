@@ -133,7 +133,7 @@ class ShellOutputCapture:
         return json.dumps(receipt)
 
     def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
-        # Keep the supervisor's ordinary startup independent of Agno imports.
+        # Keep the supervisor's ordinary startup independent of tool-output imports.
         from mindroom.tool_system.output_files import (  # noqa: PLC0415
             ToolOutputFilePolicy,
             finalize_tool_output_file,

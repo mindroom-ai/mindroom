@@ -33,6 +33,9 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 ENCRYPTED_REPLAY_REJECTED = "encrypted_replay_rejected"
 # The marker of a stream that went silent past the idle timeout and was retried once.
 STREAM_STALLED = "stream_stalled"
+# The marker of a TLS certificate verification error: never retried on the same route, not a host outage, but
+# another route in a fallback chain can still answer.
+TLS_CERTIFICATE_ERROR = "tls_certificate_error"
 # The text of a safeguard refusal, which error runs store.
 MODEL_SAFEGUARD_REFUSAL_MESSAGE = "The model's safeguards refused the response"
 
@@ -179,7 +182,7 @@ def is_transient_status(status: int | None) -> bool:
 
 def fails_over(error: ProviderError) -> bool:
     """Return whether ``error`` means the provider cannot serve now, so another model may answer the request."""
-    if error.code in {QUOTA_EXHAUSTED, TOKENS_PER_MINUTE}:
+    if error.code in {QUOTA_EXHAUSTED, TOKENS_PER_MINUTE, TLS_CERTIFICATE_ERROR}:
         return True
     if isinstance(error, ContextWindowExceeded):
         return False
@@ -203,6 +206,7 @@ __all__ = [
     "QUOTA_EXHAUSTED",
     "SAFEGUARD_REFUSAL",
     "STREAM_STALLED",
+    "TLS_CERTIFICATE_ERROR",
     "TOKENS_PER_MINUTE",
     "TRANSPORT_TIMEOUT",
     "AuthenticationFailed",

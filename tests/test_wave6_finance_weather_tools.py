@@ -14,8 +14,8 @@ import yfinance as yf
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path

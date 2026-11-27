@@ -729,7 +729,7 @@ def member_tool_scope(member: str, model_name: str) -> Iterator[None]:
 def tool_runtime_model_context(model_name: str | None) -> Iterator[None]:
     """Bind ``model_name`` as the ambient context's ``active_model_name`` for one tool call; None binds nothing.
 
-    Agno-authored tools and plugins read the model a call runs for there.
+    Tools and plugins read the model a call runs for there.
     """
     context = get_tool_runtime_context()
     if model_name is None or context is None:

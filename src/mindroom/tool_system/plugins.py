@@ -1224,8 +1224,9 @@ def _load_plugin_module(
         sys.modules.pop(module_name, None)
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
-        msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
-        logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
+        detail = plugin_imports.agno_migration_error(exc) or exc
+        msg = f"Plugin {kind} module execution failed for {module_path}: {detail}"
+        logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(detail))
         raise plugin_imports.PluginValidationError(msg) from exc
     finally:
         if canonical:

@@ -13,6 +13,10 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.custom_tools.calculator import CalculatorTools
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.custom_tools.job import JobTools
 from mindroom.llm.provider import ToolSpec
 from mindroom.llm.runs import RunStatus
@@ -20,15 +24,17 @@ from mindroom.participation import ParticipationGate
 from mindroom.shell import execution as shell_execution
 from mindroom.tool_jobs.background_after import background_after_schema
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_jobs.execution import project_definitions, wait_mode
+from mindroom.tool_jobs.execution import approval_can_run_as_job, offered_definitions, project_definitions, wait_mode
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tools.shell import shell_tools
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
@@ -439,7 +445,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
 class _ConnectedTools(Toolkit):
     """A toolkit the SDK connects for one run, like Postgres."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def __init__(self) -> None:
         super().__init__(name="connected", tools=[self.query])
@@ -548,5 +554,74 @@ async def test_run_connected_toolkits_run_inline_without_wait_metadata(tmp_path:
         assert results["stale"].is_error
         assert "background_after" in str(results["stale"].result)
         assert await runtime.list_jobs(owner=owner, depth=0) == []
+    finally:
+        await runtime.shutdown()
+
+
+def test_background_after_schema_omits_default_description_and_formats_caps(tmp_path: Path) -> None:
+    """Only tools with a finite default wait budget emit a concise description; anyOf stays nullable."""
+    assert background_after_schema(None) == {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]}
+    assert background_after_schema(120.0) == {
+        "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+        "description": "Default: 120s.",
+    }
+    assert background_after_schema(0.0) == {
+        "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
+        "description": "Default: 0s (backgrounds immediately).",
+    }
+    assert "wait time in seconds" in (JobTools(_runtime_paths(tmp_path)).instructions or "")
+
+
+@pytest.mark.asyncio
+async def test_offer_background_after_false_hides_schema_while_keeping_job_gate_intact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opted-out built-ins omit background_after from definitions while keeping ToolGate.JOB approval and runtime jobs."""
+    context, runtime = await _managed_context(tmp_path)
+    calc = CalculatorTools()
+    fs = FilesystemTools(base_dir=str(tmp_path))
+    dyn = DynamicToolsToolkit(deferred_toolkits=lambda: ())
+    att = AttachmentTools(tool_output_workspace_root=tmp_path)
+    shell = shell_tools()(base_dir=tmp_path, runtime_paths=context.runtime_paths, allow_without_worker=True)
+    job_tools = {
+        **toolkit_job_tools(calc, authored_name="calculator"),
+        **toolkit_job_tools(fs, authored_name="filesystem"),
+        **toolkit_job_tools(dyn, authored_name="dynamic_tools"),
+        **toolkit_job_tools(att, authored_name="attachments"),
+        **toolkit_job_tools(shell, authored_name="shell"),
+    }
+    # Opting out of schema projection must never disable ToolGate.JOB async approvals or managed execution.
+    assert approval_can_run_as_job(job_tools["add"].function, calc)
+    assert approval_can_run_as_job(job_tools["write_file"].function, fs)
+    gated_add = replace(job_tools["add"], function=replace(job_tools["add"].function, gate=ToolGate.JOB))
+    job_tools["add"] = gated_add
+
+    actor = job_actor(*job_tools.values())
+    raw_defs = tuple(tool.function.definition() for tool in job_tools.values())
+    try:
+        async with execution_resources():
+            with tool_runtime_context(context):
+                projected = {defn.name: defn for defn in offered_definitions(actor, raw_defs)}
+                assert wait_mode(gated_add, depth=0, context=context) == "managed"
+        for hidden in ("add", "write_file", "read_file", "tool_search", "list_attachments"):
+            assert "background_after" not in projected[hidden].parameters["properties"]
+        for shown in ("grep", "find_files", "call_tool", "get_attachment", "run_shell_command"):
+            assert "background_after" in projected[shown].parameters["properties"]
+            assert "background_after" not in projected[shown].parameters.get("required", [])
+
+        approved_calls: list[str] = []
+
+        async def approve(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
+            approved_calls.append("approved")
+            return True, None
+
+        monkeypatch.setattr("mindroom.tool_jobs.execution.ask_tool_call_approval", approve)
+        model = ScriptedModel([calls(tool_call("add", "gated-add", a=2, b=3)), answer("done")])
+        async with execution_resources():
+            with tool_runtime_context(context):
+                record = await run_job_turn(actor, model)
+        assert approved_calls == ["approved"]
+        assert record.tools[0].result == '{"operation": "addition", "result": 5.0}'
     finally:
         await runtime.shutdown()

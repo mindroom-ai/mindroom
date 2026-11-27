@@ -6,8 +6,6 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, NO_HOOKS, run_model_loop
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
@@ -15,8 +13,9 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import RunMetrics
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence

@@ -9,9 +9,9 @@ from mindroom.agents import build_agent_toolkit
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.terminal.client import WorkerTerminals
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkits import toolkit_function, toolkit_worker_stand_ins
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

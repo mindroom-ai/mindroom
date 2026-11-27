@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 class OAuthConnectionTools(Toolkit):
     """Issue browser-confirmed resets for OAuth connections the requester may manage."""
 
+    offer_output_path = False
+
     def __init__(self, runtime_paths: RuntimePaths, *, worker_target: ResolvedWorkerTarget | None) -> None:
         self._runtime_paths = runtime_paths
         self._worker_target = worker_target

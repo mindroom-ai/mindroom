@@ -24,8 +24,8 @@ Review the code at @$ARGUMENTS and ensure it follows MindRoom's core philosophy 
 
 ### 1. Remove Obsolete Compatibility
 - Remove unjustified fallback paths, compatibility shims, version checks, and deprecated methods
-- Preserve required boundaries under the [Legacy Compatibility Policy](../../AGENTS.md#legacy-compatibility-policy) and [Agno Compatibility Policy](../../AGENTS.md#agno-compatibility-policy)
-- Check documented provenance, removal criteria, and regression coverage before deleting a boundary; remove Agno workarounds only when the relevant behavioral tests pass without them
+- Preserve required boundaries under the [Legacy Compatibility Policy](../../AGENTS.md#legacy-compatibility-policy)
+- Check documented provenance, removal criteria, and regression coverage before deleting a boundary
 - One way to do things, not multiple
 
 ### 2. Radical Simplicity

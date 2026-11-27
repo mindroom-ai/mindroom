@@ -57,6 +57,7 @@ def register_tool_with_metadata(
     supports_toolkit_filters: bool = True,
 ) -> Callable[[Callable[[], type]], Callable[[], type]]:
     """Register a tool factory and its declarative metadata."""
+    del worker_inert_agent_functions  # Retained as a no-op parameter for plugin API v1.x compatibility.
     if isinstance(action_scoped_grants, str):
         msg = "action_scoped_grants must be a sequence of function names, not a string"
         raise TypeError(msg)
@@ -100,7 +101,6 @@ def register_tool_with_metadata(
             approval_aliases=dict(approval_aliases or {}),
             action_scoped_grants=tuple(action_scoped_grants),
             retired_functions=dict(retired_functions or {}),
-            worker_inert_agent_functions=worker_inert_agent_functions,
             managed_init_args=managed_init_args,
             supports_toolkit_filters=supports_toolkit_filters,
             factory=factory,

@@ -24,10 +24,10 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed, toolkit_authority
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_tool_offer import _identity, _runtime_paths
 from tests.turn_model_helpers import turn_model

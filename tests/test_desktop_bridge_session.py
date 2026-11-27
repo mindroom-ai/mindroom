@@ -34,7 +34,12 @@ from mindroom.desktop.native_config import (
     NativeFilesConfig,
     NativeShellConfig,
 )
-from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE, DesktopCommand, DesktopResponse
+from mindroom.desktop.protocol import (
+    DESKTOP_COMMAND_EVENT_TYPE,
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    DesktopCommand,
+    DesktopResponse,
+)
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 from tests.desktop_helpers import (
@@ -568,7 +573,12 @@ async def test_shell_first_start_succeeds_without_gui_permissions(
         shell_resp = await run_command(
             "run_shell",
             1,
-            {"command": "printf ok", "cwd": str(tmp_path), "timeout_seconds": 5},
+            {
+                "command": "printf ok",
+                "cwd": str(tmp_path),
+                "timeout_seconds": 5,
+                "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+            },
         )
         assert shell_resp.ok
         assert shell_resp.result["output"] == "ok"
@@ -583,7 +593,12 @@ async def test_shell_first_start_succeeds_without_gui_permissions(
         after_resp = await run_command(
             "run_shell",
             4,
-            {"command": "printf still-live", "cwd": str(tmp_path), "timeout_seconds": 5},
+            {
+                "command": "printf still-live",
+                "cwd": str(tmp_path),
+                "timeout_seconds": 5,
+                "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+            },
         )
         assert after_resp.ok
         assert after_resp.result["output"] == "still-live"

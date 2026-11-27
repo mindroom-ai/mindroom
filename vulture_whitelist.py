@@ -504,3 +504,5 @@ _._auth_configs  # Docker APIClient auth config pinned empty so pull/build never
 _.rest_client  # Daytona ApiClient REST pool rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
 _._toolbox_api_client  # Daytona SDK toolbox client rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
 _.register_event_source  # PluginLifecycle method called by plugins (src/mindroom/plugin_lifecycle.py)
+_.revised_prompt  # Media dataclass field serialized via fields(self) (src/mindroom/llm/media.py)
+_.alt_text  # Image dataclass field serialized via fields(self) (src/mindroom/llm/media.py)

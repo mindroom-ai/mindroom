@@ -147,8 +147,7 @@
                     {
                       "type": "null"
                     }
-                  ],
-                  "description": "Seconds before continuing in background (0 = immediately; omit/null = wait)."
+                  ]
                 }
               },
               "required": [

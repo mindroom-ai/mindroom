@@ -192,8 +192,6 @@ class ToolMetadata:
     action_scoped_grants: tuple[str, ...] = ()
     # Retired function names mapped to their replacement function name, for fail-closed approval rule validation.
     retired_functions: Mapping[str, str] = field(default_factory=dict)
-    # SDK functions that accept, but never use, an injected Agent or Team.
-    worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None

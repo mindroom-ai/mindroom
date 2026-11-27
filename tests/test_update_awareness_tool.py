@@ -16,7 +16,7 @@ from mindroom.custom_tools.update_awareness import (
     _MindRoomReleaseStatus,
     _ReleaseLookupError,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -11186,7 +11186,7 @@ Set up and run the bridge from the [macOS app](https://docs.mindroom.chat/instal
   On Windows, `mindroom desktop access` refuses to save them and `mindroom desktop run` refuses to start while either is saved; run `mindroom desktop access --clear-folders --no-shell` to turn them off.
 - **Signed-in browser profile** (optional): Node.js 18 or newer, Chrome or Brave, and the official Playwright MCP Bridge extension in the browser profile MindRoom will use.
 
-Application access needs an unlocked graphical session; folder and shell access also work on a headless computer when no applications are selected.
+Application access needs an unlocked graphical session; folder and shell access also work on a headless computer or when macOS display mapping is unavailable (for example, with the lid closed).
 
 ## 1. Configure the Agent
 
@@ -11205,7 +11205,7 @@ agents:
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
+| `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_desktop_shell` command starts always wait up to 120 seconds so the person at the computer has time to decide. |
 
 By default, `defaults.desktop_pairing` is `self_service`, so authorized users can pair their computer with any concrete agent without statically listing `desktop` in `tools` (the tool activates automatically once paired).
 Set `defaults.desktop_pairing: explicit_only` to restrict pairing to agents that explicitly configure `desktop`, or `disabled` to refuse new pairings while still allowing existing pairings to disconnect.
@@ -11450,7 +11450,7 @@ The Matrix homeserver sees routing metadata, timing, and encrypted media size, b
 Accessibility state, screenshots, file contents, and command output become model input in the cloud, so your model provider receives them.
 Accessibility data can include labels, document text, and form values not obvious from the screenshot; macOS secure text fields are suppressed and cannot be changed semantically.
 Screenshots and other results can remain in agent session storage, tool traces, and automatically saved workspace files, so protect and expire that storage according to the sensitivity of the controlled applications.
-Action arguments, shell commands, and paths appear in model context, approval cards, and Matrix tool traces, so never use `set_value`, `type_text`, or `run_shell` with passwords, tokens, recovery codes, or other secrets.
+Action arguments, shell commands, and paths appear in model context, approval cards, and Matrix tool traces, so never use `set_value`, `type_text`, or `run_desktop_shell` with passwords, tokens, recovery codes, or other secrets.
 Screenshots, labels, web content, file contents, and command output are untrusted data and are never user authorization or instructions.
 Locally, the bridge keeps command arguments and outcomes, including shell commands, file text, and inline shell output, in the owner-only `<storage>/desktop_bridge/commands.sqlite3`; it stores no plaintext screenshots.
 
@@ -11501,17 +11501,20 @@ A saved folder that no longer exists makes startup fail with `Cannot open local 
 
 Enable shell requests locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`.
 
-- `run_shell` runs `command`, up to 8,192 characters, with `/bin/sh -c` in `cwd`, an absolute local directory that defaults to the home directory.
-  `timeout_seconds`, from 1 to 60 with a default of 30, is how long the call waits for the command to finish before returning a handle.
-- `check_shell` returns a handle's newest output while it runs, and its complete output and exit code once it finishes.
-  Pass `offset=0` to read a running command's output from the beginning, then continue from the returned `next_offset`.
-- `kill_shell` asks a handle's command to terminate, or kills it immediately with `force=true`.
+The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, cwd=None)` alongside `desktop(...)`:
+
+- `args` takes a shell command string or an argv list of strings (converted with POSIX shell quoting), up to 8,192 characters, and runs via `/bin/sh -c` in optional absolute `cwd` (defaulting to the local home directory).
+- `tail` returns the last `tail` lines of stdout then stderr (all stderr on non-zero exit), matching `run_shell_command`.
+- `timeout` stops the remote command after N seconds and returns output so far; calls without `background_after` wait up to 120 seconds inline and then continue as a managed `job` (with live progress updates and `job cancel` stopping the remote command).
+- `mindroom_output_path` saves the full command output into a workspace file on completion (stopped or truncated commands save no file).
+
+`run_desktop_shell` automatically tracks long-running commands, transfers large output over encrypted attachments, and recovers uncertain replies without re-running the command.
 
 Commands or working directories padded with long runs of whitespace, invisible characters, blank lines, or combining marks are refused before approval, because padding could hide part of the request from the approver.
 
 ### Local Approval
 
-Every `run_shell` request waits for a decision from the person at the computer, on the macOS app's approval card or at the `mindroom desktop run` terminal prompt, unless auto-approval is active.
+Every `run_desktop_shell` request waits for a decision from the person at the computer, on the macOS app's approval card or at the `mindroom desktop run` terminal prompt, unless auto-approval is active.
 The approver sees the exact command, working directory, requester, agent, expiry, and command length, with invisible and control characters escaped and a warning for look-alike non-ASCII characters.
 The choices are reject, approve once, or approve and also auto-approve later commands for 5, 15, or 60 minutes or until shell access is revoked or the bridge stops.
 A chat message, the agent, or cloud configuration cannot approve a command or grant auto-approval.
@@ -11526,14 +11529,14 @@ Revoking shell access or stopping the bridge also rejects a waiting request and 
 
 ### Handles
 
-A command still running after its inline wait keeps running as a handle; the agent polls it with `check_shell` and stops it with `kill_shell`.
-Handles belong to the requester and agent that started them, and checking or killing your own handle needs no approval.
+A command still running after its short initial wait continues on the computer as a bridge handle managed automatically by `run_desktop_shell` (and by the enclosing managed `job` once it runs past 120 seconds).
+Handles belong to the requester and agent that started them, and checking or stopping your own handle needs no approval.
 The macOS app lists every handle with its requester, agent, command preview, elapsed time, and state, and can kill running ones.
 
 The bridge keeps at most 16 handles; a new command drops the handle that finished longest ago, and is refused if all 16 are still running.
 Finished output is kept until it is read in full or dropped for a newer command.
-Handles do not survive revoking shell access or a bridge restart, so a later `check_shell` reports an unknown handle.
-When a command finishes, other processes it started in the background, such as children started with `&`, are terminated, so keep long-running work in the foreground and let it continue as a handle.
+Handles do not survive revoking shell access or a bridge restart.
+When a command finishes, other processes it started in the background, such as children started with `&`, are terminated, so keep long-running work in the foreground.
 
 ### Environment and Output
 
@@ -11547,15 +11550,13 @@ The bridge's own credentials are never passed to commands.
 
 Each call runs in a fresh non-interactive `/bin/sh`, so directory changes and variables never carry over.
 Commands have no terminal and read standard input from `/dev/null`, so they cannot answer password prompts.
-Standard error is merged into standard output; redirect it with `2>file` to keep it separate.
-
-The bridge captures up to 10 MiB of output per command and reports `output_truncated: true` when more was dropped.
+Standard output and standard error are captured separately (each up to 10 MiB per command).
 Large output arrives as an encrypted Matrix attachment that the cloud tool downloads within its `timeout_seconds`.
 MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) apply to large results.
 
 ## Uncertain Outcomes
 
-A timeout returns the original `request_id` and an unknown outcome; the action may still be queued, may have run, or, for `run_shell`, may still be waiting for approval or running.
+A timeout returns the original `request_id` and an unknown outcome; the action may still be queued or may have run (and `run_desktop_shell` automatically recovers uncertain transport replies via `request_status` without replaying commands).
 Call `desktop(action="request_status", request_id="...")` to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
 Only the requester and agent that sent the action can read its outcome; other callers get `not_found`, and `not_found` does not prove that the action never ran.
 Do not repeat an uncertain action automatically; observe current state first, because some apps change their UI and still report an error.
@@ -11601,7 +11602,8 @@ tool_approval:
 
 Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
 Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
-Adding `run_shell` to the set adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule.
+Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 
@@ -11838,7 +11840,8 @@ Deployments that route `shell` to Docker or Kubernetes workers already isolate c
 When running `shell` directly in the MindRoom process on a Linux systemd host (`defaults.allow_shell_without_worker: true`), spawned commands inherit MindRoom's own service cgroup by default, so heavy builds or test suites can compete with MindRoom for RAM and swap.
 
 To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
-MindRoom probes `systemd-run --user --scope` together with `env` once per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS)` and caches the result for the process lifetime, failing open when unavailable (including on older systemd releases without `--expand-environment=no`).
+MindRoom checks the active `systemd --user` manager generation (`systemctl --user show`) and caches the `systemd-run --user --scope` + `env` probe per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, manager generation)`.
+It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers.
 When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
 
 Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
@@ -19864,11 +19867,11 @@ Annotations are read when an agent is built, so import the types they name at ru
 An agent leaves out a toolkit with a refused parameter or an annotation that does not resolve, and logs `Could not load tool for agent construction`.
 `mindroom plugins check` reports both for the `@tool` methods of a `mindroom.plugin_api.Toolkit` class, naming the tool and function.
 `instructions` is guidance on the toolkit as a whole: it appears in the system prompt of every agent that offers one of the toolkit's functions.
-A factory may also return an Agno toolkit class, for example to offer one of Agno's own toolkits.
 
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
 Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
+To return media alongside text, return a `ToolValue` carrying `Image`, `Audio`, `Video`, or `File` values imported from `mindroom.plugin_api` (a plugin that imports `Image`, `Audio`, `Video`, or `File` states `"mindroom_plugin_api": "1.37"`).
 
 Assign the tool to agents like any built-in tool:
 
@@ -19928,15 +19931,14 @@ See [Security Posture](https://docs.mindroom.chat/architecture/security-posture/
 | `executes_code` | bool | `False` | The tool runs arbitrary programs; MindRoom warns at startup when such a tool runs in a worker while the same agent keeps unconfined tools in the primary process |
 | `workspace_writers` | tuple of strings | `()` | The functions that change files in the agent's workspace, by writing them or by running code there, which decide `files` as [Workspace Files](https://docs.mindroom.chat/workspace-files/#who-may-open-and-change-a-workspace) describes; a tool that names none counts every function when it sets `executes_code`; a plugin that passes it states `"mindroom_plugin_api": "1.19"` |
 | `supports_toolkit_filters` | bool | `True` | Accept the [`include_tools` and `exclude_tools`](https://docs.mindroom.chat/tools/#filtering-toolkit-functions) inline overrides |
-| `worker_inert_agent_functions` | tuple of strings | `()` | Agno toolkit functions whose injected `agent` parameter is unused and can receive `None` in a worker |
+| `worker_inert_agent_functions` | tuple of strings | `()` | Legacy metadata field retained for compatibility; native tool functions cannot accept an `agent` parameter |
 | `approval_aliases` | dict of function name to `ApprovalAlias` | `None` | Functions whose calls another function's approval rules judge too (see [Approval aliases](#approval-aliases)) |
 | `action_scoped_grants` | sequence of strings | `()` | Action-dispatched function names whose timed approval grants bind to `(tool_name, action)` instead of only `tool_name` (and whose scheduled calls never offer approving any arguments); a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 | `retired_functions` | dict of retired name to replacement name | `None` | Retired function names mapped to their replacement function name so config validation fails closed when `tool_approval.rules` still decides a retired name differently from its replacement; a plugin that passes it states `"mindroom_plugin_api": "1.35"` |
 
 Set `requires_primary_runtime=True` when the toolkit depends on primary-process services, keeps state or an open resource between calls, or needs what [`current_call()` or `get_tool_runtime_context()`](#tool-runtime-context) returns, since both return `None` in a worker.
 A worker builds a fresh toolkit for every call and accepts only JSON values and paths as arguments.
-An Agno toolkit function that reads its injected `agent`, `team`, or `run_context` needs the primary runtime too.
-If it accepts an `agent` parameter but never uses it, list it in `worker_inert_agent_functions` instead; never do this for functions that depend on agent identity, configuration, or session state.
+Tool functions cannot accept reserved framework parameters (`agent`, `team`, `run_context`); read call context through `current_call()` instead.
 `requires_room_context` and `requires_primary_runtime` describe where a tool can run; they do not grant or replace tool authorization.
 
 ### Approval aliases
@@ -20610,7 +20612,6 @@ See [Atlassian Cloud](https://docs.mindroom.chat/tools/atlassian/#add-more-conne
 ## MCP servers
 
 Configure MCP servers under `mcp_servers:` in `config.yaml` as described in [MCP](https://docs.mindroom.chat/mcp/).
-MindRoom does not run plugin toolkits that subclass Agno `MCPTools`: `mindroom plugins check` rejects them once their dependencies are installed, and agents skip them with a warning that names `mcp_servers:`.
 
 ## HTTP routes
 
@@ -21126,7 +21127,7 @@ A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its ma
 
 ## Event sources
 
-A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.36`).
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
 
 Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
 Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
@@ -23607,7 +23608,6 @@ Headless runs send MindRoom's log records to Python's `logging` module, under th
 Until your program configures `logging`, Python prints only warnings and errors, on stderr.
 To see more, configure it, for example with `logging.basicConfig(level=logging.INFO)`; `DEBUG` records include the full prompts sent to the model.
 Your program's structlog configuration applies to its own records, not to MindRoom's.
-Agno, the tool library MindRoom uses, prints its own log lines to stdout; `logging.getLogger("agno").handlers.clear()` after importing `mindroom.headless` keeps them off stdout and leaves only its warnings and errors, on stderr.
 
 # MCP Gateway
 

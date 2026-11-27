@@ -4,7 +4,7 @@ A toolkit groups the functions an agent is offered under one name, with instruct
 offers any of them. Each function's model-facing description and parameter schema come from its docstring and
 annotations (``tool_schema``), and every parameter is the model's to fill: a function reads the call it runs for
 through ``current_call()`` instead of taking it as a parameter.
-The module imports no Agno code, so plugin code that authors tools through ``mindroom.plugin_api`` loads none.
+The module keeps its import surface lean so plugin code importing ``mindroom.plugin_api`` stays fast.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -34,6 +33,8 @@ class _ToolMark:
     description: str | None
     # The schema ``passthrough_tool`` gave a function that takes the model's arguments as sent.
     parameters: Mapping[str, Any] | None = None
+    offer_background_after: bool | None = None
+    offer_output_path: bool | None = None
 
 
 @overload
@@ -41,7 +42,13 @@ def tool[F](function: F, /) -> F: ...
 
 
 @overload
-def tool[F](*, name: str | None = None, description: str | None = None) -> Callable[[F], F]: ...
+def tool[F](
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
+) -> Callable[[F], F]: ...
 
 
 def tool[F](
@@ -50,15 +57,27 @@ def tool[F](
     *,
     name: str | None = None,
     description: str | None = None,
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
 ) -> F | Callable[[F], F]:
     """Mark a method as one of its toolkit's functions and return it unchanged, so it stays directly callable.
 
     ``name`` replaces the function's own name for the model, and ``description`` its docstring's summary and body.
-    A static or class method may be marked before or after it becomes one.
+    ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
+    parameters in the schema. A static or class method may be marked before or after it becomes one.
     """
 
     def mark(marked: F) -> F:
-        setattr(_function_of(marked), _TOOL_MARK, _ToolMark(name=name, description=description))
+        setattr(
+            _function_of(marked),
+            _TOOL_MARK,
+            _ToolMark(
+                name=name,
+                description=description,
+                offer_background_after=offer_background_after,
+                offer_output_path=offer_output_path,
+            ),
+        )
         return marked
 
     return mark if function is None else mark(function)
@@ -69,15 +88,29 @@ def passthrough_tool[F](
     name: str | None = None,
     description: str | None = None,
     parameters: Mapping[str, Any],
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
 ) -> Callable[[F], F]:
     """Mark a function the model calls with the schema ``parameters`` and that takes the model's arguments as sent.
 
     Its arguments are not validated against its annotations, as an MCP server's tools take theirs, so its body checks
     them. ``name`` replaces the function's own name, and ``description`` is what the model reads of it.
+    ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
+    parameters in the schema.
     """
 
     def mark(marked: F) -> F:
-        setattr(_function_of(marked), _TOOL_MARK, _ToolMark(name=name, description=description, parameters=parameters))
+        setattr(
+            _function_of(marked),
+            _TOOL_MARK,
+            _ToolMark(
+                name=name,
+                description=description,
+                parameters=parameters,
+                offer_background_after=offer_background_after,
+                offer_output_path=offer_output_path,
+            ),
+        )
         return marked
 
     return mark
@@ -122,6 +155,18 @@ def passthrough_parameters(function: Callable[..., Any]) -> Mapping[str, Any] | 
     return None if mark is None else mark.parameters
 
 
+def authored_offer_background_after(function: Callable[..., Any]) -> bool | None:
+    """Return whether ``@tool`` chose to offer ``background_after`` on ``function``; None inherits its toolkit's default."""
+    mark = _mark(function)
+    return None if mark is None else mark.offer_background_after
+
+
+def authored_offer_output_path(function: Callable[..., Any]) -> bool | None:
+    """Return whether ``@tool`` chose to offer ``mindroom_output_path`` on ``function``; None inherits its toolkit's default."""
+    mark = _mark(function)
+    return None if mark is None else mark.offer_output_path
+
+
 def _mark(function: object) -> _ToolMark | None:
     mark = getattr(function, _TOOL_MARK, None)
     return mark if isinstance(mark, _ToolMark) else None
@@ -147,6 +192,8 @@ class Toolkit:
     name: str = "toolkit"
     instructions: str | None = None
     requires_connect: bool = False
+    offer_background_after: bool = True
+    offer_output_path: bool = True
 
     def __init__(
         self,
@@ -217,7 +264,7 @@ class CurrentCall:
 
 def current_call() -> CurrentCall | None:
     """Return the tool call this task is running; None outside one, such as when code calls a tool method directly."""
-    # Deferred because invocation loads Agno for vendor toolkits, which plugin code importing this module must not;
+    # Deferred to keep plugin_api's import surface free of invocation and schema-generation dependencies;
     # any code running inside a tool call has loaded it already.
     from mindroom.tool_system.invocation import current_tool_call  # noqa: PLC0415
 
@@ -234,17 +281,17 @@ def current_call() -> CurrentCall | None:
     )
 
 
-def toolkit_functions(toolkit: AnyToolkit) -> dict[str, Callable[..., Any]]:
+def toolkit_functions(toolkit: Toolkit) -> dict[str, Callable[..., Any]]:
     """Return the callables of ``toolkit``'s functions by name, one per name, as an agent's run calls them.
 
     Each validates its arguments; for a toolkit ``get_tool_by_name`` built, each also handles ``mindroom_output_path``
-    and sends a call routed to a worker there. For an Agno toolkit, a function's async variant wins where it has one.
+    and sends a call routed to a worker there.
     A call through one inside an async tool shares that call's ownership of the synchronous work it starts, so the
     tool may call them any number of times, at once too; a tool that calls them must be async.
     """
-    # Deferred because the adapter loads Agno for vendor toolkits, which plugin code importing this module must not;
+    # Deferred to keep authoring and plugin_api free of schema-generation imports at import time;
     # code calling a toolkit's functions runs inside MindRoom, which has loaded it already.
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
 
     adapted = adapt_toolkit(toolkit)
     return {function.name: function.entrypoint for function in adapted.functions}
@@ -254,6 +301,8 @@ __all__ = [
     "CurrentCall",
     "Toolkit",
     "authored_description",
+    "authored_offer_background_after",
+    "authored_offer_output_path",
     "current_call",
     "passthrough_parameters",
     "passthrough_tool",

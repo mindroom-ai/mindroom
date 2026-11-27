@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
-PLUGIN_API_VERSION = (1, 36)
+PLUGIN_API_VERSION = (1, 38)
 _PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 # One DNS label, as a plugin origin's host takes its plugin's name and a label the plugin picks.
@@ -38,6 +38,27 @@ _PreparedPluginModule = tuple[ModuleType, dict[str, ModuleType | None]] | None
 
 class PluginValidationError(ValueError):
     """Raised when plugin config or plugin runtime validation fails for authored config."""
+
+
+def agno_migration_error(error: BaseException, *, tool_name: str | None = None) -> ValueError | None:
+    """Return an actionable migration error when ``error`` or its cause is a missing ``agno`` import."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            isinstance(current, ModuleNotFoundError)
+            and current.name is not None
+            and (current.name == "agno" or current.name.startswith("agno."))
+        ):
+            subject = f"Tool {tool_name!r}" if tool_name is not None else "Plugin"
+            msg = (
+                f"{subject} imports removed dependency {current.name!r}; "
+                "MindRoom removed Agno support — migrate this plugin to mindroom.plugin_api.Toolkit"
+            )
+            return ValueError(msg)
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return None
 
 
 @dataclass(frozen=True)

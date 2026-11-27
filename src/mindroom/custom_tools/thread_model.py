@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 class ThreadModelTools(Toolkit):
     """Tools for switching the model used by the requester's agents and teams in the current Matrix thread."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="thread_model",
@@ -33,9 +36,11 @@ class ThreadModelTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Mark the model switch as able to stop the run, which a switch for the current response does."""
+        """Mark the model switch as able to stop the run, and allow redirecting the model catalog."""
         if function.name == "switch_thread_model":
             return replace(function, may_stop_run=True)
+        if function.name == "list_models":
+            return replace(function, offer_output_path=True)
         return function
 
     @staticmethod

@@ -16,7 +16,6 @@ from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_p
 from mindroom.oauth.credential_binding import oauth_credential_binding
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.registry import oauth_provider_registry
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -28,6 +27,7 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.atlassian_test_support import (
     ALICE,

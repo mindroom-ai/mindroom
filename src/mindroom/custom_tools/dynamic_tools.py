@@ -54,7 +54,7 @@ class DynamicToolsToolkit(Toolkit):
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("dynamic_tools", status, **kwargs)
 
-    @tool
+    @tool(offer_background_after=False)
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
         """Search deferred functions by name or keywords and return their full definitions, or list them.
 
@@ -83,7 +83,9 @@ class DynamicToolsToolkit(Toolkit):
         matches = scored[: max(1, min(max_results, _MAX_RESULTS_LIMIT))]
         instructions = _domain_instructions(deferred for _score, deferred, _definition in matches)
         payload: dict[str, object] = {
-            "matches": [_match(deferred, definition) for _score, deferred, definition in matches],
+            "matches": [
+                {**definition, "toolkit": deferred.deferral.domain_name} for _score, deferred, definition in matches
+            ],
             "usage": "Call a match with call_tool(name, arguments), passing arguments as a JSON object.",
         }
         if instructions:
@@ -165,13 +167,6 @@ def _domain_instructions(matched: Iterable[DeferredToolkit]) -> dict[str, str]:
         if instructions := deferred.deferral.instructions:
             texts.setdefault(deferred.deferral.domain_name, {})[instructions] = None
     return {domain: "\n\n".join(domain_texts) for domain, domain_texts in texts.items()}
-
-
-def _match(deferred: DeferredToolkit, definition: dict[str, Any]) -> dict[str, Any]:
-    match = {**definition, "toolkit": deferred.deferral.domain_name}
-    if function_instructions := deferred.deferral.function_instructions.get(definition["name"]):
-        match["instructions"] = function_instructions
-    return match
 
 
 def _function_definitions(deferred: DeferredToolkit) -> list[dict[str, Any]]:

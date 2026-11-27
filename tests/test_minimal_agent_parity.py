@@ -18,8 +18,6 @@ from uuid import uuid4
 import nio
 import pytest
 import yaml
-from agno.run import RunContext  # noqa: TC002 - injected tool argument
-from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
 from mindroom import agents, ai
@@ -55,12 +53,14 @@ from mindroom.response_turn import (
 )
 from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import answered_calls
@@ -154,26 +154,28 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
     effects = []
     hooks = []
 
-    def effect(value, run_context):
+    def effect(value):
         context = get_tool_runtime_context()
         identity = current_execution_identity()
         effects.append((value, context.agent_name, context.requester_id, context.target, identity))
-        run_context.session_state["parity"] = value
+        call = current_call()
+        assert call is not None
+        call.session_state["parity"] = value
 
-    def sync(value: int, run_context: RunContext) -> str:
-        effect(value, run_context)
+    def sync(value: int) -> str:
+        effect(value)
         return f"result:{value}"
 
-    async def asynchronous(value: int, run_context: RunContext) -> str:
-        return sync(value, run_context)
+    async def asynchronous(value: int) -> str:
+        return sync(value)
 
-    def generator(value: int, run_context: RunContext) -> Iterator[str]:
-        effect(value, run_context)
+    def generator(value: int) -> Iterator[str]:
+        effect(value)
         yield "result:"
         yield str(value)
 
-    async def async_generator(value: int, run_context: RunContext) -> AsyncIterator[str]:
-        effect(value, run_context)
+    async def async_generator(value: int) -> AsyncIterator[str]:
+        effect(value)
         yield "result:"
         yield str(value)
 
@@ -690,9 +692,12 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     def build(name, *args, **kwargs):
         if name != "calculator":
             return original(name, *args, **kwargs)
-        toolkit = Toolkit(name="calculator", tools=[action])
-        toolkit.get_async_functions()["action"].requires_confirmation = True
-        return toolkit
+
+        class ConfirmCalculator(Toolkit):
+            def offered_function(self, function: ToolFunction) -> ToolFunction:
+                return replace(function, gate=ToolGate.CONFIRM)
+
+        return ConfirmCalculator(name="calculator", tools=[action])
 
     async def approve(paused):
         nonlocal current_config, function_allowed

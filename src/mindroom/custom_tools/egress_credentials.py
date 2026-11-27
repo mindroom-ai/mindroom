@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from mindroom.egress_broker.key_access import ServiceKeyRefusal
     from mindroom.secret_requests import SecretRequestOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -201,6 +202,8 @@ def _proposed_service(
 class EgressCredentialsTools(Toolkit):
     """Tool that lists the egress broker services, whether this agent has a key or account for each, and asks for keys."""
 
+    offer_output_path = False
+
     def __init__(
         self,
         *,
@@ -210,6 +213,12 @@ class EgressCredentialsTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._worker_target = worker_target
         super().__init__(name="egress_credentials", tools=[self.list_egress_credentials, self.request_secret])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit wait budgets from fast credential listing while keeping them on interactive secret requests."""
+        if function.name == "list_egress_credentials":
+            return replace(function, offer_background_after=False)
+        return function
 
     def list_egress_credentials(self) -> str:
         """List Agent Keys egress services available to this agent, credential status, and `manage_url`.

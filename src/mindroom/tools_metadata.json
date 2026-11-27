@@ -8120,7 +8120,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "desktop"
+        "desktop",
+        "run_desktop_shell"
       ],
       "helper_text": "Ask the requester to send `/desktop setup` in a private Matrix room containing only them and one Desktop-enabled agent.",
       "icon": "MonitorUp",
