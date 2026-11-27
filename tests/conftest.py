@@ -203,7 +203,7 @@ from mindroom.session_storage.store import (
     runs_without,
 )
 from mindroom.shell.execution import _probe_systemd_slice_launcher
-from mindroom.shell.supervisor import shutdown_slice_shell_supervisor
+from mindroom.shell.supervisor import _shutdown_slice_shell_supervisor
 from mindroom.steward_duties import StewardDuties
 from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
@@ -4416,7 +4416,7 @@ def _isolate_shell_systemd_slice(monkeypatch: pytest.MonkeyPatch) -> Generator[N
     monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
     _probe_systemd_slice_launcher.cache_clear()
     yield
-    shutdown_slice_shell_supervisor()
+    _shutdown_slice_shell_supervisor()
     _probe_systemd_slice_launcher.cache_clear()
 
 

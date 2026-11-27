@@ -28,7 +28,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
-from urllib.parse import unquote
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
@@ -661,18 +660,7 @@ async def _start_command(
     allow_systemd_slice: bool = True,
 ) -> asyncio.subprocess.Process:
     """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    warm_unsliced = sys.platform != "linux" or (
-        (not allow_systemd_slice or configured_systemd_slice_name() is None)
-        and all(
-            callable(info := getattr(fn, "cache_info", None)) and info().currsize > 0
-            for fn in (_idle_launcher, _idle_io_launcher)
-        )
-    )
-    launch = (
-        _idle_launch_argv(argv, env, cwd, allow_systemd_slice=allow_systemd_slice)
-        if warm_unsliced
-        else await asyncio.to_thread(_idle_launch_argv, argv, env, cwd, allow_systemd_slice=allow_systemd_slice)
-    )
+    launch = await asyncio.to_thread(_idle_launch_argv, argv, env, cwd, allow_systemd_slice=allow_systemd_slice)
     process = await asyncio.create_subprocess_exec(
         *launch.argv,
         stdin=stdin,
@@ -1417,7 +1405,7 @@ async def _await_reader_tasks_with_grace(
                 await task
 
 
-_SHELL_SYSTEMD_SLICE_ENV = "MINDROOM_SHELL_SYSTEMD_SLICE"
+SHELL_SYSTEMD_SLICE_ENV = "MINDROOM_SHELL_SYSTEMD_SLICE"
 _SYSTEMD_SCOPE_DESCRIPTION = "MindRoom shell"
 
 
@@ -1463,7 +1451,7 @@ def _idle_io_launcher() -> str | None:
 _SYSTEMD_UNAVAILABLE_STATES = frozenset({"stopping", "offline"})
 
 
-def _systemd_bus_env(runtime_dir: str | None, dbus_addr: str | None) -> dict[str, str]:
+def systemd_bus_env(runtime_dir: str | None, dbus_addr: str | None) -> dict[str, str]:
     """Return the minimal bus environment passed to user-systemd probe commands."""
     return {
         key: value
@@ -1485,7 +1473,7 @@ def _user_manager_generation(runtime_dir: str | None, dbus_addr: str | None) -> 
             text=True,
             timeout=5,
             check=False,
-            env=_systemd_bus_env(runtime_dir, dbus_addr),
+            env=systemd_bus_env(runtime_dir, dbus_addr),
         )
         if result.returncode != 0 or not result.stdout:
             return None
@@ -1540,7 +1528,7 @@ def _probe_systemd_slice_launcher(
             capture_output=True,
             timeout=5,
             check=False,
-            env=_systemd_bus_env(runtime_dir, dbus_addr),
+            env=systemd_bus_env(runtime_dir, dbus_addr),
         )
         if probe.returncode == 0:
             return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
@@ -1549,7 +1537,7 @@ def _probe_systemd_slice_launcher(
 
 def configured_systemd_slice_name() -> str | None:
     """Return the validated ``MINDROOM_SHELL_SYSTEMD_SLICE`` unit name, or ``None`` if unset or invalid."""
-    slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
+    slice_name = os.environ.get(SHELL_SYSTEMD_SLICE_ENV, "").strip()
     if (
         len(slice_name) <= len(".slice")
         or not slice_name.endswith(".slice")
@@ -1559,34 +1547,6 @@ def configured_systemd_slice_name() -> str | None:
     ):
         return None
     return slice_name
-
-
-def _stat_key(path: Path | None) -> tuple[int, int, int] | None:
-    if path is None:
-        return None
-    try:
-        st = path.stat()
-    except (OSError, ValueError):
-        return None
-    return (st.st_dev, st.st_ino, st.st_mtime_ns)
-
-
-def systemd_bus_socket_fingerprint(
-    runtime_dir: str | None,
-    dbus_addr: str | None,
-) -> tuple[tuple[int, int, int] | None, tuple[int, int, int] | None] | None:
-    """Return ``(bus_stat, systemd_private_stat)``, or ``None`` when *dbus_addr* is not filesystem-fingerprintable."""
-    if dbus_addr is None:
-        bus_path = Path(runtime_dir) / "bus" if runtime_dir else None
-    elif dbus_addr.startswith("unix:path="):
-        raw_path = dbus_addr.removeprefix("unix:path=").split(";", 1)[0].split(",", 1)[0]
-        if not raw_path:
-            return None
-        bus_path = Path(unquote(raw_path))
-    else:
-        return None
-    private_path = Path(runtime_dir) / "systemd" / "private" if runtime_dir else None
-    return (_stat_key(bus_path), _stat_key(private_path))
 
 
 def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:

@@ -303,40 +303,40 @@ async def _run_local_command(
     *,
     bg_scope: ShellBackgroundScope | None,
     namespace: str,
+    use_slice_supervisor: bool,
 ) -> ShellRunResult:
-    """Run via the persistent user-slice supervisor when active, falling back once on connect error."""
-    if (slice_socket := await ensure_slice_shell_supervisor_async()) is not None:
+    """Run via the persistent user-slice supervisor when enabled, falling back once on connect error."""
+    if use_slice_supervisor and (slice_socket := await ensure_slice_shell_supervisor_async()) is not None:
         endpoint_key = f"slice-supervisor:{slice_socket}"
         if bg_scope is not None:
             bg_scope.track_remote_start(
                 endpoint_key,
                 functools.partial(kill_slice_shell_supervisor_namespace, slice_socket, namespace),
             )
+        ended = False
         result: ShellRunResult | None = None
-        connect_failed = False
         try:
             result = await invoke(
                 functools.partial(run_command_via_supervisor, slice_socket, raise_on_connect_error=True),
             )
-        except ShellSupervisorConnectError:
-            connect_failed = True
-        finally:
+        except ShellSupervisorConnectError as exc:
             if bg_scope is not None:
-                needs_cleanup = (
-                    False if connect_failed else (result is None or result.handle is not None or result.execution_error)
-                )
-                bg_scope.track_remote_end(endpoint_key, backgrounded=needs_cleanup)
-        if not connect_failed:
-            assert result is not None
+                bg_scope.track_remote_end(endpoint_key, backgrounded=False)
+                ended = True
+            await asyncio.to_thread(invalidate_slice_shell_supervisor, slice_socket, exc)
+        else:
             return result
-        await asyncio.to_thread(invalidate_slice_shell_supervisor, slice_socket)
+        finally:
+            if bg_scope is not None and not ended:
+                needs_cleanup = result is None or result.handle is not None or result.execution_error
+                bg_scope.track_remote_end(endpoint_key, backgrounded=needs_cleanup)
     return await invoke(
         functools.partial(
             run_command,
             bg_scope.records if bg_scope is not None else {},
             # Never the terminal MindRoom runs in, where a prompting command would wait forever.
             stdin=subprocess.DEVNULL,
-            allow_systemd_slice=configured_systemd_slice_name() is None,
+            allow_systemd_slice=not use_slice_supervisor or configured_systemd_slice_name() is None,
         ),
     )
 
@@ -672,7 +672,12 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             result = (
                 await _invoke(functools.partial(run_command_via_supervisor, self._supervisor_socket))
                 if self._supervisor_socket is not None
-                else await _run_local_command(_invoke, bg_scope=bg_scope, namespace=namespace)
+                else await _run_local_command(
+                    _invoke,
+                    bg_scope=bg_scope,
+                    namespace=namespace,
+                    use_slice_supervisor=not self._in_worker,
+                )
             )
             if bg_scope is not None and result.handle is not None:
                 bg_scope.had_backgrounded = True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import pytest
 
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.constants import CONTROL_STATE_PATH_ENV, resolve_runtime_paths
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs import launch_contract, supervised
 from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
@@ -37,6 +39,7 @@ from mindroom.shell.supervisor import (
     _handle_connection,
     _kill_namespace_via_supervisor,
     _ShellSupervisorManager,
+    _shutdown_slice_shell_supervisor,
     _SliceShellSupervisorManager,
     check_command_via_supervisor,
     ensure_slice_shell_supervisor_async,
@@ -45,9 +48,10 @@ from mindroom.shell.supervisor import (
     parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
-    shutdown_slice_shell_supervisor,
 )
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.shell import shell_tools
 from tests.api.sandbox_runner_support import execute_call
@@ -1482,13 +1486,14 @@ def _stub_slice_systemd(
     """Stub systemd-run/systemctl for _SliceShellSupervisorManager unit tests using real supervisor subprocesses."""
     spawns: list[tuple[list[str], dict[str, str]]] = []
     stops: list[tuple[list[str], dict[str, str]]] = []
+    real_which = shutil.which
     real_popen = subprocess.Popen
     real_run = subprocess.run
 
-    def fake_which(name: str) -> str | None:
+    def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
         if name in {"systemd-run", "systemctl"}:
             return f"/usr/bin/{name}"
-        return shutil.which(name)
+        return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
 
     def fake_popen(cmd: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
         cmd_env = dict(kwargs.get("env") or {})  # type: ignore[arg-type]
@@ -1547,6 +1552,9 @@ async def test_slice_manager_reuses_supervisor_unsets_slice_env_and_handles_conf
         assert "MINDROOM_SHELL_SYSTEMD_SLICE" not in child_env
         assert "--expand-environment=no" not in cmd
         assert not any(Path(arg).name in {"chrt", "ionice"} for arg in cmd)
+        assert manager._supervisor is not None
+        unit_name = manager._supervisor.unit_name
+        assert unit_name == f"{manager._supervisor.runtime_dir.name}.scope"
 
         # Config mismatch falls back to None without killing the live supervisor.
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
@@ -1562,15 +1570,15 @@ async def test_slice_manager_reuses_supervisor_unsets_slice_env_and_handles_conf
     finally:
         manager.shutdown()
     assert len(stops) == 1
-    assert stops[0][0][1:] == ["--user", "stop", f"mindroom-shell-supervisor-{os.getpid()}-1.scope"]
+    assert stops[0][0][1:] == ["--user", "stop", unit_name]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
-def test_slice_manager_backoff_fingerprint_recovery_and_oom_policy_fail_open(
+def test_slice_manager_backoff_oom_policy_and_mkdtemp_oserror_fail_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Startup failure (including rejected OOMPolicy=continue) enters backoff and retries instantly on bus change."""
+    """Startup failures (rejected OOMPolicy=continue or mkdtemp ENOSPC) fail open with backoff and recover after it."""
     should_fail = True
     spawns, _stops = _stub_slice_systemd(
         monkeypatch,
@@ -1584,18 +1592,35 @@ def test_slice_manager_backoff_fingerprint_recovery_and_oom_policy_fail_open(
     try:
         assert manager.ensure() is None
         assert len(spawns) == 1
-        # Same socket fingerprint stays in backoff without spawning again.
+        # Still in backoff window -> no second spawn attempt.
         assert manager.ensure() is None
         assert len(spawns) == 1
 
-        # Bus socket appearing changes fingerprint -> clears backoff immediately.
+        # Once backoff expires, startup succeeds.
         should_fail = False
-        (tmp_path / "bus").write_text("ready")
+        assert manager._backoff is not None
+        manager._backoff = shell_supervisor._SliceSupervisorBackoff(manager._backoff.config_key, 0.0)
         sock = manager.ensure()
         assert sock is not None
         assert len(spawns) == 2
     finally:
         manager.shutdown()
+
+    # mkdtemp OSError (e.g. ENOSPC) fails open cleanly with backoff instead of raising.
+    mkdtemp_calls: list[str] = []
+
+    def fail_mkdtemp(*, prefix: str) -> str:
+        mkdtemp_calls.append(prefix)
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(shell_supervisor.tempfile, "mkdtemp", fail_mkdtemp)
+    enospc_manager = _SliceShellSupervisorManager()
+    try:
+        assert enospc_manager.ensure() is None
+        assert enospc_manager.ensure() is None
+        assert len(mkdtemp_calls) == 1
+    finally:
+        enospc_manager.shutdown()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
@@ -1669,15 +1694,15 @@ async def test_kill_namespace_is_graceful_and_flushes_background_log_trailer(tmp
 
 
 @pytest.mark.asyncio
-async def test_toolkit_slice_connect_error_falls_back_once_and_post_send_error_does_not_retry(
+async def test_toolkit_slice_connect_error_fallback_emfile_preservation_and_no_post_send_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pre-send connect errors invalidate and fall back once unsliced; post-send execution errors never retry."""
+    """Dead-socket connect errors invalidate and fall back once; EMFILE leaves a live supervisor up; post-send never retries."""
     monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
     tool = _get_toolkit(tmp_path)
     missing_sock = str(tmp_path / "missing.sock")
-    invalidated: list[str] = []
+    invalidated: list[tuple[str, BaseException | None]] = []
     direct_calls: list[bool] = []
     real_run = run_command
 
@@ -1689,10 +1714,12 @@ async def test_toolkit_slice_connect_error_falls_back_once_and_post_send_error_d
         "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
         lambda: asyncio.sleep(0, missing_sock),
     )
-    monkeypatch.setattr("mindroom.tools.shell.invalidate_slice_shell_supervisor", invalidated.append)
+    monkeypatch.setattr(
+        "mindroom.tools.shell.invalidate_slice_shell_supervisor",
+        lambda sock, err=None: invalidated.append((sock, err)),
+    )
     monkeypatch.setattr("mindroom.tools.shell.run_command", spy_run_command)
 
-    # Pre-send ShellSupervisorConnectError -> invalidates & falls back once with allow_systemd_slice=False.
     with pytest.raises(ShellSupervisorConnectError):
         await run_command_via_supervisor(
             missing_sock,
@@ -1713,10 +1740,12 @@ async def test_toolkit_slice_connect_error_falls_back_once_and_post_send_error_d
         assert await tool.run_shell_command("echo fallback-ok") == "fallback-ok"
         assert scope.had_backgrounded is False
     assert kill_calls == []
-    assert invalidated == [missing_sock]
+    assert len(invalidated) == 1
+    assert invalidated[0][0] == missing_sock
+    assert isinstance(invalidated[0][1], ShellSupervisorConnectError)
     assert direct_calls == [False]
 
-    # Post-send execution_error=True -> must NOT retry or call run_command.
+    # Post-send execution_error=True must NOT retry or call run_command.
     direct_calls.clear()
     invalidated.clear()
     monkeypatch.setattr(
@@ -1728,12 +1757,97 @@ async def test_toolkit_slice_connect_error_falls_back_once_and_post_send_error_d
     assert invalidated == []
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd user slices are Linux-only")
+@pytest.mark.asyncio
+async def test_toolkit_slice_emfile_connect_error_falls_back_without_killing_live_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-local EMFILE connect error falls back for that call while leaving a live supervisor running."""
+    _stub_slice_systemd(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+
+    live_sock = await ensure_slice_shell_supervisor_async()
+    assert live_sock is not None
+    assert shell_supervisor._slice_manager is not None
+    live_sup = shell_supervisor._slice_manager._supervisor
+    assert live_sup is not None
+
+    async def raise_emfile(*_args: object, **_kwargs: object) -> ShellRunResult:
+        cause = OSError(errno.EMFILE, "Too many open files")
+        raise ShellSupervisorConnectError(str(cause)) from cause
+
+    monkeypatch.setattr("mindroom.tools.shell.run_command_via_supervisor", raise_emfile)
+    tool = _get_toolkit(tmp_path)
+    assert await tool.run_shell_command("echo emfile-fallback") == "emfile-fallback"
+    assert shell_supervisor._slice_manager._supervisor is live_sup
+    assert live_sup.process.poll() is None
+
+
+@pytest.mark.asyncio
+async def test_toolkit_slice_post_send_eof_preserves_mindroom_output_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the supervisor disconnects after reading a request with mindroom_output_path, do not retry or overwrite the file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "existing.txt"
+    target.write_text("original content\n", encoding="utf-8")
+
+    received: list[bytes] = []
+
+    async def drop_after_read(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        received.append(await reader.readline())
+        writer.close()
+        await writer.wait_closed()
+
+    runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-eof-test-"))
+    socket_path = str(runtime_dir / "s.sock")
+    server = await asyncio.start_unix_server(drop_after_read, path=socket_path)
+    direct_calls: list[object] = []
+
+    async def fail_direct(*_args: object, **_kwargs: object) -> ShellRunResult:
+        direct_calls.append(True)
+        return ShellRunResult(message="unexpected fallback")
+
+    try:
+        monkeypatch.setattr(
+            "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
+            lambda: asyncio.sleep(0, socket_path),
+        )
+        monkeypatch.setattr("mindroom.tools.shell.run_command", fail_direct)
+        toolkit = get_tool_by_name(
+            "shell",
+            _make_runtime_paths(tmp_path),
+            runs_in_worker=False,
+            worker_target=None,
+            tool_init_overrides={"base_dir": str(workspace)},
+            tool_output_workspace_root=workspace,
+            tools=builtin_tool_registry(),
+        )
+        configure_toolkit_functions(toolkit, output_files=ToolOutputFilePolicy(workspace_root=workspace))
+        fn = toolkit_function(toolkit, "run_shell_command")
+        assert fn is not None
+        response = await fn.entrypoint(args="echo should-not-overwrite", mindroom_output_path="existing.txt")
+        assert len(received) == 1
+        assert direct_calls == []
+        assert response == "Error: Shell supervisor closed the connection unexpectedly."
+        assert target.read_text(encoding="utf-8") == "original content\n"
+    finally:
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
 @pytest.mark.asyncio
 async def test_toolkit_slice_scope_cleanup_cancellation_and_worker_precedence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Slice supervisor enforces turn-end scope isolation, foreground skip, cancellation, and worker precedence."""
+    """Slice supervisor enforces turn-end scope isolation, foreground skip, and cancellation."""
     registry: dict[str, ProcessRecord] = {}
     kill_calls: list[tuple[str, str]] = []
     real_kill = shell_supervisor.kill_slice_shell_supervisor_namespace
@@ -1791,16 +1905,40 @@ async def test_toolkit_slice_scope_cleanup_cancellation_and_worker_precedence(
             await task
         await _assert_pid_dead(cancel_pid)
 
-        # Explicit worker _supervisor_socket always wins and never calls slice supervisor.
-        slice_called: list[bool] = []
-        monkeypatch.setattr(
-            "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
-            lambda: (slice_called.append(True), asyncio.sleep(0, None))[1],
-        )
+
+@pytest.mark.asyncio
+async def test_toolkit_worker_and_in_worker_modes_skip_slice_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both explicit worker supervisor sockets and in-process static workers never touch the local slice supervisor."""
+    registry: dict[str, ProcessRecord] = {}
+    slice_called: list[bool] = []
+    monkeypatch.setattr(
+        "mindroom.tools.shell.ensure_slice_shell_supervisor_async",
+        lambda: (slice_called.append(True), asyncio.sleep(0, None))[1],
+    )
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+
+    async with _running_server(registry) as socket_path:
         monkeypatch.setenv(SHELL_SUPERVISOR_SOCKET_ENV, socket_path)
         worker_tool = _get_toolkit(tmp_path)
         assert await worker_tool.run_shell_command("echo worker-wins") == "worker-wins"
         assert slice_called == []
+
+    monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
+    inprocess_worker_tool = shell_tools()(
+        runtime_paths=_make_runtime_paths(
+            tmp_path,
+            process_env={
+                "PATH": os.environ["PATH"],
+                SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "1",
+            },
+        ),
+        allow_without_worker=True,
+    )
+    assert await inprocess_worker_tool.run_shell_command("echo in-worker-direct") == "in-worker-direct"
+    assert slice_called == []
 
 
 _LIVE_SLICE_PROBE = (
@@ -1886,6 +2024,7 @@ async def test_live_systemd_slice_supervisor_sigkill_grandchild_and_outage_recov
 ) -> None:
     """SIGKILLed supervisor cleans up scope grandchildren on respawn; XDG_RUNTIME_DIR outage fails open and recovers."""
     live_xdg = _live_systemd_runtime_dir()
+    monkeypatch.setattr(shell_supervisor, "_SLICE_STARTUP_BACKOFF_SECONDS", 0.0)
     with tempfile.TemporaryDirectory(prefix="mr-") as runtime_parent:
         runtime_link = Path(runtime_parent) / "rt"
         runtime_link.symlink_to(live_xdg)
@@ -1926,4 +2065,4 @@ async def test_live_systemd_slice_supervisor_sigkill_grandchild_and_outage_recov
         recovered = json.loads(str(await tool.run_shell_command(argv, timeout=10)))
         assert "/app.slice/" in recovered["cgroup"]
         assert recovered["cgroup"] != self_cgroup
-        shutdown_slice_shell_supervisor()
+        _shutdown_slice_shell_supervisor()
