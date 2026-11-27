@@ -87,10 +87,36 @@ def _context(config: Config, agent_name: str = "alice", requester_id: str = _USE
     )
 
 
-def _call(context: ToolRuntimeContext, function: str, *args: str, acting_agent: str | None = None) -> dict[str, object]:
+def _call(
+    context: ToolRuntimeContext,
+    function: str,
+    *args: str,
+    acting_agent: str | None = None,
+    **kwargs: object,
+) -> dict[str, object]:
     tools = SharedDirectoryTools(agent_name=acting_agent or context.agent_name)
     with tool_runtime_context(context):
-        return json.loads(getattr(tools, function)(*args))
+        return json.loads(getattr(tools, function)(*args, **kwargs))
+
+
+def _write(
+    context: ToolRuntimeContext,
+    action: str,
+    name: str,
+    *,
+    agent_name: str | None = None,
+    owner: str | None = None,
+    acting_agent: str | None = None,
+) -> dict[str, object]:
+    return _call(
+        context,
+        "shared_directories_write",
+        action,
+        name,
+        agent_name=agent_name,
+        owner=owner,
+        acting_agent=acting_agent,
+    )
 
 
 def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
@@ -98,8 +124,8 @@ def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
     context = _context(_config(tmp_path, dedicated_workers=True))
     worker_path = "/app/worker/shared_directories/alice/report"
 
-    created = _call(context, "create_shared_directory", "report")
-    invited = _call(context, "invite_to_shared_directory", "report", "bob")
+    created = _write(context, "create", "report")
+    invited = _write(context, "invite", "report", agent_name="bob")
     listed = _call(context, "list_shared_directories")
 
     assert created["status"] == "ok"
@@ -124,8 +150,8 @@ def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
 def test_member_sees_the_directory_read_only(tmp_path: Path) -> None:
     """An invited agent lists the directory it joined as read-only; others see nothing."""
     config = _config(tmp_path)
-    _call(_context(config), "create_shared_directory", "report")
-    _call(_context(config), "invite_to_shared_directory", "report", "bob")
+    _write(_context(config), "create", "report")
+    _write(_context(config), "invite", "report", agent_name="bob")
 
     bob_listing = _call(_context(config, "bob"), "list_shared_directories")
 
@@ -144,9 +170,9 @@ def test_member_sees_the_directory_read_only(tmp_path: Path) -> None:
 def test_invite_refuses_invalid_targets(tmp_path: Path, target: str, fragment: str) -> None:
     """Only other configured, non-private agents can be invited."""
     context = _context(_config(tmp_path))
-    _call(context, "create_shared_directory", "report")
+    _write(context, "create", "report")
 
-    payload = _call(context, "invite_to_shared_directory", "report", target)
+    payload = _write(context, "invite", "report", agent_name=target)
 
     assert payload["status"] == "error"
     assert fragment in str(payload["message"])
@@ -168,8 +194,8 @@ def _bob_mounts(config: Config) -> tuple[SharedDirectoryMount, ...]:
 
 
 def _pending_report(config: Config) -> dict[str, object]:
-    _call(_context(config), "create_shared_directory", "report")
-    return _call(_context(config), "invite_to_shared_directory", "report", "bob")
+    _write(_context(config), "create", "report")
+    return _write(_context(config), "invite", "report", agent_name="bob")
 
 
 def test_invite_to_an_agent_the_requester_cannot_use_waits_for_acceptance(tmp_path: Path) -> None:
@@ -209,7 +235,7 @@ def test_accepting_through_the_invited_agent_for_its_user_makes_it_a_member(tmp_
     config = _bobs_own_config(tmp_path)
     _pending_report(config)
 
-    payload = _call(_context(config, "bob", _BOBS_USER), "accept_shared_directory", "alice", "report")
+    payload = _write(_context(config, "bob", _BOBS_USER), "accept", "report", owner="alice")
 
     share = runtime_paths_for(config).storage_root / "shared_directories" / "alice" / "report"
     assert payload["status"] == "ok"
@@ -247,7 +273,7 @@ def test_accept_by_another_user_or_agent_is_refused(
     config = _bobs_own_config(tmp_path)
     _pending_report(config)
 
-    payload = _call(_context(config, acting_agent, requester_id), "accept_shared_directory", "alice", "report")
+    payload = _write(_context(config, acting_agent, requester_id), "accept", "report", owner="alice")
 
     assert payload["status"] == "error"
     assert fragment in str(payload["message"])
@@ -262,7 +288,7 @@ def test_accept_refuses_when_no_user_is_acting(tmp_path: Path) -> None:
     _pending_report(config)
     context = _context(config, "bob", _BOBS_USER)
 
-    payload = _call(replace(context, requester_id=context.client.user_id), "accept_shared_directory", "alice", "report")
+    payload = _write(replace(context, requester_id=context.client.user_id), "accept", "report", owner="alice")
 
     assert payload["status"] == "error"
     assert "on behalf of a user" in str(payload["message"])
@@ -270,33 +296,33 @@ def test_accept_refuses_when_no_user_is_acting(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("acting_agent", "requester_id", "function", "args", "fragment"),
+    ("acting_agent", "requester_id", "action", "kwargs", "fragment"),
     [
-        ("bob", _BOBS_USER, "decline_shared_directory", ("alice", "report"), "Declined."),
-        ("alice", _USER, "remove_from_shared_directory", ("report", "bob"), "The invitation to bob is cancelled."),
-        ("alice", _USER, "delete_shared_directory", ("report",), "Deleted. alice: worker restarts"),
+        ("bob", _BOBS_USER, "decline", {"owner": "alice"}, "Declined."),
+        ("alice", _USER, "remove", {"agent_name": "bob"}, "The invitation to bob is cancelled."),
+        ("alice", _USER, "delete", {}, "Deleted. alice: worker restarts"),
     ],
 )
 def test_decline_remove_and_delete_clear_the_pending_invitation(
     tmp_path: Path,
     acting_agent: str,
     requester_id: str,
-    function: str,
-    args: tuple[str, ...],
+    action: str,
+    kwargs: dict[str, str],
     fragment: str,
 ) -> None:
     """The invited agent's user declines, or the owner cancels, and nothing waits for bob any more."""
     config = _bobs_own_config(tmp_path)
     _pending_report(config)
 
-    payload = _call(_context(config, acting_agent, requester_id), function, *args)
+    payload = _write(_context(config, acting_agent, requester_id), action, "report", **kwargs)
 
     assert payload["status"] == "ok"
     assert fragment in str(payload["message"])
     assert "bob:" not in str(payload["message"])
     assert all(directory.pending == () for directory in load_shared_directories(runtime_paths_for(config)))
     assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ()
-    accepted = _call(_context(config, "bob", _BOBS_USER), "accept_shared_directory", "alice", "report")
+    accepted = _write(_context(config, "bob", _BOBS_USER), "accept", "report", owner="alice")
     assert accepted["status"] == "error"
 
 
@@ -305,7 +331,7 @@ def test_decline_by_a_user_who_cannot_use_the_invited_agent_is_refused(tmp_path:
     config = _bobs_own_config(tmp_path)
     _pending_report(config)
 
-    payload = _call(_context(config, "bob", _USER), "decline_shared_directory", "alice", "report")
+    payload = _write(_context(config, "bob", _USER), "decline", "report", owner="alice")
 
     assert payload["status"] == "error"
     assert "cannot be declined" in str(payload["message"])
@@ -318,7 +344,7 @@ def test_repeated_invitation_while_pending_is_idempotent(tmp_path: Path) -> None
     _pending_report(config)
     first = load_shared_directories(runtime_paths_for(config))[0].pending
 
-    again = _call(_context(config), "invite_to_shared_directory", "report", "bob")
+    again = _write(_context(config), "invite", "report", agent_name="bob")
 
     assert again["status"] == "pending"
     assert "already waiting to be accepted" in str(again["message"])
@@ -330,17 +356,17 @@ def test_an_agent_holds_at_most_ten_pending_invitations(tmp_path: Path) -> None:
     config = _bobs_own_config(tmp_path)
     context = _context(config)
     for index in range(11):
-        _call(context, "create_shared_directory", f"report{index}")
-    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report10", "bob")
+        _write(context, "create", f"report{index}")
+    _write(_context(config, requester_id=_BOBS_USER), "invite", "report10", agent_name="bob")
     for index in range(10):
-        assert _call(context, "invite_to_shared_directory", f"report{index}", "bob")["status"] == "pending"
-    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report0", "bob")
-    assert _call(context, "invite_to_shared_directory", "report9", "bob")["status"] == "pending"
+        assert _write(context, "invite", f"report{index}", agent_name="bob")["status"] == "pending"
+    _write(_context(config, requester_id=_BOBS_USER), "invite", "report0", agent_name="bob")
+    assert _write(context, "invite", "report9", agent_name="bob")["status"] == "pending"
 
-    _call(context, "create_shared_directory", "extra")
-    _call(context, "create_shared_directory", "again")
-    accepted_one = _call(context, "invite_to_shared_directory", "extra", "bob")
-    refused = _call(context, "invite_to_shared_directory", "again", "bob")
+    _write(context, "create", "extra")
+    _write(context, "create", "again")
+    accepted_one = _write(context, "invite", "extra", agent_name="bob")
+    refused = _write(context, "invite", "again", agent_name="bob")
 
     assert accepted_one["status"] == "pending"
     assert refused["status"] == "error"
@@ -354,7 +380,7 @@ def test_invitation_by_a_user_of_the_invited_agent_replaces_the_pending_one(tmp_
     config = _bobs_own_config(tmp_path)
     _pending_report(config)
 
-    payload = _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report", "bob")
+    payload = _write(_context(config, requester_id=_BOBS_USER), "invite", "report", agent_name="bob")
 
     assert payload["status"] == "ok"
     [directory] = load_shared_directories(runtime_paths_for(config))
@@ -364,10 +390,10 @@ def test_invitation_by_a_user_of_the_invited_agent_replaces_the_pending_one(tmp_
 def test_invite_refuses_when_no_user_is_acting(tmp_path: Path) -> None:
     """An agent acting in its own name cannot invite, as for any user-only action."""
     context = _context(_config(tmp_path))
-    _call(context, "create_shared_directory", "report")
+    _write(context, "create", "report")
     context = replace(context, requester_id=context.client.user_id)
 
-    payload = _call(context, "invite_to_shared_directory", "report", "bob")
+    payload = _write(context, "invite", "report", agent_name="bob")
 
     assert payload["status"] == "error"
     assert "on behalf of a user" in str(payload["message"])
@@ -377,7 +403,7 @@ def test_private_agents_cannot_share(tmp_path: Path) -> None:
     """A private agent cannot create a shared directory."""
     context = _context(_config(tmp_path), "carol")
 
-    payload = _call(context, "create_shared_directory", "report")
+    payload = _write(context, "create", "report")
 
     assert payload["status"] == "error"
     assert "Private agents cannot share directories" in str(payload["message"])
@@ -385,19 +411,19 @@ def test_private_agents_cannot_share(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("function", "args"),
+    ("action", "kwargs"),
     [
-        ("invite_to_shared_directory", ("report", "alice")),
-        ("remove_from_shared_directory", ("report", "alice")),
-        ("delete_shared_directory", ("report",)),
+        ("invite", {"agent_name": "alice"}),
+        ("remove", {"agent_name": "alice"}),
+        ("delete", {}),
     ],
 )
-def test_only_the_owner_changes_a_directory(tmp_path: Path, function: str, args: tuple[str, ...]) -> None:
+def test_only_the_owner_changes_a_directory(tmp_path: Path, action: str, kwargs: dict[str, str]) -> None:
     """Another agent cannot change or delete a directory it does not own."""
     config = _config(tmp_path)
-    _call(_context(config), "create_shared_directory", "report")
+    _write(_context(config), "create", "report")
 
-    payload = _call(_context(config, "bob"), function, *args)
+    payload = _write(_context(config, "bob"), action, "report", **kwargs)
 
     assert payload["status"] == "error"
     assert "bob has no shared directory named 'report'" in str(payload["message"])
@@ -407,12 +433,12 @@ def test_only_the_owner_changes_a_directory(tmp_path: Path, function: str, args:
 def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
     """Repeating an invitation or removal reports the state without restarting anything."""
     context = _context(_config(tmp_path, dedicated_workers=True))
-    _call(context, "create_shared_directory", "report")
-    _call(context, "invite_to_shared_directory", "report", "bob")
+    _write(context, "create", "report")
+    _write(context, "invite", "report", agent_name="bob")
 
-    again = _call(context, "invite_to_shared_directory", "report", "bob")
-    removed = _call(context, "remove_from_shared_directory", "report", "bob")
-    removed_again = _call(context, "remove_from_shared_directory", "report", "bob")
+    again = _write(context, "invite", "report", agent_name="bob")
+    removed = _write(context, "remove", "report", agent_name="bob")
+    removed_again = _write(context, "remove", "report", agent_name="bob")
 
     assert again["status"] == "ok"
     assert "bob is already a member" in str(again["message"])
@@ -426,11 +452,11 @@ def test_invite_and_remove_are_idempotent(tmp_path: Path) -> None:
 def test_delete_empties_the_directory_and_names_every_restart(tmp_path: Path) -> None:
     """Deleting forgets the directory, removes every file in it, and names the owner and members."""
     context = _context(_config(tmp_path))
-    created = _call(context, "create_shared_directory", "report")
+    created = _write(context, "create", "report")
     context = _context(_config(tmp_path, dedicated_workers=True))
-    _call(context, "invite_to_shared_directory", "report", "bob")
+    _write(context, "invite", "report", agent_name="bob")
 
-    payload = _call(context, "delete_shared_directory", "report")
+    payload = _write(context, "delete", "report")
 
     assert payload["status"] == "ok"
     assert "alice and bob: worker restarts" in str(payload["message"])
@@ -440,7 +466,7 @@ def test_delete_empties_the_directory_and_names_every_restart(tmp_path: Path) ->
 
 def test_invalid_name_is_reported_to_the_model(tmp_path: Path) -> None:
     """A refused name comes back as a tool error, not an exception."""
-    payload = _call(_context(_config(tmp_path)), "create_shared_directory", "../x")
+    payload = _write(_context(_config(tmp_path)), "create", "../x")
 
     assert payload["status"] == "error"
     assert "Shared directory names" in str(payload["message"])
@@ -493,8 +519,8 @@ def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> N
     """Without dedicated workers nothing restarts, so the result does not claim it."""
     context = _context(_config(tmp_path))
 
-    created = _call(context, "create_shared_directory", "report")
-    invited = _call(context, "invite_to_shared_directory", "report", "bob")
+    created = _write(context, "create", "report")
+    invited = _write(context, "invite", "report", agent_name="bob")
 
     assert "restart" not in str(created["message"])
     assert invited["message"] == "bob can now read it."
@@ -510,8 +536,8 @@ def test_a_team_member_shares_as_itself(tmp_path: Path) -> None:
     config = _config(tmp_path)
     team_context = _context(config, "crew")
 
-    created = _call(team_context, "create_shared_directory", "report", acting_agent="alice")
-    invited = _call(team_context, "invite_to_shared_directory", "report", "bob", acting_agent="alice")
+    created = _write(team_context, "create", "report", acting_agent="alice")
+    invited = _write(team_context, "invite", "report", agent_name="bob", acting_agent="alice")
 
     assert created["status"] == "ok"
     assert invited["status"] == "ok"
@@ -522,19 +548,19 @@ def test_a_team_member_shares_as_itself(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("function", ["remove_from_shared_directory", "delete_shared_directory"])
-def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, function: str) -> None:
+@pytest.mark.parametrize("action", ["remove", "delete"])
+def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, action: str) -> None:
     """A member removed from the config can still be removed, and the directory deleted, with dedicated workers."""
     config = _config(tmp_path, dedicated_workers=True)
-    _call(_context(config), "create_shared_directory", "report")
-    _call(_context(config), "invite_to_shared_directory", "report", "bob")
+    _write(_context(config), "create", "report")
+    _write(_context(config), "invite", "report", agent_name="bob")
     without_bob = bind_runtime_paths(
         config.model_copy(update={"agents": {k: v for k, v in config.agents.items() if k != "bob"}, "teams": {}}),
         runtime_paths_for(config),
     )
 
-    args = ("report", "bob") if function == "remove_from_shared_directory" else ("report",)
-    payload = _call(_context(without_bob), function, *args)
+    kwargs = {"agent_name": "bob"} if action == "remove" else {}
+    payload = _write(_context(without_bob), action, "report", **kwargs)
 
     assert payload["status"] == "ok"
     assert "bob:" not in str(payload["message"])
@@ -542,15 +568,47 @@ def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, function
 
 
 def test_shared_directory_meta_schema_flags() -> None:
-    """Only recursive deletion keeps background_after; all shared directory tools omit mindroom_output_path."""
+    """Writes keep background_after for recursive deletion while listing omits it; both omit mindroom_output_path."""
     by_name = {fn.name: fn for fn in adapt_toolkit(SharedDirectoryTools("alice")).functions}
+    assert set(by_name) == {"list_shared_directories", "shared_directories_write"}
     assert (
-        by_name["delete_shared_directory"].offer_background_after,
-        by_name["delete_shared_directory"].offer_output_path,
-    ) == (
-        True,
-        False,
-    )
-    for name, fn in by_name.items():
-        if name != "delete_shared_directory":
-            assert (fn.offer_background_after, fn.offer_output_path) == (False, False)
+        by_name["shared_directories_write"].offer_background_after,
+        by_name["shared_directories_write"].offer_output_path,
+    ) == (True, False)
+    assert (
+        by_name["list_shared_directories"].offer_background_after,
+        by_name["list_shared_directories"].offer_output_path,
+    ) == (False, False)
+
+
+@pytest.mark.parametrize(
+    ("action", "kwargs", "fragment"),
+    [
+        ("bogus", {}, "Unsupported action"),
+        ("create", {"agent_name": "bob"}, "cannot be used"),
+        ("create", {"owner": "alice"}, "cannot be used"),
+        ("delete", {"agent_name": "bob"}, "cannot be used"),
+        ("delete", {"owner": "alice"}, "cannot be used"),
+        ("invite", {}, "agent_name"),
+        ("invite", {"agent_name": "bob", "owner": "alice"}, "cannot be used"),
+        ("remove", {}, "agent_name"),
+        ("remove", {"agent_name": "bob", "owner": "alice"}, "cannot be used"),
+        ("accept", {}, "owner"),
+        ("accept", {"owner": "alice", "agent_name": "bob"}, "cannot be used"),
+        ("decline", {}, "owner"),
+        ("decline", {"owner": "alice", "agent_name": "bob"}, "cannot be used"),
+    ],
+)
+def test_shared_directories_write_validates_action_and_parameters(
+    tmp_path: Path,
+    action: str,
+    kwargs: dict[str, str],
+    fragment: str,
+) -> None:
+    """Invalid actions, missing required parameters, and cross-action parameters return error payloads."""
+    context = _context(_config(tmp_path))
+
+    payload = _write(context, action, "report", **kwargs)
+
+    assert payload["status"] == "error"
+    assert fragment in str(payload["message"])

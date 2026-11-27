@@ -476,7 +476,7 @@ class _DesktopShellRunner:
 
 async def run_desktop_shell_command(
     *,
-    args: list[str] | str,
+    args: str | list[str],
     tail: int,
     timeout: int | None,  # noqa: ASYNC109
     cwd: str | None,

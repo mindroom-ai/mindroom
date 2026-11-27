@@ -406,20 +406,23 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   twilio, discord, telegram, whatsapp, webex, zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup,
 #   trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits
 #   (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote,
-#   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, and Google Docs /
+#   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, Google Docs /
 #   Google Tasks (google_docs, google_tasks, including prefixed secondary Google Workspace plugin copies for all Google
-#   Workspace toolkits) previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
+#   Workspace toolkits), and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model, usage_stats)
+#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs or
+#   include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
-#   workflow/thread_tags: v2026.11.658; google_docs/google_tasks: v2026.11.659; Wave 2/4: v2026.11.663); replacement:
-#   unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   workflow/thread_tags: v2026.11.658; google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659;
+#   Wave 2/4: v2026.11.663); replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments/Microsoft 365/workflow/thread_tags/Wave-2/Wave-4
-#   function is decided by a wildcard approval script or any retired function's effective decision differs from the
-#   replacement's effective decision (regardless of other toolkits); also reject include_tools or exclude_tools naming a
-#   retired function on a consolidated toolkit entry, directing operators to the replacement function alongside
-#   per-action `enable_*` settings (where available) or `tool_approval.rules` so permissions are not broadened.
+#   reject tool_approval.rules when a retired strict-wildcard toolkit function (skills, attachments, Microsoft 365,
+#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, usage_stats) is decided by a wildcard
+#   approval script or any retired function's effective decision differs from the replacement's effective decision
+#   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
+#   consolidated toolkit entry (both authored overrides and stored dashboard settings), directing operators to the
+#   replacement function alongside per-action `enable_*` settings (where available) or `tool_approval.rules` so
+#   permissions are not broadened.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
@@ -431,6 +434,9 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
+#   tests/test_tool_approval_grants.py::test_runtime_crud_action_scoped_grants_and_fail_closed_migration,
+#   tests/api/test_plugin_room_agents.py::test_retired_stored_claude_agent_filters_fail_closed_and_block_workspace_write_grant,
+#   tests/api/test_plugin_room_agents.py::test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
@@ -1119,11 +1125,93 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "register_attachment": "attachment",
         "inline_image": "attachment",
     },
+    # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
+    # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
+    #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
+    #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
+    #   and list_email_invites).
+    # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
+    #   functions with ToolMetadata.action_scoped_grants.
+    # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
+    #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
+    #   in include_tools/exclude_tools at config load.
+    # Coverage: tests/test_tool_approval_grants.py::test_identity_access_graph_action_scoped_grants_and_fail_closed_migration,
+    #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
+    #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
+    "shared_directories": {
+        "create_shared_directory": "shared_directories_write",
+        "invite_to_shared_directory": "shared_directories_write",
+        "remove_from_shared_directory": "shared_directories_write",
+        "delete_shared_directory": "shared_directories_write",
+        "accept_shared_directory": "shared_directories_write",
+        "decline_shared_directory": "shared_directories_write",
+    },
+    "contacts": {
+        "request_contact": "contacts_write",
+        "accept_contact": "contacts_write",
+        "decline_contact": "contacts_write",
+        "update_contact": "contacts_write",
+        "remove_contact": "contacts_write",
+    },
+    "knowledge_graph": {
+        "search_graph": "knowledge_graph_read",
+        "graph_entity": "knowledge_graph_read",
+        "delete_graph_fact": "knowledge_graph_write",
+        "delete_graph_entity": "knowledge_graph_write",
+        "merge_graph_entities": "knowledge_graph_write",
+        "update_graph_entity_summary": "knowledge_graph_write",
+    },
+    "agent_manager": {
+        "create_agent": "agent_manager_write",
+        "update_agent": "agent_manager_write",
+        "set_avatar": "agent_manager_write",
+        "delete_agent": "agent_manager_write",
+    },
+    "email_invite": {
+        "invite_by_email": "email_invite_write",
+        "revoke_email_invite": "email_invite_write",
+    },
+    "script": {
+        "start_script": "script_write",
+        "cancel_script": "script_write",
+        "get_script": "script_read",
+        "list_scripts": "script_read",
+        "get_script_resource_profiles": "script_read",
+    },
+    "terminal": {
+        "terminal_open": "terminal_write",
+        "terminal_run": "terminal_write",
+        "terminal_send": "terminal_write",
+        "terminal_list": "terminal_read",
+    },
+    "claude_agent": {
+        "claude_session_status": "claude_agent_status",
+        "claude_start_session": "claude_agent_write",
+        "claude_send": "claude_agent_write",
+        "claude_interrupt": "claude_agent_write",
+        "claude_end_session": "claude_agent_write",
+    },
+    "thread_model": {
+        "list_models": "thread_model_read",
+        "get_thread_model": "thread_model_read",
+        "switch_thread_model": "thread_model_write",
+        "reset_thread_model": "thread_model_write",
+    },
+    "usage_stats": {
+        "get_my_usage": "usage_stats",
+        "get_my_private_usage": "usage_stats",
+        "get_all_usage": "usage_stats",
+    },
 }
 _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
     {
         "skills",
         "attachments",
+        "shared_directories",
+        "contacts",
+        "knowledge_graph",
+        "agent_manager",
+        "email_invite",
         "calculator",
         "duckduckgo",
         "googlesearch",
@@ -1146,6 +1234,11 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
         "microsoft_todo",
         "microsoft_meetings",
         "microsoft_people",
+        "script",
+        "terminal",
+        "claude_agent",
+        "thread_model",
+        "usage_stats",
     },
 )
 
@@ -1402,7 +1495,7 @@ def _retired_function_filter(
     return None
 
 
-def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+def _retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
     if (
         retired := _retired_function_filter(
@@ -1452,12 +1545,57 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
     )
 
 
+def _retired_consolidated_filter_checker(
+    toolkit_name: str,
+) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
+    """Build a setting checker rejecting retired consolidated function filters for ``toolkit_name``."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
+
+    def _check(settings: Mapping[str, object]) -> tuple[str, str] | None:
+        return _retired_function_filter(
+            settings,
+            renames,
+            guidance_for=lambda key, new: (
+                f"use `{toolkit_name}: {{{key}: [{new}]}}` "
+                f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
+                f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
+                "if per-action gating is needed"
+            ),
+        )
+
+    return _check
+
+
 _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
-    "filesystem": retired_file_setting,
+    "filesystem": _retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
     "slack": _retired_slack_setting,
+    **{
+        name: _retired_consolidated_filter_checker(name)
+        for name in (
+            "shared_directories",
+            "contacts",
+            "knowledge_graph",
+            "agent_manager",
+            "email_invite",
+            "terminal",
+            "claude_agent",
+            "thread_model",
+            "usage_stats",
+        )
+    },
 }
+
+
+def retired_stored_tool_setting(
+    tool_name: str,
+    settings: Mapping[str, object],
+) -> tuple[str, str] | None:
+    """Return the first retired stored setting or function filter for ``tool_name``, and its replacement guidance."""
+    if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None:
+        return checker(settings)
+    return None
 
 
 def retired_tool_override(
@@ -1467,9 +1605,7 @@ def retired_tool_override(
     has_enable_toggles: bool = False,
 ) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
-    if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None and (
-        retired := checker(overrides)
-    ) is not None:
+    if (retired := retired_stored_tool_setting(tool_name, overrides)) is not None:
         return retired
     if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
         retired := _retired_function_filter(

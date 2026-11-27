@@ -166,7 +166,7 @@ Counter values can change between reports as coverage improves.
 
 ### Personal Private-Agent Usage
 
-`GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
+`GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `usage_stats(action="private")` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
 The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
@@ -202,11 +202,11 @@ A service assertion authorizes only `/api/usage/export`, not `/api/usage`, perso
 
 The `usage_stats` tool lets an agent answer usage questions in chat; it is read-only.
 
-| Function | Reports | Availability |
+| Action (`usage_stats`) | Reports | Availability |
 | --- | --- | --- |
-| `get_my_usage()` | The caller's usage of the current agent; for a private agent, the caller's own instance | Always |
-| `get_my_private_usage()` | Usage across all the caller's currently configured private agents | Always |
-| `get_all_usage()` | Organization-wide usage of currently configured agents, all stored teams, and `system:internal` | Requires `admin_scope: true` and a caller listed in `administrators` |
+| `usage_stats(action="self")` | The caller's usage of the current agent; for a private agent, the caller's own instance | Always |
+| `usage_stats(action="private")` | Usage across all the caller's currently configured private agents | Always |
+| `usage_stats(action="all")` | Organization-wide usage of currently configured agents, all stored teams, and `system:internal` | Requires `admin_scope: true` and a caller listed in `administrators` |
 
 Give an agent the self-service functions by adding the tool:
 
@@ -221,7 +221,7 @@ agents:
 
 `mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
-Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
+Enable `usage_stats(action="all")` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
 ```yaml
 administrators:
@@ -236,15 +236,15 @@ agents:
           admin_scope: true
 ```
 
-All three functions accept `include_daily` (default `false`), which adds [daily rows](#daily-rows) and `daily_coverage`.
+All three actions accept `include_daily` (default `false`), which adds [daily rows](#daily-rows) and `daily_coverage`.
 
 ### Tool Responses
 
 Responses are JSON with `status` and `tool` fields, plus `scope`, `totals`, `session_count`, `breakdown`, `coverage`, `model_breakdown`, and `model_coverage`.
-`get_all_usage()` returns the organization report fields described in [Report Fields](#report-fields), except request rows.
+`usage_stats(action="all")` returns the organization report fields described in [Report Fields](#report-fields), except request rows.
 Self reports leave `breakdown` empty.
-`get_my_private_usage()` adds `cumulative_model_breakdown` and `private_agent_breakdown` without user IDs.
-`get_my_usage()` omits cumulative model and private-agent fields and excludes the in-progress tool call.
+`usage_stats(action="private")` adds `cumulative_model_breakdown` and `private_agent_breakdown` without user IDs.
+`usage_stats(action="self")` omits cumulative model and private-agent fields and excludes the in-progress tool call.
 On a shared agent it counts only the caller's retained runs, so it can miss usage after compaction.
 On a private agent it reports the whole session totals, which include compacted usage and can exceed the retained model or daily detail.
 
@@ -252,5 +252,5 @@ Errors use the same envelope with a `code` and `message`:
 
 | Code | Cause |
 | --- | --- |
-| `authorization_error` | `get_all_usage()` called without `admin_scope`, from another agent, or by a non-administrator |
+| `authorization_error` | `usage_stats(action="all")` called without `admin_scope`, from another agent, or by a non-administrator |
 | `context_unavailable` | No active requester or agent context, such as outside a conversation |

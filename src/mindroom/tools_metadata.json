@@ -84,11 +84,7 @@
       "file_access": "none",
       "function_names": [
         "list_contacts",
-        "request_contact",
-        "accept_contact",
-        "decline_contact",
-        "update_contact",
-        "remove_contact"
+        "contacts_write"
       ],
       "helper_text": null,
       "icon": "Users",
@@ -248,9 +244,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "invite_by_email",
         "list_email_invites",
-        "revoke_email_invite"
+        "email_invite_write"
       ],
       "helper_text": null,
       "icon": null,
@@ -1570,10 +1565,7 @@
       "file_access": "none",
       "function_names": [
         "agent_settings",
-        "create_agent",
-        "update_agent",
-        "set_avatar",
-        "delete_agent"
+        "agent_manager_write"
       ],
       "helper_text": null,
       "icon": "Settings",
@@ -2459,11 +2451,8 @@
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
-        "claude_end_session",
-        "claude_interrupt",
-        "claude_send",
-        "claude_session_status",
-        "claude_start_session"
+        "claude_agent_status",
+        "claude_agent_write"
       ],
       "helper_text": null,
       "icon": "Bot",
@@ -5925,11 +5914,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "start_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "cancel_script",
-        "list_scripts"
+        "script_read",
+        "script_write"
       ],
       "helper_text": null,
       "icon": "FileCode2",
@@ -6151,11 +6137,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "terminal_open",
-        "terminal_run",
-        "terminal_send",
         "terminal_read",
-        "terminal_list"
+        "terminal_write"
       ],
       "helper_text": null,
       "icon": "SquareTerminal",
@@ -7252,9 +7235,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_my_usage",
-        "get_my_private_usage",
-        "get_all_usage"
+        "usage_stats"
       ],
       "helper_text": null,
       "icon": "FaChartBar",
@@ -8495,12 +8476,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "graph_entity",
-        "search_graph",
-        "delete_graph_entity",
-        "delete_graph_fact",
-        "merge_graph_entities",
-        "update_graph_entity_summary"
+        "knowledge_graph_read",
+        "knowledge_graph_write"
       ],
       "helper_text": null,
       "icon": "Network",
@@ -9317,13 +9294,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "create_shared_directory",
-        "invite_to_shared_directory",
-        "remove_from_shared_directory",
-        "delete_shared_directory",
         "list_shared_directories",
-        "accept_shared_directory",
-        "decline_shared_directory"
+        "shared_directories_write"
       ],
       "helper_text": null,
       "icon": "FolderOpen",
@@ -9547,10 +9519,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_models",
-        "get_thread_model",
-        "switch_thread_model",
-        "reset_thread_model"
+        "thread_model_read",
+        "thread_model_write"
       ],
       "helper_text": null,
       "icon": "Cpu",

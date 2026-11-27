@@ -592,27 +592,28 @@ Which functions an agent gets depends on what it is:
 
 | Function | Offered to | What it does |
 | --- | --- | --- |
-| `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
 | `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
-| `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
-| `set_avatar(attachment_id)` | Every generated agent | Sets its Matrix profile picture to an image attached in the conversation, cropped to its center square |
-| `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
+| `agent_manager_write(action, ...)` | Creators and generated agents (schema narrowed to enabled actions) | Runs an enabled write action: `create` (for agents with `created_agents_per_owner` above 0), `update` and `set_avatar` (for every generated agent), and `delete` (for created agents) |
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
-`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
+`agent_manager_write` always shows an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
 Background scripts cannot call it, and it cannot be deferred.
 
 ```python
-create_agent(
+agent_manager_write(
+    action="create",
     name="research",
     display_name="Research Helper",
     role="Find and summarize sources for the owner.",
     tools=["duckduckgo", "wikipedia"],
 )
-update_agent({"role": "Answer in two sentences.", "instructions": None})
+agent_manager_write(
+    action="update",
+    changes={"role": "Answer in two sentences.", "instructions": None},
+)
 ```
 
-`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `update_agent` replaces the whole field, with `None` restoring the base agent's value.
+`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `changes` replaces the whole field, with `None` restoring the base agent's value.
 [Created Agents and Self-Updates](../personal-agents.md#created-agents-and-self-updates) covers naming, the cap, owners and co-owners, and what happens when the creator changes.
 
 ## [`claude_agent`]
@@ -621,14 +622,14 @@ update_agent({"role": "Answer in two sentences.", "instructions": None})
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](../architecture/security-posture.md#file-access).
 To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](../configuration/models.md#claude-models-with-a-claude-subscription) instead.
 
-The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
-`claude_send()` creates the session if needed, so `claude_start_session()` is optional.
+The tool exposes `claude_agent_status()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
+`claude_agent_write(action="send")` creates the session if needed, so `claude_agent_write(action="start")` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
-When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_send()` reply.
-`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
-`claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
-When Claude fails while processing a prompt, `claude_send()` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
+When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_agent_write(action="send")` reply.
+`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_agent_write(action="end")` first.
+`claude_agent_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+When Claude fails while processing a prompt, `claude_agent_write(action="send")` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](../openai-api.md#session-continuity).
 
 | Option | Type | Default | Notes |
@@ -679,11 +680,12 @@ Credentials for an Anthropic-compatible gateway such as LiteLLM:
 ```
 
 ```python
-claude_send(
+claude_agent_write(
+    action="send",
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",
 )
-claude_session_status(session_label="bugfix")
-claude_interrupt(session_label="bugfix")
-claude_end_session(session_label="bugfix")
+claude_agent_status(session_label="bugfix")
+claude_agent_write(action="interrupt", session_label="bugfix")
+claude_agent_write(action="end", session_label="bugfix")
 ```

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _CALL_TOOL_NAME: Final = "call_tool"
 
 
-def _arguments_object(value: object) -> dict[str, Any] | None:
+def arguments_object(value: object) -> dict[str, Any] | None:
     """Return call arguments parsed like the tool executor parses them when they are a JSON-serializable object.
 
     Model output can be malformed in many ways (unhashable literals, sets, deep nesting), so any failure returns None,
@@ -56,7 +56,7 @@ def call_arguments(function: Mapping[str, Any]) -> dict[str, Any]:
     arguments as that provider produced them: JSON text, possibly cut off by the output limit or empty, or an object.
     Every wire that sends arguments as an object, and the portable ``call_tool`` wrapper, reads them this way.
     """
-    return _arguments_object(function.get("arguments")) or {}
+    return arguments_object(function.get("arguments")) or {}
 
 
 def portable_tool_search_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
@@ -110,7 +110,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     function = call.get("function")
     if not isinstance(function, dict) or function.get("name") != _CALL_TOOL_NAME:
         return call
-    payload = _arguments_object(function.get("arguments") or "{}")
+    payload = arguments_object(function.get("arguments") or "{}")
     if payload is None:
         return call
     name = payload.get("name")
@@ -118,7 +118,7 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")
-    arguments = {} if raw_arguments in (None, "") else _arguments_object(raw_arguments)
+    arguments = {} if raw_arguments in (None, "") else arguments_object(raw_arguments)
     if arguments is None:
         return call
     # Keys beside name and arguments, such as background_after or arguments flattened by a weaker model, belong to
@@ -128,4 +128,10 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
-__all__ = ["call_arguments", "portable_tool_search_request", "portable_tool_search_stream", "resolve_call_tool_calls"]
+__all__ = [
+    "arguments_object",
+    "call_arguments",
+    "portable_tool_search_request",
+    "portable_tool_search_stream",
+    "resolve_call_tool_calls",
+]

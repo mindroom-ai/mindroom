@@ -4201,7 +4201,7 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
     for paused in (gated(stop_after_tool_call=True), gated(connects=True)):
         assert paused.gate is ToolGate.POLICY
     # A model switch stops the run only when it applies to the current response, which a job could not continue.
-    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["switch_thread_model"]
+    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["thread_model_write"]
     assert switch.gate is ToolGate.POLICY
     # An authored confirmation is the tool's own pause, never a job's approval.
     assert gated(requires_confirmation=True).gate is ToolGate.CONFIRM

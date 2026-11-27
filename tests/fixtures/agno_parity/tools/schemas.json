@@ -4,19 +4,46 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_agent",
-        "description": "Create an agent for the person asking, with a role of its own and some of your tools.\nThe new agent's ID is your name plus `name`. `instructions` replace yours; omit them to keep yours.\n`tools` are toolkit names you have, such as `calculator`, never function names; omit it to give all of yours.\nThe owner approves on a card unless their own /auto_approve window is open.",
+        "name": "agent_manager_write",
+        "description": "Create an agent or change, re-avatar, or delete this generated agent.\nThe owner approves on a card unless their own /auto_approve window is open.\n\nActions:\n- `create`: Create an agent for the person asking with `name`, `display_name`, `role`, and optional `instructions` and `tools` (toolkit names you have, such as `calculator`, never function names; omit to inherit yours).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "create"
+              ]
+            },
             "name": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "display_name": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "role": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "instructions": {
               "anyOf": [
@@ -56,9 +83,7 @@
             }
           },
           "required": [
-            "name",
-            "display_name",
-            "role"
+            "action"
           ]
         },
         "strict": false,
@@ -3487,35 +3512,12 @@
     "guidance": null,
     "functions": [
       {
-        "name": "claude_start_session",
-        "description": "Start or reuse a persistent Claude coding session for this conversation.",
+        "name": "claude_agent_status",
+        "description": "Show age, idle time, and Claude session ID for the current persistent Claude session.",
         "parameters": {
           "type": "object",
           "properties": {
             "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "resume": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "fork_session": {
-              "type": "boolean"
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -3533,13 +3535,31 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "claude_send",
-        "description": "Send a prompt to a persistent Claude session and return Claude's response.",
+        "name": "claude_agent_write",
+        "description": "Start, message, interrupt, or close a persistent Claude coding session.\n- `start`: start or reuse session (`resume`/`fork_session` apply on creation only).\n- `send`: send `prompt` and return response (creates session if needed).\n- `interrupt`: interrupt active session.\n- `end`: close active session.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "send",
+                "interrupt",
+                "end"
+              ],
+              "description": "Action."
+            },
             "prompt": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt text (send)."
             },
             "session_label": {
               "anyOf": [
@@ -3549,7 +3569,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Optional label."
             },
             "resume": {
               "anyOf": [
@@ -3559,10 +3580,19 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Claude session ID to resume (start, send)."
             },
             "fork_session": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fork resumed session (start, send)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3576,107 +3606,8 @@
             }
           },
           "required": [
-            "prompt"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_session_status",
-        "description": "Show status information for the current persistent Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_interrupt",
-        "description": "Send an interrupt signal to an active Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "claude_end_session",
-        "description": "Close and remove an active Claude session.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -4202,7 +4133,7 @@
     "functions": [
       {
         "name": "list_contacts",
-        "description": "List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.\nPending requests that wait for your owner's answer show `you: target`.",
+        "description": "List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.\nTakes no arguments. Pending requests that wait for your owner's answer show `you: target`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4224,16 +4155,50 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "request_contact",
-        "description": "Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.\n`target` is a personal agent's name or Matrix ID, a person's Matrix ID, or the Matrix ID of an agent of another MindRoom deployment. `reason` tells the other owner why you ask.\n`rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nWith `party=\"me\"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.\nYour owner approves the request on a card, then the other owner decides in their personal room;\nyou are told in this thread when they accept or decline, or with `party=\"me\"` your owner is invited to the contact room when they accept.",
+        "name": "contacts_write",
+        "description": "Request, answer, update, or remove a contact; your owner approves every write on a card.\nActions:\n- `request`: Ask `target` (personal agent name/Matrix ID, person Matrix ID, or remote deployment agent Matrix ID) for contact with `reason`, optional `rules`, `tools` (toolkit names, never function names), and `party` (`\"agent\"` default or `\"me\"` as owner without rules/tools).\n- `accept`: Accept pending request `contact_id` to open a contact room; optional `rules` and `tools` (omit a field to keep what is set).\n- `decline`: Decline pending request `contact_id` and notify the requesting thread; requester cannot ask again until the declined contact is removed.\n- `update`: Change your side's `rules` or `tools` on `contact_id` from the next turn; omit a field to keep it, blank `rules` clear them, `tools` replaces the list.\n- `remove`: End `contact_id` and leave its room; only the declining owner removes a local decline, while your owner may remove a remote decline.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "request",
+                "accept",
+                "decline",
+                "update",
+                "remove"
+              ]
+            },
+            "contact_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "target": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "reason": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "rules": {
               "anyOf": [
@@ -4277,170 +4242,11 @@
             }
           },
           "required": [
-            "target",
-            "reason"
+            "action"
           ]
         },
         "strict": false,
         "gate": "confirm",
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "accept_contact",
-        "description": "Accept a pending contact request that asks your owner, opening a room where both sides talk.\n`rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.\nOmit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,\nthen the requesting agent is told in the thread it asked from and continues there; an agent of another\ndeployment learns of it from your agent joining the room.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "contact_id": {
-              "type": "string"
-            },
-            "rules": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "tools": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "contact_id"
-          ]
-        },
-        "strict": false,
-        "gate": "confirm",
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "decline_contact",
-        "description": "Decline a pending contact request that asks your owner, and tell the thread it came from.\nThe requester cannot ask again until your owner removes the declined contact. An agent of another deployment\nlearns of the decline from its rejected invite.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "contact_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "contact_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_contact",
-        "description": "Change the rules or tools of your owner's side of a contact; it applies from the next turn in that contact.\nOmit a field to keep it; blank `rules` remove your side's rules. `tools` replace the list and are toolkit names you have, never function names.\nYour owner approves the change on a card.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "contact_id": {
-              "type": "string"
-            },
-            "rules": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "tools": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "contact_id"
-          ]
-        },
-        "strict": false,
-        "gate": "confirm",
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "remove_contact",
-        "description": "Remove a contact; the agents leave its room, which an owner keeps only if they joined it.\nEither owner may remove a contact, but only the owner who declined a request may remove the declined contact,\nexcept that your owner may remove a request an agent of another deployment declined.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "contact_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "contact_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
         "stop_after_tool_call": false
       }
     ]
@@ -5161,16 +4967,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
@@ -5978,7 +5784,7 @@
       },
       {
         "name": "call_tool",
-        "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+        "description": "Call a deferred function from tool_search with top-level name and arguments object.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6481,37 +6287,8 @@
     "guidance": null,
     "functions": [
       {
-        "name": "invite_by_email",
-        "description": "Invite one email address to this room.\nIf the person asking may invite, a single-use link is mailed (or returned to forward by hand when no mail\nserver is configured). Otherwise the request waits until someone who may invite asks for the same address.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "email": {
-              "type": "string",
-              "description": "One plain email address, such as alice@example.com."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "email"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
         "name": "list_email_invites",
-        "description": "List the open email invites of this room with their state, asker, approver and expiry.",
+        "description": "List the open email invites of this room with their state, asker, approver and expiry.\nTakes no arguments.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6533,14 +6310,22 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "revoke_email_invite",
-        "description": "Revoke the open email invite for one address in this room.",
+        "name": "email_invite_write",
+        "description": "Invite an email address to this room or revoke an open email invite.\nActions:\n- `invite`: Invite one plain email address to this room; mails a single-use link (or returns it to forward by hand when no mail server is configured) when the asker may invite, otherwise stores a waiting request until someone who may invite approves.\n- `revoke`: Revoke the open email invite for one address in this room.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "invite",
+                "revoke"
+              ],
+              "description": "Operation to perform (`invite` or `revoke`)."
+            },
             "email": {
               "type": "string",
-              "description": "The invited email address."
+              "description": "One plain email address, such as alice@example.com."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6554,6 +6339,7 @@
             }
           },
           "required": [
+            "action",
             "email"
           ]
         },
@@ -10252,18 +10038,26 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_graph",
-        "description": "Find facts about people, projects, documents, and events that your conversations and tools revealed.\nEach fact shows when it held and its sources: \"conversation\" means someone said it, \"tool_results\" means a\ntool returned it. Facts marked superseded were true before later evidence replaced them.",
+        "name": "knowledge_graph_read",
+        "description": "Read facts or entities from your knowledge graph, with when each held and its sources.\nActions:\n- `search`: Find facts matching `query` (up to `limit`, from 1 to 50); \"conversation\" means someone said it, \"tool_results\" means a tool returned it, and superseded facts held before later evidence replaced them.\n- `entity`: Show the summary and facts for one person, organization, project, or other entity named `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise the closest match plus other close matches).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "search",
+                "entity"
+              ],
+              "description": "Lookup mode (`search` or `entity`)."
+            },
             "query": {
               "type": "string",
-              "description": "What to look up, for example \"who owns Project Atlas\"."
+              "description": "Search query for `search`, or entity name/alias/Matrix ID/ID for `entity`."
             },
             "limit": {
               "type": "integer",
-              "description": "Most facts to return, from 1 to 50."
+              "description": "Maximum facts to return for `search`, from 1 to 50."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10277,6 +10071,7 @@
             }
           },
           "required": [
+            "action",
             "query"
           ]
         },
@@ -10285,45 +10080,22 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "graph_entity",
-        "description": "Show what the knowledge graph knows about one person, organization, project, or other entity.\nAn entity named exactly ``name`` in any letter case is returned, and a configured alias, agent key, or Matrix\nID finds the entity it names; otherwise the closest match, followed by the names of other close matches to look\nup if it is not the one you meant.",
+        "name": "knowledge_graph_write",
+        "description": "Edit mistakes in your knowledge graph (available when knowledge_graph_edits is enabled).\nActions:\n- `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right (e.g. after deleting a fact).\n- `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between the two, and deleting the duplicate.\n- `delete_fact`: Delete a wrong fact (`fact_id`) that never held or recorded your own lookup; keep historical superseded facts.\n- `delete_entity`: Delete a non-entity (`entity_id`, such as a path, URL, or setting) with every fact that touches it; use `merge` for duplicates.",
         "parameters": {
           "type": "object",
           "properties": {
-            "name": {
+            "action": {
               "type": "string",
-              "description": "The entity's name, for example \"Alice\" or \"Project Atlas\"."
+              "enum": [
+                "update_summary",
+                "merge",
+                "delete_fact",
+                "delete_entity"
+              ],
+              "description": "Edit operation to perform."
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_graph_fact",
-        "description": "Delete a wrong fact from your knowledge graph.\nDelete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact\nabout your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it\nsuperseded. A later conversation or tool result that states the fact again can add it back. The summaries of\nthe entities it connects can still state it; rewrite those with `update_graph_entity_summary`.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "fact_id": {
-              "type": "string",
-              "description": "The fact's id, as `search_graph` and `graph_entity` show it."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10331,28 +10103,10 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": [
-            "fact_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_graph_entity",
-        "description": "Delete an entity that does not belong in your knowledge graph, with every fact that touches it.\nDelete an entity that is not a person, agent, organization, location, event, project, product, document, or\naccount, such as a file path, URL, or setting, or that never existed. To combine two entities for the same\nperson or thing, merge them with `merge_graph_entities` instead, which keeps the facts.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ],
+              "description": "Fact ID from `knowledge_graph_read` (required for `delete_fact`)."
+            },
             "entity_id": {
-              "type": "string",
-              "description": "The entity's id, as `graph_entity` shows it."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10360,32 +10114,21 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": [
-            "entity_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "merge_graph_entities",
-        "description": "Merge an entity into another entity for the same person or thing, such as a nickname into a full name.\nThe duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are\ndropped, and the duplicate is deleted. `graph_entity` also takes an id, to check an entity before merging it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+              ],
+              "description": "Entity ID from `knowledge_graph_read` (required for `update_summary` and `delete_entity`)."
+            },
             "duplicate_id": {
-              "type": "string",
-              "description": "The id of the entity to merge away, as `graph_entity` shows it."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Entity ID to merge away (required for `merge`)."
             },
             "into_id": {
-              "type": "string",
-              "description": "The id of the entity to keep."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -10393,31 +10136,19 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": [
-            "duplicate_id",
-            "into_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "update_graph_entity_summary",
-        "description": "Replace an entity's summary, for example to remove what a fact you deleted said.\nKeep everything the old summary says that is still right; later conversations and tool results that mention\nthe entity add to the new summary.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "entity_id": {
-              "type": "string",
-              "description": "The entity's id, as `graph_entity` shows it."
+              ],
+              "description": "Entity ID to keep (required for `merge`)."
             },
             "summary": {
-              "type": "string",
-              "description": "The new summary."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "New entity summary (required for `update_summary`)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10431,8 +10162,7 @@
             }
           },
           "required": [
-            "entity_id",
-            "summary"
+            "action"
           ]
         },
         "strict": false,
@@ -15476,11 +15206,75 @@
     "guidance": null,
     "functions": [
       {
-        "name": "start_script",
-        "description": "Run a Python script in the background.\nProvide exactly one of `source` or `path`.\nA path is relative to this agent's workspace and is snapshotted before execution.\nThe script gets no command-line arguments.\nIt calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{\"argument\": \"value\"}'`,\nwhich waits for the result, or with `from mindroom.script_sdk import MindRoomTools`\nand `MindRoomTools().call(\"toolkit\", \"function\", argument=\"value\")`.",
+        "name": "script_read",
+        "description": "Inspect background Python scripts.\n- `list`: list owned runs.\n- `get`: state and recent output for one run.\n- `resource_profiles`: Kubernetes CPU/memory profiles.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "get",
+                "resource_profiles"
+              ],
+              "description": "Action."
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run ID (get)."
+            },
+            "include_finished": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Include finished runs (list, default true)."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "script_write",
+        "description": "Start or cancel a background Python script.\n- `start`: provide exactly one of `source` or `path` (snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call(\"toolkit\", \"function\", ...)`.\n- `cancel`: revoke tool access and stop one owned run.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "cancel"
+              ],
+              "description": "Action."
+            },
             "source": {
               "anyOf": [
                 {
@@ -15490,7 +15284,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Inline Python source code."
+              "description": "Inline Python code (start)."
             },
             "path": {
               "anyOf": [
@@ -15501,7 +15295,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Workspace-relative path to a Python source file."
+              "description": "Workspace-relative .py file (start)."
             },
             "name": {
               "anyOf": [
@@ -15512,7 +15306,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional short label shown by status and list operations."
+              "description": "Short label (start)."
             },
             "resource_profile": {
               "type": "string",
@@ -15521,59 +15315,9 @@
                 "standard",
                 "large"
               ],
-              "description": "Optional bounded Kubernetes profile. Call get_script_resource_profiles to inspect the\nexact resources, or omit it to use the configured default."
+              "description": "Profile from `script_read(action=\"resource_profiles\")`; omit `resource_profile` for default (start)."
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_script_resource_profiles",
-        "description": "Return the exact CPU and memory reservations available to background scripts.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_script",
-        "description": "Return durable state and recent process output for one owned script.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "run_id": {
-              "type": "string",
-              "description": "Identifier returned by `start_script`."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -15581,72 +15325,24 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": [
-            "run_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_script",
-        "description": "Cancel one owned background script after revoking its tool capability.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "Identifier returned by `start_script`."
+              ],
+              "description": "Run ID (cancel)."
             },
             "force": {
-              "type": "boolean",
-              "description": "Force-kill the supervised process instead of requesting graceful termination."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "boolean"
                 },
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Force-kill (cancel, default false)."
             }
           },
           "required": [
-            "run_id"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_scripts",
-        "description": "List background scripts owned by this requester and agent.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_finished": {
-              "type": "boolean",
-              "description": "Include terminal runs in addition to active runs."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -16062,94 +15758,8 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_shared_directory",
-        "description": "Create a directory you can write and later share read-only with other agents.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Directory name: 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "invite_to_shared_directory",
-        "description": "Let another agent read one of your shared directories from its own worker.\nWhen the user you act for may not use that agent, the invitation waits until a user who may use it\naccepts it through that agent.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Name of a directory you created."
-            },
-            "agent_name": {
-              "type": "string",
-              "description": "Name of the agent to invite."
-            }
-          },
-          "required": [
-            "name",
-            "agent_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "remove_from_shared_directory",
-        "description": "Stop sharing one of your directories with an agent.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Name of a directory you created."
-            },
-            "agent_name": {
-              "type": "string",
-              "description": "Name of the member to remove."
-            }
-          },
-          "required": [
-            "name",
-            "agent_name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_shared_directory",
-        "description": "Delete one of your shared directories and every file in it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "name": {
-              "type": "string",
-              "description": "Name of a directory you created."
-            }
-          },
-          "required": [
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
         "name": "list_shared_directories",
-        "description": "List the shared directories you own or joined, with their paths and your access, and your pending invitations.",
+        "description": "List the shared directories you own or joined, with their paths and your access, and your pending invitations.\nTakes no arguments.",
         "parameters": {
           "type": "object",
           "properties": {},
@@ -16160,46 +15770,52 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "accept_shared_directory",
-        "description": "Accept an invitation to read another agent's shared directory, once the user you act for agrees.",
+        "name": "shared_directories_write",
+        "description": "Create, share, join, or delete shared directories.\nActions:\n- `create`: Create a directory (`name`) you can write and later share read-only with other agents.\n- `invite`: Let `agent_name` read your shared directory (`name`) from its own worker; waits for acceptance when the user may not use `agent_name`.\n- `accept`: Accept a pending invitation from `owner` to read shared directory `name`, once the user agrees.\n- `decline`: Decline a pending invitation from `owner` to read shared directory `name`.\n- `remove`: Stop sharing your directory (`name`) with `agent_name`, or cancel its pending invitation.\n- `delete`: Delete your shared directory (`name`) and every file in it.",
         "parameters": {
           "type": "object",
           "properties": {
-            "owner": {
+            "action": {
               "type": "string",
-              "description": "Agent that owns the directory."
+              "enum": [
+                "create",
+                "invite",
+                "accept",
+                "decline",
+                "remove",
+                "delete"
+              ],
+              "description": "Operation to perform."
             },
             "name": {
               "type": "string",
-              "description": "Name of the directory."
-            }
-          },
-          "required": [
-            "owner",
-            "name"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "decline_shared_directory",
-        "description": "Decline an invitation to read another agent's shared directory.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "owner": {
-              "type": "string",
-              "description": "Agent that owns the directory."
+              "description": "Directory name: 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit."
             },
-            "name": {
-              "type": "string",
-              "description": "Name of the directory."
+            "agent_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target agent name (required for `invite` and `remove`)."
+            },
+            "owner": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Owning agent name (required for `accept` and `decline`)."
             }
           },
           "required": [
-            "owner",
+            "action",
             "name"
           ]
         },
@@ -16222,16 +15838,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
@@ -17660,8 +17276,8 @@
     ]
   },
   "terminal": {
-    "instructions": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent output; terminal_list shows them all.",
-    "guidance": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read shows recent output; terminal_list shows them all.",
+    "instructions": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
+    "guidance": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
     "functions": []
   },
   "thread_model": {
@@ -17669,11 +17285,18 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_models",
-        "description": "List the configured model aliases available for selection.",
+        "name": "thread_model_read",
+        "description": "List configured models or inspect this thread's model override.\n- `list`: list configured models, providers, and reasoning levels (works outside a thread).\n- `get`: inspect this thread's current active/stale model override.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "get"
+              ]
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -17685,33 +17308,38 @@
               ]
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
       {
-        "name": "get_thread_model",
-        "description": "Return the current thread's model override for each entity it applies to and the available model names.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "switch_thread_model",
-        "description": "Switch the model that the agents and teams the requester may address use in the current thread.\nThe override persists for this thread until reset. It can take effect\nafter this tool call or from the next message in the thread.",
+        "name": "thread_model_write",
+        "description": "Switch or reset this thread's model override.\n- `switch`: set thread model to `model_name` until reset.\n- `reset`: clear override, restoring room selection.",
         "parameters": {
           "type": "object",
           "properties": {
-            "model_name": {
+            "action": {
               "type": "string",
-              "description": "Configured model name from the `models:` section of\nconfig.yaml (for example \"default\" or \"opus\"), or `name@level`\nfor one of the reasoning levels `list_models` shows (for example \"sol@high\")."
+              "enum": [
+                "switch",
+                "reset"
+              ],
+              "description": "Action."
+            },
+            "model_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model name or `name@level` (switch)."
             },
             "when": {
               "type": "string",
@@ -17719,24 +17347,12 @@
                 "after-toolcall",
                 "next-turn"
               ],
-              "description": "Whether the current response continues with the new model or\nthe change starts on the next turn."
+              "description": "`next-turn` (default) or `after-toolcall` to continue now (switch)."
             }
           },
           "required": [
-            "model_name"
+            "action"
           ]
-        },
-        "strict": null,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reset_thread_model",
-        "description": "Remove the thread override of the requester's agents and teams, restoring room-level model selection.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -19524,14 +19140,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_my_usage",
-        "description": "Return retained usage for the current agent and canonical requester.",
+        "name": "usage_stats",
+        "description": "Return retained token usage summaries.\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "self",
+                "private"
+              ],
+              "description": "Scope."
+            },
             "include_daily": {
               "type": "boolean",
-              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
+              "description": "Include daily UTC totals and breakdowns."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19544,34 +19168,9 @@
               ]
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_my_private_usage",
-        "description": "Return usage for all of the current requester's private agents.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "include_daily": {
-              "type": "boolean",
-              "description": "Include retained token totals and per-model breakdowns by UTC date."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,

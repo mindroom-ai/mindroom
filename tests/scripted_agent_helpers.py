@@ -77,7 +77,7 @@ class ProbeTools(Toolkit):
     """Tools an agent-path reply calls: a shell that answers or keeps running, a save that keeps running, and more.
 
     A call that keeps running sets ``running`` and waits to be cancelled, so a test can stop the turn mid-call.
-    ``switch_thread_model`` answers as the thread-model tool does, and as that tool does, a switch for the current
+    ``thread_model_write`` answers as the thread-model tool does, and as that tool does, a switch for the current
     response stops the run after it.
     """
 
@@ -92,7 +92,7 @@ class ProbeTools(Toolkit):
                 self.read_file,
                 self.inspect,
                 self.dangerous,
-                self.switch_thread_model,
+                self.thread_model_write,
             ],
         )
 
@@ -149,19 +149,25 @@ class ProbeTools(Toolkit):
         """
         return f"did {value}"
 
-    async def switch_thread_model(self, model_name: str, when: str = "next-turn") -> str | ToolOutcome:
+    async def thread_model_write(
+        self,
+        action: str = "switch",
+        model_name: str | None = None,
+        when: str = "next-turn",
+    ) -> str | ToolOutcome:
         """Switch the thread's model.
 
         Args:
+            action: Write operation to perform.
             model_name: The configured model.
             when: When the switch takes effect.
 
         """
-        if model_name not in {"default", "large"}:
+        if action != "switch" or model_name not in {"default", "large"}:
             return custom_tool_payload(
                 "thread_model",
                 "error",
-                action="switch",
+                action=action,
                 message=f"Unknown model '{model_name}'.",
             )
         payload = custom_tool_payload("thread_model", "ok", action="switch", model=model_name, when=when)

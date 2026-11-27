@@ -29,11 +29,13 @@ from mindroom.desktop.credentials import (
 )
 from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
+from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -1963,7 +1965,9 @@ def test_call_tool_wire_definition_has_a_description() -> None:
     """Providers read the wrapper's description, and some (Cerebras) fail without one."""
     function = toolkit_offers(_search_toolkit(), "call_tool")
 
-    assert function.definition().description
+    assert function.definition().description == (
+        "Call a deferred function from tool_search with top-level name and arguments object."
+    )
 
 
 def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
@@ -1972,6 +1976,117 @@ def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
 
     assert "tool_search" in _tool_payload(entrypoint(customer_id=7))["message"]
     assert "'crm_lookpu' was not called" in _tool_payload(entrypoint(name="crm_lookpu", customer_id=7))["message"]
+
+
+def test_call_tool_fallback_diagnostics_never_echo_payload_secrets() -> None:
+    """Fallback diagnostics classify malformed wrapper calls without echoing values, extra keys, or container names."""
+    entrypoint = toolkit_offers(_search_toolkit(), "call_tool").entrypoint
+    nested_both = {"name": "SECRET_FN", "arguments": {"token": "SECRET_VAL"}}
+    nested_name = {"name": "SECRET_FN", "token": "SECRET_VAL"}
+    cases: list[tuple[dict[str, object], str]] = [
+        ({"arguments": nested_both}, "found 'name' and 'arguments' nested inside 'arguments'"),
+        (
+            {"name": "   ", "arguments": json.dumps(nested_both)},
+            "found 'name' and 'arguments' nested inside 'arguments'",
+        ),
+        ({"name": None, "arguments": nested_name}, "found 'name' inside 'arguments'"),
+        ({"arguments": json.dumps(nested_name)}, "found 'name' inside 'arguments'"),
+        ({"arguments": {"token": "SECRET_VAL"}, "SECRET_EXTRA_KEY": "SECRET_EXTRA_VAL"}, "missing top-level 'name'."),
+        (
+            {"name": {"name": "SECRET_DICT_VAL"}, "arguments": {"token": "SECRET_VAL"}},
+            "top-level 'name' must be a string",
+        ),
+        ({"name": ["SECRET_LIST_VAL"], "arguments": [1]}, "top-level 'name' must be a string"),
+        ({"name": ("SECRET_TUPLE_VAL",)}, "top-level 'name' must be a string"),
+        ({"name": {"SECRET_SET_VAL"}}, "top-level 'name' must be a string"),
+        ({"name": frozenset({"SECRET_FSET_VAL"})}, "top-level 'name' must be a string"),
+        ({"name": "call_tool", "arguments": nested_name}, "exact name from tool_search, not 'call_tool'"),
+        (
+            {"name": "crm_lookup", "arguments": ["SECRET_VAL"]},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        (
+            {"name": "crm_lookup", "arguments": "SECRET_VAL"},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        (
+            {"name": "crm_lookup", "arguments": '["SECRET_VAL"]'},
+            "'crm_lookup' was not called: 'arguments' must be a JSON object.",
+        ),
+        ({"name": "crm_lookup", "arguments": 42}, "'crm_lookup' was not called: 'arguments' must be a JSON object."),
+    ]
+    for kwargs, expected_fragment in cases:
+        message = _tool_payload(entrypoint(**kwargs))["message"]
+        assert isinstance(message, str)
+        assert expected_fragment in message
+        for secret in (
+            "SECRET_FN",
+            "SECRET_VAL",
+            "SECRET_EXTRA_KEY",
+            "SECRET_EXTRA_VAL",
+            "SECRET_DICT_VAL",
+            "SECRET_LIST_VAL",
+            "SECRET_TUPLE_VAL",
+            "SECRET_SET_VAL",
+            "SECRET_FSET_VAL",
+        ):
+            assert secret not in message
+
+    default_cases: list[tuple[object, object]] = [
+        ("crm_lookpu", None),
+        ("crm_lookpu", ""),
+        ("crm_lookpu", []),
+        ("crm_lookpu", {}),
+        ("crm_lookpu", "{}"),
+        ("crm_lookpu", "[]"),
+        ("crm_lookpu", "{'a': 1}"),
+        (0, None),
+        (False, None),
+    ]
+    for name, arguments in default_cases:
+        expected = (
+            f"'{name}' was not called. Use an exact function name from tool_search and pass arguments as a JSON object."
+        )
+        assert _tool_payload(entrypoint(name=name, arguments=arguments))["message"] == expected
+
+
+def test_call_tool_malformed_wire_calls_end_to_end() -> None:
+    """Malformed call_tool wire calls survive resolve_call_tool_calls and parse_tool_arguments to safe diagnostics."""
+    call_tool_fn = toolkit_offers(_search_toolkit(), "call_tool")
+    cases = [
+        (
+            json.dumps({"arguments": {"name": "crm_lookup", "arguments": {"token": "SECRET"}}}),
+            "found 'name' and 'arguments' nested inside 'arguments'",
+            "SECRET",
+        ),
+        (
+            json.dumps({"arguments": "{'name': 'crm_lookup', 'token': 'SECRET'}"}),
+            "found 'name' inside 'arguments'",
+            "SECRET",
+        ),
+        ("{'name': ('SECRET',)}", "top-level 'name' must be a string", "SECRET"),
+        ("{'name': {'SECRET'}}", "top-level 'name' must be a string", "SECRET"),
+        (
+            json.dumps({"name": "crm_lookpu", "arguments": "[]"}),
+            "'crm_lookpu' was not called. Use an exact function name",
+            "must be a JSON object",
+        ),
+        (
+            json.dumps({"name": "crm_lookpu", "arguments": "{'a': 1}"}),
+            "'crm_lookpu' was not called. Use an exact function name",
+            "must be a JSON object",
+        ),
+    ]
+    for raw_arguments, expected, forbidden in cases:
+        call = {"id": "c1", "type": "function", "function": {"name": "call_tool", "arguments": raw_arguments}}
+        [resolved] = resolve_call_tool_calls([call], {"crm_lookup"})
+        assert resolved["function"]["name"] == "call_tool"
+        parsed = parse_tool_arguments(resolved["function"]["arguments"], call_tool_fn)
+        assert isinstance(parsed, dict)
+        message = _tool_payload(call_tool_fn.entrypoint(**parsed))["message"]
+        assert isinstance(message, str)
+        assert expected in message
+        assert forbidden not in message
 
 
 def test_search_toolkit_results_are_never_redirected_to_output_files(
@@ -1990,13 +2105,13 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
 
 
 def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) -> None:
-    """A creator is offered create_agent, a generated agent its own settings, a created one delete, an authored one none."""
+    """A creator gets write(create), a generated agent settings+write(update,set_avatar), a created one delete too, an authored one none."""
     config = _load(tmp_path, _with_template(), entries=[_personal()], created=[_created()])
     config.agents["code"] = config.agents["creator"].model_copy(update={"created_agents_per_owner": 0})
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
 
-    def offered(agent_name: str) -> set[str]:
+    def offered(agent_name: str) -> tuple[set[str], tuple[str, ...]]:
         build = create_agent(
             agent_name,
             config,
@@ -2007,15 +2122,20 @@ def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) ->
             supports_native_tool_approval=True,
             plugins=config_plugins(config, paths),
         )
-        return {
-            function.name
+        functions = {
+            function.name: function
             for toolkit in build.spec.toolkits
             if toolkit.name == "agent_manager"
             for function in toolkit.functions
         }
+        write_fn = functions.get("agent_manager_write")
+        actions = tuple(write_fn.parameters["properties"]["action"]["enum"]) if write_fn is not None else ()
+        return set(functions), actions
 
-    managed = {"agent_settings", "update_agent", "set_avatar"}
-    assert offered("creator") == {"create_agent"}
-    assert offered("creator_research") == managed | {"delete_agent"}
-    assert offered("mind_alice") == managed
-    assert offered("code") == set()
+    assert offered("creator") == ({"agent_manager_write"}, ("create",))
+    assert offered("creator_research") == (
+        {"agent_settings", "agent_manager_write"},
+        ("update", "set_avatar", "delete"),
+    )
+    assert offered("mind_alice") == ({"agent_settings", "agent_manager_write"}, ("update", "set_avatar"))
+    assert offered("code") == (set(), ())

@@ -106,7 +106,7 @@ def _continue_call(
     model_name: str = "default",
 ) -> list[ScriptStep]:
     """Return a switch of the current response to the model it runs on, which ends the step and continues the turn."""
-    switch = tool_call("switch_thread_model", call_id, model_name=model_name, when="after-toolcall")
+    switch = tool_call("thread_model_write", call_id, action="switch", model_name=model_name, when="after-toolcall")
     return calls(switch, metrics=metrics)
 
 
@@ -430,7 +430,10 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     if outcome == "immediate_pause":
         turns[1:1] = [_call("calculate", "approved-again", action="add", a=4, b=5)]
     if switch_when:
-        turns.insert(1, _call("switch_thread_model", "switcher", model_name="alternate", when=switch_when))
+        turns.insert(
+            1,
+            _call("thread_model_write", "switcher", action="switch", model_name="alternate", when=switch_when),
+        )
     if switch_when == "after-toolcall":
         # The step after the switch continues on the model the switch moved the response to.
         turns[2] = _continue_call("continue", model_name="alternate")
@@ -611,7 +614,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     last = model.requests[-1].messages
     assert any(message.role == "tool" and message.tool_call_id == "approved" for message in last)
     assert any(message.role == "tool" and message.tool_call_id == "continue" for message in last)
-    expected_tools = ["calculate", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
+    expected_tools = ["calculate", *(["thread_model_write"] if switch_when else []), "thread_model_write", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
     receipt_requests = [index for index, request in enumerate(model.requests) if carries_approval_receipt(request)]
     # Each resumed run's requests read its receipt; the first resumed run answers a next-turn switch in a second one.
@@ -809,7 +812,7 @@ async def test_old_or_child_tool_changes_keep_parent_terminal_content(source: st
     """Only newly completed parent tools can request another parent continuation attempt."""
     tool = ToolExecution(
         tool_call_id="old-continue",
-        tool_name="switch_thread_model",
+        tool_name="thread_model_write",
         result=json.dumps(
             {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "after-toolcall"},
         ),

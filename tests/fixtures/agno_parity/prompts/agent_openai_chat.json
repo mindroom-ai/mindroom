@@ -162,7 +162,7 @@
         },
         {
           "name": "call_tool",
-          "description": "Call a deferred function found with tool_search, passing its arguments as a JSON object.",
+          "description": "Call a deferred function from tool_search with top-level name and arguments object.",
           "parameters": {
             "type": "object",
             "properties": {

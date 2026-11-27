@@ -1828,7 +1828,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |
-| `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `start_script` omits `resource_profile` | `small` |
+| `MINDROOM_KUBERNETES_DEFAULT_SCRIPT_RESOURCE_PROFILE` | Default Kubernetes background-script profile (`small`, `standard`, or `large`) when `script_write(action="start")` omits `resource_profile` | `small` |
 | `MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON` | JSON object defining CPU and memory requests and limits for the `small`, `standard`, and `large` profiles | Built-in profiles |
 | `MINDROOM_SCRIPT_RETENTION_SECONDS` | Positive seconds to retain finished background-script runs, tool-call receipts, and approval records | `2592000` (30 days) |
 | `MINDROOM_SHELL_SYSTEMD_SLICE` | Linux systemd user slice name (for example `mindroom-shells.slice`) to isolate local `shell` commands outside MindRoom's own service cgroup via `systemd-run --user --scope`; see [Linux resource isolation](https://docs.mindroom.chat/tools/execution-and-coding/#linux-resource-isolation) | _(unset)_ |
@@ -1931,7 +1931,7 @@ agents:
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | | | See [History Settings](https://docs.mindroom.chat/configuration/history/#history-settings) |
 | `compaction` | object | `defaults.compaction` | Per-agent compaction overrides; `enabled: false` turns automatic compaction off. See [Agent Compaction Settings](https://docs.mindroom.chat/configuration/history/#agent-compaction-settings) |
 | `max_tool_calls_per_turn` | int, >= 1 | `null` | Tool calls one turn may execute. Further calls return a tool error, and after this many plus two model requests the turn ends with the text produced so far, which also stops loops of unknown or malformed tool calls. Separately, a tool whose calls failed in 8 model requests of one turn, with no success in between, is refused for the rest of the turn with its last error, redacted; several failed calls in one request count once, and calls that never ran (unknown tools, undecodable arguments, the call limit) do not count. Only failed calls count: a tool that returns an error as its ordinary output, such as a `shell` command that exits with an error, is never refused. If the model calls the refused tool again, the turn ends with the text so far and a line naming the tool and its last error |
-| `created_agents_per_owner` | int, >= 0 | `0` | How many agents each person may create through this agent with `create_agent`; `0` turns the tool off. It applies to this agent only and is not inherited from `defaults`. See [Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) |
+| `created_agents_per_owner` | int, >= 0 | `0` | How many agents each person may create through this agent with `agent_manager_write(action="create", ...)`; `0` turns agent creation off. It applies to this agent only and is not inherited from `defaults`. See [Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) |
 | `show_tool_calls` | bool | `null` | Show tool-call markers and trace metadata in Matrix messages; see [Tool Calls During Streaming](https://docs.mindroom.chat/streaming/#tool-calls-during-streaming) |
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](https://docs.mindroom.chat/streaming/#reasoning) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](https://docs.mindroom.chat/deployment/sandbox-proxy/#execution-modes) decides. See [Worker Routing](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-routing) |
@@ -3000,7 +3000,7 @@ models:
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
 `sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
-`!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
+`!model list` and the `thread_model` tool's `thread_model_read(action="list")` show each model's levels and default.
 
 MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
 
@@ -3103,13 +3103,13 @@ agents:
       - thread_model
 ```
 
-- `list_models()` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
-- `get_thread_model()` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `switch_thread_model(model_name, when)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
+- `thread_model_read(action="list")` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
+- `thread_model_read(action="get")` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
+- `thread_model_write(action="switch", model_name=..., when=...)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
-- `reset_thread_model()` removes the thread override so room-level selection applies again.
+- `thread_model_write(action="reset")` removes the thread override so room-level selection applies again.
 
-All functions except `list_models` require an active thread and return an error outside one.
+All operations except `thread_model_read(action="list")` require an active thread and return an error outside one.
 Overrides set by the tool follow the same entity scope and team rules as [`!model`](#model) and are stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
 
 # Team Configuration
@@ -4943,7 +4943,7 @@ A Matrix ID or agent key in an entry gives that person or agent the entry's name
 Someone else whose display name is the name of an entry with a Matrix ID or agent key goes by their username, so the two stay apart.
 A speaker whose display name is the name of an entry without one shares that entry's entity and its other names, so an entry named after your own display name needs no Matrix ID.
 A username that an entry with a Matrix ID or agent key, or an agent, is already named gets its homeserver added, such as `alice work.example`.
-Every other alias is a plain name that extraction maps to the entry's name and that `graph_entity` finds the entity by.
+Every other alias is a plain name that extraction maps to the entry's name and that `knowledge_graph_read(action="entity", ...)` finds the entity by.
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
@@ -4952,14 +4952,14 @@ Entities extracted earlier under other names, such as a Matrix ID, stay separate
 ## The `knowledge_graph` Tool
 
 ```python
-search_graph("who owns Project Atlas", limit=10)   # limit 1 to 50
-graph_entity("Project Atlas")
+knowledge_graph_read(action="search", query="who owns Project Atlas", limit=10)  # limit 1 to 50
+knowledge_graph_read(action="entity", query="Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
-`graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
+`knowledge_graph_read(action="entity", ...)` returns the entity whose name equals the given `query` in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reaches only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
@@ -4968,20 +4968,20 @@ An agent reaches only its own graph; a [private agent](https://docs.mindroom.cha
 
 An agent with a graph can correct it.
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
-With edits on, its lookups show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
+With edits on, its lookups show each fact's and entity's id, `knowledge_graph_read(action="entity", ...)` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains `knowledge_graph_write` with four actions:
 
 ```python
-delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
-delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
-merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
-update_graph_entity_summary("<entity id>", "...")    # a summary that still states a deleted fact
+knowledge_graph_write(action="delete_fact", fact_id="<fact id>")                            # a fact that never held, or names the wrong person or thing
+knowledge_graph_write(action="delete_entity", entity_id="<entity id>")                      # a file path, URL, or other non-entity, with every fact that touches it
+knowledge_graph_write(action="merge", duplicate_id="<duplicate id>", into_id="<kept id>")   # the duplicate's facts and their sources move to the kept entity
+knowledge_graph_write(action="update_summary", entity_id="<entity id>", summary="...")      # a summary that still states a deleted fact
 ```
 
 The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
 An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
 Ask the agent to fix what it finds wrong, or let an [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
 Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
-To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `delete_graph_*`, `merge_graph_entities`, and `update_graph_entity_summary`.
+To approve each edit before it happens, add a [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `knowledge_graph_write` (timed grants are scoped per `action`).
 To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
@@ -7705,7 +7705,7 @@ Counter values can change between reports as coverage improves.
 
 ### Personal Private-Agent Usage
 
-`GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
+`GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `usage_stats(action="private")` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
 The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
@@ -7741,11 +7741,11 @@ A service assertion authorizes only `/api/usage/export`, not `/api/usage`, perso
 
 The `usage_stats` tool lets an agent answer usage questions in chat; it is read-only.
 
-| Function | Reports | Availability |
+| Action (`usage_stats`) | Reports | Availability |
 | --- | --- | --- |
-| `get_my_usage()` | The caller's usage of the current agent; for a private agent, the caller's own instance | Always |
-| `get_my_private_usage()` | Usage across all the caller's currently configured private agents | Always |
-| `get_all_usage()` | Organization-wide usage of currently configured agents, all stored teams, and `system:internal` | Requires `admin_scope: true` and a caller listed in `administrators` |
+| `usage_stats(action="self")` | The caller's usage of the current agent; for a private agent, the caller's own instance | Always |
+| `usage_stats(action="private")` | Usage across all the caller's currently configured private agents | Always |
+| `usage_stats(action="all")` | Organization-wide usage of currently configured agents, all stored teams, and `system:internal` | Requires `admin_scope: true` and a caller listed in `administrators` |
 
 Give an agent the self-service functions by adding the tool:
 
@@ -7760,7 +7760,7 @@ agents:
 
 `mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
-Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
+Enable `usage_stats(action="all")` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 
 ```yaml
 administrators:
@@ -7775,15 +7775,15 @@ agents:
           admin_scope: true
 ```
 
-All three functions accept `include_daily` (default `false`), which adds [daily rows](#daily-rows) and `daily_coverage`.
+All three actions accept `include_daily` (default `false`), which adds [daily rows](#daily-rows) and `daily_coverage`.
 
 ### Tool Responses
 
 Responses are JSON with `status` and `tool` fields, plus `scope`, `totals`, `session_count`, `breakdown`, `coverage`, `model_breakdown`, and `model_coverage`.
-`get_all_usage()` returns the organization report fields described in [Report Fields](#report-fields), except request rows.
+`usage_stats(action="all")` returns the organization report fields described in [Report Fields](#report-fields), except request rows.
 Self reports leave `breakdown` empty.
-`get_my_private_usage()` adds `cumulative_model_breakdown` and `private_agent_breakdown` without user IDs.
-`get_my_usage()` omits cumulative model and private-agent fields and excludes the in-progress tool call.
+`usage_stats(action="private")` adds `cumulative_model_breakdown` and `private_agent_breakdown` without user IDs.
+`usage_stats(action="self")` omits cumulative model and private-agent fields and excludes the in-progress tool call.
 On a shared agent it counts only the caller's retained runs, so it can miss usage after compaction.
 On a private agent it reports the whole session totals, which include compacted usage and can exceed the retained model or daily detail.
 
@@ -7791,7 +7791,7 @@ Errors use the same envelope with a `code` and `message`:
 
 | Code | Cause |
 | --- | --- |
-| `authorization_error` | `get_all_usage()` called without `admin_scope`, from another agent, or by a non-administrator |
+| `authorization_error` | `usage_stats(action="all")` called without `admin_scope`, from another agent, or by a non-administrator |
 | `context_unavailable` | No active requester or agent context, such as outside a conversation |
 
 # Budgets
@@ -8455,7 +8455,7 @@ Every generated agent also gets these settings, whatever the template says:
 
 - The owner is added to `access.users` and `credential_managers` when missing.
 - `access.members_of_rooms` is `[]` when missing or null, so membership of the agent's rooms grants nothing unless you list rooms yourself.
-- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `update_agent` instead.
+- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `agent_manager_write(action="update", ...)` instead.
 
 Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
 It also rejects `matrix_username` there, because the template's own `matrix_username` names every user's account.
@@ -8478,7 +8478,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 - Editing the template changes every user's agent at the next reload.
   The name, Matrix account, `{user_display_name}`, and `{user_first_name}` stay fixed at what onboarding stored.
-  A field its owner changed with [`update_agent`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
+  A field its owner changed with [`agent_manager_write(action="update", ...)`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
 - An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
   The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
 - A team member or `delegate_to` entry can name a generated agent only once it exists, because validation rejects an unknown agent name before then.
@@ -8569,17 +8569,17 @@ Every call that creates, changes, or deletes an agent waits for the person askin
 ### Updating a Generated Agent
 
 Ask the agent to change itself, for example to answer more briefly or to drop a tool.
-It calls `agent_settings` to read its current values and the tool names it may choose from, then `update_agent` with only the fields to change.
+It calls `agent_settings` to read its current values and the tool names it may choose from, then `agent_manager_write(action="update", changes=...)` with only the fields to change.
 
 - Each value replaces the whole field, so send a changed `instructions` list in full.
 - `null` restores the template's value, or for a created agent its creator's value.
 - `tools` are toolkit names such as `calculator`, never function names, chosen from the `allowed_tools` that `agent_settings` returns, which are the tools of the template or creator.
   A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
-- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
+- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `agent_manager_write(action="create", ...)`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
 
 To change the agent's picture, attach a PNG, JPEG, GIF, or WebP image in a conversation with the agent and ask it to use the image as its avatar.
-It calls `set_avatar`, which crops the image to its center square, and the new picture applies without a reload.
+It calls `agent_manager_write(action="set_avatar", attachment_id=...)`, which crops the image to its center square, and the new picture applies without a reload.
 An animated image keeps only its first frame.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
@@ -8600,7 +8600,7 @@ agents:
     created_agents_per_owner: 2
 ```
 
-The person asks `mind` for a helper, and `mind` calls `create_agent` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
+The person asks `mind` for a helper, and `mind` calls `agent_manager_write(action="create", ...)` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
 
 - The new agent's ID is the creator's name, an underscore, and the `name` lowercased with other characters turned into underscores, trimmed of leading and trailing underscores, and cut to 30 characters, so `Research Helper` from `mind` gives `mind_research_helper`.
   The tool replies with its Matrix ID.
@@ -8615,7 +8615,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 The new agent joins no room by itself.
 The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.
 Authored config cannot reference a created agent, so a `delegate_to` list or a team that names one fails to load.
-A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with update_agent`, because saving it to `config.yaml` would lose it.
+A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with agent_manager_write(action="update", ...)`, because saving it to `config.yaml` would lose it.
 
 > [!WARNING]
 > **A created agent has its creator's tools, knowledge bases, skills, and model.**
@@ -8635,13 +8635,13 @@ A name stays taken after the agent is deleted, because its Matrix account stays.
 The person whose request creates an agent is its owner, resolved through any [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) to the person.
 Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
 
-An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
+An owner can share a created agent by passing `co_owners` in `changes` to `agent_manager_write(action="update", ...)`, and passing `null` clears them.
 Co-owners may use the agent, invite it, change its `display_name`, `role`, `instructions`, and `tools`, and set its avatar.
-Only the owner may change `co_owners` or delete the agent with `delete_agent`.
+Only the owner may change `co_owners` or delete the agent with `agent_manager_write(action="delete")`.
 
 ### Approval Cards
 
-`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` each show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
+`agent_manager_write` (`create`, `update`, `set_avatar`, and `delete`) always shows an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
 The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything).
 `agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
@@ -8653,7 +8653,7 @@ A created agent is built again from its creator at every config load, so changin
 - A tool removed from the creator leaves the created agents that chose it, and the load logs `generated_agent_tool_dropped`.
   The choice stays stored, so the tool returns if the creator gets it back.
 - Lowering `created_agents_per_owner` keeps each person's oldest agents up to the new cap and stops the rest with `created_agent_skipped` and `reason=over_cap`.
-  Setting it to 0 stops them all and removes `create_agent`.
+  Setting it to 0 stops them all and removes the `create` action from `agent_manager_write`.
 - Removing the creator stops its agents with `reason=creator_missing`.
 - Stopped agents keep their roster entries and Matrix accounts, so restoring the creator or raising the cap starts them again.
   A stopped agent leaves every room except its direct messages, so an owner must invite it back into those rooms.
@@ -8674,7 +8674,7 @@ The retry log lines are described in [Troubleshooting Personal Rooms](https://do
 | `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
 | `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, `<user> cannot own an agent: brackets in a Matrix ID are not supported` for an ID with `[` or `]`, `<user> cannot own a personal agent: <reason>` for another unsupported Matrix ID such as one with a space, `*`, or `?`, or `<user> is a MindRoom account and cannot own a personal agent`. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
-| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `create_agent` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
+| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `agent_manager_write(action="create", ...)` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
 | `generated_agent_tool_dropped` | A tool an owner chose is no longer among the tools of the template or creator, so the agent loads without it. |
 | `generated_agents_invalid` | The config with the owners' edits and the created agents is invalid for the reason in `error`, so MindRoom ignores them all until it is fixed, and each personal agent runs from its template. |
 
@@ -8734,9 +8734,9 @@ Agents of other templates can be contacts as well when their template sets `cont
 
 ## How a Contact Works
 
-1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `request_contact`, which shows Alice an approval card.
+1. Alice asks her agent to get in touch with Bob's agent, and the agent calls `contacts_write(action="request", ...)`, which shows Alice an approval card.
 2. Bob's personal-room agent posts the request as a new thread in Bob's personal room, naming Alice's agent and Alice, quoting the reason, and listing the rules and tools that would apply to Bob's agent.
-3. Bob replies in that thread, and his personal-room agent accepts with `accept_contact`, which shows Bob an approval card, or declines with `decline_contact`.
+3. Bob replies in that thread, and his personal-room agent accepts with `contacts_write(action="accept", ...)` or declines with `contacts_write(action="decline", ...)`, each showing Bob an approval card.
    Bob can also accept or decline on the [Contacts page](#contacts-page).
 4. On acceptance, an invite-only contact room is created holding both agents, without MindRoom's owner account.
    Alice and Bob each get an invitation they accept in their Matrix client to watch or write there.
@@ -8751,9 +8751,9 @@ A request to a person reaches that person's own personal room, where their perso
 With `party="me"`, Alice herself is the requesting party instead of her agent, so she talks to Bob's agent in the contact room directly, her invitation to the contact room is how she learns that Bob accepted, and nobody tells her if Bob declines.
 A contact needs an agent on at least one side and two different owners.
 
-Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `update_contact`.
+Asking again for a pair that already has a pending or active contact returns that contact instead of creating another, and asking again with different `rules` or `tools` is refused; change them with `contacts_write(action="update", ...)`.
 If the first request's notice never reached the other owner, asking again posts it with the new reason, and the answer comes to the conversation that asked again.
-After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `remove_contact`.
+After a decline, new requests for that pair are refused until the owner who declined removes the declined contact with `contacts_write(action="remove", ...)`.
 Removing a contact makes its agents leave the contact room and withdraws the invitation of an owner who never joined it; owners who joined keep the room and its history.
 From then on its agents send nothing more into that room, and no message there starts their turns.
 
@@ -8776,12 +8776,12 @@ The steps are the same as within one deployment, with these differences:
 
 - Your agent creates the contact room when it asks and invites the other agent, and the other owner sees the request in their personal room or on their Contacts page.
 - When the other owner accepts, their agent joins the room, your agent tells you in the thread where you asked, and each agent invites its own owner.
-- After a decline, you can remove the declined request with `remove_contact` and ask again, but the other side refuses new requests until its owner removes their decline.
+- After a decline, you can remove the declined request with `contacts_write(action="remove", ...)` and ask again, but the other side refuses new requests until its owner removes their decline.
 - When either owner removes the contact, both agents leave the room.
   Your side cannot make the other agent leave: it leaves when its deployment sees yours go, so while that deployment is unreachable it can still read what is posted there.
 - If the other agent asked yours before your deployment listed it, its request still waits on its side, which refuses your request back as a decline until its owner withdraws theirs.
 - A decline made while your homeserver cannot be reached never reaches you, so a request that waits long may have been declined; withdraw it and ask again, and a decline that stands then arrives.
-- A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `remove_contact` clears it, while declining it also refuses that agent's next requests until you remove the decline.
+- A request the other side withdraws stays in your list until that agent asks again, which replaces it; accepting it fails, and removing it with `contacts_write(action="remove", ...)` clears it, while declining it also refuses that agent's next requests until you remove the decline.
 - Removing an agent from `remote_agents` stops you from accepting its waiting requests; your own waiting request to it can still be accepted, so withdraw it, and contacts already active with it continue until an owner removes them.
 - Ask only an agent whose deployment lists yours in `remote_agents`: an agent that accepts every invitation joins your request's room on its own, which your side reports as an acceptance, and nobody answers there.
 - Only an agent can ask an agent of another deployment, so `party="me"` reaches only this deployment.
@@ -8806,25 +8806,22 @@ It cannot include `contacts`, `delegate`, `agent_manager`, `self_config`, `confi
 Tools that need the room they run in, such as `scheduler`, `todo`, `attachments`, `script`, and the other `matrix_*` and `thread_*` tools, are never offered in contact turns even when listed; `matrix_message` is the only one a contact turn gets.
 Changes to `contacts` apply from the agent's next turn without a restart.
 
-Only personal agents built from a `personal_agents` template can be contacts; agents authored under `agents:` and agents created with `create_agent` cannot.
+Only personal agents built from a `personal_agents` template can be contacts; agents authored under `agents:` and agents created with `agent_manager_write(action="create", ...)` cannot.
 
 ## Tools
 
 | Function | Approval card | What it does |
 | --- | --- | --- |
 | `list_contacts()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
-| `request_contact(target, reason, rules=None, tools=None, party="agent")` | Yes | Asks the target's owner for a contact; `rules` and `tools` set your agent's side, and with `party="me"` you ask as yourself and set neither |
-| `accept_contact(contact_id, rules=None, tools=None)` | Yes | Accepts a pending request to you and opens the contact room; `rules` and `tools` set the side of your agent that was asked |
-| `decline_contact(contact_id)` | No | Declines a pending request to you; a requesting agent is told in the thread it asked from, a person who asked is not told |
-| `update_contact(contact_id, rules=None, tools=None)` | Yes | Changes your side's rules or tools from the next turn in that contact; blank `rules` clear them |
-| `remove_contact(contact_id)` | No | Ends a contact; its agents leave the contact room |
+| `contacts_write(action, contact_id=None, target=None, reason=None, rules=None, tools=None, party=None)` | Yes | Runs one contact write: `request` (asks `target` with `reason`, optional `rules`, `tools`, and `party="agent"\|"me"`), `accept` (accepts `contact_id` with optional `rules` and `tools` and opens the contact room), `decline` (declines `contact_id`), `update` (changes your side's `rules` or `tools` on `contact_id`; blank `rules` clear them), or `remove` (ends `contact_id` and leaves its room) |
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
-`request_contact`, `accept_contact`, and `update_contact` always show the owner an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) with the values the call passes, even when `tool_approval.default` is `auto_approve` (see [Auto-Approve Everything](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) for the exception).
+`contacts_write` always shows the owner an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) with the values the call passes, even when `tool_approval.default` is `auto_approve` (see [Auto-Approve Everything](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) for the exception).
 A field the call leaves out keeps its configured default, which the request notice and these tools' results name: the results state the rules and tools your agent then has in that contact, before any contact turn uses them.
 
 ```python
-request_contact(
+contacts_write(
+    action="request",
     target="bob_mind",
     reason="Find a 30-minute slot for the project review next week.",
     rules="Share only free and busy times.",
@@ -8904,7 +8901,7 @@ The judge is never given a message that looks like it contains a secret such as 
 - A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `list_contacts`.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
-- Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `remove_contact`.
+- Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `contacts_write(action="remove", ...)`.
 
 ## Troubleshooting
 
@@ -8920,8 +8917,8 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | `<owner> has no personal agent here, so a request cannot reach them; ...` | The target person is not onboarded on this deployment, or the target is another deployment's agent that `remote_agents` does not name; onboard the person, or add the agent's Matrix ID to `remote_agents` |
 | `Only your agent can contact an agent of another MindRoom deployment, so ask with party=agent` | `party="me"` reaches only this deployment |
 | `The request to <agent> could not be delivered; ask again to retry` | The other agent could not be invited, for example because its homeserver is unreachable; nothing is kept, so ask again |
-| `<agent> declined contact <id>; remove it with remove_contact to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
-| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; the request stays pending, so accept again once it is reachable, or remove a withdrawn request with `remove_contact`, since declining refuses that agent's next requests |
+| `<agent> declined contact <id>; remove it with contacts_write(action="remove", ...) to ask again` | The other deployment's owner declined; their side refuses new requests until they remove their decline |
+| `<agent> could not join the contact room; the request may have been withdrawn, so accept again later or remove it` | The other side withdrew the request, or its homeserver is unreachable; the request stays pending, so accept again once it is reachable, or remove a withdrawn request with `contacts_write(action="remove", ...)`, since declining refuses that agent's next requests |
 | `The invite from <agent> could not be rejected, so the request still waits; decline again later` (or `remove it again later`) | Your agent is stopped or its homeserver is unreachable, so the other side could not be told; the request stays pending until you try again |
 | A request from another deployment never arrives | MindRoom logs `contact_request_rejected` for an invite without a reason, one your personal-room agent could not answer, and one for a pair that already has a contact or that you declined; check that your agent's `remote_agents` names the asking agent; a request sent before it did is not picked up, so the asking owner removes it and asks again |
 | `<owner> has no personal room yet, so the request cannot reach them; ask again once they have one` | The target owner's personal room is not created yet; the request is kept, so ask again once it exists |
@@ -9989,9 +9986,9 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
-- Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
+- Unknown or ineligible toolkit names, including `*`, make `script_write(action="start")` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `memory`, `self_config`, `skill_manage`, `slack`, and `workflow` toolkits are never available to scripts, even when the agent has them.
-- Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
+- Functions that can stop the agent's current model step, such as `thread_model`'s `thread_model_write`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -10002,32 +9999,36 @@ Adding toolkits later, including expanding `allowed_tools`, never gives a runnin
 
 ## Control Functions
 
-The agent receives five control functions.
+The agent receives two control functions (`script_read` and `script_write`).
 
 ```text
-start_script(
+script_read(
+    action: Literal["list", "get", "resource_profiles"],
+    run_id: str | None = None,
+    include_finished: bool | None = None,
+)
+script_write(
+    action: Literal["start", "cancel"],
     source: str | None = None,
     path: str | None = None,
     name: str | None = None,
     resource_profile: Literal["small", "standard", "large"] | None = None,
+    run_id: str | None = None,
+    force: bool | None = None,
 )
-get_script_resource_profiles()
-get_script(run_id: str)
-cancel_script(run_id: str, force: bool = False)
-list_scripts(include_finished: bool = True)
 ```
 
-- `start_script` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
+- `script_write(action="start")` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
   A `path` file is copied at launch, so later edits do not change the running program.
   The script runs with no command-line arguments, so `sys.argv` holds only its own path.
   `name` is an optional label shown in status and list results.
 - `resource_profile` selects a Kubernetes CPU and memory profile; omitting it uses the configured default.
-  `get_script_resource_profiles` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
+  `script_read(action="resource_profiles")` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
   An explicit profile fails on a backend that cannot enforce resource profiles.
   Operators define the profiles as described in [Kubernetes deployment](https://docs.mindroom.chat/deployment/kubernetes/) and the [environment variable reference](https://docs.mindroom.chat/configuration/#workers-and-background-scripts).
-- `get_script` returns the run state plus recent process output when available.
-- `list_scripts` returns only runs owned by the current requester and agent.
-- `cancel_script` immediately revokes the script's tool access, requests graceful termination, force-kills after a short grace period, and reports `cancelled` once the process has exited.
+- `script_read(action="get", run_id=...)` returns the run state plus recent process output when available.
+- `script_read(action="list")` returns only runs owned by the current requester and agent (`include_finished` defaults to `True`).
+- `script_write(action="cancel", run_id=...)` immediately revokes the script's tool access, requests graceful termination, force-kills after a short grace period, and reports `cancelled` once the process has exited.
   `force=True` kills the process without the graceful step.
 
 ## Calling Agent Tools From A Script
@@ -10122,7 +10123,7 @@ Make the watcher edge-triggered: update its observed value before sending, and n
 Run scripts on a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 The shared `static_runner` sandbox is not supported.
 Workers should run the same MindRoom release as the primary; see [Keeping worker versions matched](https://docs.mindroom.chat/deployment/sandbox-proxy/#keeping-worker-versions-matched).
-Without a worker backend or explicit local execution, `start_script` fails with `Background scripts require a worker or an explicitly disabled sandbox.`
+Without a worker backend or explicit local execution, `script_write(action="start")` fails with `Background scripts require a worker or an explicitly disabled sandbox.`
 
 Workers must reach the primary's script gateway over the network.
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
@@ -10139,7 +10140,7 @@ export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gatew
 ### Kubernetes
 
 Kubernetes scripts stay disabled until the gateway runs on a listener that exposes no other primary API routes, because workers that can reach the general API listener get more authority than the script gateway grants.
-Until then, `start_script` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
+Until then, `script_write(action="start")` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
 
 - `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` and the capability-authenticated [`/api/agent-cli`](https://docs.mindroom.chat/tools/agent-cli/#shell-in-a-worker) routes.
 - `MINDROOM_SCRIPT_GATEWAY_URL` must name that listener explicitly; `MINDROOM_PUBLIC_URL` is not used on Kubernetes.
@@ -10209,7 +10210,7 @@ Restore the previous settings, restart once so MindRoom can retire those runs, t
 
 ### Output and retention
 
-`get_script(run_id)` keeps returning up to 64 KiB of process output after the run ends.
+`script_read(action="get", run_id=...)` keeps returning up to 64 KiB of process output after the run ends.
 Finished runs, their tool-call receipts, and approval records are kept for 30 days by default.
 Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to change the window; see the [environment variable reference](https://docs.mindroom.chat/configuration/#workers-and-background-scripts).
 
@@ -10287,7 +10288,7 @@ workflow(action="save", run_id=..., name=..., description=None)
 - `action="cancel"` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
   Cancelling the run's job, for example with `!cancel_job`, does the same.
   A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
-  The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
+  The plain `script` tool's `script_read` and `script_write(action="cancel")` neither list nor stop a run's script.
 - `action="resume"` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
 - `action="list"` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
 - `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
@@ -11971,22 +11972,22 @@ EOF
 `terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals, as far as the agent's [`terminals`](https://docs.mindroom.chat/configuration/agents/) setting allows.
 Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
 
-- `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
-- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30, at most 600) for its next prompt, and returns the output and exit status; a command still running then keeps running.
-- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
-- `terminal_read(session_id)` returns the terminal's recent output as text.
-- `terminal_list()` lists the workspace's terminals, including the ones people opened.
+- `terminal_write(action="open", cwd=...)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
+- `terminal_write(action="run", session_id=..., command=..., timeout_s=...)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30, at most 600) for its next prompt, and returns the output and exit status; a command still running then keeps running.
+- `terminal_write(action="send", session_id=..., keys=...)` types verbatim text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
+- `terminal_read(action="read", session_id=...)` returns the terminal's recent output as text.
+- `terminal_read(action="list")` lists the workspace's terminals, including the ones people opened.
 
 An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 It also starts with `INPUTRC=/dev/null`, so it and the readline programs started in it keep their built-in key bindings and read no readline settings, such as a `~/.inputrc` in the workspace.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
 With [`terminals: type`](https://docs.mindroom.chat/configuration/agents/), people who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](https://docs.mindroom.chat/deployment/sandbox-proxy/#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
-After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
+After keys typed while a command runs, such as an answer to its prompt, `terminal_write(action="run")` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_write(action="send")`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: the first [approval rule](https://docs.mindroom.chat/tool-approval/) that matches `run_shell_command` is `auto_approve`, or no rule matches and `tool_approval.default` is `auto_approve`; a rule with an approval script counts as one that may ask.
-Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people the agent's `terminals` setting lets type still type in the terminals.
+Otherwise the agent is offered only `terminal_read` (`list` and `read`), and its instructions tell it to run commands with `run_shell_command`; people the agent's `terminals` setting lets type still type in the terminals.
 The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 
 ```yaml
@@ -12035,7 +12036,7 @@ agents:
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
-It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, `list_shared_directories()`, `accept_shared_directory(owner, name)`, and `decline_shared_directory(owner, name)`, and has no configuration fields.
+It provides `list_shared_directories()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
 
 ### Setup
 
@@ -12063,7 +12064,7 @@ agents:
 ```
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
-It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
+It calls `shared_directories_write(action="create", name="report")` and `shared_directories_write(action="invite", name="report", agent_name="writer")`, and from then on both agents see the directory's path in their prompts.
 `list_shared_directories()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
 
 ### Sharing between personal agents
@@ -12091,7 +12092,7 @@ agents:
 
 Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
 Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `list_shared_directories()` also shows who asked and when.
-When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `accept_shared_directory("ann_assistant", "notes")` and reads the files from then on.
+When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `shared_directories_write(action="accept", owner="ann_assistant", name="notes")` and reads the files from then on.
 The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 
 ### Rules
@@ -12103,10 +12104,10 @@ Creating or deleting a directory, and adding or removing a member, restarts each
 
 An invitation applies at once when the user who asks for it may use the invited agent outside the current room.
 Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](https://docs.mindroom.chat/authorization/#responder-access).
-Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `accept_shared_directory(owner, name)` or declines it with `decline_shared_directory(owner, name)`.
+Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `shared_directories_write(action="accept", owner=..., name=...)` or declines it with `shared_directories_write(action="decline", owner=..., name=...)`.
 A pending agent sees no path or file of the directory and its worker mounts nothing until the accept; inviting it again while pending changes nothing.
 An agent holds at most 10 pending invitations; a further invitation fails until it accepts or declines one, or an owner cancels one.
-The owner's `remove_from_shared_directory` and `delete_shared_directory` also cancel a pending invitation.
+The owner's `shared_directories_write(action="remove", ...)` and `shared_directories_write(action="delete", ...)` also cancel a pending invitation.
 
 Under `file_access: workspace`, `filesystem` accepts paths inside the agent's shared directories when it runs in a worker or when MindRoom runs without workers.
 When MindRoom uses workers but an agent's `filesystem` runs in the primary process, `workspace` keeps it out of shared directories; add it to the agent's `worker_tools`.
@@ -14301,10 +14302,10 @@ react("$event_id", "👍")
 
 ## [`email_invite`]
 
-`invite_by_email(email)` invites one address to the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for it is recommended.
-When the person asking may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
 `list_email_invites()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
-`revoke_email_invite(email)` revokes the open invite for an address; its asker, its approver, or anyone who may invite can do so, and an invite already used is reported with the account that used it.
+`email_invite_write(action, email)` invites (`action="invite"`) or revokes (`action="revoke"`) one address in the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for `email_invite_write` is recommended (timed grants are scoped per `action`).
+When `action="invite"` is called for a person who may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
+With `action="revoke"`, its asker, its approver, or anyone who may invite can revoke an open invite, and an invite already used is reported with the account that used it.
 No function takes a room, a Matrix ID, or text, so the mail is always the fixed one for the current room.
 Set-up, the approval rule, and the limits are on [Email Invites](https://docs.mindroom.chat/email-invites/).
 
@@ -17254,27 +17255,28 @@ Which functions an agent gets depends on what it is:
 
 | Function | Offered to | What it does |
 | --- | --- | --- |
-| `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
 | `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
-| `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
-| `set_avatar(attachment_id)` | Every generated agent | Sets its Matrix profile picture to an image attached in the conversation, cropped to its center square |
-| `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
+| `agent_manager_write(action, ...)` | Creators and generated agents (schema narrowed to enabled actions) | Runs an enabled write action: `create` (for agents with `created_agents_per_owner` above 0), `update` and `set_avatar` (for every generated agent), and `delete` (for created agents) |
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
-`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
+`agent_manager_write` always shows an [approval card](https://docs.mindroom.chat/tool-approval/#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything) window skips it.
 Background scripts cannot call it, and it cannot be deferred.
 
 ```python
-create_agent(
+agent_manager_write(
+    action="create",
     name="research",
     display_name="Research Helper",
     role="Find and summarize sources for the owner.",
     tools=["duckduckgo", "wikipedia"],
 )
-update_agent({"role": "Answer in two sentences.", "instructions": None})
+agent_manager_write(
+    action="update",
+    changes={"role": "Answer in two sentences.", "instructions": None},
+)
 ```
 
-`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `update_agent` replaces the whole field, with `None` restoring the base agent's value.
+`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `changes` replaces the whole field, with `None` restoring the base agent's value.
 [Created Agents and Self-Updates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) covers naming, the cap, owners and co-owners, and what happens when the creator changes.
 
 ## [`claude_agent`]
@@ -17283,14 +17285,14 @@ update_agent({"role": "Answer in two sentences.", "instructions": None})
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) instead.
 
-The tool exposes `claude_start_session()`, `claude_send()`, `claude_session_status()`, `claude_interrupt()`, and `claude_end_session()`.
-`claude_send()` creates the session if needed, so `claude_start_session()` is optional.
+The tool exposes `claude_agent_status()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
+`claude_agent_write(action="send")` creates the session if needed, so `claude_agent_write(action="start")` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
-When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_send()` reply.
-`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_end_session()` first.
-`claude_session_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
-When Claude fails while processing a prompt, `claude_send()` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
+When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_agent_write(action="send")` reply.
+`resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_agent_write(action="end")` first.
+`claude_agent_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+When Claude fails while processing a prompt, `claude_agent_write(action="send")` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](https://docs.mindroom.chat/openai-api/#session-continuity).
 
 | Option | Type | Default | Notes |
@@ -17341,13 +17343,14 @@ Credentials for an Anthropic-compatible gateway such as LiteLLM:
 ```
 
 ```python
-claude_send(
+claude_agent_write(
+    action="send",
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",
 )
-claude_session_status(session_label="bugfix")
-claude_interrupt(session_label="bugfix")
-claude_end_session(session_label="bugfix")
+claude_agent_status(session_label="bugfix")
+claude_agent_write(action="interrupt", session_label="bugfix")
+claude_agent_write(action="end", session_label="bugfix")
 ```
 
 # Automation & Platforms
@@ -18135,11 +18138,11 @@ email_invites:
 
 tool_approval:
   rules:
-    - match: invite_by_email
-      action: require_approval             # recommended: an invitation needs approval, like any gated tool
+    - match: email_invite_write
+      action: require_approval             # recommended: email invite writes need approval, like any gated tool
 ```
 
-`invite_by_email` is an ordinary tool for [tool approval](https://docs.mindroom.chat/tool-approval/): whether a call asks first is up to your config, and the rule above is recommended.
+`email_invite_write` is an ordinary tool for [tool approval](https://docs.mindroom.chat/tool-approval/): whether a call asks first is up to your config, and the rule above is recommended. Timed grants are scoped per `action` (`invite` vs. `revoke`).
 
 To send mail, set two environment variables:
 
@@ -18160,7 +18163,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 
 Asking again for an address that was already sent replaces the old link, which stops working.
 
-`list_email_invites()` shows the room's open invites, and `revoke_email_invite(email)` revokes one; the asker, the approver, or anyone who may invite can revoke.
+`list_email_invites()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
 ## Without a Mail Server
 
@@ -18196,12 +18199,12 @@ The counts are kept on disk, so a restart does not reset them.
 
 Known limits:
 
-- Without a `tool_approval` rule that requires approval for `invite_by_email` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (timed card approval, `!auto_approve`) covers it like any tool.
+- Without a `tool_approval` rule that requires approval for `email_invite_write` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (action-scoped timed card approval, `!auto_approve`) covers it like any tool.
 
 - The Matrix sync store of the agent that sent the link keeps the claim event, code included, in plain text on the agent's own disk. The code works once and is bound to the first account that uses it.
 - A claim that arrives just before the agent crashes, or while it is not running, may get no answer; the person clicks Join again.
 - A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told the outcome.
-Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `revoke_email_invite`.
+Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `email_invite_write(action="revoke", email=...)`.
 
 # OAuth Integration Framework
 
@@ -19040,7 +19043,7 @@ Its scripts run in a dedicated worker when a worker backend is configured, and n
 Without a worker backend they run as a child process of the primary, as the primary's operating-system user, only on Linux and only when `defaults.allow_shell_without_worker` is `true` or the sandbox mode is local; that is the operator's existing statement that code may run there ([Workflows](https://docs.mindroom.chat/tools/workflows/#where-the-script-runs)).
 Scheduled `script_check` triggers (`triggers(action="watch_script", ...)`) keep `triggers` at `executes_code=False` so `triggers`-only agents never gain code execution or workspace write authority.
 Authoring a `script_check` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns tracked via `com.mindroom.automation_origin`, event-source watch turns, tool-filtered turns, tool-restricted personas, detached or background-script/workflow contexts, and non-Matrix turns), and the same `workflow_placement` check as `workflow` (dedicated worker when configured, local only under `defaults.allow_shell_without_worker` or explicit local mode, never falling back to the host); `triggers(action="update")` is metadata-only and never accepts `source` or `path`.
-`triggers` registers `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)` so only `watch_script` calls are judged under `start_script` approval rules (failing closed on missing, invalid, or unknown actions and keeping timed approval grants exact-call-only, while leaving other `triggers` actions usable on non-resumable surfaces and voice calls).
+`triggers` registers `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` so only `watch_script` calls are judged under `script_write` approval rules (failing closed on missing, invalid, or unknown actions and keeping timed approval grants exact-call-only, while leaving other `triggers` actions usable on non-resumable surfaces and voice calls).
 Each tick runs in a short-lived `script_runs` process only after live rechecks of policy, `workflow_placement`, executing-agent capability, live owner membership in the source room, and owner reply authority; ticks enforce `_SCRIPT_CHECK_RESTRICTED_TOOLKITS` plus optional `external_trigger_policy.script_check_allowed_tools` (and live `tool_approval`) rather than an agent's `script.allowed_tools`, block `agent()`, evaluate live `tool_approval` rules and `ToolGate.CONFIRM` non-interactively and fail-closed (never posting approval cards or honoring transient `!auto_approve` windows, and rejecting state commits or event emission if any tool call was denied even when user code catches the error), and wrap emitted payloads inside `<untrusted_event_data>`.
 Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` live solely in the primary-only `script_check_checkpoints` table inside `control_state/reactive_triggers.db` and are redacted from `spec_json`, `triggers(action="list")`, and `/api/rooms/{room_id}/triggers`.
 `terminal` also runs in the primary process, but it only types into and reads the terminals of the agent's shell in its worker, so it declares no file access, and it offers nothing to an agent whose shell runs in the primary.
@@ -19203,7 +19206,7 @@ Do not report or "fix" these; they are deliberate.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack uploads may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries or remote assets on, through the addresses it requests, so agents should only show pages they wrote; remote assets also show every host a page names the viewer's IP address; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `attachment(action="get", attachment_id=..., mindroom_output_path=...)` and then passes that workspace path.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager_write(action="set_avatar", ...)` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `attachment(action="get", attachment_id=..., mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `filesystem` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
@@ -19221,7 +19224,7 @@ Do not report or "fix" these; they are deliberate.
   An agent or team publishes its configured `role` in the same state whenever it is set, also with the API off.
   MindRoom Chat uses a published origin only from agents on the viewer's homeserver, and only while that homeserver binds tokens, so a hostile agent can collect at most tokens bound to its own origin.
   It shows a published role likewise only from agents on the viewer's homeserver, so a person writing the same state under their own user ID shows no role.
-- An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `create_agent`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
+- An administrator whom a personal agent's template `access` admits, whom an owner adds as a co-owner of an agent created with `agent_manager_write(action="create", ...)`, or whom a team that includes such an agent admits, may use that agent, whose instructions its owner may have written, and its tools act for the administrator, so such an agent with an administrator-gated tool such as `config_manager` can make that tool act with an administrator's authority; [Letting an Agent Create Agents](https://docs.mindroom.chat/personal-agents/#letting-an-agent-create-agents) warns to allow creation only on agents whose whole configuration each person may have.
 - Anyone who may talk to an agent in a room may cancel its background jobs there, including jobs another requester started, as with **Stop**; another agent's account never may.
 - A secret request card shows a `reason` the model wrote, so a manipulated agent can ask for the key of any service it may request with misleading text; the key still reaches only that service's hosts, which the card shows.
 - A secret request card also shows a title, a field hint, and a link button the model chose, so a manipulated agent can point the button at a look-alike sign-in page, as it can with a link in any message; the button names the page's host, only `http` and `https` links with no `user:password@` part get one, and MindRoom never fetches the link.
@@ -19258,7 +19261,7 @@ Do not report or "fix" these; they are deliberate.
   A terminal's shell never gets it, because the shell outlives the response ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/)).
 - Approval rules judge the text of each command an agent runs, not what running it does, so files an earlier approved or allowed command left in the workspace can change what a later allowed command does, such as a [`.mindroom/worker-env.sh`](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-env-hook-mindroomworker-envsh) that sets `BASH_ENV`, whose file Bash then reads before each later shell command.
   The terminal toolkit's typing rule above follows from the same limit.
-- A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, except that a terminal a `terminal_open` call starts keeps them in its shell, and other code in the same worker can read them, as with the CLI grant.
+- A plugin's `tool:environment` hook decides which variables a tool call's `shell` commands receive, in the primary or a worker, including values it passes through from the primary's process environment; plugins already run with the primary's full trust, the variables travel only with that call's request, except that a terminal a `terminal_write(action="open")` call starts keeps them in its shell, and other code in the same worker can read them, as with the CLI grant.
 - A shared agent's knowledge graph holds facts from every requester's conversations and tool results, and any requester of that agent can query it, like shared-agent memory; private agents get one graph per requester.
 - A shared agent's later turns in a conversation replay each earlier turn's context, including another requester's `persist=False` hook items such as a location, so it can repeat them to anyone in that conversation, like persisted items; private agents keep each requester's conversations apart.
 - Unless `knowledge_graph_edits` is off, any requester of a shared agent, or a tool result that steers it, can have it delete facts and entities from the shared graph, merge its entities, or rewrite their summaries, as with any write tool; the edits reach only that agent's own graph.
@@ -19309,7 +19312,7 @@ Do not report or "fix" these; they are deliberate.
   A contact turn also keeps the agent's instructions, preloaded files, and memory recall, so the other side can try to extract them.
 - A contact turn can post into its contact room only through `matrix_message`, after the contact's message policy; any other message, edit, reaction, or file that the turn, its tools, or its plugin hooks send into that room is refused, and so is one that a `message:received` or `reaction:received` hook sends there for an event in that room; only the fixed 👀 that MindRoom puts on the message the turn answers skips the policy.
 - A contact request puts text its requester controls, the `reason` and the requesting agent's display name, into a new thread of the target owner's personal room, and any owner whose personal agent has `contacts` can send one after approving their own request card.
-  When the target owner replies in that thread, their personal-room agent reads that text in a normal turn with the owner's full tools, so the text can steer it like any untrusted content; approval cards, which `accept_contact` always shows unless the owner turned on `!auto_approve` there, and the owner's `tool_approval` rules for other tools are what stop writes.
+  When the target owner replies in that thread, their personal-room agent reads that text in a normal turn with the owner's full tools, so the text can steer it like any untrusted content; approval cards, which `contacts_write` always shows unless the owner turned on `!auto_approve` there, and the owner's `tool_approval` rules for other tools are what stop writes.
 - A personal agent whose `contacts.remote_agents` names agents of other deployments treats an invite from any matching account as a contact request, which puts the invite's `reason` into its owner's personal room like a request from this deployment; an empty list, the default, accepts none.
   Only the other agent's Matrix ID, which federation authenticates, is trusted for such a contact: its owner is not exchanged and starts no turn here, and its unmentioned messages start none either.
   The contact room and every message in it are stored on the other deployment's homeserver as well.
@@ -22282,8 +22285,8 @@ async def route_github_through_proxy(ctx: ToolEnvironmentContext) -> None:
 - `ctx.decline(reason)` refuses the call, for example when a credential the command needs cannot be fetched: the tool does not run, locally or in a worker, and as with a `tool:before_call` decline the model receives the reason in the tool result and `tool:after_call` hooks see `blocked`.
   When several hooks decline, the first in hook order gives the reason.
 - The hooks run once per tool call, and their changes reach only the commands that call runs, so calls in other replies never see them.
-  A terminal that a [`terminal_open`](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) call starts keeps that call's changes in its shell for as long as it runs, so later replies and people type with them, while a terminal a person opens from a chat client gets none.
-- Only the `shell` tool's commands and the terminals `terminal_open` starts receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
+  A terminal that a [`terminal_write(action="open")`](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) call starts keeps that call's changes in its shell for as long as it runs, so later replies and people type with them, while a terminal a person opens from a chat client gets none.
+- Only the `shell` tool's commands and the terminals `terminal_write(action="open")` starts receive the changes, but the hooks run before every tool call, so check `ctx.function_name` or `ctx.registered_toolkit` first.
 - The [agent CLI](https://docs.mindroom.chat/tools/agent-cli/)'s variables, the egress proxy variables from the [egress broker](https://docs.mindroom.chat/deployment/egress-broker/) or a worker's own egress settings, `MINDROOM_AGENT_WORKSPACE`, and in a worker the [workspace home contract](https://docs.mindroom.chat/deployment/sandbox-proxy/#workspace-home-contract) variables such as `HOME` still apply over a hook's changes, and the `PATH` entries MindRoom adds go ahead of a `PATH` a hook sets.
 - A failing or timed-out hook loses its changes, including a decline, and the call still runs; `tool:before_call` hooks run first, so they cannot see that failure.
   A hook that must keep a call from running without its changes catches its own error and calls `ctx.decline(reason)`.
@@ -22686,7 +22689,7 @@ Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
 To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers`.
-`watch_script` calls are also judged under `start_script` approval rules via `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers` actions (including in voice calls and other non-resumable surfaces).
+`watch_script` calls are also judged under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers` actions (including in voice calls and other non-resumable surfaces).
 
 ## Reactive Triggers
 
@@ -22841,7 +22844,7 @@ def check():
 
 #### Guardrails and security
 
-- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `start_script` approval rules via `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `start_workflow` may require approval (grant `script` or allow unapproved `start_workflow`).
+- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `start_workflow` may require approval (grant `script` or allow unapproved `start_workflow`).
 - **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
 - **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
 

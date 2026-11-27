@@ -119,7 +119,7 @@ def _team_run_ids(team: TeamTurn) -> list[str]:
 
 def _switch_now(metrics: MessageMetrics | None = None) -> list[ScriptStep]:
     """Return the member's switch of the current response to ``large``, which ends the attempt for a continuation."""
-    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="after-toolcall")
+    switch = tool_call("thread_model_write", "call-switch", action="switch", model_name="large", when="after-toolcall")
     return calls(switch, metrics=metrics)
 
 

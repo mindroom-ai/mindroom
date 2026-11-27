@@ -149,7 +149,7 @@ Matrix sync callback
 | `contacts/turns.py` | Contact turns: the contact a room belongs to, who it admits, that its turns run as the agent's owner, and how a turn of an agent in its own contact room differs from a normal turn |
 | `contacts/flow.py` | The contact operations behind the `contacts` tools and the Connections Contacts page: request (with the notice in the target owner's personal room), accept (creating the contact room, seating both parties, and starting the requesting agent's turn), decline, update, remove, and list, each run for a `ContactActor` owner and checked against their ownership |
 | `contacts/federation.py` | Contacts with agents of other deployments: an invite matching `contacts.remote_agents` stored as a request and posted to the owner, and the contact room's membership accepting, declining, or ending such a contact |
-| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts`, with confirmation cards on requests, acceptances, and rule changes |
+| `custom_tools/contacts.py` | `ContactsTools`: the toolkit injected for agents with `contacts` (`list_contacts` and confirmation-gated `contacts_write`) |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
 | `thread_summary/schedule.py` | The process's per-thread summary baselines and write locks, the next threshold, and the pre-queue gate |
@@ -571,7 +571,7 @@ Matrix sync callback
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |
 | `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
-| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_run` types only at an empty prompt |
+| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_write(action="run")` types only at an empty prompt |
 | `terminal/resolution.py` | The terminals of an agent's workspace as its turn for one requester resolves them |
 | `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, offering typing only while its shell commands never ask for approval |
 | `api/agent_terminals.py` | Chat clients' routes to the terminals of the agents they may use in a room, and the rechecked terminal stream |
@@ -735,7 +735,7 @@ Matrix sync callback
 | `reactive_triggers/management.py` | Shared owner-checking, re-enable cursor/checkpoint refresh, enable/disable, and delete helpers across webhook and reactive trigger stores |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller (with opt-in `include_bots` internal-entity watching and target self-loop prevention), live `com.mindroom.thread.tags` observer, GitHub PR and `ScriptCheckPoller` cadence loops, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
 | `custom_tools/triggers.py` | Local-only unified `triggers(action=...)` toolkit (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
-| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
+| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State
 
