@@ -633,7 +633,7 @@ def _retired_approval_pair_failure_for_agent(
     moved_actions: Collection[str] | None = None,
 ) -> tuple[_RetiredApprovalFailureKind, int] | None:
     old_indices = _agent_rule_indices(rules, old, agent, moved_actions=moved_actions)
-    new_indices = _agent_rule_indices(rules, new, agent)
+    new_indices = _agent_rule_indices(rules, new, agent, moved_actions=moved_actions)
     shared_prefix_len = 0
     for old_index, new_index in zip(old_indices, new_indices, strict=False):
         if old_index != new_index:

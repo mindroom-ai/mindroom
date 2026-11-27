@@ -4387,21 +4387,21 @@ def test_browser_split_approval_rule_fails_closed_while_include_tools_remains_va
     )
     assert len(explicit.tool_approval.rules) == 2
 
-    # Control-only action filters on browser_control never moved to browser_read, so they load cleanly.
-    for control_only in ("open", ["open", "act"]):
+    # Control-only or broad non-read action filters never create a browser_control -> browser_read mismatch.
+    for valid_rule in (
+        {"match": ["browser_control"], "arguments": {"action": "open"}, "action": "require_approval"},
+        {"match": ["browser_control"], "arguments": {"action": ["open", "act"]}, "action": "require_approval"},
+        {"match": "*", "arguments": {"action": "delete"}, "action": "require_approval"},
+        {"match": "browser_*", "arguments": {"action": "open"}, "action": "require_approval"},
+        {"match": "*", "arguments": {"action": "snapshot"}, "action": "require_approval"},
+    ):
         loaded = Config.validate_with_runtime(
             {
                 "models": models,
                 "agents": {"assistant": {"display_name": "Assistant", "tools": ["browser"]}},
                 "tool_approval": {
                     "default": "auto_approve",
-                    "rules": [
-                        {
-                            "match": ["browser_control"],
-                            "arguments": {"action": control_only},
-                            "action": "require_approval",
-                        },
-                    ],
+                    "rules": [valid_rule],
                 },
             },
             TEST_RUNTIME_PATHS,

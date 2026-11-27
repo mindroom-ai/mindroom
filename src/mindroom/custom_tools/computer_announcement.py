@@ -43,23 +43,23 @@ def computer_announcement_middleware(
 
     async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
         name = call.function.name
-        should_announce = _runs_as(agent_name) and _uses_computer(name, call.arguments, placement)
-        if should_announce and name != "browser_read":
-            await _announce(name)
+        should_announce = False
+        try:
+            should_announce = _runs_as(agent_name) and _uses_computer(name, call.arguments, placement)
+            if should_announce and name != "browser_read":
+                await show_computer_once()
+        except Exception:
+            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
         result = await call_next(call.arguments)
         # browser_read page views fail when Chromium is stopped, so announce only after one succeeds.
         if should_announce and name == "browser_read":
-            await _announce(name)
+            try:
+                await show_computer_once()
+            except Exception:
+                logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
         return result
 
     return announce_computer
-
-
-async def _announce(name: str) -> None:
-    try:
-        await show_computer_once()
-    except Exception:
-        logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
 
 
 def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:

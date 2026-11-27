@@ -1076,7 +1076,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = _merge_toolkit_renam
 # Legacy format: `triggers`, `desktop`, `workflow`, and `matrix_api` were previously single multi-action functions,
 #   and `browser_control` previously served both read and control actions (read actions moved to `browser_read` while
 #   `browser_control` remains active for control actions).
-# Last legacy release: v2026.11.680; replacement: unreleased; split into read vs. write/control functions.
+# Last legacy release: v2026.11.680; replacement: v2026.11.681; split into read vs. write/control functions.
 # Handling: Reject `triggers`, `desktop`, `workflow`, and `matrix_api` in `include_tools`/`exclude_tools` (both authored
 #   overrides and stored dashboard settings) and fail closed in `tool_approval.rules` unless rules explicitly cover every
 #   replacement function; for `browser`, validate `browser_control` -> `browser_read` in `tool_approval.rules` only
