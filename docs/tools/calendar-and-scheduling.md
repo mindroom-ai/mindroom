@@ -71,24 +71,21 @@ If the Google Calendar connection lacks any required Calendar permission, the to
 
 ## [`google_tasks`]
 
-`google_tasks` works with the connected user's Google Tasks lists.
+`google_tasks` works with the connected user's Google Tasks lists through two risk-scoped functions:
 
-| Function | Behavior |
-| --- | --- |
-| `google_tasks_list_task_lists()` | Returns up to 1,000 task lists with their IDs and titles. |
-| `google_tasks_list_tasks()` | Returns up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat. Completed tasks, including those completed in Google's own apps, appear only with `show_completed=True`. |
-| `google_tasks_create_task()` | Creates a task with optional notes, due date, and parent task. |
-| `google_tasks_update_task()` | Changes only the fields you pass: title, notes, due date, or completion state. Pass an empty string as `notes` or `due` to remove that field. |
-| `google_tasks_delete_task()` | Deletes one task. Deleting a task assigned from Google Docs or Chat also deletes the original assignment. |
+| Function | Actions | Behavior |
+| --- | --- | --- |
+| `google_tasks_read(action, ...)` | `list_task_lists`, `list_tasks` | Returns up to 1,000 task lists with their IDs and titles, or up to 100 tasks per page from one list, including subtasks and tasks assigned to the user from Google Docs or Chat. Completed tasks, including those completed in Google's own apps, appear only with `show_completed=True`. |
+| `google_tasks_write(action, ...)` | `create`, `update`, `delete` | Creates a task with optional notes, due date, and `parent_task_id`; changes only the fields you pass (`title`, `notes`, `due`, or `completed`, passing `""` as `notes` or `due` to remove that field); or deletes one task (deleting a task assigned from Google Docs or Chat also deletes the original assignment). |
 
-Both list functions return a `nextPageToken` when more results remain.
-Every function uses the user's default list, `@default`, when no `task_list_id` is given.
+Both `google_tasks_read` actions return a `nextPageToken` when more results remain.
+Every action uses the user's default list, `@default`, when no `task_list_id` is given.
 Due dates use `YYYY-MM-DD`, because Google Tasks stores a due day without a time.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_list_task_lists()` and `google_tasks_list_tasks()`. |
-| `manage_tasks` | `boolean` | `no` | `true` | Expose task creation, updates, completion, and deletion. |
+| `read_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_read()` (`list_task_lists` and `list_tasks`). |
+| `manage_tasks` | `boolean` | `no` | `true` | Expose `google_tasks_write()` (`create`, `update`, and `delete`). |
 
 ```yaml
 agents:
@@ -100,9 +97,9 @@ agents:
 ```
 
 ```python
-google_tasks_list_tasks()
-google_tasks_create_task("Renew passport", notes="Bring two photos", due="2026-10-15")
-google_tasks_update_task("dGFzay0x", completed=True)
+google_tasks_read(action="list_tasks")
+google_tasks_write(action="create", title="Renew passport", notes="Bring two photos", due="2026-10-15")
+google_tasks_write(action="update", task_id="dGFzay0x", completed=True)
 ```
 
 ## [`cal_com`]
