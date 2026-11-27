@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
@@ -30,7 +29,7 @@ from mindroom.helper_usage import HelperUsageOwner, record_run_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.tool_search import resolve_call_tool_calls
+from mindroom.llm.tool_search import resolve_call_tool_calls, search_words
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -236,28 +235,19 @@ def _review_tools(
     return PreparedTools(functions=functions), runnable, frozenset(d.name for d in deferred_runnable)
 
 
-_REVIEW_SEARCH_WORD_RE = re.compile(r"[a-z0-9]+")
-
-
-def _review_search_tokens(text: str) -> set[str]:
-    return set(_REVIEW_SEARCH_WORD_RE.findall(text.lower()))
-
-
 def _review_search_matches(
     deferred_runnable: Sequence[ToolSpec],
     query: str,
     max_results: int,
 ) -> list[ToolSpec]:
-    query_tokens = _review_search_tokens(query)
+    query_tokens = search_words(query)
     if not query_tokens:
         return list(deferred_runnable)[: max(1, max_results)]
     matched: list[ToolSpec] = []
     for definition in deferred_runnable:
-        searchable = _review_search_tokens(definition.name) | _review_search_tokens(definition.description or "")
         properties = definition.parameters.get("properties")
-        if isinstance(properties, Mapping):
-            for param_name in properties:
-                searchable |= _review_search_tokens(str(param_name))
+        param_names = (str(param_name) for param_name in properties) if isinstance(properties, Mapping) else ()
+        searchable = search_words(definition.name, definition.description or "", *param_names)
         if query_tokens & searchable:
             matched.append(definition)
     return matched[: max(1, max_results)]
@@ -339,11 +329,7 @@ def _fork(
     )
     if "skill_manage" not in runnable:
         return None
-    if (
-        "skill_manage" in request.deferred_tools.names
-        and request.deferred_tools.portable
-        and "call_tool" not in functions.functions
-    ):
+    if "skill_manage" in deferred_runnable and "call_tool" not in functions.functions:
         return None
     return _ReviewRequest(
         model=captured.model,

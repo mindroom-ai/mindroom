@@ -1203,11 +1203,14 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("attachments", "get_attachment", "attachment"),
         ("attachments", "register_attachment", "attachment"),
         ("attachments", "inline_image", "attachment"),
+        (None, "get_skill_instructions", "skill"),
+        (None, "get_skill_reference", "skill"),
+        (None, "get_skill_script", "skill"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
     tmp_path: Path,
-    toolkit: str,
+    toolkit: str | None,
     old_name: str,
     new_name: str,
 ) -> None:
@@ -1216,10 +1219,12 @@ def test_retired_consolidated_approval_rules_fail_closed(
 
     runtime_paths = test_runtime_paths(tmp_path)
     options = {"searxng": {"host": "https://search.example.test"}, "telegram": {"chat_id": "1234"}}
-    tool_entry: object = {toolkit: options[toolkit]} if toolkit in options else toolkit
+    tools_list: list[object] = (
+        [] if toolkit is None else [{toolkit: options[toolkit]} if toolkit in options else toolkit]
+    )
     stale_data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
+        "agents": {"a": {"display_name": "A", "tools": tools_list, "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
     }
     with pytest.raises(ConfigRuntimeValidationError, match=new_name):
@@ -1231,28 +1236,6 @@ def test_retired_consolidated_approval_rules_fail_closed(
     }
     loaded = Config.validate_with_runtime(updated_data, runtime_paths)
     assert loaded.tool_approval.rules[0].match == new_name
-
-
-@pytest.mark.parametrize("old_name", ["get_skill_instructions", "get_skill_reference", "get_skill_script"])
-def test_retired_skill_approval_rules_fail_closed_unconditionally(tmp_path: Path, old_name: str) -> None:
-    """Retired skill approval rules fail closed even when no skills or tools are configured."""
-    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
-
-    runtime_paths = test_runtime_paths(tmp_path)
-    stale_data = {
-        "models": {"default": {"provider": "openai", "id": "x"}},
-        "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
-        "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
-    }
-    with pytest.raises(ConfigRuntimeValidationError, match="skill"):
-        Config.validate_with_runtime(stale_data, runtime_paths)
-
-    updated_data = {
-        **stale_data,
-        "tool_approval": {"rules": [{"match": "skill", "action": "require_approval"}]},
-    }
-    loaded = Config.validate_with_runtime(updated_data, runtime_paths)
-    assert loaded.tool_approval.rules[0].match == "skill"
 
 
 def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
@@ -3236,53 +3219,34 @@ def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_open
         ("matrix_message", None),
         (None, None),
     ):
-        list_op = grant_operation(
-            config,
-            "attachment",
-            {"action": "list"},
-            tools=tools_arg,
-            toolkit_name=toolkit_name,
-        )
-        inline_op = grant_operation(
-            config,
-            "attachment",
-            {"action": "inline_image"},
-            tools=tools_arg,
-            toolkit_name=toolkit_name,
-        )
-        assert list_op is not None
-        assert inline_op is not None
-        assert list_op.key != inline_op.key
-        assert list_op.mcp_server_id == "attachment"
-        assert list_op.mcp_tool_name == "list"
-        assert inline_op.mcp_tool_name == "inline_image"
+        ops = {}
+        for action in ("list", "inline_image"):
+            op = grant_operation(
+                config,
+                "attachment",
+                {"action": action},
+                tools=tools_arg,
+                toolkit_name=toolkit_name,
+            )
+            assert op is not None
+            assert op.mcp_server_id == "attachment"
+            assert op.mcp_tool_name == action
+            assert (
+                scheduled_call_offers_any_arguments(
+                    config,
+                    "attachment",
+                    {"action": action},
+                    requester_id="@alice:example.org",
+                    approver_id="@alice:example.org",
+                    authored_confirmation=False,
+                    tools=tools_arg,
+                    toolkit_name=toolkit_name,
+                )
+                is False
+            )
+            ops[action] = op
+        assert ops["list"].key != ops["inline_image"].key
         assert grant_operation(config, "attachment", {}, tools=tools_arg, toolkit_name=toolkit_name) is None
-        assert (
-            scheduled_call_offers_any_arguments(
-                config,
-                "attachment",
-                {"action": "list"},
-                requester_id="@alice:example.org",
-                approver_id="@alice:example.org",
-                authored_confirmation=False,
-                tools=tools_arg,
-                toolkit_name=toolkit_name,
-            )
-            is False
-        )
-        assert (
-            scheduled_call_offers_any_arguments(
-                config,
-                "attachment",
-                {"action": "inline_image"},
-                requester_id="@alice:example.org",
-                approver_id="@alice:example.org",
-                authored_confirmation=False,
-                tools=tools_arg,
-                toolkit_name=toolkit_name,
-            )
-            is False
-        )
 
     # Standalone view_file keeps normal tool-wide scheduled_any_arguments behavior.
     assert (
@@ -3300,89 +3264,40 @@ def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_open
     )
 
 
-def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names(tmp_path: Path) -> None:
-    """A wildcard approval script rule fails config load until explicit replacement rules are authored."""
+@pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        ([], ["*"], r"check\.py.*skill"),
+        ([], ["skill", "*"], None),
+        (["attachments"], ["*"], r"check\.py.*attachment"),
+        (["attachments"], ["*", "attachment", "skill"], r"check\.py.*attachment"),
+        (["attachments"], ["attachment", "skill", "*"], None),
+        (["memory"], ["*memor*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired skills/attachments names until explicit rules precede them."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
-
-    # Even with no tools enabled, unconditional skills validation rejects a wildcard script rule.
-    skills_only_data: dict[str, object] = {
+    data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "defaults": {"tools": []},
-        "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
-        "tool_approval": {"rules": [{"match": "*", "script": "check.py"}]},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
     }
-    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*skill"):
-        Config.validate_with_runtime(skills_only_data, runtime_paths)
-
-    loaded_skills = Config.validate_with_runtime(
-        {
-            **skills_only_data,
-            "tool_approval": {
-                "rules": [
-                    {"match": "skill", "script": "check.py"},
-                    {"match": "*", "script": "check.py"},
-                ],
-            },
-        },
-        runtime_paths,
-    )
-    assert [rule.match for rule in loaded_skills.tool_approval.rules] == ["skill", "*"]
-
-    # With attachments enabled, wildcard script rule fails until both `attachment` and `skill` have explicit rules first.
-    attachments_data: dict[str, object] = {
-        "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
-        "agents": {"a": {"display_name": "A", "tools": ["attachments"], "include_default_tools": False}},
-        "tool_approval": {"rules": [{"match": "*", "script": "check.py"}]},
-    }
-    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*attachment"):
-        Config.validate_with_runtime(attachments_data, runtime_paths)
-
-    # Putting the wildcard rule before the explicit replacement rule still fails because rule 0 shadows rule 1.
-    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*attachment"):
-        Config.validate_with_runtime(
-            {
-                **attachments_data,
-                "tool_approval": {
-                    "rules": [
-                        {"match": "*", "script": "check.py"},
-                        {"match": "attachment", "script": "check.py"},
-                        {"match": "skill", "script": "check.py"},
-                    ],
-                },
-            },
-            runtime_paths,
-        )
-
-    loaded_both = Config.validate_with_runtime(
-        {
-            **attachments_data,
-            "tool_approval": {
-                "rules": [
-                    {"match": "attachment", "script": "check.py"},
-                    {"match": "skill", "script": "check.py"},
-                    {"match": "*", "script": "check.py"},
-                ],
-            },
-        },
-        runtime_paths,
-    )
-    assert [rule.match for rule in loaded_both.tool_approval.rules] == ["attachment", "skill", "*"]
-
-    # Already-released consolidations (e.g. memory) keep loading under a matching wildcard script rule.
-    loaded_memory = Config.validate_with_runtime(
-        {
-            "models": {"default": {"provider": "openai", "id": "x"}},
-            "defaults": {"tools": []},
-            "agents": {"a": {"display_name": "A", "tools": ["memory"], "include_default_tools": False}},
-            "tool_approval": {"rules": [{"match": "*memor*", "script": "check.py"}]},
-        },
-        runtime_paths,
-    )
-    assert [rule.match for rule in loaded_memory.tool_approval.rules] == ["*memor*"]
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
 
 
 @pytest.mark.parametrize(
@@ -3409,10 +3324,14 @@ def test_retired_attachments_include_exclude_overrides_fail_config_load(
     }
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"attachments\.(in|ex)clude_tools: .* was removed; .*attachment.*view_file",
+        match=r"attachments\.(in|ex)clude_tools: .* was removed; .*attachment.*view_file.*tool_approval\.rules",
     ):
         Config.validate_with_runtime(data, runtime_paths)
 
+
+def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) -> None:
+    """Excluding standalone view_file remains a valid attachments override."""
+    runtime_paths = test_runtime_paths(tmp_path)
     valid = Config.validate_with_runtime(
         {
             "models": {"default": {"provider": "openai", "id": "x"}},

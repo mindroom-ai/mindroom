@@ -39,7 +39,6 @@ from mindroom.path_confinement import open_regular_file_within_root
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
-    OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     ToolOutputFileRequest,
     current_tool_workdir,
@@ -49,7 +48,6 @@ from mindroom.tool_system.output_files import (
     saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
-    with_optional_output_path,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.runtime_context import (
@@ -317,38 +315,7 @@ def _register_attachment_file_path(
     return attachment_record
 
 
-def resolve_send_attachment(
-    context: ToolRuntimeContext,
-    reference: str,
-    *,
-    workspace_root: Path | None,
-    file_access: FileAccess,
-) -> tuple[_ResolvedSendAttachment, bool] | str:
-    """Resolve one send reference to a sendable attachment and whether this call registered it, or an error.
-
-    An ``att_*`` reference is a context attachment ID; any other reference is a file path to register,
-    so a workspace file named ``att_*`` is sent as ``./att_*``.
-    """
-    if reference.startswith("att_"):
-        runtime_media = get_tool_runtime_media_attachment(context, reference)
-        if runtime_media is not None:
-            return runtime_media, False
-        record = resolve_context_attachment_record(context, reference)
-        newly_registered = False
-    else:
-        record = _register_attachment_file_path(
-            context,
-            reference,
-            workspace_root=workspace_root,
-            file_access=file_access,
-        )
-        newly_registered = True
-    if isinstance(record, str):
-        return record
-    return record, newly_registered
-
-
-def _resolve_inline_image_source(
+def _resolve_attachment_source(
     context: ToolRuntimeContext,
     *,
     attachment_id: str | None,
@@ -356,7 +323,7 @@ def _resolve_inline_image_source(
     workspace_root: Path | None,
     file_access: FileAccess,
 ) -> _ResolvedSendAttachment | str:
-    """Resolve an inline image source strictly as either a context attachment ID or a local file path."""
+    """Resolve a sendable attachment strictly as either a context attachment ID or a local file path."""
     if attachment_id is not None:
         runtime_media = get_tool_runtime_media_attachment(context, attachment_id)
         if runtime_media is not None:
@@ -371,11 +338,36 @@ def _resolve_inline_image_source(
     )
 
 
+def resolve_send_attachment(
+    context: ToolRuntimeContext,
+    reference: str,
+    *,
+    workspace_root: Path | None,
+    file_access: FileAccess,
+) -> tuple[_ResolvedSendAttachment, bool] | str:
+    """Resolve one send reference to a sendable attachment and whether this call registered it, or an error.
+
+    An ``att_*`` reference is a context attachment ID; any other reference is a file path to register,
+    so a workspace file named ``att_*`` is sent as ``./att_*``.
+    """
+    is_id = reference.startswith("att_")
+    record = _resolve_attachment_source(
+        context,
+        attachment_id=reference if is_id else None,
+        path=None if is_id else reference,
+        workspace_root=workspace_root,
+        file_access=file_access,
+    )
+    if isinstance(record, str):
+        return record
+    return record, not is_id
+
+
 _ALLOWED_ATTACHMENT_PARAMS: dict[str, frozenset[str]] = {
-    "list": frozenset({"attachment_id", "mindroom_output_path"}),
-    "get": frozenset({"attachment_id", "view", "mindroom_output_path"}),
-    "register": frozenset({"path", "mindroom_output_path"}),
-    "inline_image": frozenset({"attachment_id", "path", "alt", "mindroom_output_path"}),
+    "list": frozenset({"attachment_id"}),
+    "get": frozenset({"attachment_id", "view"}),
+    "register": frozenset({"path"}),
+    "inline_image": frozenset({"attachment_id", "path", "alt"}),
 }
 
 
@@ -394,25 +386,7 @@ def _non_empty(value: str | None) -> str | None:
     return stripped or None
 
 
-def _validate_inline_image_args(
-    *,
-    resolved_id: str | None,
-    resolved_path: str | None,
-    raw_attachment_id: str | None,
-    raw_path: str | None,
-) -> str | None:
-    if resolved_id is not None and resolved_path is not None:
-        return "Pass either attachment_id or path for action='inline_image', not both."
-    if resolved_id is not None or resolved_path is not None:
-        return None
-    if raw_attachment_id is not None and raw_path is None:
-        return "attachment_id must be a non-empty string."
-    if raw_path is not None and raw_attachment_id is None:
-        return "path must be a non-empty string."
-    return "action='inline_image' requires either attachment_id or path."
-
-
-def _parse_attachment_args(  # noqa: PLR0911
+def _parse_attachment_args(  # noqa: C901, PLR0911
     action: str,
     *,
     attachment_id: str | None,
@@ -439,7 +413,6 @@ def _parse_attachment_args(  # noqa: PLR0911
         ("path", resolved_path is not None),
         ("view", view),
         ("alt", resolved_alt is not None),
-        ("mindroom_output_path", resolved_output_path is not None),
     )
     unexpected = [name for name, is_set in provided if is_set and name not in allowed]
     if unexpected:
@@ -453,15 +426,15 @@ def _parse_attachment_args(  # noqa: PLR0911
     elif action == "register":
         if resolved_path is None:
             return "path must be a non-empty string."
-    elif action == "inline_image" and (
-        error := _validate_inline_image_args(
-            resolved_id=resolved_id,
-            resolved_path=resolved_path,
-            raw_attachment_id=attachment_id,
-            raw_path=path,
-        )
-    ):
-        return error
+    elif action == "inline_image":
+        if resolved_id is not None and resolved_path is not None:
+            return "Pass either attachment_id or path for action='inline_image', not both."
+        if resolved_id is None and resolved_path is None:
+            if attachment_id is not None and path is None:
+                return "attachment_id must be a non-empty string."
+            if path is not None and attachment_id is None:
+                return "path must be a non-empty string."
+            return "action='inline_image' requires either attachment_id or path."
     return _NormalizedAttachmentArgs(
         attachment_id=resolved_id,
         path=resolved_path,
@@ -622,14 +595,7 @@ class AttachmentTools(Toolkit):
         """Offer ``attachment``'s output path and wait budget for binary saves and JSON redirects."""
         if function.name != "attachment":
             return function
-        parameters = with_optional_output_path(function.parameters)
-        parameters["properties"][OUTPUT_PATH_ARGUMENT] = {
-            **parameters["properties"][OUTPUT_PATH_ARGUMENT],
-            "description": (
-                "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
-            ),
-        }
-        return replace(function, parameters=parameters, offer_background_after=True, offer_output_path=True)
+        return replace(function, offer_background_after=True, offer_output_path=True)
 
     def _prepare_output_request(
         self,
@@ -646,11 +612,10 @@ class AttachmentTools(Toolkit):
             return None
         runtime_paths = self._runtime_paths or context.runtime_paths
         config = self._runtime_config or context.config
-        policy = ToolOutputFilePolicy.from_runtime(
+        policy = ToolOutputFilePolicy.for_current_tools(
             self._tool_output_workspace_root,
             runtime_paths,
             auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-            tools_use_workdir=current_tool_workdir() is not None,
         )
         return prepare_tool_output_file(policy, tool_name="attachment", output_path=output_path)
 
@@ -659,12 +624,19 @@ class AttachmentTools(Toolkit):
         action: Literal["list", "get", "register", "inline_image"],
         context: ToolRuntimeContext,
         parsed: _NormalizedAttachmentArgs,
+        *,
+        view: bool,
     ) -> str | ToolValue:
         if action == "list":
             return self._list_attachments(context, parsed.attachment_id)
         if action == "get":
             assert parsed.attachment_id is not None
-            return await self._get_attachment(context, parsed.attachment_id, mindroom_output_path=None, view=False)
+            return await self._get_attachment(
+                context,
+                parsed.attachment_id,
+                mindroom_output_path=parsed.mindroom_output_path,
+                view=view,
+            )
         if action == "register":
             assert parsed.path is not None
             return self._register_attachment(context, parsed.path)
@@ -716,18 +688,11 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if action == "get" and (parsed.mindroom_output_path is not None or view):
-            assert parsed.attachment_id is not None
-            return await self._get_attachment(
-                context,
-                parsed.attachment_id,
-                mindroom_output_path=parsed.mindroom_output_path,
-                view=view,
-            )
-        prepared = self._prepare_output_request(context, parsed.mindroom_output_path)
+        owns_output = action == "get" and (parsed.mindroom_output_path is not None or view)
+        prepared = None if owns_output else self._prepare_output_request(context, parsed.mindroom_output_path)
         if isinstance(prepared, (dict, str)):
             return prepared
-        result = await self._dispatch_attachment_action(action, context, parsed)
+        result = await self._dispatch_attachment_action(action, context, parsed, view=view)
         if prepared is not None and isinstance(result, str):
             finalized = finalize_tool_output_file(prepared, result)
             return finalized if isinstance(finalized, (str, dict)) else result
@@ -800,7 +765,7 @@ class AttachmentTools(Toolkit):
             return await asyncio.to_thread(finalize_tool_media, result)
         return json.dumps(metadata, sort_keys=True)
 
-    async def _save_attachment_to_output_path(  # noqa: PLR0911
+    async def _save_attachment_to_output_path(
         self,
         context: ToolRuntimeContext,
         *,
@@ -844,10 +809,10 @@ class AttachmentTools(Toolkit):
         if read_error is not None or payload_bytes is None:
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=read_error)
 
-        sha256 = hashlib.sha256(payload_bytes).hexdigest()
         attachment_payload = attachments_for_tool_payload([attachment])[0]
         attachment_payload.pop("local_path", None)
 
+        overwritten: bool | None
         if use_worker:
             try:
                 worker_receipt = await asyncio.to_thread(
@@ -862,46 +827,34 @@ class AttachmentTools(Toolkit):
                 )
             except Exception as exc:
                 return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=str(exc))
-            attachment_payload.update(
-                {
-                    "save_path": worker_receipt.worker_path,
-                    "size_bytes": worker_receipt.size_bytes,
-                    "sha256": worker_receipt.sha256,
-                },
+            save_path, byte_count, sha256, overwritten = (
+                worker_receipt.worker_path,
+                worker_receipt.size_bytes,
+                worker_receipt.sha256,
+                None,
             )
-            return _attachment_tool_payload(
-                "ok",
-                attachment_id=requested_attachment_id,
-                attachment=attachment_payload,
-                mindroom_tool_output=saved_tool_output_receipt(
-                    path=worker_receipt.worker_path,
-                    byte_count=worker_receipt.size_bytes,
-                    output_format="binary",
-                    sha256=worker_receipt.sha256,
-                ),
+        else:
+            assert local_policy is not None
+            write_result = write_bytes_to_output_path(local_policy, output_path, payload_bytes, file_mode=0o600)
+            if isinstance(write_result, str):
+                return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=write_result)
+            save_path, byte_count, sha256, overwritten = (
+                output_path,
+                write_result.byte_count,
+                hashlib.sha256(payload_bytes).hexdigest(),
+                write_result.overwritten,
             )
 
-        assert local_policy is not None
-        write_result = write_bytes_to_output_path(local_policy, output_path, payload_bytes, file_mode=0o600)
-        if isinstance(write_result, str):
-            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=write_result)
-
-        attachment_payload.update(
-            {
-                "save_path": output_path,
-                "size_bytes": write_result.byte_count,
-                "sha256": sha256,
-            },
-        )
+        attachment_payload.update({"save_path": save_path, "size_bytes": byte_count, "sha256": sha256})
         return _attachment_tool_payload(
             "ok",
             attachment_id=requested_attachment_id,
             attachment=attachment_payload,
             mindroom_tool_output=saved_tool_output_receipt(
-                path=output_path,
-                byte_count=write_result.byte_count,
+                path=save_path,
+                byte_count=byte_count,
                 output_format="binary",
-                overwritten=write_result.overwritten,
+                overwritten=overwritten,
                 sha256=sha256,
             ),
         )
@@ -954,7 +907,7 @@ class AttachmentTools(Toolkit):
                 message="Inline images cannot be sent to this room right now. Send the image as an attachment with matrix_message instead.",
             )
         resolved = await asyncio.to_thread(
-            _resolve_inline_image_source,
+            _resolve_attachment_source,
             context,
             attachment_id=attachment_id,
             path=path,

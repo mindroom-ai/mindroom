@@ -1955,7 +1955,7 @@ async def test_inline_image_checks_encryption_guard_before_resolving(tmp_path: P
     context.client.rooms[context.room_id].encrypted = True
     context.client.olm = None
     with (
-        patch("mindroom.custom_tools.attachments._resolve_inline_image_source") as resolve,
+        patch("mindroom.custom_tools.attachments._resolve_attachment_source") as resolve,
         tool_runtime_context(context),
     ):
         payload = json.loads(
@@ -1981,7 +1981,7 @@ async def test_inline_image_resolves_in_worker_thread(tmp_path: Path) -> None:
         return "test resolution error"
 
     with (
-        patch("mindroom.custom_tools.attachments._resolve_inline_image_source", side_effect=resolve_off_loop),
+        patch("mindroom.custom_tools.attachments._resolve_attachment_source", side_effect=resolve_off_loop),
         tool_runtime_context(context),
     ):
         payload = json.loads(await AttachmentTools().attachment("inline_image", path="cat.png"))
@@ -2113,34 +2113,68 @@ async def test_inline_image_surfaces_payload_too_large(
 
 
 @pytest.mark.asyncio
-async def test_attachment_rejects_irrelevant_params_before_side_effects(tmp_path: Path) -> None:
-    """Each attachment action rejects non-default parameters belonging to other actions before touching storage."""
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error"),
+    [
+        ({"action": "list", "path": "note.txt"}, "cannot be used with action='list'"),
+        ({"action": "list", "view": True}, "cannot be used with action='list'"),
+        ({"action": "list", "alt": "x"}, "cannot be used with action='list'"),
+        ({"action": "get", "attachment_id": "att_pic", "path": "note.txt"}, "cannot be used with action='get'"),
+        ({"action": "get", "attachment_id": "att_pic", "alt": "x"}, "cannot be used with action='get'"),
+        (
+            {"action": "get", "attachment_id": "att_pic", "view": True, "mindroom_output_path": "out.txt"},
+            "view cannot be combined",
+        ),
+        ({"action": "get", "attachment_id": ""}, "attachment_id must be a non-empty string"),
+        ({"action": "get", "attachment_id": "   "}, "attachment_id must be a non-empty string"),
+        ({"action": "get", "attachment_id": "att_pic", "mindroom_output_path": ""}, "mindroom_output_path"),
+        (
+            {"action": "get", "attachment_id": "att_pic", "view": True, "mindroom_output_path": ""},
+            "view cannot be combined",
+        ),
+        (
+            {"action": "register", "path": "note.txt", "attachment_id": "att_pic"},
+            "cannot be used with action='register'",
+        ),
+        ({"action": "register", "path": "note.txt", "view": True}, "cannot be used with action='register'"),
+        ({"action": "register", "path": "note.txt", "alt": "x"}, "cannot be used with action='register'"),
+        ({"action": "register", "path": ""}, "path must be a non-empty string"),
+        ({"action": "register", "path": "   "}, "path must be a non-empty string"),
+        ({"action": "inline_image"}, "requires either attachment_id or path"),
+        ({"action": "inline_image", "attachment_id": "att_pic", "path": "note.txt"}, "not both"),
+        ({"action": "inline_image", "path": "note.txt", "view": True}, "cannot be used with action='inline_image'"),
+        ({"action": "inline_image", "attachment_id": "", "path": ""}, "requires either attachment_id or path"),
+        ({"action": "inline_image", "attachment_id": "   ", "path": "  "}, "requires either attachment_id or path"),
+        ({"action": "inline_image", "attachment_id": ""}, "attachment_id must be a non-empty string"),
+        ({"action": "inline_image", "path": "   "}, "path must be a non-empty string"),
+    ],
+)
+async def test_attachment_rejects_invalid_and_irrelevant_params_before_side_effects(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+    expected_error: str,
+) -> None:
+    """Each attachment action rejects irrelevant, conflicting, or blank required params before side effects."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "note.txt").write_text("hello", encoding="utf-8")
+    pic = workspace / "pic.png"
+    pic.write_bytes(image_bytes())
+    record = register_local_attachment(tmp_path, pic, kind="image", mime_type="image/png", attachment_id="att_pic")
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
     tool = AttachmentTools(tool_output_workspace_root=workspace)
-    context = _tool_context(tmp_path, attachment_ids=())
+    before_storage = sorted((tmp_path / "attachments").rglob("*"))
+    before_workspace = sorted(workspace.rglob("*"))
 
     with tool_runtime_context(context):
-        for kwargs in (
-            {"action": "list", "path": "note.txt"},
-            {"action": "list", "view": True},
-            {"action": "list", "alt": "x"},
-            {"action": "get", "attachment_id": "att_1", "path": "note.txt"},
-            {"action": "get", "attachment_id": "att_1", "alt": "x"},
-            {"action": "get", "attachment_id": "att_1", "view": True, "mindroom_output_path": "out.txt"},
-            {"action": "register", "path": "note.txt", "attachment_id": "att_1"},
-            {"action": "register", "path": "note.txt", "view": True},
-            {"action": "register", "path": "note.txt", "alt": "x"},
-            {"action": "inline_image"},
-            {"action": "inline_image", "attachment_id": "att_1", "path": "note.txt"},
-            {"action": "inline_image", "path": "note.txt", "view": True},
-        ):
-            payload = json.loads(await tool.attachment(**kwargs))  # type: ignore[arg-type]
-            assert payload["status"] == "error", kwargs
+        payload = json.loads(await tool.attachment(**kwargs))  # type: ignore[arg-type]
 
-    assert not list_tool_runtime_attachment_ids(context)
-    assert not (tmp_path / "attachments").exists()
+    assert payload["status"] == "error", kwargs
+    assert expected_error in payload["message"], payload
+    assert list_tool_runtime_attachment_ids(context) == [record.attachment_id]
+    assert sorted((tmp_path / "attachments").rglob("*")) == before_storage
+    assert sorted(workspace.rglob("*")) == before_workspace
 
 
 @pytest.mark.asyncio
@@ -2285,10 +2319,8 @@ async def test_attachment_output_files_worker_and_no_workspace_behavior(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_attachment_treats_blank_irrelevant_optional_params_as_unset_and_rejects_blank_required(
-    tmp_path: Path,
-) -> None:
-    """Empty/whitespace optional params on unused actions succeed, while blank required params still fail."""
+async def test_attachment_treats_blank_irrelevant_optional_params_as_unset(tmp_path: Path) -> None:
+    """Empty/whitespace irrelevant optional parameters are treated as unset across all 4 actions."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     note = workspace / "note.txt"
@@ -2308,7 +2340,6 @@ async def test_attachment_treats_blank_irrelevant_optional_params_as_unset_and_r
         ),
         tool_runtime_context(context),
     ):
-        # Blank irrelevant optional parameters are treated as unset across all 4 actions.
         list_ok = json.loads(
             await tool.attachment("list", attachment_id="  ", path="", alt="   ", mindroom_output_path=""),
         )
@@ -2333,19 +2364,3 @@ async def test_attachment_treats_blank_irrelevant_optional_params_as_unset_and_r
             await tool.attachment("inline_image", attachment_id="  ", path="pic.png", mindroom_output_path=""),
         )
         assert inline_by_path["status"] == "ok"
-
-        # Blank required parameters and blank mindroom_output_path on action="get" are still rejected.
-        for bad_kwargs in (
-            {"action": "get", "attachment_id": ""},
-            {"action": "get", "attachment_id": "   "},
-            {"action": "get", "attachment_id": "att_pic", "mindroom_output_path": ""},
-            {"action": "get", "attachment_id": "att_pic", "view": True, "mindroom_output_path": ""},
-            {"action": "register", "path": ""},
-            {"action": "register", "path": "   "},
-            {"action": "inline_image", "attachment_id": "", "path": ""},
-            {"action": "inline_image", "attachment_id": "   ", "path": "  "},
-            {"action": "inline_image", "attachment_id": ""},
-            {"action": "inline_image", "path": "   "},
-        ):
-            bad = json.loads(await tool.attachment(**bad_kwargs))  # type: ignore[arg-type]
-            assert bad["status"] == "error", bad_kwargs

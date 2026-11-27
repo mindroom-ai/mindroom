@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from pydantic import BaseModel
 
@@ -62,15 +62,57 @@ class ToolOutputFilePolicy:
         workspace_root: Path,
         runtime_paths: RuntimePaths,
         *,
-        auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        auto_save_threshold_bytes: int | None = None,
         tools_use_workdir: bool = False,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
-            auto_save_threshold_bytes=auto_save_threshold_bytes,
+            auto_save_threshold_bytes=(
+                DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+                if auto_save_threshold_bytes is None
+                else auto_save_threshold_bytes
+            ),
             tools_use_workdir=tools_use_workdir,
+        )
+
+    @classmethod
+    @overload
+    def for_current_tools(
+        cls,
+        workspace_root: Path,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy: ...
+
+    @classmethod
+    @overload
+    def for_current_tools(
+        cls,
+        workspace_root: Path | None,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy | None: ...
+
+    @classmethod
+    def for_current_tools(
+        cls,
+        workspace_root: Path | None,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy | None:
+        """Build a policy for the current tool workdir context, or None without a workspace."""
+        if workspace_root is None:
+            return None
+        return cls.from_runtime(
+            workspace_root,
+            runtime_paths,
+            auto_save_threshold_bytes=auto_save_threshold_bytes,
+            tools_use_workdir=current_tool_workdir() is not None,
         )
 
     @property

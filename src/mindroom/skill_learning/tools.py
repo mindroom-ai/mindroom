@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 # A plain alias: tool_schema unwraps Literal directly when building the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
+_SUPPORT_DIRS: dict[Literal["reference", "script"], str] = {"reference": "references", "script": "scripts"}
 # The tool calls of one reply run concurrently, and chat, a review, and archival may change one library at once,
 # while each change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they
 # take turns.
@@ -193,12 +194,8 @@ class SkillTools:
             if path is not None and path.strip():
                 return _refusal("path must be omitted when action='instructions'.")
             relative_path: str | None = SKILL_FILENAME
-        elif action == "reference":
-            relative_path = _support_path("references", path)
-        elif action == "script":
-            relative_path = _support_path("scripts", path)
         else:
-            assert_never(action)
+            relative_path = _support_path(_SUPPORT_DIRS[action], path)
         return await self._view(name, relative_path)
 
     async def _view(self, skill_name: str, relative_path: str | None) -> str:
@@ -446,7 +443,10 @@ def _support_path(directory: str, filename: str | None) -> str | None:
 def _loader(relative_path: str) -> str:
     if relative_path == SKILL_FILENAME:
         return 'skill(action="instructions", ...)'
-    action = "reference" if relative_path.startswith("references/") else "script"
+    action = next(
+        (name for name, directory in _SUPPORT_DIRS.items() if relative_path.startswith(f"{directory}/")),
+        "script",
+    )
     return f'skill(action="{action}", ...)'
 
 
