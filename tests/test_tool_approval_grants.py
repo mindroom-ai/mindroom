@@ -1181,6 +1181,7 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("github", "get_pull_request", "github_read_issues_prs"),
         ("google_drive", "google_drive_trash_file", "google_drive_write"),
         ("google_drive", "google_drive_download_file", "google_drive_read"),
+        ("google_docs", "google_docs_get_document", "google_docs_read"),
         ("google_docs", "google_docs_create_document", "google_docs_write"),
         ("google_docs", "google_docs_insert_text", "google_docs_write"),
         ("google_docs", "google_docs_replace_text", "google_docs_write"),
@@ -1204,6 +1205,7 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("e2b", "list_files", "e2b_inspect"),
         ("daytona", "list_files", "daytona_inspect"),
         ("email", "email_user", "smtp_send_email"),
+        ("twilio", "send_sms", "twilio_send"),
         ("twilio", "get_call_details", "twilio_read"),
         ("discord", "get_channel_messages", "discord_read"),
         ("discord", "send_message", "discord_send"),
@@ -1233,7 +1235,8 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("terminal", "terminal_run", "terminal_write"),
         ("terminal", "terminal_send", "terminal_write"),
         ("terminal", "terminal_list", "terminal_read"),
-        ("claude_agent", "claude_session_status", "claude_agent_status"),
+        ("claude_agent", "claude_session_status", "claude_agent_read"),
+        ("claude_agent", "claude_agent_status", "claude_agent_read"),
         ("claude_agent", "claude_start_session", "claude_agent_write"),
         ("claude_agent", "claude_send", "claude_agent_write"),
         ("claude_agent", "claude_interrupt", "claude_agent_write"),
@@ -3158,7 +3161,8 @@ def test_wave3b_registry_action_scoped_grants_bind_per_action(
     ("toolkit_name", "tool_name"),
     [
         ("gmail", "gmail_send_to_self"),
-        ("google_docs", "google_docs_get_document"),
+        ("google_docs", "google_docs_read"),
+        ("twilio", "twilio_send"),
         ("google_sheets", "google_sheets_read"),
     ],
 )
@@ -3231,6 +3235,7 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     }
     for retired_match, replacement in (
         ("work_send_email", "work_gmail_send"),
+        ("work_google_docs_get_document", "work_google_docs_read"),
         ("work_google_docs_batch_update", "work_google_docs_write"),
         ("work_google_tasks_delete_task", "work_google_tasks_write"),
     ):
@@ -3239,6 +3244,87 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
                 {**base_data, "tool_approval": {"rules": [{"match": retired_match, "action": "require_approval"}]}},
                 runtime_paths,
             )
+
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*work_google_docs_read"):
+        Config.validate_with_runtime(
+            {**base_data, "tool_approval": {"rules": [{"match": "work_google_docs_*", "script": "check.py"}]}},
+            runtime_paths,
+        )
+    with_explicit_script = Config.validate_with_runtime(
+        {
+            **base_data,
+            "tool_approval": {
+                "rules": [
+                    {"match": "work_google_docs_read", "script": "check.py"},
+                    {"match": "work_google_docs_write", "script": "check.py"},
+                    {"match": "work_google_docs_*", "script": "check.py"},
+                ],
+            },
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in with_explicit_script.tool_approval.rules] == [
+        "work_google_docs_read",
+        "work_google_docs_write",
+        "work_google_docs_*",
+    ]
+    # Non-strict Google services (gmail) must not be forced into strict wildcard script rejection.
+    gmail_only = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [str(plugin_root)],
+            "agents": {"a": {"display_name": "A", "tools": ["work_gmail"], "include_default_tools": False}},
+            "tool_approval": {"rules": [{"match": "work_*", "script": "check.py"}]},
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in gmail_only.tool_approval.rules] == ["work_*"]
+
+    # Secondary Google Workspace include_tools/exclude_tools filters fail closed with accurate guidance.
+    for filter_key in ("include_tools", "exclude_tools"):
+        with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+            Config.validate_with_runtime(
+                {
+                    "models": {"default": {"provider": "openai", "id": "x"}},
+                    "plugins": [str(plugin_root)],
+                    "agents": {
+                        "a": {
+                            "display_name": "A",
+                            "tools": [{"work_google_docs": {filter_key: ["work_google_docs_get_document"]}}],
+                            "include_default_tools": False,
+                        },
+                    },
+                },
+                runtime_paths,
+            )
+        msg = str(exc_info.value)
+        assert (
+            f"replace `work_google_docs_get_document` with `work_google_docs_read` in `work_google_docs.{filter_key}` "
+            "while preserving any other entries in the list"
+        ) in msg
+        guidance = msg.split("was removed; ", 1)[1]
+        assert "action" not in guidance
+        assert "remove" not in guidance
+
+    with pytest.raises(ConfigRuntimeValidationError) as batch_exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "plugins": [str(plugin_root)],
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "tools": [{"work_google_docs": {"exclude_tools": ["work_google_docs_batch_update"]}}],
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            runtime_paths,
+        )
+    batch_msg = str(batch_exc_info.value)
+    assert "replace `work_google_docs_batch_update` with `work_google_docs_write`" in batch_msg
+    assert "removes all sibling actions in `work_google_docs_write`" in batch_msg
 
     loaded = Config.validate_with_runtime(
         {**base_data, "tool_approval": {"rules": [{"match": "work_gmail_send", "action": "require_approval"}]}},
@@ -3268,6 +3354,31 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     assert star_op is not None
     assert del_op is not None
     assert star_op != del_op
+
+    # Stored dashboard settings naming retired prefixed Google Docs functions also fail closed.
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "work_google_docs",
+        {"_source": "ui", "exclude_tools": ["work_google_docs_get_document"]},
+    )
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=(
+            r"work_google_docs: stored setting exclude_tools: work_google_docs_get_document was removed; "
+            r"replace `work_google_docs_get_document` with `work_google_docs_read` in `work_google_docs\.exclude_tools`"
+        ),
+    ):
+        get_tool_by_name(
+            "work_google_docs",
+            runtime_paths,
+            tools=registry,
+            credentials_manager=manager,
+            worker_target=None,
+        )
 
 
 def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_openclaw_compat() -> None:
@@ -3652,18 +3763,18 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
             toolkit_name=toolkit_name,
         )
 
-    # Single-verb claude_agent_status has no action= param and is NOT action-scoped.
-    assert "claude_agent_status" not in registry.entries["claude_agent"].action_scoped_grants
-    status_op = grant_operation(config, "claude_agent_status", {}, tools=registry, toolkit_name="claude_agent")
+    # Single-verb claude_agent_read has no action= param and is NOT action-scoped.
+    assert "claude_agent_read" not in registry.entries["claude_agent"].action_scoped_grants
+    status_op = grant_operation(config, "claude_agent_read", {}, tools=registry, toolkit_name="claude_agent")
     assert status_op is not None
     assert (status_op.tool_name, status_op.mcp_server_id, status_op.mcp_tool_name) == (
-        "claude_agent_status",
+        "claude_agent_read",
         None,
         None,
     )
     assert scheduled_call_offers_any_arguments(
         config,
-        "claude_agent_status",
+        "claude_agent_read",
         {},
         requester_id="@alice:example.org",
         approver_id="@alice:example.org",
@@ -3677,7 +3788,9 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
     wildcard_cases = (
         ("script", ["script_read", "script_write"]),
         ("terminal", ["terminal_read", "terminal_write"]),
-        ("claude_agent", ["claude_agent_status", "claude_agent_write"]),
+        ("claude_agent", ["claude_agent_read", "claude_agent_write"]),
+        ("google_docs", ["google_docs_read", "google_docs_write"]),
+        ("twilio", ["twilio_send", "twilio_read"]),
         ("thread_model", ["thread_model_read", "thread_model_write"]),
         ("usage_stats", ["usage_stats"]),
     )
@@ -3708,12 +3821,11 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         loaded = Config.validate_with_runtime(explicit, runtime_paths)
         assert [rule.match for rule in loaded.tool_approval.rules] == ["skill", *explicit_matches, "*"]
 
-    # Retired include_tools/exclude_tools filters fail closed on the 4 filterable toolkits.
+    # Retired include_tools/exclude_tools filters fail closed on multi-action consolidated targets.
     retired_filter_cases = (
         ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
         ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
         ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
-        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_status"),
         ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
     )
@@ -3729,6 +3841,24 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
             ConfigRuntimeValidationError,
             match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}.*{expected_verb} all of `{replacement}`'s actions",
         ):
+            Config.validate_with_runtime(bad, runtime_paths)
+
+    # Multi-action twilio/google_docs targets keep their consolidated/enable_* guidance.
+    for toolkit_name, overrides, expected_pattern in (
+        ("twilio", {"include_tools": ["list_messages"]}, r"twilio\.include_tools:.*twilio_read.*enable_\*"),
+        (
+            "google_docs",
+            {"include_tools": ["google_docs_create_document"]},
+            r"google_docs\.include_tools:.*google_docs_write.*`action` parameter",
+        ),
+    ):
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
             Config.validate_with_runtime(bad, runtime_paths)
 
     # Kept name `terminal_read` in terminal include_tools still loads cleanly.
@@ -3772,12 +3902,12 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
         assert op_a.key != op_b.key
         assert grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit) is None
 
-    # Kept zero-arg reads remain tool-wide grants (not action-scoped).
+    # Single-verb zero-arg reads remain tool-wide grants (not action-scoped).
     for toolkit, fn in (
-        ("shared_directories", "list_shared_directories"),
-        ("contacts", "list_contacts"),
+        ("shared_directories", "shared_directories_read"),
+        ("contacts", "contacts_read"),
         ("agent_manager", "agent_settings"),
-        ("email_invite", "list_email_invites"),
+        ("email_invite", "email_invite_read"),
     ):
         op = grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit)
         assert op is not None
@@ -3792,7 +3922,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             {"agents": {"a": {"display_name": "A", "tools": ["shared_directories"], "include_default_tools": False}}},
             "delete_shared_directory",
             "*_shared_directory",
-            ["shared_directories_write"],
+            ["shared_directories_read", "shared_directories_write"],
         ),
         (
             {
@@ -3802,7 +3932,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             },
             "invite_by_email",
             "*_email*",
-            ["email_invite_write"],
+            ["email_invite_read", "email_invite_write"],
         ),
         (
             {
@@ -3849,7 +3979,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             },
             "request_contact",
             "*_contact",
-            ["agent_manager_write", "contacts_write"],
+            ["agent_manager_write", "contacts_read", "contacts_write"],
         ),
     ]
     for extra, exact_old, glob_old, replacements in cases:
@@ -3864,7 +3994,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
                 {**base, "tool_approval": {"rules": [{"match": exact_old, "action": "require_approval"}]}},
                 runtime_paths,
             )
-        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+        with pytest.raises(ConfigRuntimeValidationError, match="|".join(replacements)):
             Config.validate_with_runtime(
                 {**base, "tool_approval": {"rules": [{"match": glob_old, "action": "require_approval"}]}},
                 runtime_paths,
@@ -3898,6 +4028,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
         # Contacts enabled on template or in a per-user override.
         ({"agent_extra": {"contacts": {}}}, {}, "request_contact", "contacts_write"),
         ({"users": {"@alice:example.org": {"contacts": {}}}}, {}, "remove_contact", "contacts_write"),
+        ({"agent_extra": {"contacts": {}}}, {}, "list_contacts", "contacts_read"),
         # Knowledge graph enabled on template, defaults, or per-user override.
         ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph_read"),
         ({}, {"knowledge_graph": True}, "graph_entity", "knowledge_graph_read"),
@@ -3915,10 +4046,22 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             "email_invite_write",
         ),
         (
+            {"users": {"@alice:example.org": {"tools": ["email_invite"]}}},
+            {},
+            "list_email_invites",
+            "email_invite_read",
+        ),
+        (
             {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
             {},
             "accept_shared_directory",
             "shared_directories_write",
+        ),
+        (
+            {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
+            {},
+            "list_shared_directories",
+            "shared_directories_read",
         ),
     ],
 )
@@ -3956,12 +4099,15 @@ def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
 @pytest.mark.parametrize(
     ("toolkit", "retired_name", "replacement", "kept_read"),
     [
-        ("shared_directories", "delete_shared_directory", "shared_directories_write", "list_shared_directories"),
+        ("shared_directories", "delete_shared_directory", "shared_directories_write", "shared_directories_read"),
+        ("shared_directories", "list_shared_directories", "shared_directories_read", None),
         ("contacts", "request_contact", "contacts_write", None),
+        ("contacts", "list_contacts", "contacts_read", None),
         ("knowledge_graph", "search_graph", "knowledge_graph_read", None),
         ("knowledge_graph", "delete_graph_fact", "knowledge_graph_write", None),
         ("agent_manager", "create_agent", "agent_manager_write", None),
-        ("email_invite", "invite_by_email", "email_invite_write", "list_email_invites"),
+        ("email_invite", "invite_by_email", "email_invite_write", "email_invite_read"),
+        ("email_invite", "list_email_invites", "email_invite_read", None),
     ],
 )
 def test_retired_identity_access_graph_include_exclude_overrides_fail_config_load(
@@ -4042,7 +4188,7 @@ def test_malformed_personal_agent_user_override_keeps_template_error_path_with_a
         ("atlassian", "jira_write", ("create", "update", "comment", "transition")),
         ("atlassian", "confluence_read", ("search", "get", "list_attachments", "download_attachment")),
         ("atlassian", "confluence_write", ("create", "update", "comment")),
-        ("slack", "slack_inspect", ("search", "recent", "read", "download")),
+        ("slack", "slack_read", ("search", "recent", "read", "download")),
         ("slack", "slack_send", ("post", "upload")),
         ("slack", "slack_manage", ("edit", "delete", "react")),
         ("outlook_mail", "outlook_mail_read", ("search", "get_message", "get_automatic_replies")),
@@ -4123,27 +4269,27 @@ def test_atlassian_slack_and_microsoft_365_registry_action_scoped_grants_bind_pe
             ],
             None,
         ),
-        # Retired slack_read fails closed under require_approval default and with slack_* catch-all.
+        # Retired slack_inspect fails closed under require_approval default and with slack_* catch-all.
         (
             ["slack"],
             "require_approval",
-            [{"match": "slack_read", "action": "auto_approve"}],
-            r"slack_read.*slack_inspect",
-        ),
-        (
-            ["slack"],
-            "auto_approve",
-            [
-                {"match": "slack_read", "action": "auto_approve"},
-                {"match": "slack_*", "action": "require_approval"},
-            ],
-            r"slack_read.*slack_inspect",
+            [{"match": "slack_inspect", "action": "auto_approve"}],
+            r"slack_inspect.*slack_read",
         ),
         (
             ["slack"],
             "auto_approve",
             [
                 {"match": "slack_inspect", "action": "auto_approve"},
+                {"match": "slack_*", "action": "require_approval"},
+            ],
+            r"slack_inspect.*slack_read",
+        ),
+        (
+            ["slack"],
+            "auto_approve",
+            [
+                {"match": "slack_read", "action": "auto_approve"},
                 {"match": "slack_*", "action": "require_approval"},
             ],
             None,
@@ -4153,7 +4299,7 @@ def test_atlassian_slack_and_microsoft_365_registry_action_scoped_grants_bind_pe
             ["slack"],
             "auto_approve",
             [
-                {"match": "slack_inspect", "script": "check.py"},
+                {"match": "slack_read", "script": "check.py"},
                 {"match": "slack_send", "script": "check.py"},
                 {"match": "slack_manage", "script": "check.py"},
                 {"match": "slack_*", "script": "check.py"},
@@ -4558,13 +4704,13 @@ def test_plugin_declared_retired_functions_fail_closed_on_wildcard_scripts(tmp_p
     [
         ({"atlassian": {"include_tools": ["jira_search_issues"]}}, r"atlassian\.include_tools.*jira_read"),
         ({"atlassian": {"exclude_tools": ["confluence_update_page"]}}, r"atlassian\.exclude_tools.*confluence_write"),
-        ({"slack": {"include_tools": ["slack_read"]}}, r"slack\.include_tools.*slack_inspect"),
-        ({"slack": {"exclude_tools": ["slack_read"]}}, r"slack\.exclude_tools.*slack_inspect"),
+        ({"slack": {"include_tools": ["slack_inspect"]}}, r"slack\.include_tools.*slack_read"),
+        ({"slack": {"exclude_tools": ["slack_inspect"]}}, r"slack\.exclude_tools.*slack_read"),
         ({"slack": {"include_tools": ["slack_post"]}}, r"slack\.include_tools.*slack_send"),
-        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_inspect"),
+        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_read"),
         ({"slack": {"exclude_tools": ["slack_watch"]}}, r"subscribe_event"),
         ({"atlassian": {"exclude_tools": ["jira_write"]}}, None),
-        ({"slack": {"include_tools": ["slack_inspect"]}}, None),
+        ({"slack": {"include_tools": ["slack_read"]}}, None),
     ],
 )
 def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(
@@ -4629,3 +4775,155 @@ def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_
     assert expected_effect in message
     assert f"approval `script` matching `{new}`" in message
     assert f"[{new}]" not in message
+
+
+@pytest.mark.parametrize(
+    ("tools", "rules", "error_pattern"),
+    [
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_read", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            (
+                r"mark_read moved from matrix_user_read to matrix_user_write; "
+                r"move 'mark_read' to matrix_user_write \(preserving conditions and approval decision\) "
+                r"and keep any remaining read actions on matrix_user_read\."
+            ),
+        ),
+        (
+            ["matrix_user"],
+            [
+                {
+                    "match": "matrix_user_read",
+                    "arguments": {"action": ["messages", "mark_read"]},
+                    "action": "require_approval",
+                },
+            ],
+            (
+                r"mark_read moved from matrix_user_read to matrix_user_write; "
+                r"move 'mark_read' to matrix_user_write \(preserving conditions and approval decision\) "
+                r"and keep any remaining read actions on matrix_user_read\."
+            ),
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_write", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "*", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_*", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user", "gmail"],
+            [{"match": "gmail_manage", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room-info"}, "action": "require_approval"}],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [
+                {
+                    "match": "matrix_room",
+                    "arguments": {"action": ["members", "room-info"]},
+                    "action": "require_approval",
+                },
+            ],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "*", "arguments": {"action": "room-info"}, "action": "require_approval"}],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room_info"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room*"}, "action": "require_approval"}],
+            None,
+        ),
+    ],
+)
+def test_retired_action_argument_approval_rules_fail_closed(
+    tmp_path: Path,
+    tools: list[str],
+    rules: list[dict[str, object]],
+    error_pattern: str | None,
+) -> None:
+    """Approval rules targeting moved mark_read or renamed room-info action values fail closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": rules},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+    else:
+        loaded = Config.validate_with_runtime(data, runtime_paths)
+        assert len(loaded.tool_approval.rules) == len(rules)
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "filter_key", "old_name", "new_name"),
+    [
+        ("google_docs", "include_tools", "google_docs_get_document", "google_docs_read"),
+        ("google_docs", "exclude_tools", "google_docs_get_document", "google_docs_read"),
+        ("twilio", "include_tools", "send_sms", "twilio_send"),
+        ("twilio", "exclude_tools", "send_sms", "twilio_send"),
+        ("contacts", "include_tools", "list_contacts", "contacts_read"),
+        ("email_invite", "exclude_tools", "list_email_invites", "email_invite_read"),
+        ("shared_directories", "include_tools", "list_shared_directories", "shared_directories_read"),
+        ("claude_agent", "include_tools", "claude_agent_status", "claude_agent_read"),
+        ("claude_agent", "exclude_tools", "claude_session_status", "claude_agent_read"),
+    ],
+)
+def test_single_verb_renamed_filter_guidance_replaces_in_place(
+    tmp_path: Path,
+    toolkit_name: str,
+    filter_key: str,
+    old_name: str,
+    new_name: str,
+) -> None:
+    """Single-verb 1-to-1 renames guide in-place filter replacement without claiming an action parameter or removal."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{toolkit_name: {filter_key: [old_name]}}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, runtime_paths)
+    message = str(exc_info.value)
+    assert (
+        f"replace `{old_name}` with `{new_name}` in `{toolkit_name}.{filter_key}` "
+        "while preserving any other entries in the list"
+    ) in message
+    guidance = message.split("was removed; ", 1)[1]
+    assert "action" not in guidance
+    assert "remove" not in guidance

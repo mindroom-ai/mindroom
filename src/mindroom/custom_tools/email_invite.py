@@ -65,10 +65,10 @@ class EmailInviteTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="email_invite",
-            tools=[self.list_email_invites, self.email_invite_write],
+            tools=[self.email_invite_read, self.email_invite_write],
         )
 
-    async def list_email_invites(self) -> str:
+    async def email_invite_read(self) -> str:
         """List the open email invites of this room with their state, asker, approver and expiry.
 
         Takes no arguments.

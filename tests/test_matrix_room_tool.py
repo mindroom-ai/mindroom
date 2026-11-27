@@ -133,7 +133,7 @@ def test_matrix_room_schema_exposes_supported_actions() -> None:
     """Agents must receive the allowed actions as a schema enum, not an unrestricted string."""
     function = toolkit_offers(MatrixRoomTools(), "matrix_room")
     assert function.parameters["properties"]["action"]["enum"] == [
-        "room-info",
+        "room_info",
         "members",
         "agents",
         "threads",
@@ -153,7 +153,7 @@ def test_matrix_room_schema_exposes_workflow_values() -> None:
 @pytest.mark.asyncio
 async def test_matrix_room_requires_runtime_context() -> None:
     """Tool should fail clearly when called without Matrix runtime context."""
-    payload = json.loads(await MatrixRoomTools().matrix_room(action="room-info"))
+    payload = json.loads(await MatrixRoomTools().matrix_room(action="room_info"))
     assert payload["status"] == "error"
     assert payload["tool"] == "matrix_room"
     assert "context" in payload["message"]
@@ -169,7 +169,7 @@ async def test_matrix_room_requires_runtime_context() -> None:
         {"action": "delete"},
         {"action": None},
         {"action": "threads", "limit": "many"},
-        {"action": "room-info", "room_id": 123},
+        {"action": "room_info", "room_id": 123},
         {"action": "threads", "include_summaries": "maybe"},
         {"action": "threads", "workflow": "done"},
     ],
@@ -195,7 +195,7 @@ async def test_matrix_room_explicit_room_requires_authorization() -> None:
     tool = MatrixRoomTools()
     ctx = _make_context()
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info", room_id="!other:localhost"))
+        payload = json.loads(await tool.matrix_room(action="room_info", room_id="!other:localhost"))
     assert payload["status"] == "error"
     assert "Not authorized" in payload["message"]
 
@@ -239,20 +239,20 @@ async def test_matrix_room_rate_limit_guardrail() -> None:
         patch.object(MatrixRoomTools, "_RATE_LIMIT_WINDOW_SECONDS", 60.0),
         tool_runtime_context(ctx),
     ):
-        first = json.loads(await tool.matrix_room(action="room-info"))
-        second = json.loads(await tool.matrix_room(action="room-info"))
+        first = json.loads(await tool.matrix_room(action="room_info"))
+        second = json.loads(await tool.matrix_room(action="room_info"))
 
     assert first["status"] == "ok"
     assert second["status"] == "error"
     assert "Rate limit exceeded" in second["message"]
 
 
-# --- room-info ---
+# --- room_info ---
 
 
 @pytest.mark.asyncio
 async def test_room_info_happy_path() -> None:
-    """room-info should return room metadata from cached state."""
+    """room_info should return room metadata from cached state."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     cached_room = _make_cached_room()
@@ -262,10 +262,10 @@ async def test_room_info_happy_path() -> None:
     ctx.client.room_get_state_event = AsyncMock(return_value=create_resp)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
+        payload = json.loads(await tool.matrix_room(action="room_info"))
 
     assert payload["status"] == "ok"
-    assert payload["action"] == "room-info"
+    assert payload["action"] == "room_info"
     assert payload["room_id"] == "!room:localhost"
     assert payload["name"] == "Test Room"
     assert payload["topic"] == "A test room"
@@ -280,13 +280,13 @@ async def test_room_info_happy_path() -> None:
 
 @pytest.mark.asyncio
 async def test_room_info_room_not_found() -> None:
-    """room-info should fail gracefully when room is not in client state."""
+    """room_info should fail gracefully when room is not in client state."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     ctx.client.rooms = {}
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
+        payload = json.loads(await tool.matrix_room(action="room_info"))
 
     assert payload["status"] == "error"
     assert "Room not found" in payload["message"]
@@ -294,7 +294,7 @@ async def test_room_info_room_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_room_info_creator_fallback_when_state_fails() -> None:
-    """room-info should return None creator when m.room.create state event fails."""
+    """room_info should return None creator when m.room.create state event fails."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     cached_room = _make_cached_room()
@@ -304,7 +304,7 @@ async def test_room_info_creator_fallback_when_state_fails() -> None:
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
+        payload = json.loads(await tool.matrix_room(action="room_info"))
 
     assert payload["status"] == "ok"
     assert payload["creator"] is None
@@ -312,7 +312,7 @@ async def test_room_info_creator_fallback_when_state_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_room_info_creator_fallback_when_create_content_malformed() -> None:
-    """room-info should ignore malformed m.room.create content instead of crashing."""
+    """room_info should ignore malformed m.room.create content instead of crashing."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     cached_room = _make_cached_room()
@@ -322,7 +322,7 @@ async def test_room_info_creator_fallback_when_create_content_malformed() -> Non
     ctx.client.room_get_state_event = AsyncMock(return_value=create_resp)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
+        payload = json.loads(await tool.matrix_room(action="room_info"))
 
     assert payload["status"] == "ok"
     assert payload["creator"] is None
@@ -330,17 +330,17 @@ async def test_room_info_creator_fallback_when_create_content_malformed() -> Non
 
 @pytest.mark.asyncio
 async def test_room_info_creator_fallback_when_create_lookup_has_transport_error() -> None:
-    """room-info should keep cached metadata when creator lookup has a transport error."""
+    """room_info should keep cached metadata when creator lookup has a transport error."""
     tool = MatrixRoomTools()
     ctx = _make_context()
     ctx.client.rooms = {"!room:localhost": _make_cached_room()}
     ctx.client.room_get_state_event = AsyncMock(side_effect=TimeoutError())
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="room-info"))
+        payload = json.loads(await tool.matrix_room(action="room_info"))
 
     assert payload["status"] == "ok"
-    assert payload["action"] == "room-info"
+    assert payload["action"] == "room_info"
     assert payload["room_id"] == "!room:localhost"
     assert payload["name"] == "Test Room"
     assert payload["creator"] is None
@@ -1610,7 +1610,7 @@ async def test_room_info_exposes_only_selected_rooms_conversation(*, other_room:
     room_id = "!other:localhost" if other_room else ctx.room_id
     ctx.client.rooms[room_id] = _make_cached_room(room_id)
     with tool_runtime_context(ctx), patch("mindroom.custom_tools.matrix_room.room_access_allowed", return_value=True):
-        payload = json.loads(await MatrixRoomTools().matrix_room(action="room-info", room_id=room_id))
+        payload = json.loads(await MatrixRoomTools().matrix_room(action="room_info", room_id=room_id))
     assert payload["status"] == "ok"
     assert payload["thread_id"] == (None if other_room else "$current-thread")
     assert payload["reply_to_event_id"] is None

@@ -164,7 +164,7 @@ def test_google_docs_missing_credentials_returns_scoped_connect_instruction(tmp_
         worker_target=_worker_target(),
     )
 
-    result = json.loads(tool.google_docs_get_document("document-id"))
+    result = json.loads(tool.google_docs_read("document-id"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "google_docs"
@@ -249,10 +249,10 @@ def test_google_docs_create_document_preserves_id_after_initial_text_transport_f
     assert sentinel not in json.dumps(result)
 
 
-def test_google_docs_get_document_returns_tab_aware_structure(tmp_path: Path) -> None:
+def test_google_docs_read_returns_tab_aware_structure(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_docs_get_document("document-id"))
+    result = json.loads(tool.google_docs_read("document-id"))
 
     assert service.documents_resource.get_calls == [
         {
@@ -269,10 +269,10 @@ def test_google_docs_get_document_returns_tab_aware_structure(tmp_path: Path) ->
     )
 
 
-def test_google_docs_get_document_accepts_full_edit_url(tmp_path: Path) -> None:
+def test_google_docs_read_accepts_full_edit_url(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_docs_get_document(
+    tool.google_docs_read(
         "https://docs.google.com/document/u/0/d/document-id/edit?usp=sharing",
     )
 
@@ -625,7 +625,7 @@ def test_google_docs_write_rejects_mismatched_action_params_without_api_call(
 
 def test_google_docs_config_flags_control_registered_functions_and_narrow_write_actions(tmp_path: Path) -> None:
     read_only, _ = _connected_tool(tmp_path, create_document=False, read_document=True, edit_document=False)
-    assert set(read_only.functions) == {"google_docs_get_document"}
+    assert set(read_only.functions) == {"google_docs_read"}
 
     create_only, create_service = _connected_tool(
         tmp_path,
@@ -633,7 +633,7 @@ def test_google_docs_config_flags_control_registered_functions_and_narrow_write_
         read_document=True,
         edit_document=False,
     )
-    assert set(create_only.functions) == {"google_docs_get_document", "google_docs_write"}
+    assert set(create_only.functions) == {"google_docs_read", "google_docs_write"}
     create_offered = toolkit_offers(create_only, "google_docs_write")
     assert create_offered.parameters["properties"]["action"]["enum"] == ["create"]
     assert set(create_offered.parameters["properties"]) == {"action", "title", "initial_text"}
@@ -680,17 +680,22 @@ def test_google_docs_config_flags_control_registered_functions_and_narrow_write_
 
 
 @pytest.mark.parametrize(
-    "retired_name",
+    ("retired_name", "replacement"),
     [
-        "google_docs_create_document",
-        "google_docs_insert_text",
-        "google_docs_replace_text",
-        "google_docs_batch_update",
+        ("google_docs_get_document", "google_docs_read"),
+        ("google_docs_create_document", "google_docs_write"),
+        ("google_docs_insert_text", "google_docs_write"),
+        ("google_docs_replace_text", "google_docs_write"),
+        ("google_docs_batch_update", "google_docs_write"),
     ],
 )
-def test_google_docs_filters_fail_closed_on_retired_names(tmp_path: Path, retired_name: str) -> None:
+def test_google_docs_filters_fail_closed_on_retired_names(
+    tmp_path: Path,
+    retired_name: str,
+    replacement: str,
+) -> None:
     for param in ("include_tools", "exclude_tools"):
-        with pytest.raises(ValueError, match="google_docs_write"):
+        with pytest.raises(ValueError, match=replacement):
             _connected_tool(tmp_path, **{param: [retired_name]})
 
 

@@ -622,13 +622,13 @@ agent_manager_write(
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](../architecture/security-posture.md#file-access).
 To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](../configuration/models.md#claude-models-with-a-claude-subscription) instead.
 
-The tool exposes `claude_agent_status()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
+The tool exposes `claude_agent_read()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
 `claude_agent_write(action="send")` creates the session if needed, so `claude_agent_write(action="start")` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
 When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_agent_write(action="send")` reply.
 `resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_agent_write(action="end")` first.
-`claude_agent_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+`claude_agent_read()` reports age, idle time, and the Claude session ID once Claude has returned a result.
 When Claude fails while processing a prompt, `claude_agent_write(action="send")` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](../openai-api.md#session-continuity).
 
@@ -685,7 +685,7 @@ claude_agent_write(
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",
 )
-claude_agent_status(session_label="bugfix")
+claude_agent_read(session_label="bugfix")
 claude_agent_write(action="interrupt", session_label="bugfix")
 claude_agent_write(action="end", session_label="bugfix")
 ```

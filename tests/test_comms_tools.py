@@ -97,6 +97,8 @@ def test_twilio_separates_sms_from_reads() -> None:
         api_secret=_CREDENTIAL,
         enable_list_messages=False,
     )
+    assert set(tools.functions) == {"twilio_send", "twilio_read"}
+    assert set(twilio_tools()(enable_send_sms=False).functions) == {"twilio_read"}
     read = next(function for function in adapt_toolkit(tools).functions if function.name == "twilio_read")
     assert read.description is not None
     assert "`get_call_details`" in read.description

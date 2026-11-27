@@ -89,7 +89,7 @@ _PERSONAL_SEARCH_ONLY = "Message and people search need a personal Slack connect
 _PERSONAL_RECENT_ONLY = "Recent conversations need a personal Slack connection"
 # Slack may have received the write before the connection failed, so a blind retry could post twice.
 _WRITE_UNANSWERED = (
-    'Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying'
+    'Slack did not answer; the message may have been sent, so check with slack_read(action="read") before retrying'
 )
 _PROJECT_POSTS_IN_CHANNELS = "Project agents post only in their channels"
 # A turn a Slack watch started carries Slack users' words, not the owner's; only the owner's own message may write.
@@ -171,7 +171,7 @@ def _recent_cursor(cursor: str | None) -> tuple[int, str | None]:
         return 0, None
     match = _RECENT_CURSOR.fullmatch(cursor)
     if match is None:
-        msg = 'cursor must be the next_cursor of the previous slack_inspect(action="recent") call'
+        msg = 'cursor must be the next_cursor of the previous slack_read(action="recent") call'
         raise _SlackRefusalError(msg)
     return int(match.group(1)), match.group(2) or None
 
@@ -405,14 +405,14 @@ class SlackTools(Toolkit):
         self.project_channels = frozenset(channels) if channels else None
         # A project agent answers a Slack-started thread in its room, and MindRoom mirrors that reply to Slack itself.
         self._reply_mirrored = self.project_channels is not None and bool(room)
-        tools = [self.slack_inspect, self.slack_send, self.slack_manage] if write else [self.slack_inspect]
+        tools = [self.slack_read, self.slack_send, self.slack_manage] if write else [self.slack_read]
         super().__init__(name=_TOOL_NAME, tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Set per-function meta-schema flags and hide ``recent``/``days`` in project mode."""
         if function.name == "slack_send":
             return replace(function, offer_background_after=True, offer_output_path=False)
-        if function.name != "slack_inspect":
+        if function.name != "slack_read":
             return function
         offered = replace(function, offer_background_after=True, offer_output_path=True)
         if self.project_channels is None:
@@ -750,7 +750,7 @@ class SlackTools(Toolkit):
             "path": str(path),
         }
 
-    async def slack_inspect(
+    async def slack_read(
         self,
         action: Literal["search", "recent", "read", "download"],
         query: str | None = None,
@@ -807,9 +807,9 @@ class SlackTools(Toolkit):
             if action == "download":
                 _reject_unexpected_args(action, ("file_id",), provided)
                 return await self._do_download(session, file_id)
-            _refuse(f"Unsupported slack_inspect action: {action!r}")
+            _refuse(f"Unsupported slack_read action: {action!r}")
 
-        return await self._run("slack_inspect", operation)
+        return await self._run("slack_read", operation)
 
     async def slack_send(
         self,
@@ -827,7 +827,7 @@ class SlackTools(Toolkit):
 
         A personal connection acts as the connected person (and accepts a user ID to open a DM); a project agent
         acts as the MindRoom app in its own channels only. Writes are sent once and never retried; check
-        slack_inspect(action="read") before retrying after an error.
+        slack_read(action="read") before retrying after an error.
 
         Args:
             action: Send operation (`post` or `upload`).
@@ -901,7 +901,7 @@ class SlackTools(Toolkit):
         - `react`: `target`, `emoji` (name such as `eyes` or `white_check_mark`, with or without colons).
 
         A personal connection acts as the connected person; a project agent acts as the MindRoom app in its own
-        channels only. Writes are sent once and never retried; check slack_inspect(action="read") before retrying after
+        channels only. Writes are sent once and never retried; check slack_read(action="read") before retrying after
         an error.
 
         Args:

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
     requires_room_context=True,
-    function_names=("list_email_invites", "email_invite_write"),
+    function_names=("email_invite_read", "email_invite_write"),
     action_scoped_grants=("email_invite_write",),
 )
 def email_invite_tools() -> type[EmailInviteTools]:

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         def agent_patterns(self) -> tuple[str, ...] | None: ...
         def matches_tool(self, tool_name: str) -> bool: ...
         def matches_agent(self, agent_name: str) -> bool: ...
+        def fixed_arguments_match(self, fixed_arguments: Mapping[str, Any]) -> str: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -626,6 +627,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "google_drive_trash_file": "google_drive_write",
     },
     "google_docs": {
+        "google_docs_get_document": "google_docs_read",
         "google_docs_create_document": "google_docs_write",
         "google_docs_insert_text": "google_docs_write",
         "google_docs_replace_text": "google_docs_write",
@@ -851,7 +853,11 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "download_photo": "unsplash",
     },
     "email": {"email_user": "smtp_send_email"},
-    "twilio": {"get_call_details": "twilio_read", "list_messages": "twilio_read"},
+    "twilio": {
+        "send_sms": "twilio_send",
+        "get_call_details": "twilio_read",
+        "list_messages": "twilio_read",
+    },
     "discord": {
         "get_channel_messages": "discord_read",
         "get_channel_info": "discord_read",
@@ -1141,10 +1147,10 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "confluence_add_comment": "confluence_write",
     },
     "slack": {
-        "slack_search": "slack_inspect",
-        "slack_recent": "slack_inspect",
-        "slack_read": "slack_inspect",
-        "slack_download": "slack_inspect",
+        "slack_inspect": "slack_read",
+        "slack_search": "slack_read",
+        "slack_recent": "slack_read",
+        "slack_download": "slack_read",
         "slack_post": "slack_send",
         "slack_upload": "slack_send",
         "slack_react": "slack_manage",
@@ -1153,9 +1159,9 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
     # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
     # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
-    #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
-    #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
-    #   and list_email_invites).
+    #   naming any of the 26 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
+    #   and email_invite (including the renamed single-verb reads shared_directories_read, contacts_read, and
+    #   email_invite_read; agent_settings remains the kept zero-arg read).
     # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
     #   functions with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
@@ -1165,6 +1171,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
     #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
     "shared_directories": {
+        "list_shared_directories": "shared_directories_read",
         "create_shared_directory": "shared_directories_write",
         "invite_to_shared_directory": "shared_directories_write",
         "remove_from_shared_directory": "shared_directories_write",
@@ -1173,6 +1180,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "decline_shared_directory": "shared_directories_write",
     },
     "contacts": {
+        "list_contacts": "contacts_read",
         "request_contact": "contacts_write",
         "accept_contact": "contacts_write",
         "decline_contact": "contacts_write",
@@ -1194,6 +1202,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "delete_agent": "agent_manager_write",
     },
     "email_invite": {
+        "list_email_invites": "email_invite_read",
         "invite_by_email": "email_invite_write",
         "revoke_email_invite": "email_invite_write",
     },
@@ -1211,7 +1220,8 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "terminal_list": "terminal_read",
     },
     "claude_agent": {
-        "claude_session_status": "claude_agent_status",
+        "claude_session_status": "claude_agent_read",
+        "claude_agent_status": "claude_agent_read",
         "claude_start_session": "claude_agent_write",
         "claude_send": "claude_agent_write",
         "claude_interrupt": "claude_agent_write",
@@ -1240,6 +1250,8 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
         "knowledge_graph",
         "agent_manager",
         "email_invite",
+        "google_docs",
+        "twilio",
         "calculator",
         "duckduckgo",
         "googlesearch",
@@ -1487,6 +1499,44 @@ def retired_slack_watch_approval_error(
     )
 
 
+def retired_action_argument_approval_error(
+    enabled_toolkits: Collection[str],
+    rules: Sequence[_ApprovalRule],
+) -> str | None:
+    """Return a migration error when approval rules target moved or renamed action argument values."""
+    check_matrix_user = "matrix_user" in enabled_toolkits
+    check_matrix_room = "matrix_room" in enabled_toolkits
+    if not (check_matrix_user or check_matrix_room):
+        return None
+    for index, rule in enumerate(rules):
+        if rule.arguments is None or "action" not in rule.arguments:
+            continue
+        if (
+            check_matrix_user
+            and rule.matches_tool("matrix_user_read")
+            and not rule.matches_tool("matrix_user_write")
+            and rule.fixed_arguments_match({"action": "mark_read"}) != "no"
+        ):
+            return (
+                f"tool_approval.rules[{index}] matches matrix_user_read with action 'mark_read'; "
+                "mark_read moved from matrix_user_read to matrix_user_write; "
+                "move 'mark_read' to matrix_user_write (preserving conditions and approval decision) "
+                "and keep any remaining read actions on matrix_user_read."
+            )
+        if (
+            check_matrix_room
+            and rule.matches_tool("matrix_room")
+            and rule.fixed_arguments_match({"action": "room-info"}) != "no"
+            and rule.fixed_arguments_match({"action": "room_info"}) == "no"
+        ):
+            return (
+                f"tool_approval.rules[{index}] matches matrix_room with retired action 'room-info'; "
+                "action 'room-info' was renamed to 'room_info'; "
+                "update the rule's arguments.action to 'room_info'."
+            )
+    return None
+
+
 def retired_consolidated_approval_error(
     toolkit_name: str,
     rules: Sequence[_ApprovalRule],
@@ -1568,7 +1618,29 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     )
 
 
+_SINGLE_VERB_RENAMED_TARGETS = frozenset(
+    {
+        "contacts_read",
+        "email_invite_read",
+        "shared_directories_read",
+        "google_docs_read",
+        "claude_agent_read",
+        "twilio_send",
+    },
+)
+
+
+def _is_single_verb_renamed_target(new: str) -> bool:
+    return new in _SINGLE_VERB_RENAMED_TARGETS or new.endswith("_google_docs_read")
+
+
+def _single_verb_rename_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:
+    return f"replace `{old}` with `{new}` in `{tool_name}.{key}` while preserving any other entries in the list"
+
+
 def _retired_consolidated_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:
+    if _is_single_verb_renamed_target(new):
+        return _single_verb_rename_filter_guidance(tool_name, key, old, new)
     effect = (
         f"adding `{new}` to `include_tools` broadens to all sibling actions in `{new}`"
         if key == "include_tools"
@@ -1620,11 +1692,15 @@ def _retired_consolidated_filter_checker(
         return _retired_function_filter(
             settings,
             renames,
-            guidance_for=lambda key, _old, new: (
-                f"use `{toolkit_name}: {{{key}: [{new}]}}` "
-                f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
-                f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
-                "if per-action gating is needed"
+            guidance_for=lambda key, old, new: (
+                _single_verb_rename_filter_guidance(toolkit_name, key, old, new)
+                if _is_single_verb_renamed_target(new)
+                else (
+                    f"use `{toolkit_name}: {{{key}: [{new}]}}` "
+                    f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
+                    f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
+                    "if per-action gating is needed"
+                )
             ),
         )
 
@@ -1654,13 +1730,60 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
 }
 
 
+def _retired_fallback_filter_guidance(
+    tool_name: str,
+    key: str,
+    old: str,
+    new: str,
+    *,
+    has_enable_toggles: bool,
+) -> str:
+    if _is_single_verb_renamed_target(new):
+        return _single_verb_rename_filter_guidance(tool_name, key, old, new)
+    if has_enable_toggles:
+        return (
+            f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+            f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
+            f"matching `{new}`) so permissions are not broadened"
+        )
+    return (
+        f"`{new}` is now a consolidated function with an `action` parameter and `{tool_name}` has no "
+        f"per-action allowlist filter; remove the retired `{key}` entry and use `tool_approval.rules` "
+        f"matching `{new}` if per-action gating is needed"
+    )
+
+
 def retired_stored_tool_setting(
     tool_name: str,
     settings: Mapping[str, object],
+    *,
+    retired_functions: Mapping[str, str] | None = None,
+    has_enable_toggles: bool = False,
 ) -> tuple[str, str] | None:
     """Return the first retired stored setting or function filter for ``tool_name``, and its replacement guidance."""
     if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None:
-        return checker(settings)
+        if (retired := checker(settings)) is not None:
+            return retired
+    elif (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
+        retired := _retired_function_filter(
+            settings,
+            renames,
+            guidance_for=lambda key, old, new: _retired_fallback_filter_guidance(
+                tool_name,
+                key,
+                old,
+                new,
+                has_enable_toggles=has_enable_toggles,
+            ),
+        )
+    ) is not None:
+        return retired
+    if retired_functions:
+        return _retired_function_filter(
+            settings,
+            retired_functions,
+            guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance(tool_name, key, old, new),
+        )
     return None
 
 
@@ -1672,43 +1795,14 @@ def retired_tool_override(
     has_enable_toggles: bool = False,
 ) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
-    if (retired := retired_stored_tool_setting(tool_name, overrides)) is not None:
-        return retired
-    if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
-        retired := _retired_function_filter(
+    if (
+        retired := retired_stored_tool_setting(
+            tool_name,
             overrides,
-            renames,
-            guidance_for=(
-                (
-                    lambda _key, _old, new: (
-                        f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
-                        f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
-                        f"matching `{new}`) so permissions are not broadened"
-                    )
-                )
-                if has_enable_toggles
-                else (
-                    lambda key, _old, new: (
-                        f"`{new}` is now a consolidated function with an `action` parameter and `{tool_name}` has no "
-                        f"per-action allowlist filter; remove the retired `{key}` entry and use `tool_approval.rules` "
-                        f"matching `{new}` if per-action gating is needed"
-                    )
-                )
-            ),
+            retired_functions=retired_functions,
+            has_enable_toggles=has_enable_toggles,
         )
     ) is not None:
-        return retired
-    if (
-        retired_functions
-        and (
-            retired := _retired_function_filter(
-                overrides,
-                retired_functions,
-                guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance(tool_name, key, old, new),
-            )
-        )
-        is not None
-    ):
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

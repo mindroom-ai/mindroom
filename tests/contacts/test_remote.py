@@ -410,7 +410,7 @@ async def test_the_same_invite_seen_again_asks_nobody_twice(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_a_request_whose_notice_failed_still_waits(tmp_path: Path) -> None:
-    """A notice that cannot be posted leaves the request pending for the Contacts page and list_contacts."""
+    """A notice that cannot be posted leaves the request pending for the Contacts page and contacts_read."""
     config, paths = _remote_setup(tmp_path)
     runtime = _runtime()
     with _delivered(None):

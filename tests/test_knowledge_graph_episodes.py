@@ -411,7 +411,7 @@ def test_claude_agent_prose_exclusion_only_drops_send_and_legacy_claude_send() -
     assert is_evidence(_tool("claude_agent_write", "Started Claude session `s1`.", action="start"))
     assert is_evidence(_tool("claude_agent_write", "Interrupt sent to Claude session `s1`.", action="interrupt"))
     assert is_evidence(_tool("claude_agent_write", "Closed Claude session `s1`.", action="end"))
-    assert is_evidence(_tool("claude_agent_status", "Claude session `s1` is active."))
+    assert is_evidence(_tool("claude_agent_read", "Claude session `s1` is active."))
 
 
 class _Index:

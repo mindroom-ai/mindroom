@@ -100,7 +100,7 @@ class GoogleDocsTools(GoogleApiToolkit):
 
         tools: list[Callable[..., str]] = []
         if read_document:
-            tools.append(self.google_docs_get_document)
+            tools.append(self.google_docs_read)
         if self._write_actions:
             tools.append(self.google_docs_write)
         tools = filter_google_tools(
@@ -108,7 +108,7 @@ class GoogleDocsTools(GoogleApiToolkit):
             include_tools,
             exclude_tools,
             retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_docs"],
-            known_tools=("google_docs_get_document", "google_docs_write"),
+            known_tools=("google_docs_read", "google_docs_write"),
         )
         super().__init__(
             name="google_docs",
@@ -141,7 +141,7 @@ class GoogleDocsTools(GoogleApiToolkit):
             service.documents().batchUpdate(documentId=document_id, body=body).execute(),
         )
 
-    def google_docs_get_document(self, document_id: str) -> str:
+    def google_docs_read(self, document_id: str) -> str:
         """Read a Google Doc's full tab-aware structure and content.
 
         Args:
@@ -315,7 +315,7 @@ class GoogleDocsTools(GoogleApiToolkit):
         - `create`: new doc with `title` and optional `initial_text`
         - `insert_text`: insert `text` into `document_id` (ID or URL) at 1-based body `index` (omit to append) in optional `tab_id`
         - `replace_text`: replace `find_text` with `replace_text` (empty string deletes; optional `match_case`, `tab_ids` or all tabs) in `document_id` (ID or URL)
-        - `batch_update`: apply Docs API `requests` atomically in order to `document_id` (ID or URL) for tables, headings, styles, lists, links, images, or deletes (UTF-16 tab indexes, default first tab; edit end-to-start); pass `required_revision_id` (from `google_docs_get_document`) for optimistic concurrency (`writeControl.requiredRevisionId`), re-reading and recomputing ranges on conflict
+        - `batch_update`: apply Docs API `requests` atomically in order to `document_id` (ID or URL) for tables, headings, styles, lists, links, images, or deletes (UTF-16 tab indexes, default first tab; edit end-to-start); pass `required_revision_id` (from `google_docs_read`) for optimistic concurrency (`writeControl.requiredRevisionId`), re-reading and recomputing ranges on conflict
         """
         if (
             guard_error := self._write_guard_error(

@@ -289,7 +289,7 @@ async def test_stateful_stubs_and_attachment_validation() -> None:
         "attachment_list_and_register",
         [_call("attachment", action="list"), _call("attachment", action="get", attachment_id="att_missing")],
         [_call("attachment", action="register", path="reports/summary.txt")],
-        [_call("attachment", action="get", attachment_id="att_eval_1"), _call("matrix_room", action="room-info")],
+        [_call("attachment", action="get", attachment_id="att_eval_1"), _call("matrix_room", action="room_info")],
     )
     assert (att_res.passed, att_res.calls[1].is_error, att_res.failure_counts) == (True, True, {"tool_error": 1})
     assert json.loads(att_res.calls[3].result_preview)["attachment"]["attachment_id"] == "att_eval_1"

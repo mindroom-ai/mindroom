@@ -59,7 +59,7 @@ class _TwilioTools(Toolkit):
         }
         super().__init__()
         if not (all or enable_send_sms):
-            self.functions.pop("send_sms")
+            self.functions.pop("twilio_send")
         if not any(self._read_actions.values()):
             self.functions.pop("twilio_read")
 
@@ -88,7 +88,7 @@ class _TwilioTools(Toolkit):
         return client
 
     @tool
-    def send_sms(self, to: str, from_: str, body: str) -> str:
+    def twilio_send(self, to: str, from_: str, body: str) -> str:
         """Send an SMS via Twilio.
 
         Args:
@@ -240,7 +240,7 @@ class _TwilioTools(Toolkit):
     ],
     dependencies=["twilio"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
-    function_names=("send_sms", "twilio_read"),
+    function_names=("twilio_send", "twilio_read"),
     action_scoped_grants=("twilio_read",),
 )
 def twilio_tools() -> type[_TwilioTools]:

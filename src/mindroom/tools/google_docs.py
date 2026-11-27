@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_docs",
     function_names=(
-        "google_docs_get_document",
+        "google_docs_read",
         "google_docs_write",
     ),
     action_scoped_grants=("google_docs_write",),

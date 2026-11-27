@@ -126,7 +126,7 @@ def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
 
     created = _write(context, "create", "report")
     invited = _write(context, "invite", "report", agent_name="bob")
-    listed = _call(context, "list_shared_directories")
+    listed = _call(context, "shared_directories_read")
 
     assert created["status"] == "ok"
     assert created["path"] == worker_path
@@ -153,7 +153,7 @@ def test_member_sees_the_directory_read_only(tmp_path: Path) -> None:
     _write(_context(config), "create", "report")
     _write(_context(config), "invite", "report", agent_name="bob")
 
-    bob_listing = _call(_context(config, "bob"), "list_shared_directories")
+    bob_listing = _call(_context(config, "bob"), "shared_directories_read")
 
     assert [(entry["owner"], entry["access"]) for entry in bob_listing["directories"]] == [("alice", "read-only")]
 
@@ -214,7 +214,7 @@ def test_invite_to_an_agent_the_requester_cannot_use_waits_for_acceptance(tmp_pa
     assert describe_agent_shared_directories(config, runtime_paths_for(config), "bob") == ()
     assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ("`alice/report`",)
     assert _bob_mounts(config) == ()
-    bob_listing = _call(_context(config, "bob", _BOBS_USER), "list_shared_directories")
+    bob_listing = _call(_context(config, "bob", _BOBS_USER), "shared_directories_read")
     assert bob_listing["directories"] == []
     assert bob_listing["invitations"] == [
         {
@@ -224,7 +224,7 @@ def test_invite_to_an_agent_the_requester_cannot_use_waits_for_acceptance(tmp_pa
             "requested_at": directory.pending[0].requested_at,
         },
     ]
-    [owner_entry] = _call(_context(config), "list_shared_directories")["directories"]
+    [owner_entry] = _call(_context(config), "shared_directories_read")["directories"]
     assert owner_entry["pending"] == [
         {"agent": "bob", "requested_by": _USER, "requested_at": directory.pending[0].requested_at},
     ]
@@ -570,14 +570,14 @@ def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, action: 
 def test_shared_directory_meta_schema_flags() -> None:
     """Writes keep background_after for recursive deletion while listing omits it; both omit mindroom_output_path."""
     by_name = {fn.name: fn for fn in adapt_toolkit(SharedDirectoryTools("alice")).functions}
-    assert set(by_name) == {"list_shared_directories", "shared_directories_write"}
+    assert set(by_name) == {"shared_directories_read", "shared_directories_write"}
     assert (
         by_name["shared_directories_write"].offer_background_after,
         by_name["shared_directories_write"].offer_output_path,
     ) == (True, False)
     assert (
-        by_name["list_shared_directories"].offer_background_after,
-        by_name["list_shared_directories"].offer_output_path,
+        by_name["shared_directories_read"].offer_background_after,
+        by_name["shared_directories_read"].offer_output_path,
     ) == (False, False)
 
 

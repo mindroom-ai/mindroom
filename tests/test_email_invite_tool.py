@@ -122,7 +122,7 @@ def _code_from(text: str) -> str:
 def test_no_function_asks_for_confirmation_itself() -> None:
     """Approval is the operator's `tool_approval` config; the toolkit gates nothing itself."""
     gates = {function.name: function.gate for function in adapt_toolkit(EmailInviteTools()).functions}
-    assert set(gates) == {"list_email_invites", "email_invite_write"}
+    assert set(gates) == {"email_invite_read", "email_invite_write"}
     assert ToolGate.CONFIRM not in gates.values()
 
 
@@ -330,7 +330,7 @@ async def test_list_is_room_scoped(harness: Harness) -> None:
         store.Request("!other:example.org", None, "elsewhere@example.com", BAS, "code"),
         expiry_days=7,
     )
-    result = await harness.call("list_email_invites", BAS)
+    result = await harness.call("email_invite_read", BAS)
     assert "elsewhere@example.com" not in result
     waiting_line = next(line for line in result.splitlines() if "waiting@example.com" in line)
     sent_line = next(line for line in result.splitlines() if "sent@example.com" in line)
@@ -338,7 +338,7 @@ async def test_list_is_room_scoped(harness: Harness) -> None:
     assert CAROL in waiting_line
     assert "sent" in sent_line.replace("sent@example.com", "")
     assert BAS in sent_line
-    assert await harness.call("list_email_invites", BAS, room_id="!empty:example.org") == (
+    assert await harness.call("email_invite_read", BAS, room_id="!empty:example.org") == (
         "No open email invites in this room."
     )
 

@@ -70,7 +70,7 @@ class ContactsTools(Toolkit):
         super().__init__(
             name="contacts",
             tools=[
-                self.list_contacts,
+                self.contacts_read,
                 self.contacts_write,
             ],
         )
@@ -82,7 +82,7 @@ class ContactsTools(Toolkit):
             return replace(function, gate=ToolGate.CONFIRM)
         return function
 
-    async def list_contacts(self) -> str:
+    async def contacts_read(self) -> str:
         """List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.
 
         Takes no arguments. Pending requests that wait for your owner's answer show `you: target`.

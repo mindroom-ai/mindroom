@@ -19,6 +19,8 @@ from mindroom.attachments.storage import register_local_attachment
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.constants import AGENT_AUTHORED_KEY
 from mindroom.custom_tools import matrix_user_writes
+from mindroom.custom_tools.matrix_user_reads import MatrixRequestError
+from mindroom.custom_tools.matrix_user_writes import mark_read
 from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.matrix.user_masquerade import create_user_masquerade_client
@@ -1568,6 +1570,7 @@ async def test_a_blank_write_argument_is_left_out(
         ({"action": "redact", "event_id": "$x"}, f"redact {ROOM_NEEDED}"),
         ({"action": "join"}, f"join {ROOM_NEEDED}"),
         ({"action": "leave", "room_id": " "}, f"leave {ROOM_NEEDED}"),
+        ({"action": "mark_read"}, f"mark_read {ROOM_NEEDED}"),
         ({"action": "invite", "room_id": ROOM}, "invite needs user_id."),
         ({"action": "create_room"}, "create_room needs name."),
         (
@@ -1752,3 +1755,157 @@ async def test_an_oversized_file_surfaces_payload_too_large_detail(
     if media_config_limit is not None:
         assert homeserver.requests_to(UPLOAD_PATH) == []
     assert _sent(homeserver) == []
+
+
+@pytest.mark.asyncio
+async def test_mark_read_sends_a_private_receipt_and_clears_the_flag(
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """Marking read moves the read marker and a private receipt, never a public one, and clears marked-unread.
+
+    Without an event, the room's newest event is the one, and the result names it.
+    """
+    marked_unread_path = f"{CLIENT}/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread"
+    messages_path = f"{ROOM_PATH}/messages"
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
+            f"{ROOM_PATH}/read_markers": {},
+            marked_unread_path: {},
+            messages_path: {"chunk": [text_message("$newest", "Bye", minute=9)], "end": "t1"},
+        },
+    )
+    client = homeserver.serve(
+        create_user_masquerade_client(paths, token=TOKEN, person_user_id=OWNER, agent_user_id=AGENT),
+    )
+    try:
+        seen = await mark_read(client, ROOM, event_id="$seen")
+        newest = await mark_read(client, ROOM, event_id=None)
+    finally:
+        await client.close()
+
+    assert seen == {}
+    assert newest == {"read_up_to": "$newest"}
+    assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
+        ("GET", f"{ROOM_PATH}/event/$seen", None),
+        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$seen", "m.read.private": "$seen"}),
+        ("PUT", marked_unread_path, {"unread": False}),
+        ("GET", messages_path, None),
+        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$newest", "m.read.private": "$newest"}),
+        ("PUT", marked_unread_path, {"unread": False}),
+    ]
+    newest_request = homeserver.requests[3]
+    assert (newest_request.query["dir"], newest_request.query["limit"]) == (["b"], ["1"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "said"),
+    [
+        (matrix_error(500, "M_UNKNOWN", "Internal error"), "Matrix answered 500 M_UNKNOWN: Internal error"),
+        (TimeoutError(), "The homeserver took too long to answer."),
+        (aiohttp.ServerDisconnectedError(), "The Matrix homeserver could not be reached."),
+    ],
+    ids=["refused", "timeout", "unreachable"],
+)
+async def test_mark_read_reports_when_only_the_markers_moved(
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    answer: Answer | Exception,
+    said: str,
+) -> None:
+    """When the marked-unread flag cannot be cleared, the error says the read markers moved all the same."""
+    marked_unread_path = f"{CLIENT}/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread"
+    homeserver.answers.update(
+        {
+            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
+            f"{ROOM_PATH}/read_markers": {},
+            marked_unread_path: answer,
+        },
+    )
+    client = homeserver.serve(
+        create_user_masquerade_client(paths, token=TOKEN, person_user_id=OWNER, agent_user_id=AGENT),
+    )
+    try:
+        with pytest.raises(MatrixRequestError) as error:
+            await mark_read(client, ROOM, event_id="$seen")
+    finally:
+        await client.close()
+
+    assert str(error.value) == f"The room is read up to $seen, but clearing its unread mark was not confirmed: {said}"
+    assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_answer", "expected"),
+    [
+        (matrix_error(404, "M_NOT_FOUND", "Event not found"), "404 M_NOT_FOUND"),
+        (text_message("$elsewhere", "Hi", room_id=OTHER_ROOM), "That event is in another room."),
+    ],
+    ids=["not-found", "another-room"],
+)
+async def test_mark_read_of_an_event_outside_the_room_changes_nothing(
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+    event_answer: object,
+    expected: str,
+) -> None:
+    """An event the room does not hold (or one from another room) is refused before any marker moves."""
+    homeserver.answers[f"{ROOM_PATH}/event/$elsewhere"] = event_answer
+    client = homeserver.serve(
+        create_user_masquerade_client(paths, token=TOKEN, person_user_id=OWNER, agent_user_id=AGENT),
+    )
+    try:
+        with pytest.raises(MatrixRequestError, match=expected):
+            await mark_read(client, ROOM, event_id="$elsewhere")
+    finally:
+        await client.close()
+
+    assert homeserver.paths() == [f"{ROOM_PATH}/event/$elsewhere"]
+
+
+@pytest.mark.asyncio
+async def test_mark_read_via_matrix_user_write_resolves_alias_audits_and_rate_limits(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """mark_read runs through matrix_user_write with alias resolution, audit logging, encrypted-room support, and rate limiting."""
+    other_path = f"{CLIENT}/rooms/{OTHER_ROOM}"
+    other_unread = f"{CLIENT}/user/{OWNER}/rooms/{OTHER_ROOM}/account_data/m.marked_unread"
+    homeserver.answers.update(
+        {
+            DIRECTORY_PATH: {"room_id": OTHER_ROOM, "servers": ["example.com"]},
+            f"{other_path}/state/m.room.encryption": {"algorithm": "m.megolm.v1.aes-sha2"},
+            f"{other_path}/messages": {"chunk": [text_message("$newest", "Hi", room_id=OTHER_ROOM)]},
+            f"{other_path}/event/$seen": text_message("$seen", "Hi", room_id=OTHER_ROOM),
+            f"{other_path}/read_markers": {},
+            other_unread: {},
+        },
+    )
+
+    with capture_logs() as logs:
+        newest = await _write(config, paths, homeserver, action="mark_read", room_id=ALIAS)
+        explicit = await _write(config, paths, homeserver, action="mark_read", room_id=OTHER_ROOM, event_id="$seen")
+
+    assert newest == ok_result("mark_read", read_up_to="$newest")
+    assert explicit == ok_result("mark_read")
+    assert all(ALIAS not in request.path for request in homeserver.requests[1:])
+    assert f"{other_path}/state/m.room.encryption" not in homeserver.paths()
+    audit_events = [entry for entry in logs if entry.get("event") == "matrix_user_write_audit"]
+    assert [(entry["action"], entry["room_id"], entry["status"], entry.get("target")) for entry in audit_events] == [
+        ("mark_read", OTHER_ROOM, "ok", None),
+        ("mark_read", OTHER_ROOM, "ok", "$seen"),
+    ]
+    assert set(matrix_user_writes._RECENT_WRITES) == {(AGENT, OWNER, OTHER_ROOM)}
+
+    # Ten more mark_read calls exhaust the 12/30s write limit; the 13th is refused before hitting the homeserver.
+    for _ in range(10):
+        assert (await _write(config, paths, homeserver, action="mark_read", room_id=OTHER_ROOM))["status"] == "ok"
+    before = len(homeserver.requests)
+    limited = await _write(config, paths, homeserver, action="mark_read", room_id=OTHER_ROOM)
+    assert limited["status"] == "error"
+    assert "matrix_user writes" in limited["message"]
+    assert len(homeserver.requests) == before
