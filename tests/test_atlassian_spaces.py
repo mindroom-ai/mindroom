@@ -143,8 +143,14 @@ def test_queries_that_could_escape_the_space_clause_are_refused(query: str) -> N
 @pytest.mark.parametrize(
     ("function_name", "kwargs"),
     [
-        ("jira_search_issues", {"jql": 'key = ENG-1) OR (project = OPS AND summary ~ "acquisition"', "max_results": 1}),
-        ("confluence_search", {"cql": 'id = 1) OR (space = OPS AND text ~ "acquisition"', "limit": 1}),
+        (
+            "jira_read",
+            {"action": "search", "jql": 'key = ENG-1) OR (project = OPS AND summary ~ "acquisition"', "max_results": 1},
+        ),
+        (
+            "confluence_read",
+            {"action": "search", "cql": 'id = 1) OR (space = OPS AND text ~ "acquisition"', "limit": 1},
+        ),
     ],
 )
 async def test_escaping_search_is_refused_before_any_call(
@@ -293,8 +299,14 @@ async def test_jira_search_returns_only_issues_in_allowed_spaces(
         {"issues": [_issue("ENG-1", "ENG"), _issue("OPS-1", "OPS"), {"key": "X-1"}], "isLast": True},
     )
 
-    result = await _call(tool, "jira_search_issues", jql="status = Done ORDER BY updated DESC", fields=["summary"])
-    everything = await _call(tool, "jira_search_issues", jql="status = Done", fields=["*all"])
+    result = await _call(
+        tool,
+        "jira_read",
+        action="search",
+        jql="status = Done ORDER BY updated DESC",
+        fields=["summary"],
+    )
+    everything = await _call(tool, "jira_read", action="search", jql="status = Done", fields=["*all"])
 
     searched, all_fields = gateway.product_requests()
     assert json_body(searched) == {
@@ -320,8 +332,8 @@ async def test_jira_issue_read_returns_only_issues_in_allowed_spaces(
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/OPS-1"), _issue("OPS-1", "OPS"))
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/ENG-1"), _issue("ENG-1", "eng"))
 
-    allowed = await _call(tool, "jira_get_issue", issue_key="ENG-1", fields=["summary"])
-    result = await _call(tool, "jira_get_issue", issue_key="OPS-1", fields=["summary"])
+    allowed = await _call(tool, "jira_read", action="get", issue_key="ENG-1", fields=["summary"])
+    result = await _call(tool, "jira_read", action="get", issue_key="OPS-1", fields=["summary"])
 
     assert gateway.product_requests()[0].url.params["fields"] == "summary,project"
     assert allowed["issue"]["fields"] == {"summary": "Work"}
@@ -345,19 +357,20 @@ async def test_items_without_a_reported_space_are_refused(tmp_path: Path, monkey
     )
     gateway.route("GET", CONTENT_SEARCH, {"results": []})
 
-    issue = await _call(tool, "jira_get_issue", issue_key="OPS-1", fields=["*all", "-project"])
+    issue = await _call(tool, "jira_read", action="get", issue_key="OPS-1", fields=["*all", "-project"])
     with tool_runtime_context(tool_context(runtime_paths(tmp_path), tmp_path / "storage")):
         pages = [
-            await _call(tool, "confluence_download_attachment", page_id="123", attachment_id="att456"),
+            await _call(tool, "confluence_read", action="download_attachment", page_id="123", attachment_id="att456"),
             await _call(
                 tool,
-                "confluence_update_page",
+                "confluence_write",
+                action="update",
                 page_id="123",
                 title="T",
                 body_storage="<p>x</p>",
                 version_number=2,
             ),
-            await _call(tool, "confluence_add_comment", page_id="123", body_storage="<p>x</p>"),
+            await _call(tool, "confluence_write", action="comment", page_id="123", body_storage="<p>x</p>"),
         ]
 
     assert issue["code"] == "space_not_allowed"
@@ -376,12 +389,13 @@ async def test_jira_create_outside_allowed_spaces_sends_nothing(
 
     gateway.route("POST", gateway_url("jira", "/rest/api/3/issue"), {"id": "1", "key": "ENG-2"})
 
-    result = await _call(tool, "jira_create_issue", project_key="OPS", summary="New")
+    result = await _call(tool, "jira_write", action="create", project_key="OPS", summary="New")
     assert gateway.requests == []
     # Extra fields cannot move the new issue into another space.
     created = await _call(
         tool,
-        "jira_create_issue",
+        "jira_write",
+        action="create",
         project_key="ENG",
         summary="New",
         fields={"project": {"key": "OPS"}},
@@ -396,9 +410,9 @@ async def test_jira_create_outside_allowed_spaces_sends_nothing(
 @pytest.mark.parametrize(
     ("function_name", "kwargs", "write_method", "write_path"),
     [
-        ("jira_update_issue", {"summary": "Renamed"}, "PUT", "/rest/api/3/issue/ENG-1"),
-        ("jira_add_comment", {"comment": "Done."}, "POST", "/rest/api/3/issue/ENG-1/comment"),
-        ("jira_transition_issue", {"transition": "31"}, "POST", "/rest/api/3/issue/ENG-1/transitions"),
+        ("jira_write", {"action": "update", "summary": "Renamed"}, "PUT", "/rest/api/3/issue/ENG-1"),
+        ("jira_write", {"action": "comment", "comment": "Done."}, "POST", "/rest/api/3/issue/ENG-1/comment"),
+        ("jira_write", {"action": "transition", "transition": "31"}, "POST", "/rest/api/3/issue/ENG-1/transitions"),
     ],
 )
 @pytest.mark.parametrize("project", ["ENG", "OPS"])
@@ -456,7 +470,7 @@ async def test_confluence_search_returns_only_results_in_allowed_spaces(
         },
     )
 
-    result = await _call(tool, "confluence_search", cql="type = page")
+    result = await _call(tool, "confluence_read", action="search", cql="type = page")
 
     params = gateway.product_requests()[0].url.params
     assert params["cql"] == 'space in ("DOCS") AND (type = page)'
@@ -475,7 +489,7 @@ async def test_confluence_page_outside_allowed_spaces_is_not_returned(
     page["results"][0]["body"] = {"storage": {"value": "<p>Secret</p>"}}  # type: ignore[index]
     gateway.route("GET", CONTENT_SEARCH, page)
 
-    result = await _call(tool, "confluence_get_page", page_id="123")
+    result = await _call(tool, "confluence_read", action="get", page_id="123")
 
     assert result["code"] == "space_not_allowed"
     assert "Secret" not in json.dumps(result)
@@ -485,18 +499,18 @@ async def test_confluence_page_outside_allowed_spaces_is_not_returned(
 @pytest.mark.parametrize(
     ("function_name", "kwargs", "next_path"),
     [
-        ("confluence_list_attachments", {}, "/wiki/rest/api/content/search"),
+        ("confluence_read", {"action": "list_attachments"}, "/wiki/rest/api/content/search"),
         (
-            "confluence_download_attachment",
-            {"attachment_id": "att456"},
+            "confluence_read",
+            {"action": "download_attachment", "attachment_id": "att456"},
             "/wiki/rest/api/content/123/child/attachment/att456/download",
         ),
         (
-            "confluence_update_page",
-            {"title": "T", "body_storage": "<p>x</p>", "version_number": 2},
+            "confluence_write",
+            {"action": "update", "title": "T", "body_storage": "<p>x</p>", "version_number": 2},
             "/wiki/api/v2/pages/123",
         ),
-        ("confluence_add_comment", {"body_storage": "<p>x</p>"}, "/wiki/api/v2/footer-comments"),
+        ("confluence_write", {"action": "comment", "body_storage": "<p>x</p>"}, "/wiki/api/v2/footer-comments"),
     ],
 )
 @pytest.mark.parametrize("space_key", ["DOCS", "OPS"])
@@ -535,13 +549,14 @@ async def test_confluence_writes_in_allowed_spaces_go_through(tmp_path: Path, mo
 
     updated = await _call(
         tool,
-        "confluence_update_page",
+        "confluence_write",
+        action="update",
         page_id="123",
         title="T",
         body_storage="<p>x</p>",
         version_number=2,
     )
-    commented = await _call(tool, "confluence_add_comment", page_id="123", body_storage="<p>x</p>")
+    commented = await _call(tool, "confluence_write", action="comment", page_id="123", body_storage="<p>x</p>")
 
     assert (updated["status"], commented["status"]) == ("ok", "ok")
     assert [request.method for request in gateway.product_requests()] == ["GET", "PUT", "GET", "POST"]
@@ -571,7 +586,8 @@ async def test_confluence_create_page_checks_its_space_and_parent(
 
     result = await _call(
         tool,
-        "confluence_create_page",
+        "confluence_write",
+        action="create",
         space_key=space_key,
         title="Notes",
         body_storage="<p>Hi</p>",
@@ -584,35 +600,42 @@ async def test_confluence_create_page_checks_its_space_and_parent(
         assert result["code"] == "space_not_allowed"
 
 
-# One call per function, each naming an item in a space the agent may not use.
-_OUTSIDE_CALLS: dict[str, dict[str, object]] = {
-    "jira_search_issues": {"jql": "status = Done"},
-    "jira_get_issue": {"issue_key": "OPS-1"},
-    "jira_create_issue": {"project_key": "OPS", "summary": "New"},
-    "jira_update_issue": {"issue_key": "OPS-1", "summary": "Renamed"},
-    "jira_add_comment": {"issue_key": "OPS-1", "comment": "Done."},
-    "jira_transition_issue": {"issue_key": "OPS-1", "transition": "31"},
-    "confluence_search": {"cql": "type = page"},
-    "confluence_get_page": {"page_id": "123"},
-    "confluence_list_attachments": {"page_id": "123"},
-    "confluence_download_attachment": {"page_id": "123", "attachment_id": "att456"},
-    "confluence_create_page": {"space_key": "OPS", "title": "T", "body_storage": "<p>x</p>", "parent_page_id": "12"},
-    "confluence_update_page": {"page_id": "123", "title": "T", "body_storage": "<p>x</p>", "version_number": 2},
-    "confluence_add_comment": {"page_id": "123", "body_storage": "<p>x</p>"},
-}
+# One call per function/action, each naming an item in a space the agent may not use.
+_OUTSIDE_CALLS: tuple[tuple[str, dict[str, object]], ...] = (
+    ("jira_read", {"action": "search", "jql": "status = Done"}),
+    ("jira_read", {"action": "get", "issue_key": "OPS-1"}),
+    ("jira_write", {"action": "create", "project_key": "OPS", "summary": "New"}),
+    ("jira_write", {"action": "update", "issue_key": "OPS-1", "summary": "Renamed"}),
+    ("jira_write", {"action": "comment", "issue_key": "OPS-1", "comment": "Done."}),
+    ("jira_write", {"action": "transition", "issue_key": "OPS-1", "transition": "31"}),
+    ("confluence_read", {"action": "search", "cql": "type = page"}),
+    ("confluence_read", {"action": "get", "page_id": "123"}),
+    ("confluence_read", {"action": "list_attachments", "page_id": "123"}),
+    ("confluence_read", {"action": "download_attachment", "page_id": "123", "attachment_id": "att456"}),
+    (
+        "confluence_write",
+        {"action": "create", "space_key": "OPS", "title": "T", "body_storage": "<p>x</p>", "parent_page_id": "12"},
+    ),
+    (
+        "confluence_write",
+        {"action": "update", "page_id": "123", "title": "T", "body_storage": "<p>x</p>", "version_number": 2},
+    ),
+    ("confluence_write", {"action": "comment", "page_id": "123", "body_storage": "<p>x</p>"}),
+)
 
 
 def test_every_function_has_an_outside_space_call() -> None:
     """A new function fails here until the outside-space check below covers it."""
-    assert set(_OUTSIDE_CALLS) == set(atlassian_function_names())
+    assert {name for name, _ in _OUTSIDE_CALLS} == set(atlassian_function_names())
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("function_name", sorted(_OUTSIDE_CALLS))
+@pytest.mark.parametrize(("function_name", "arguments"), _OUTSIDE_CALLS)
 async def test_no_function_reaches_outside_the_allowed_spaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     function_name: str,
+    arguments: dict[str, object],
 ) -> None:
     """Every function refuses, or returns nothing, for items Atlassian reports in another space, and only looks them up."""
     tool, gateway = _connected(tmp_path, monkeypatch, jira_spaces=["ENG"], confluence_spaces=["DOCS"])
@@ -628,9 +651,9 @@ async def test_no_function_reaches_outside_the_allowed_spaces(
         gateway.route(method, url, body)
 
     with tool_runtime_context(tool_context(runtime_paths(tmp_path), tmp_path / "storage")):
-        result = await _call(tool, function_name, **_OUTSIDE_CALLS[function_name])
+        result = await _call(tool, function_name, **arguments)
 
-    if function_name.endswith(("_search", "_search_issues")):
+    if arguments.get("action") == "search":
         assert (result["status"], result.get("issues", result.get("results"))) == ("ok", [])
     else:
         assert result["code"] == "space_not_allowed"

@@ -64,12 +64,12 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
-from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
@@ -122,36 +122,42 @@ def _page_not_found() -> AtlassianError:
     )
 
 
-def _page_id(value: str, *, field_name: str = "page_id") -> str:
-    if _PAGE_ID_PATTERN.fullmatch(value):
+def _page_id(value: str | None, *, field_name: str = "page_id") -> str:
+    if isinstance(value, str) and _PAGE_ID_PATTERN.fullmatch(value):
         return value
     msg = f"{field_name} must be a numeric Confluence page ID, not a URL, title, or path."
     raise _InvalidArgumentError(msg)
 
 
-def _confluence_attachment_id(value: str) -> str:
-    match = _ATTACHMENT_ID_PATTERN.fullmatch(value)
+def _confluence_attachment_id(value: str | None) -> str:
+    match = _ATTACHMENT_ID_PATTERN.fullmatch(value) if isinstance(value, str) else None
     if match is None:
-        msg = "attachment_id must be a Confluence attachment ID from confluence_list_attachments, such as att123456."
+        msg = (
+            "attachment_id must be a Confluence attachment ID from "
+            'confluence_read(action="list_attachments"), such as att123456.'
+        )
         raise _InvalidArgumentError(msg)
     return f"att{match.group(1)}"
 
 
-def _issue_key(value: str) -> str:
-    if _ISSUE_KEY_PATTERN.fullmatch(value):
+def _issue_key(value: str | None) -> str:
+    if isinstance(value, str) and _ISSUE_KEY_PATTERN.fullmatch(value):
         return value.upper()
     msg = "issue_key must be a Jira issue key such as PROJ-123, or a numeric issue ID."
     raise _InvalidArgumentError(msg)
 
 
-def _required_text(value: str, field_name: str) -> str:
-    if value.strip():
+def _required_text(value: str | None, field_name: str) -> str:
+    if isinstance(value, str) and value.strip():
         return value
     msg = f"{field_name} must be a non-empty string."
     raise _InvalidArgumentError(msg)
 
 
-def _page_size(value: int) -> int:
+def _page_size(value: int, field_name: str = "limit") -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f"{field_name} must be an integer."
+        raise _InvalidArgumentError(msg)
     return max(1, min(value, _MAX_PAGE_SIZE))
 
 
@@ -178,6 +184,23 @@ def _extra_fields(value: dict | None) -> dict[str, object]:
     if value is None:
         return {}
     return dict(value)
+
+
+def _reject_unexpected_args(
+    action: str,
+    allowed: Collection[str],
+    provided: Mapping[str, object],
+    *,
+    hints: Mapping[str, str] | None = None,
+) -> None:
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
+    if not unexpected:
+        return
+    names = ", ".join(unexpected)
+    verb = "is" if len(unexpected) == 1 else "are"
+    hint = next((hints[name] for name in unexpected if hints and name in hints), "")
+    msg = f"{names} {verb} not used for action {action!r}." + (f" {hint}" if hint else "")
+    raise _InvalidArgumentError(msg)
 
 
 def _adf_document(text: str) -> dict[str, object]:
@@ -452,19 +475,10 @@ class AtlassianToolkit(Toolkit):
             instructions = f"{instructions} {shared}" if instructions else shared
         super().__init__(name=provider.id, instructions=instructions)
         functions = {
-            "jira_search_issues": self.jira_search_issues,
-            "jira_get_issue": self.jira_get_issue,
-            "jira_create_issue": self.jira_create_issue,
-            "jira_update_issue": self.jira_update_issue,
-            "jira_add_comment": self.jira_add_comment,
-            "jira_transition_issue": self.jira_transition_issue,
-            "confluence_search": self.confluence_search,
-            "confluence_get_page": self.confluence_get_page,
-            "confluence_list_attachments": self.confluence_list_attachments,
-            "confluence_download_attachment": self.confluence_download_attachment,
-            "confluence_create_page": self.confluence_create_page,
-            "confluence_update_page": self.confluence_update_page,
-            "confluence_add_comment": self.confluence_add_comment,
+            "jira_read": self.jira_read,
+            "jira_write": self.jira_write,
+            "confluence_read": self.confluence_read,
+            "confluence_write": self.confluence_write,
         }
         self.functions = {
             f"{function_prefix}{name}": functions[name]
@@ -592,35 +606,43 @@ class AtlassianToolkit(Toolkit):
             raise _page_not_found()
         self._require_space("confluence", _mapping(_mapping(results[0]).get("space")).get("key"))
 
-    async def jira_search_issues(
+    async def _dispatch(
         self,
-        jql: str,
-        max_results: int = 20,
-        fields: list[str] | None = None,
-        next_page_token: str | None = None,
+        product: AtlassianProduct,
+        action: str,
+        builders: Mapping[str, tuple[Collection[str], Callable[[], _Operation]]],
+        provided: Mapping[str, object],
+        *,
+        hints: Mapping[str, Mapping[str, str]] | None = None,
     ) -> str:
-        """Search Jira issues with JQL.
-
-        Args:
-            jql: Jira Query Language expression, for example "project = PROJ AND statusCategory != Done ORDER BY updated DESC".
-                For the requester's own issues, use assignee = currentUser() or reporter = currentUser().
-            max_results: Maximum issues to return; values above 50 are capped.
-            fields: Jira field IDs to include, for example ["summary", "status", "assignee"].
-            next_page_token: The next_page_token from a previous call, to fetch the next page.
-
-        """
+        entry = builders.get(action)
+        if entry is None:
+            expected = ", ".join(repr(name) for name in builders)
+            return self._error(_InvalidArgumentError(f"Unsupported action {action!r}; expected one of: {expected}."))
+        allowed, builder = entry
         try:
-            requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS)
-            adds_space_field = self._adds_space_field(requested)
-            body: dict[str, object] = {
-                "jql": self._restricted_query("jira", _required_text(jql, "jql"), "jql"),
-                "maxResults": _page_size(max_results),
-                "fields": [*requested, "project"] if adds_space_field else requested,
-            }
-            if token := _cursor(next_page_token, "next_page_token"):
-                body["nextPageToken"] = token
+            _reject_unexpected_args(action, allowed, provided, hints=(hints or {}).get(action))
+            operation = builder()
         except AtlassianError as exc:
             return self._error(exc)
+        return await self._call(product, operation)
+
+    def _jira_search_op(
+        self,
+        jql: str | None,
+        fields: list[str] | None,
+        max_results: int | None,
+        next_page_token: str | None,
+    ) -> _Operation:
+        requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_FIELDS)
+        adds_space_field = self._adds_space_field(requested)
+        body: dict[str, object] = {
+            "jql": self._restricted_query("jira", _required_text(jql, "jql"), "jql"),
+            "maxResults": _page_size(20 if max_results is None else max_results, "max_results"),
+            "fields": [*requested, "project"] if adds_space_field else requested,
+        }
+        if token := _cursor(next_page_token, "next_page_token"):
+            body["nextPageToken"] = token
 
         async def search(access_token: str, site: AtlassianSite) -> dict[str, object]:
             data = _mapping(
@@ -642,27 +664,16 @@ class AtlassianToolkit(Toolkit):
                 **_page_fields(has_more, next_token, cursor_field="next_page_token"),
             }
 
-        return await self._call("jira", search)
+        return search
 
-    async def jira_get_issue(self, issue_key: str, fields: list[str] | None = None) -> str:
-        """Get one Jira issue, including the transitions available from its current status.
-
-        Args:
-            issue_key: Issue key such as PROJ-123.
-            fields: Jira field IDs to include, such as ["summary", "labels"], or ["*all"] for every field.
-                By default: summary, status, assignee, reporter, priority, issuetype, updated, and description.
-
-        """
-        try:
-            key = _issue_key(issue_key)
-            requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_READ_FIELDS)
-            adds_space_field = self._adds_space_field(requested)
-            params: dict[str, str | int] = {
-                "expand": "transitions",
-                "fields": ",".join([*requested, "project"] if adds_space_field else requested),
-            }
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _jira_get_op(self, issue_key: str | None, fields: list[str] | None) -> _Operation:
+        key = _issue_key(issue_key)
+        requested = _string_list(fields, "fields") or list(_DEFAULT_ISSUE_READ_FIELDS)
+        adds_space_field = self._adds_space_field(requested)
+        params: dict[str, str | int] = {
+            "expand": "transitions",
+            "fields": ",".join([*requested, "project"] if adds_space_field else requested),
+        }
 
         async def get_issue(access_token: str, site: AtlassianSite) -> dict[str, object]:
             data = _mapping(
@@ -676,41 +687,73 @@ class AtlassianToolkit(Toolkit):
             )
             return {"issue": issue}
 
-        return await self._call("jira", get_issue)
+        return get_issue
 
-    async def jira_create_issue(
+    @tool(offer_background_after=True, offer_output_path=True)
+    async def jira_read(
         self,
-        project_key: str,
-        summary: str,
-        issue_type: str = "Task",
-        description: str | None = None,
-        fields: dict | None = None,
+        action: Literal["search", "get"],
+        jql: str | None = None,
+        issue_key: str | None = None,
+        fields: list[str] | None = None,
+        max_results: int | None = None,
+        next_page_token: str | None = None,
     ) -> str:
-        """Create a Jira issue.
+        """Search Jira issues or get one issue with its available transitions.
+
+        - `search`: `jql` (optional: `max_results`, `fields`, `next_page_token`). Use `assignee = currentUser()` or
+          `reporter = currentUser()` for the requester's own issues.
+        - `get`: `issue_key` (optional: `fields`; defaults to summary, status, assignee, reporter, priority,
+          issuetype, updated, and description).
 
         Args:
-            project_key: Project key such as PROJ.
-            summary: Issue summary line.
-            issue_type: Issue type name, such as Task, Bug, or Story.
-            description: Optional plain-text description.
-            fields: Optional additional Jira fields keyed by field ID, for example {"labels": ["docs"]}.
+            action: Read operation (`search` or `get`).
+            jql: Jira Query Language expression, for example "project = PROJ AND statusCategory != Done ORDER BY updated DESC".
+            issue_key: Issue key such as PROJ-123, or a numeric issue ID.
+            fields: Jira field IDs to include, such as ["summary", "labels"], or ["*all"] for every field.
+            max_results: Maximum issues to return for `search` (defaults to 20; values above 50 are capped).
+            next_page_token: The next_page_token from a previous `search` call, to fetch the next page.
 
         """
-        try:
-            if not JIRA_PROJECT_KEY_PATTERN.fullmatch(project_key):
-                msg = "project_key must be a Jira project key such as PROJ."
-                raise _InvalidArgumentError(msg)
-            self._require_space("jira", project_key)
-            issue_fields: dict[str, object] = {
-                **_extra_fields(fields),
-                "project": {"key": project_key.upper()},
-                "summary": _required_text(summary, "summary"),
-                "issuetype": {"name": _required_text(issue_type, "issue_type")},
-            }
-            if description is not None:
-                issue_fields["description"] = _adf_document(_required_text(description, "description"))
-        except AtlassianError as exc:
-            return self._error(exc)
+        return await self._dispatch(
+            "jira",
+            action,
+            {
+                "search": (
+                    ("jql", "fields", "max_results", "next_page_token"),
+                    lambda: self._jira_search_op(jql, fields, max_results, next_page_token),
+                ),
+                "get": (("issue_key", "fields"), lambda: self._jira_get_op(issue_key, fields)),
+            },
+            {
+                "jql": jql,
+                "issue_key": issue_key,
+                "fields": fields,
+                "max_results": max_results,
+                "next_page_token": next_page_token,
+            },
+        )
+
+    def _jira_create_op(
+        self,
+        project_key: str | None,
+        summary: str | None,
+        issue_type: str | None,
+        description: str | None,
+        fields: dict | None,
+    ) -> _Operation:
+        if not isinstance(project_key, str) or not JIRA_PROJECT_KEY_PATTERN.fullmatch(project_key):
+            msg = "project_key must be a Jira project key such as PROJ."
+            raise _InvalidArgumentError(msg)
+        self._require_space("jira", project_key)
+        issue_fields: dict[str, object] = {
+            **_extra_fields(fields),
+            "project": {"key": project_key.upper()},
+            "summary": _required_text(summary, "summary"),
+            "issuetype": {"name": _required_text("Task" if issue_type is None else issue_type, "issue_type")},
+        }
+        if description is not None:
+            issue_fields["description"] = _adf_document(_required_text(description, "description"))
 
         async def create(access_token: str, site: AtlassianSite) -> dict[str, object]:
             data = await request_json(
@@ -723,36 +766,24 @@ class AtlassianToolkit(Toolkit):
             )
             return {"issue": _issue_reference(data, site)}
 
-        return await self._call("jira", create)
+        return create
 
-    async def jira_update_issue(
+    def _jira_update_op(
         self,
-        issue_key: str,
-        summary: str | None = None,
-        description: str | None = None,
-        fields: dict | None = None,
-    ) -> str:
-        """Update fields of a Jira issue.
-
-        Args:
-            issue_key: Issue key such as PROJ-123.
-            summary: Optional new summary line.
-            description: Optional new plain-text description, replacing the current one.
-            fields: Optional additional Jira fields keyed by field ID, for example {"labels": ["docs"]}.
-
-        """
-        try:
-            key = _issue_key(issue_key)
-            issue_fields = _extra_fields(fields)
-            if summary is not None:
-                issue_fields["summary"] = _required_text(summary, "summary")
-            if description is not None:
-                issue_fields["description"] = _adf_document(_required_text(description, "description"))
-            if not issue_fields:
-                msg = "Provide summary, description, or fields to update."
-                raise _InvalidArgumentError(msg)
-        except AtlassianError as exc:
-            return self._error(exc)
+        issue_key: str | None,
+        summary: str | None,
+        description: str | None,
+        fields: dict | None,
+    ) -> _Operation:
+        key = _issue_key(issue_key)
+        issue_fields = _extra_fields(fields)
+        if summary is not None:
+            issue_fields["summary"] = _required_text(summary, "summary")
+        if description is not None:
+            issue_fields["description"] = _adf_document(_required_text(description, "description"))
+        if not issue_fields:
+            msg = "Provide summary, description, or fields to update."
+            raise _InvalidArgumentError(msg)
 
         async def update(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_issue_space(access_token, site, key)
@@ -766,21 +797,11 @@ class AtlassianToolkit(Toolkit):
             )
             return {"issue": _issue_reference({"key": key}, site), "updated_fields": sorted(issue_fields)}
 
-        return await self._call("jira", update)
+        return update
 
-    async def jira_add_comment(self, issue_key: str, comment: str) -> str:
-        """Add a plain-text comment to a Jira issue.
-
-        Args:
-            issue_key: Issue key such as PROJ-123.
-            comment: Comment text; blank lines separate paragraphs.
-
-        """
-        try:
-            key = _issue_key(issue_key)
-            body = {"body": _adf_document(_required_text(comment, "comment"))}
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _jira_comment_op(self, issue_key: str | None, comment: str | None) -> _Operation:
+        key = _issue_key(issue_key)
+        body = {"body": _adf_document(_required_text(comment, "comment"))}
 
         async def add_comment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_issue_space(access_token, site, key)
@@ -796,21 +817,11 @@ class AtlassianToolkit(Toolkit):
             )
             return {"comment": {"id": data.get("id"), "issue_key": key}}
 
-        return await self._call("jira", add_comment)
+        return add_comment
 
-    async def jira_transition_issue(self, issue_key: str, transition: str) -> str:
-        """Move a Jira issue through its workflow.
-
-        Args:
-            issue_key: Issue key such as PROJ-123.
-            transition: Transition ID from jira_get_issue such as "31", or a transition or target status name.
-
-        """
-        try:
-            key = _issue_key(issue_key)
-            requested = _required_text(transition, "transition").strip()
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _jira_transition_op(self, issue_key: str | None, transition: str | None) -> _Operation:
+        key = _issue_key(issue_key)
+        requested = _required_text(transition, "transition").strip()
 
         async def transition_issue(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_issue_space(access_token, site, key)
@@ -821,31 +832,78 @@ class AtlassianToolkit(Toolkit):
             await request_json(access_token, site, "jira", "POST", path, json_body={"transition": {"id": match["id"]}})
             return {"issue": _issue_reference({"key": key}, site), "transition": match}
 
-        return await self._call("jira", transition_issue)
+        return transition_issue
 
-    async def confluence_search(self, cql: str, limit: int = 10, cursor: str | None = None) -> str:
-        """Search Confluence with CQL; each result names who created, owns, and last edited it.
+    @tool(offer_background_after=False, offer_output_path=False)
+    async def jira_write(
+        self,
+        action: Literal["create", "update", "comment", "transition"],
+        project_key: str | None = None,
+        issue_key: str | None = None,
+        summary: str | None = None,
+        issue_type: str | None = None,
+        description: str | None = None,
+        fields: dict | None = None,
+        comment: str | None = None,
+        transition: str | None = None,
+    ) -> str:
+        """Create, update, comment on, or transition a Jira issue.
+
+        - `create`: `project_key`, `summary` (optional: `issue_type` defaults to "Task", `description`, `fields`).
+        - `update`: `issue_key` and at least one of `summary`, `description`, or `fields`.
+        - `comment`: `issue_key`, `comment`.
+        - `transition`: `issue_key`, `transition`.
 
         Args:
-            cql: Confluence Query Language expression, for example 'type = page AND text ~ "release plan"'.
-                For the requester's own content, use creator = currentUser() or contributor = currentUser().
-            limit: Maximum results to return; values above 50 are capped.
-            cursor: The next_cursor from a previous call, to fetch the next page.
+            action: Write operation (`create`, `update`, `comment`, or `transition`).
+            project_key: Project key such as PROJ.
+            issue_key: Issue key such as PROJ-123, or a numeric issue ID.
+            summary: Issue summary line.
+            issue_type: Issue type name such as Task, Bug, or Story (defaults to "Task" for `create`).
+            description: Plain-text description (replaces the current description on `update`).
+            fields: Additional Jira fields keyed by field ID, for example {"labels": ["docs"]}.
+            comment: Plain-text comment; blank lines separate paragraphs.
+            transition: Transition ID from jira_read(action="get") such as "31", or a transition or target status name.
 
         """
-        try:
-            expand = "content.history,content.history.ownedBy,content.version"
-            params: dict[str, str | int] = {
-                "cql": self._restricted_query("confluence", _required_text(cql, "cql"), "cql"),
-                "limit": _page_size(limit),
-                "excerpt": "indexed",
-                "expand": f"{expand},content.space" if self._spaces.confluence is not None else expand,
-            }
-            if next_cursor := _cursor(cursor, "cursor"):
-                # Search's own next links pair the cursor with next=true.
-                params.update(cursor=next_cursor, next="true")
-        except AtlassianError as exc:
-            return self._error(exc)
+        return await self._dispatch(
+            "jira",
+            action,
+            {
+                "create": (
+                    ("project_key", "summary", "issue_type", "description", "fields"),
+                    lambda: self._jira_create_op(project_key, summary, issue_type, description, fields),
+                ),
+                "update": (
+                    ("issue_key", "summary", "description", "fields"),
+                    lambda: self._jira_update_op(issue_key, summary, description, fields),
+                ),
+                "comment": (("issue_key", "comment"), lambda: self._jira_comment_op(issue_key, comment)),
+                "transition": (("issue_key", "transition"), lambda: self._jira_transition_op(issue_key, transition)),
+            },
+            {
+                "project_key": project_key,
+                "issue_key": issue_key,
+                "summary": summary,
+                "issue_type": issue_type,
+                "description": description,
+                "fields": fields,
+                "comment": comment,
+                "transition": transition,
+            },
+        )
+
+    def _confluence_search_op(self, cql: str | None, limit: int | None, cursor: str | None) -> _Operation:
+        expand = "content.history,content.history.ownedBy,content.version"
+        params: dict[str, str | int] = {
+            "cql": self._restricted_query("confluence", _required_text(cql, "cql"), "cql"),
+            "limit": _page_size(10 if limit is None else limit),
+            "excerpt": "indexed",
+            "expand": f"{expand},content.space" if self._spaces.confluence is not None else expand,
+        }
+        if next_cursor := _cursor(cursor, "cursor"):
+            # Search's own next links pair the cursor with next=true.
+            params.update(cursor=next_cursor, next="true")
 
         async def search(access_token: str, site: AtlassianSite) -> dict[str, object]:
             data = _mapping(
@@ -864,21 +922,10 @@ class AtlassianToolkit(Toolkit):
                 **_page_fields(*_next_cursor(links)),
             }
 
-        return await self._call("confluence", search)
+        return search
 
-    async def confluence_get_page(self, page_id: str) -> str:
-        """Get a Confluence page with its storage-format body and current version number.
-
-        The result names who created, owns, and last edited the page.
-
-        Args:
-            page_id: Numeric Confluence page ID.
-
-        """
-        try:
-            page = _page_id(page_id)
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _confluence_get_op(self, page_id: str | None) -> _Operation:
+        page = _page_id(page_id)
         # Any content type is matched, so an ID that is not a page is reported as such instead of as missing.
         params = {"cql": f"id = {page}", "limit": 1, "expand": "body.storage,version,space,history,history.ownedBy"}
 
@@ -898,7 +945,10 @@ class AtlassianToolkit(Toolkit):
                 )
                 raise AtlassianError(
                     code="not_a_page",
-                    message=f"This ID belongs to {described}, not a page, and confluence_get_page reads pages only.",
+                    message=(
+                        f"This ID belongs to {described}, not a page, "
+                        'and confluence_read(action="get") reads pages only.'
+                    ),
                     content_type=content_type if isinstance(content_type, str) else None,
                 )
             links = _mapping(item.get("_links"))
@@ -915,28 +965,17 @@ class AtlassianToolkit(Toolkit):
                 },
             }
 
-        return await self._call("confluence", get_page)
+        return get_page
 
-    async def confluence_list_attachments(self, page_id: str, limit: int = 25, cursor: str | None = None) -> str:
-        """List files attached to a Confluence page.
-
-        Args:
-            page_id: Numeric Confluence page ID.
-            limit: Maximum attachments to return; values above 50 are capped.
-            cursor: The next_cursor from a previous call, to fetch the next page.
-
-        """
-        try:
-            page = _page_id(page_id)
-            params: dict[str, str | int] = {
-                "cql": f"type = attachment AND container = {page}",
-                "limit": _page_size(limit),
-                "expand": "version",
-            }
-            if next_cursor := _cursor(cursor, "cursor"):
-                params["cursor"] = next_cursor
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _confluence_list_attachments_op(self, page_id: str | None, limit: int | None, cursor: str | None) -> _Operation:
+        page = _page_id(page_id)
+        params: dict[str, str | int] = {
+            "cql": f"type = attachment AND container = {page}",
+            "limit": _page_size(25 if limit is None else limit),
+            "expand": "version",
+        }
+        if next_cursor := _cursor(cursor, "cursor"):
+            params["cursor"] = next_cursor
 
         async def list_attachments(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_page_space(access_token, site, page)
@@ -949,35 +988,19 @@ class AtlassianToolkit(Toolkit):
                 **_page_fields(*_next_cursor(data.get("_links"))),
             }
 
-        return await self._call("confluence", list_attachments)
+        return list_attachments
 
-    async def confluence_download_attachment(
+    def _confluence_download_op(
         self,
-        page_id: str,
-        attachment_id: str,
-        filename: str | None = None,
-    ) -> str:
-        """Download one Confluence page attachment into this conversation.
-
-        Returns a context attachment ID (att_...) that is usable in this turn only.
-        Open it with attachment(action="get", attachment_id=...), or save it to the workspace with
-        attachment(action="get", attachment_id=..., mindroom_output_path=...); in a later turn, download it again.
-
-        Args:
-            page_id: Numeric Confluence page ID that owns the attachment.
-            attachment_id: Confluence attachment ID from confluence_list_attachments, such as att123456.
-            filename: Optional title from confluence_list_attachments, used only when the download names no file.
-
-        """
-        try:
-            page = _page_id(page_id)
-            confluence_attachment_id = _confluence_attachment_id(attachment_id)
-        except AtlassianError as exc:
-            return self._error(exc)
+        page_id: str | None,
+        attachment_id: str | None,
+        filename: str | None,
+    ) -> _Operation:
+        page = _page_id(page_id)
+        confluence_attachment_id = _confluence_attachment_id(attachment_id)
         context = get_tool_runtime_context()
         if context is None or context.storage_path is None:
-            return self._payload(
-                "error",
+            raise AtlassianError(
                 code="attachment_context_unavailable",
                 message="Attachment downloads require a conversation with MindRoom attachment storage.",
             )
@@ -1033,39 +1056,84 @@ class AtlassianToolkit(Toolkit):
                 "usage": _ATTACHMENT_USAGE,
             }
 
-        return await self._call("confluence", download_attachment)
+        return download_attachment
 
-    async def confluence_create_page(
+    @tool(offer_background_after=True, offer_output_path=True)
+    async def confluence_read(
         self,
-        space_key: str,
-        title: str,
-        body_storage: str,
-        parent_page_id: str | None = None,
+        action: Literal["search", "get", "list_attachments", "download_attachment"],
+        cql: str | None = None,
+        page_id: str | None = None,
+        attachment_id: str | None = None,
+        filename: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
     ) -> str:
-        """Create and publish a Confluence page.
+        """Search Confluence, read a page, or list and download page attachments.
+
+        - `search`: `cql` (optional: `limit` default 10, `cursor`). Each result names who created, owns, and last
+          edited it; use `creator = currentUser()` or `contributor = currentUser()` for the requester's own content.
+        - `get`: `page_id`. Returns storage-format body, current version number, and people metadata.
+        - `list_attachments`: `page_id` (optional: `limit` default 25, `cursor`).
+        - `download_attachment`: `page_id`, `attachment_id` (optional: `filename`). Returns a turn-scoped context
+          attachment ID (`att_...`); open it with `attachment(action="get", attachment_id=...)` or save with
+          `attachment(action="get", attachment_id=..., mindroom_output_path=...)`.
 
         Args:
-            space_key: Key of the space to create the page in, such as DOCS.
-            title: Page title.
-            body_storage: Page body in Confluence storage format (XHTML), for example "<p>Hello</p>".
-            parent_page_id: Optional numeric ID of the parent page.
+            action: Read operation (`search`, `get`, `list_attachments`, or `download_attachment`).
+            cql: Confluence Query Language expression, for example 'type = page AND text ~ "release plan"'.
+            page_id: Numeric Confluence page ID.
+            attachment_id: Confluence attachment ID from confluence_read(action="list_attachments"), such as att123456.
+            filename: Optional title from confluence_read(action="list_attachments"), used only when the download names no file.
+            limit: Maximum results to return (defaults to 10 for `search`, 25 for `list_attachments`; values above 50 are capped).
+            cursor: The next_cursor from a previous call, to fetch the next page.
 
         """
-        try:
-            if not CONFLUENCE_SPACE_KEY_PATTERN.fullmatch(space_key):
-                msg = "space_key must be a Confluence space key such as DOCS."
-                raise _InvalidArgumentError(msg)
-            self._require_space("confluence", space_key)
-            body: dict[str, object] = {
-                "status": "current",
-                "title": _required_text(title, "title"),
-                "body": _storage_body(_required_text(body_storage, "body_storage")),
-            }
-            parent = _page_id(parent_page_id, field_name="parent_page_id") if parent_page_id is not None else None
-            if parent is not None:
-                body["parentId"] = parent
-        except AtlassianError as exc:
-            return self._error(exc)
+        return await self._dispatch(
+            "confluence",
+            action,
+            {
+                "search": (("cql", "limit", "cursor"), lambda: self._confluence_search_op(cql, limit, cursor)),
+                "get": (("page_id",), lambda: self._confluence_get_op(page_id)),
+                "list_attachments": (
+                    ("page_id", "limit", "cursor"),
+                    lambda: self._confluence_list_attachments_op(page_id, limit, cursor),
+                ),
+                "download_attachment": (
+                    ("page_id", "attachment_id", "filename"),
+                    lambda: self._confluence_download_op(page_id, attachment_id, filename),
+                ),
+            },
+            {
+                "cql": cql,
+                "page_id": page_id,
+                "attachment_id": attachment_id,
+                "filename": filename,
+                "limit": limit,
+                "cursor": cursor,
+            },
+        )
+
+    def _confluence_create_op(
+        self,
+        space_key: str | None,
+        title: str | None,
+        body_storage: str,
+        parent_page_id: str | None,
+    ) -> _Operation:
+        if not isinstance(space_key, str) or not CONFLUENCE_SPACE_KEY_PATTERN.fullmatch(space_key):
+            msg = "space_key must be a Confluence space key such as DOCS."
+            raise _InvalidArgumentError(msg)
+        resolved_space_key = space_key
+        self._require_space("confluence", resolved_space_key)
+        body: dict[str, object] = {
+            "status": "current",
+            "title": _required_text(title, "title"),
+            "body": _storage_body(_required_text(body_storage, "body_storage")),
+        }
+        parent = _page_id(parent_page_id, field_name="parent_page_id") if parent_page_id is not None else None
+        if parent is not None:
+            body["parentId"] = parent
 
         async def create(access_token: str, site: AtlassianSite) -> dict[str, object]:
             if parent is not None:
@@ -1077,7 +1145,7 @@ class AtlassianToolkit(Toolkit):
                     "confluence",
                     "GET",
                     "/wiki/api/v2/spaces",
-                    params={"keys": space_key, "limit": 1},
+                    params={"keys": resolved_space_key, "limit": 1},
                 ),
             ).get("results")
             space_id = next(
@@ -1086,7 +1154,7 @@ class AtlassianToolkit(Toolkit):
                     for space in spaces or []
                     if isinstance(space, dict)
                     and isinstance(space.get("key"), str)
-                    and space["key"].casefold() == space_key.casefold()
+                    and space["key"].casefold() == resolved_space_key.casefold()
                     and space.get("id")
                 ),
                 None,
@@ -1106,43 +1174,30 @@ class AtlassianToolkit(Toolkit):
             )
             return {"page": self._written_page(data)}
 
-        return await self._call("confluence", create)
+        return create
 
-    async def confluence_update_page(
+    def _confluence_update_op(
         self,
-        page_id: str,
-        title: str,
+        page_id: str | None,
+        title: str | None,
         body_storage: str,
-        version_number: int,
-        version_message: str | None = None,
-    ) -> str:
-        """Replace the title and body of a published Confluence page.
-
-        Args:
-            page_id: Numeric Confluence page ID.
-            title: Page title, which may be unchanged.
-            body_storage: Complete new page body in Confluence storage format (XHTML).
-            version_number: The page's current version number from confluence_get_page plus one.
-            version_message: Optional change note stored with the new version.
-
-        """
-        try:
-            page = _page_id(page_id)
-            if version_number < 2:
-                msg = "version_number must be the page's current version number plus one."
-                raise _InvalidArgumentError(msg)
-            version: dict[str, object] = {"number": version_number}
-            if version_message is not None:
-                version["message"] = _required_text(version_message, "version_message")
-            body = {
-                "id": page,
-                "status": "current",
-                "title": _required_text(title, "title"),
-                "body": _storage_body(_required_text(body_storage, "body_storage")),
-                "version": version,
-            }
-        except AtlassianError as exc:
-            return self._error(exc)
+        version_number: int | None,
+        version_message: str | None,
+    ) -> _Operation:
+        page = _page_id(page_id)
+        if isinstance(version_number, bool) or not isinstance(version_number, int) or version_number < 2:
+            msg = "version_number must be the page's current version number plus one."
+            raise _InvalidArgumentError(msg)
+        version: dict[str, object] = {"number": version_number}
+        if version_message is not None:
+            version["message"] = _required_text(version_message, "version_message")
+        body = {
+            "id": page,
+            "status": "current",
+            "title": _required_text(title, "title"),
+            "body": _storage_body(_required_text(body_storage, "body_storage")),
+            "version": version,
+        }
 
         async def update(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_page_space(access_token, site, page)
@@ -1156,21 +1211,11 @@ class AtlassianToolkit(Toolkit):
             )
             return {"page": self._written_page(data)}
 
-        return await self._call("confluence", update)
+        return update
 
-    async def confluence_add_comment(self, page_id: str, body_storage: str) -> str:
-        """Add a footer comment to a Confluence page.
-
-        Args:
-            page_id: Numeric Confluence page ID.
-            body_storage: Comment body in Confluence storage format (XHTML), for example "<p>Looks good.</p>".
-
-        """
-        try:
-            page = _page_id(page_id)
-            body = {"pageId": page, "body": _storage_body(_required_text(body_storage, "body_storage"))}
-        except AtlassianError as exc:
-            return self._error(exc)
+    def _confluence_comment_op(self, page_id: str | None, body_storage: str) -> _Operation:
+        page = _page_id(page_id)
+        body = {"pageId": page, "body": _storage_body(_required_text(body_storage, "body_storage"))}
 
         async def add_comment(access_token: str, site: AtlassianSite) -> dict[str, object]:
             await self._require_page_space(access_token, site, page)
@@ -1186,7 +1231,67 @@ class AtlassianToolkit(Toolkit):
             )
             return {"comment": {"id": data.get("id"), "page_id": page}}
 
-        return await self._call("confluence", add_comment)
+        return add_comment
+
+    @tool(offer_background_after=False, offer_output_path=False)
+    async def confluence_write(
+        self,
+        action: Literal["create", "update", "comment"],
+        body_storage: str,
+        space_key: str | None = None,
+        page_id: str | None = None,
+        title: str | None = None,
+        parent_page_id: str | None = None,
+        version_number: int | None = None,
+        version_message: str | None = None,
+    ) -> str:
+        """Create, update, or comment on a Confluence page.
+
+        - `create`: `space_key`, `title`, `body_storage` (optional: `parent_page_id`).
+        - `update`: `page_id`, `title`, `body_storage`, `version_number` (optional: `version_message`).
+        - `comment`: `page_id`, `body_storage`.
+
+        Args:
+            action: Write operation (`create`, `update`, or `comment`).
+            body_storage: Page or comment body in Confluence storage format (XHTML), for example "<p>Hello</p>".
+            space_key: Key of the space to create the page in, such as DOCS.
+            page_id: Numeric Confluence page ID.
+            title: Page title (may be unchanged on `update`).
+            parent_page_id: Optional numeric ID of the parent page for `create`.
+            version_number: Page's current version number from confluence_read(action="get") plus one (for `update`).
+            version_message: Optional change note stored with the new version (for `update`).
+
+        """
+        return await self._dispatch(
+            "confluence",
+            action,
+            {
+                "create": (
+                    ("space_key", "title", "parent_page_id"),
+                    lambda: self._confluence_create_op(space_key, title, body_storage, parent_page_id),
+                ),
+                "update": (
+                    ("page_id", "title", "version_number", "version_message"),
+                    lambda: self._confluence_update_op(
+                        page_id,
+                        title,
+                        body_storage,
+                        version_number,
+                        version_message,
+                    ),
+                ),
+                "comment": (("page_id",), lambda: self._confluence_comment_op(page_id, body_storage)),
+            },
+            {
+                "space_key": space_key,
+                "page_id": page_id,
+                "title": title,
+                "parent_page_id": parent_page_id,
+                "version_number": version_number,
+                "version_message": version_message,
+            },
+            hints={"create": {"page_id": "Use parent_page_id to create a child page."}},
+        )
 
     @staticmethod
     def _written_page(data: object) -> dict[str, object]:

@@ -305,7 +305,7 @@ def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
     assert ScriptToolGrant("calculator", "calculate") in grants
     assert all(grant.toolkit_name != "slack" for grant in grants)
     assert "slack" not in resolve_script_launch_toolkit_names(context)
-    assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
+    assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_send")) is None
 
 
 def test_launch_grants_leave_out_a_function_that_can_stop_the_run(tmp_path: Path) -> None:

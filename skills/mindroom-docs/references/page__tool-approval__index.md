@@ -6,14 +6,14 @@
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack posting and reactions, allows read-only `matrix_message` calls while gating writes, gates `run_shell_command` for one agent, and delegates other shell calls to a review script:
+This example gates Slack sending and message management, allows read-only `matrix_message` calls while gating writes, gates `run_shell_command` for one agent, and delegates other shell calls to a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: [slack_post, slack_react]
+    - match: [slack_send, slack_manage]
       action: require_approval
     - match: matrix_message
       arguments:

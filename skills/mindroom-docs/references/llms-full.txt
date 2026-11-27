@@ -15385,26 +15385,17 @@ Their function names do not collide with the `atlassian` functions, so an agent 
 
 ## What It Does
 
-| Function | Product | Changes data | Purpose |
+| Function | Product | Changes data | Actions |
 | --- | --- | --- | --- |
-| `jira_search_issues` | Jira | no | Search issues with JQL, with `next_page_token` paging. |
-| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields` (`["*all"]` for every field), with the transitions available from its current status. |
-| `jira_create_issue` | Jira | yes | Create an issue from a project key, summary, issue type, optional plain-text description, and optional extra fields. |
-| `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
-| `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
-| `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
-| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging, naming who created, owns, and last edited each result and when it was created. |
-| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, current version number, and who created, owns, and last edited it. |
-| `confluence_list_attachments` | Confluence | no | List a page's attachments with ID, title, media type, size, comment, and version, with `cursor` paging. |
-| `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation, see [Attachments](#attachments). |
-| `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |
-| `confluence_update_page` | Confluence | yes | Replace a page's title and whole body as a new version. |
-| `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
+| `jira_read` | Jira | no | `search` (JQL with `next_page_token` paging) and `get` (read one issue's fields and available transitions). |
+| `jira_write` | Jira | yes | `create`, `update`, `comment`, and `transition` (by transition ID, transition name, or target status name). |
+| `confluence_read` | Confluence | no | `search` (CQL with `cursor` paging and author/owner/editor metadata), `get` (page storage-format body, space, version, and people), `list_attachments` (with `cursor` paging), and `download_attachment` (see [Attachments](#attachments)). |
+| `confluence_write` | Confluence | yes | `create` (publish a page in a space, optionally under a parent), `update` (replace title and whole body as a new version), and `comment` (add a footer comment). |
 
 Jira descriptions and comments are plain text, with blank lines separating paragraphs.
 Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
-`confluence_update_page` needs the page's current version number plus one, taken from `confluence_get_page`.
-`jira_transition_issue` matches an exact transition ID first, then a transition name, then a target status that only one transition leads to, ignoring case for names and statuses.
+`confluence_write(action="update")` needs the page's current version number plus one, taken from `confluence_read(action="get")`.
+`jira_write(action="transition")` matches an exact transition ID first, then a transition name, then a target status that only one transition leads to, ignoring case for names and statuses.
 When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
 Every result is a JSON object with `status` set to `ok` or `error`, and successful results name the `product` and the `site` that answered.
 
@@ -15445,14 +15436,14 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
-| `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
-| `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
-| `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
-| `write:comment:confluence` | granular | `confluence_add_comment` |
+| `read:jira-work` | classic | `jira_read`, `jira_write` |
+| `write:jira-work` | classic | `jira_write` |
+| `search:confluence` | classic | `confluence_read`, `confluence_write` |
+| `read:confluence-content.all` | classic | `confluence_read`, `confluence_write` |
+| `readonly:content.attachment:confluence` | classic | `confluence_read` (download_attachment action) |
+| `read:space:confluence` | granular | `confluence_write` (create action), to resolve a space key |
+| `write:page:confluence` | granular | `confluence_write` (create and update actions) |
+| `write:comment:confluence` | granular | `confluence_write` (comment action) |
 
 A stored connection that lacks any requested scope counts as disconnected, and the tool asks the requester to connect again.
 Adding a product or enabling writes therefore requires each user whose connection lacks the new scopes to reconnect once, while removing a product or disabling writes does not.
@@ -15605,7 +15596,7 @@ The `name` determines every identifier, so keep it stable once users have connec
 | Callback URL | `https://mindroom.example.com/api/oauth/partner_atlassian/callback` |
 | Token service | `partner_atlassian_oauth` |
 | App client service | `partner_atlassian_oauth_client` |
-| Function names | `partner_confluence_search`, `partner_confluence_get_page`, and so on |
+| Function names | `partner_confluence_read`, `partner_confluence_write` (and `partner_jira_read`, `partner_jira_write` when Jira is enabled) |
 
 By default, each connection uses its own Atlassian app, because Atlassian documents one callback URL per app.
 Create an app for the connection as in [Set Up The Atlassian App](#set-up-the-atlassian-app), register the connection's callback URL on it, and store its client ID and secret in the connection's app client service.
@@ -15665,31 +15656,22 @@ Use [tool approval](https://docs.mindroom.chat/tool-approval/) rules to require 
 ```yaml
 tool_approval:
   rules:
-    - match: "*jira_create_issue"
+    - match: jira_write
       action: require_approval
-    - match: "*jira_update_issue"
-      action: require_approval
-    - match: "*jira_add_comment"
-      action: require_approval
-    - match: "*jira_transition_issue"
-      action: require_approval
-    - match: "*confluence_create_page"
-      action: require_approval
-    - match: "*confluence_update_page"
-      action: require_approval
-    - match: "*confluence_add_comment"
+    - match: confluence_write
       action: require_approval
 ```
 
-The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
-Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
+For additional connections, exact prefixed function names (for example, `partner_jira_write` and `partner_confluence_write`) are recommended: broad patterns that decide the old and new names identically (such as `jira_*`) still work, whereas patterns like `*jira_write` that match only the new name fail closed during config validation.
+Timed approval grants for these consolidated functions are scoped per `action` (for example, approving `jira_write(action="comment")` does not auto-approve `jira_write(action="transition")`).
+Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for exact read function names (`jira_read` and `confluence_read`, plus prefixed names such as `partner_jira_read` and `partner_confluence_read` for additional connections) instead.
 To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
-`confluence_list_attachments` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
+`confluence_read(action="list_attachments")` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
 
-`confluence_download_attachment` stores the file in MindRoom's [attachment storage](https://docs.mindroom.chat/attachments/) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
+`confluence_read(action="download_attachment")` stores the file in MindRoom's [attachment storage](https://docs.mindroom.chat/attachments/) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
 The ID is usable in the same turn, for example with `attachment(action="get", attachment_id=...)` to inspect the file, `attachment(action="get", attachment_id=..., mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
@@ -15713,7 +15695,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 | `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
-| `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
+| `not_a_page` | `confluence_read(action="get")` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
 | `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
 | `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit, and also the setting that raises it when an operator has lowered the limit. |
 | `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |
@@ -15755,20 +15737,14 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 
 ## Functions
 
-| Function | Does | Personal | Project |
+| Function | Actions | Personal | Project |
 | --- | --- | --- | --- |
-| `slack_search` | Finds messages, conversations, or people and returns the IDs the other functions take | `messages` (Slack search syntax, such as `launch in:#general from:@dana after:2026-10-01`), `conversations`, and `people` | `conversations` only, among the agent's channels |
-| `slack_recent` | Lists conversations by their latest message, newest first, with that message's start and link, in batches when Slack limits it | `dms` (direct and group direct messages, named after the other person, leaving out deactivated people) or `channels`, with a message in the last `days` (default 30) | needs a personal connection; `slack_search` lists the agent's channels |
-| `slack_read` | Reads a conversation's latest messages, or one thread | any conversation the person can see | the agent's channels |
-| `slack_download` | Saves a file of up to 50 MB in the agent workspace's `slack-downloads/` folder | any file the person can see | files shared in the agent's channels |
-| `slack_upload` | Shares a workspace file of up to 50 MB in a conversation or thread, with an optional `title` and `comment` | as the person; a user ID opens a direct message | as the app, in the agent's channels |
-| `slack_post` | Posts a message, or a reply in a thread | as the person; a user ID opens a direct message | as the app, in the agent's channels |
-| `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
-| `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
-| `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
+| `slack_inspect` | `search` (messages, conversations, or people), `recent` (newest-first DMs or channels within `days`), `read` (latest messages or a thread), and `download` (up to 50 MB into `slack-downloads/`) | all actions; `search` supports `messages`, `conversations`, and `people`; `recent` lists `dms` or `channels` | `search` (`conversations` only), `read`, and `download` within the agent's channels (`recent` is hidden) |
+| `slack_send` | `post` (message or thread reply) and `upload` (workspace file up to 50 MB with optional `title` and `comment`) | as the person; a user ID opens a direct message | as the app, in the agent's channels |
+| `slack_manage` | `edit` (replace message text), `delete` (delete a message), and `react` (add an emoji reaction) | as the person (only messages Slack allows them to edit/delete) | as the app, in the agent's channels |
 
 Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
-`slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
+`slack_send(action="upload")` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
 [Background scripts](https://docs.mindroom.chat/tools/background-scripts/) cannot call `slack`.
 
 ## Set Up The Slack App
@@ -15901,7 +15877,7 @@ The `slack` entry of an agent takes these options:
 | --- | --- | --- | --- |
 | `channels` | list of channel IDs | unset | Makes the agent a [project agent](#project-agents) with these channels, such as `C0123ABCD`; leave it out for a personal agent. A channel's ID is at the bottom of its details in Slack. Set it on the agent's own entry, not in `defaults.tools`. |
 | `room` | string | unset | One of the agent's `rooms`, where Slack mentions of the app in its channels start threads. Needs `channels` and the `slack` section above. |
-| `write` | boolean | `true` | When `false`, the agent has no `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`. An agent with `room` needs `true`, because it posts its replies to Slack. |
+| `write` | boolean | `true` | When `false`, the agent has no `slack_send` or `slack_manage`. An agent with `room` needs `true`, because it posts its replies to Slack. |
 
 An agent that another agent [creates](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) keeps its creator's `channels` but not its `room`, because it has no rooms and never answers mentions.
 
@@ -15945,7 +15921,7 @@ With `room`, the agent answers Slack:
 2. A thread opens in `room`, showing the Slack message with its author's name and a link, marked as from Slack.
 3. The agent answers as that person's MindRoom account, so the agent's access rules and the person's own connected accounts apply.
 4. The agent's final reply is posted in the Slack thread by the app, cut with "…" at Slack's length limit.
-   The agent does not need `slack_post` to answer.
+   The agent does not need `slack_send(action="post", ...)` to answer.
 5. Replies in that Slack thread need no mention for 7 days after the last message; they continue the same Matrix thread, as whoever wrote them.
    After that, mention the app again.
 
@@ -15997,7 +15973,7 @@ A Slack watch delivers only while all of these hold, so someone else never reads
 | `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
 | `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_send` and `slack_manage` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
 A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
@@ -16014,17 +15990,13 @@ Add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules to make S
 ```yaml
 tool_approval:
   rules:
-    - match: slack_post
+    - match: slack_send
       action: require_approval
-    - match: slack_edit
-      action: require_approval
-    - match: slack_delete
-      action: require_approval
-    - match: slack_react
-      action: require_approval
-    - match: slack_upload
+    - match: slack_manage
       action: require_approval
 ```
+
+Timed approval grants for `slack_inspect`, `slack_send`, and `slack_manage` are scoped per `action` (for example, approving `slack_manage(action="react")` does not auto-approve `slack_manage(action="delete")`).
 
 The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool calls, so these rules do not gate them.
 
@@ -16034,7 +16006,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
 - While anyone's watch takes direct messages, every direct message that a connected person sends or receives costs one Slack request to check who can see it, which counts against Slack's rate limits.
-- `slack_recent` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
+- `slack_inspect(action="recent")` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
   The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
 
 ## Troubleshooting
@@ -16045,15 +16017,15 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
 | `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
 | `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
-| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_download` takes files, not canvases or posts. |
+| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_inspect(action="download")` takes files, not canvases or posts. |
 | `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
 | `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
-| `Slack did not answer; the message may have been sent, so check with slack_read before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
+| `Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
 | `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
-| `path '<path>' must be an existing file inside the agent workspace` | `slack_upload` reads only workspace files under the default `file_access`; save the file in the workspace first. |
-| `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_upload` takes files of up to 50 MB. |
+| `path '<path>' must be an existing file inside the agent workspace` | `slack_send(action="upload")` reads only workspace files under the default `file_access`; save the file in the workspace first. |
+| `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_send(action="upload")` takes files of up to 50 MB. |
 | `This Slack account belongs to another workspace` | The person approved with an account outside the app's workspace. |
 | `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
 | `Cannot watch Slack here: another person is in this room` | A watch needs a room where only the owner is; the text after the colon names the cause, as in the table above. |
@@ -18004,14 +17976,14 @@ None of these ownership rules grants responder access.
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack posting and reactions, allows read-only `matrix_message` calls while gating writes, gates `run_shell_command` for one agent, and delegates other shell calls to a review script:
+This example gates Slack sending and message management, allows read-only `matrix_message` calls while gating writes, gates `run_shell_command` for one agent, and delegates other shell calls to a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: [slack_post, slack_react]
+    - match: [slack_send, slack_manage]
       action: require_approval
     - match: matrix_message
       arguments:
@@ -19269,7 +19241,7 @@ Do not report or "fix" these; they are deliberate.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
-- A personal `slack_download` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
+- A personal `slack_inspect(action="download")` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
 - `google_drive_read(action="download")`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, as is a started profile's running browser with its open tabs, so one requester can use web sessions another signed in, read pages another left open, and upload screenshots another took; they never cross agents or the requesters of a private agent.
@@ -19325,7 +19297,7 @@ Do not report or "fix" these; they are deliberate.
 - A Slack message wakes a project agent as the MindRoom account that its author's confirmed Slack email maps to through `slack.email_domain` and `slack.matrix_user_id_template`, still subject to the agent's `access`, so whoever can set that email on a full member account of the workspace can act as that MindRoom account; guests, bots, other workspaces, and emails that map to one of MindRoom's own accounts or to a configured `bot_accounts` entry never map.
   Slack text is delivered as a fenced block that is never parsed for Matrix mentions, so it cannot wake other agents.
   Only messages in the agent's listed channels wake it, and only while Slack confirms at that moment that the app is still a member there, never in a direct message.
-- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so `tool_approval` rules for Slack's write functions (`slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload`) are the boundary for those.
+- A personal Slack watch delivers only into a room where the owner is the only human, nobody is invited, and people who join later cannot read earlier messages; the turn runs as the owner, and the toolkit refuses Slack writes in it, but work that turn schedules or delegates still runs as the owner, so `tool_approval` rules for Slack's write functions (`slack_send` and `slack_manage`) are the boundary for those.
 - The MCP gateway runs an agent's tools without its instructions, so it withholds agents whose worker scope is `shared` or unset unless `mcp_gateway_shared_credentials` opts one in; an opted-in agent's users can call its tools directly with its shared accounts and worker, and the shared workspace and browser profiles of a non-private `user` or `user_agent` agent stay reachable through the gateway as they are in chat.
 
 ## Reviewing security findings
@@ -25264,7 +25236,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds | `120` |
-| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_read(action="download_attachment")` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |

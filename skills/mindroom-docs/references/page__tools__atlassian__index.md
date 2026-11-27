@@ -14,26 +14,17 @@ Their function names do not collide with the `atlassian` functions, so an agent 
 
 ## What It Does
 
-| Function | Product | Changes data | Purpose |
+| Function | Product | Changes data | Actions |
 | --- | --- | --- | --- |
-| `jira_search_issues` | Jira | no | Search issues with JQL, with `next_page_token` paging. |
-| `jira_get_issue` | Jira | no | Read one issue's summary fields and description, or the requested `fields` (`["*all"]` for every field), with the transitions available from its current status. |
-| `jira_create_issue` | Jira | yes | Create an issue from a project key, summary, issue type, optional plain-text description, and optional extra fields. |
-| `jira_update_issue` | Jira | yes | Update the summary, description, or other fields of an issue. |
-| `jira_add_comment` | Jira | yes | Add a plain-text comment to an issue. |
-| `jira_transition_issue` | Jira | yes | Move an issue through its workflow by transition ID, transition name, or target status name. |
-| `confluence_search` | Confluence | no | Search with CQL, with `cursor` paging, naming who created, owns, and last edited each result and when it was created. |
-| `confluence_get_page` | Confluence | no | Read a page with its storage-format body, space, current version number, and who created, owns, and last edited it. |
-| `confluence_list_attachments` | Confluence | no | List a page's attachments with ID, title, media type, size, comment, and version, with `cursor` paging. |
-| `confluence_download_attachment` | Confluence | no | Download one page attachment into the conversation, see [Attachments](#attachments). |
-| `confluence_create_page` | Confluence | yes | Create and publish a page in a space, optionally under a parent page. |
-| `confluence_update_page` | Confluence | yes | Replace a page's title and whole body as a new version. |
-| `confluence_add_comment` | Confluence | yes | Add a footer comment to a page. |
+| `jira_read` | Jira | no | `search` (JQL with `next_page_token` paging) and `get` (read one issue's fields and available transitions). |
+| `jira_write` | Jira | yes | `create`, `update`, `comment`, and `transition` (by transition ID, transition name, or target status name). |
+| `confluence_read` | Confluence | no | `search` (CQL with `cursor` paging and author/owner/editor metadata), `get` (page storage-format body, space, version, and people), `list_attachments` (with `cursor` paging), and `download_attachment` (see [Attachments](#attachments)). |
+| `confluence_write` | Confluence | yes | `create` (publish a page in a space, optionally under a parent), `update` (replace title and whole body as a new version), and `comment` (add a footer comment). |
 
 Jira descriptions and comments are plain text, with blank lines separating paragraphs.
 Confluence bodies use the Confluence storage format, which is XHTML such as `<p>Hello</p>`.
-`confluence_update_page` needs the page's current version number plus one, taken from `confluence_get_page`.
-`jira_transition_issue` matches an exact transition ID first, then a transition name, then a target status that only one transition leads to, ignoring case for names and statuses.
+`confluence_write(action="update")` needs the page's current version number plus one, taken from `confluence_read(action="get")`.
+`jira_write(action="transition")` matches an exact transition ID first, then a transition name, then a target status that only one transition leads to, ignoring case for names and statuses.
 When several transitions share that name or target status, it returns `transition_ambiguous` with the candidates and changes nothing.
 Every result is a JSON object with `status` set to `ok` or `error`, and successful results name the `product` and the `site` that answered.
 
@@ -74,14 +65,14 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | Scope | Type | Used by |
 | --- | --- | --- |
 | `offline_access` | classic | Token refresh |
-| `read:jira-work` | classic | `jira_search_issues`, `jira_get_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `write:jira-work` | classic | `jira_create_issue`, `jira_update_issue`, `jira_add_comment`, `jira_transition_issue` |
-| `search:confluence` | classic | `confluence_search`, `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
-| `read:confluence-content.all` | classic | `confluence_get_page`, `confluence_list_attachments`, `confluence_download_attachment`, `confluence_create_page`, `confluence_update_page`, `confluence_add_comment` |
-| `readonly:content.attachment:confluence` | classic | `confluence_download_attachment` |
-| `read:space:confluence` | granular | `confluence_create_page`, to resolve a space key |
-| `write:page:confluence` | granular | `confluence_create_page`, `confluence_update_page` |
-| `write:comment:confluence` | granular | `confluence_add_comment` |
+| `read:jira-work` | classic | `jira_read`, `jira_write` |
+| `write:jira-work` | classic | `jira_write` |
+| `search:confluence` | classic | `confluence_read`, `confluence_write` |
+| `read:confluence-content.all` | classic | `confluence_read`, `confluence_write` |
+| `readonly:content.attachment:confluence` | classic | `confluence_read` (download_attachment action) |
+| `read:space:confluence` | granular | `confluence_write` (create action), to resolve a space key |
+| `write:page:confluence` | granular | `confluence_write` (create and update actions) |
+| `write:comment:confluence` | granular | `confluence_write` (comment action) |
 
 A stored connection that lacks any requested scope counts as disconnected, and the tool asks the requester to connect again.
 Adding a product or enabling writes therefore requires each user whose connection lacks the new scopes to reconnect once, while removing a product or disabling writes does not.
@@ -234,7 +225,7 @@ The `name` determines every identifier, so keep it stable once users have connec
 | Callback URL | `https://mindroom.example.com/api/oauth/partner_atlassian/callback` |
 | Token service | `partner_atlassian_oauth` |
 | App client service | `partner_atlassian_oauth_client` |
-| Function names | `partner_confluence_search`, `partner_confluence_get_page`, and so on |
+| Function names | `partner_confluence_read`, `partner_confluence_write` (and `partner_jira_read`, `partner_jira_write` when Jira is enabled) |
 
 By default, each connection uses its own Atlassian app, because Atlassian documents one callback URL per app.
 Create an app for the connection as in [Set Up The Atlassian App](#set-up-the-atlassian-app), register the connection's callback URL on it, and store its client ID and secret in the connection's app client service.
@@ -294,31 +285,22 @@ Use [tool approval](https://docs.mindroom.chat/tool-approval/) rules to require 
 ```yaml
 tool_approval:
   rules:
-    - match: "*jira_create_issue"
+    - match: jira_write
       action: require_approval
-    - match: "*jira_update_issue"
-      action: require_approval
-    - match: "*jira_add_comment"
-      action: require_approval
-    - match: "*jira_transition_issue"
-      action: require_approval
-    - match: "*confluence_create_page"
-      action: require_approval
-    - match: "*confluence_update_page"
-      action: require_approval
-    - match: "*confluence_add_comment"
+    - match: confluence_write
       action: require_approval
 ```
 
-The leading `*` also matches the prefixed functions of additional connections, such as `partner_confluence_create_page`.
-Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for `*jira_search_issues`, `*jira_get_issue`, `*confluence_search`, `*confluence_get_page`, `*confluence_list_attachments`, and `*confluence_download_attachment` instead.
+For additional connections, exact prefixed function names (for example, `partner_jira_write` and `partner_confluence_write`) are recommended: broad patterns that decide the old and new names identically (such as `jira_*`) still work, whereas patterns like `*jira_write` that match only the new name fail closed during config validation.
+Timed approval grants for these consolidated functions are scoped per `action` (for example, approving `jira_write(action="comment")` does not auto-approve `jira_write(action="transition")`).
+Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for exact read function names (`jira_read` and `confluence_read`, plus prefixed names such as `partner_jira_read` and `partner_confluence_read` for additional connections) instead.
 To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.
 
 ## Attachments
 
-`confluence_list_attachments` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
+`confluence_read(action="list_attachments")` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
 
-`confluence_download_attachment` stores the file in MindRoom's [attachment storage](https://docs.mindroom.chat/attachments/) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
+`confluence_read(action="download_attachment")` stores the file in MindRoom's [attachment storage](https://docs.mindroom.chat/attachments/) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
 The ID is usable in the same turn, for example with `attachment(action="get", attachment_id=...)` to inspect the file, `attachment(action="get", attachment_id=..., mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
@@ -342,7 +324,7 @@ An operator can lower the download limit with [`MINDROOM_ATTACHMENT_INLINE_SAVE_
 | `space_not_allowed` | The item is outside the agent's `jira_spaces` or `confluence_spaces`, which the result lists in `allowed_spaces`; check that each entry is the space key from the space's URL rather than its name, and add the space to the agent's tool entry if the agent should use it. |
 | `scope_mismatch` | Atlassian rejected a request for a scope the app does not grant; reconnecting grants the same scopes again, so an administrator must add the scopes in [Scopes](#scopes) to the app. |
 | `page_not_found` | The page does not exist, is not visible to the account, or is too new for search to have indexed it. |
-| `not_a_page` | `confluence_get_page` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
+| `not_a_page` | `confluence_read(action="get")` reads pages only, and the ID belongs to a blog post or other content named in `content_type`. |
 | `response_too_large` | The API response exceeded the size limit; narrow the request, for example with fewer fields or a smaller limit. |
 | `attachment_too_large` | The attachment exceeds the download limit in [Attachments](#attachments); the message names the limit, and also the setting that raises it when an operator has lowered the limit. |
 | `attachment_unavailable` | The attachment does not exist or the connected account may not view it. |

@@ -625,15 +625,9 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "slack_search",
-        "slack_recent",
-        "slack_read",
-        "slack_download",
-        "slack_post",
-        "slack_react",
-        "slack_edit",
-        "slack_delete",
-        "slack_upload"
+        "slack_inspect",
+        "slack_send",
+        "slack_manage"
       ],
       "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for Slack event triggers, app-level token in slack_app.",
       "icon": "FaSlack",
@@ -7719,19 +7713,10 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "jira_search_issues",
-        "jira_get_issue",
-        "jira_create_issue",
-        "jira_update_issue",
-        "jira_add_comment",
-        "jira_transition_issue",
-        "confluence_search",
-        "confluence_get_page",
-        "confluence_list_attachments",
-        "confluence_download_attachment",
-        "confluence_create_page",
-        "confluence_update_page",
-        "confluence_add_comment"
+        "jira_read",
+        "jira_write",
+        "confluence_read",
+        "confluence_write"
       ],
       "helper_text": "Each user connects their own Atlassian account. Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in the atlassian_oauth_client credential service.",
       "icon": "SiAtlassian",

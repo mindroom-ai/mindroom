@@ -1125,6 +1125,32 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "register_attachment": "attachment",
         "inline_image": "attachment",
     },
+    "atlassian": {
+        "jira_search_issues": "jira_read",
+        "jira_get_issue": "jira_read",
+        "jira_create_issue": "jira_write",
+        "jira_update_issue": "jira_write",
+        "jira_add_comment": "jira_write",
+        "jira_transition_issue": "jira_write",
+        "confluence_search": "confluence_read",
+        "confluence_get_page": "confluence_read",
+        "confluence_list_attachments": "confluence_read",
+        "confluence_download_attachment": "confluence_read",
+        "confluence_create_page": "confluence_write",
+        "confluence_update_page": "confluence_write",
+        "confluence_add_comment": "confluence_write",
+    },
+    "slack": {
+        "slack_search": "slack_inspect",
+        "slack_recent": "slack_inspect",
+        "slack_read": "slack_inspect",
+        "slack_download": "slack_inspect",
+        "slack_post": "slack_send",
+        "slack_upload": "slack_send",
+        "slack_react": "slack_manage",
+        "slack_edit": "slack_manage",
+        "slack_delete": "slack_manage",
+    },
     # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
     # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
     #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
@@ -1207,6 +1233,8 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
     {
         "skills",
         "attachments",
+        "atlassian",
+        "slack",
         "shared_directories",
         "contacts",
         "knowledge_graph",
@@ -1453,6 +1481,7 @@ def retired_slack_watch_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        # Probe historical broad globs like `slack_*` without matching `slack_w*`.
         broad_probe="slack_post",
         agent_names=agent_names,
     )
@@ -1465,6 +1494,8 @@ def retired_consolidated_approval_error(
     default_timeout_days: float = 7.0,
     renames: Mapping[str, str] | None = None,
     agent_names: Collection[str] = (),
+    *,
+    reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
@@ -1475,7 +1506,11 @@ def retired_consolidated_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=toolkit_name in _STRICT_WILDCARD_SCRIPT_TOOLKITS,
+        reject_wildcard_scripts=(
+            toolkit_name in _STRICT_WILDCARD_SCRIPT_TOOLKITS
+            if reject_wildcard_scripts is None
+            else reject_wildcard_scripts
+        ),
         agent_names=agent_names,
     )
 
@@ -1484,14 +1519,14 @@ def _retired_function_filter(
     settings: Mapping[str, object],
     renames: Mapping[str, str],
     *,
-    guidance_for: Callable[[str, str], str],
+    guidance_for: Callable[[str, str, str], str],
 ) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
         value = settings.get(key)
         names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
         for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (new := renames.get(name.strip())):
-                return f"{key}: {name.strip()}", guidance_for(key, new)
+            if isinstance(name, str) and (new := renames.get(old := name.strip())):
+                return f"{key}: {old}", guidance_for(key, old, new)
     return None
 
 
@@ -1501,7 +1536,7 @@ def _retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | N
         retired := _retired_function_filter(
             settings,
             _RETIRED_FILE_FUNCTIONS,
-            guidance_for=lambda key, new: f"use `filesystem: {{{key}: [{new}]}}`",
+            guidance_for=lambda key, _old, new: f"use `filesystem: {{{key}: [{new}]}}`",
         )
     ) is not None:
         return retired
@@ -1513,7 +1548,7 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     return _retired_function_filter(
         settings,
         _RETIRED_TRIGGER_FUNCTIONS,
-        guidance_for=lambda _key, new: (
+        guidance_for=lambda _key, _old, new: (
             f"`{new}` is now a single unified function with an `action` parameter; "
             "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
         ),
@@ -1525,7 +1560,7 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     return _retired_function_filter(
         settings,
         RETIRED_CONSOLIDATED_FUNCTIONS["attachments"],
-        guidance_for=lambda _key, new: (
+        guidance_for=lambda _key, _old, new: (
             f"`{new}` is now a single unified function with an `action` parameter (alongside standalone `view_file`); "
             f"remove the per-function filter and use `tool_approval.rules` matching `{new}` if per-action gating "
             "(such as restricting `register` or `inline_image`) is needed"
@@ -1533,15 +1568,45 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     )
 
 
+def _retired_consolidated_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:
+    effect = (
+        f"adding `{new}` to `include_tools` broadens to all sibling actions in `{new}`"
+        if key == "include_tools"
+        else f"adding `{new}` to `exclude_tools` removes all sibling actions in `{new}`"
+    )
+    return (
+        f"replace `{old}` with `{new}` in `{tool_name}.{key}` while preserving any other entries in the list "
+        f"(note that `{new}` covers all actions in that consolidated group, so {effect}; "
+        f"for per-action gating, use a `tool_approval.rules` approval `script` matching `{new}`)"
+    )
+
+
 def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first retired Slack function filter in ``settings``, and its migration guidance."""
+    if (
+        retired := _retired_function_filter(
+            settings,
+            _RETIRED_SLACK_FUNCTIONS,
+            guidance_for=lambda _key, _old, _new: (
+                '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
+                "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
+            ),
+        )
+    ) is not None:
+        return retired
     return _retired_function_filter(
         settings,
-        _RETIRED_SLACK_FUNCTIONS,
-        guidance_for=lambda _key, _new: (
-            '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
-            "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
-        ),
+        RETIRED_CONSOLIDATED_FUNCTIONS["slack"],
+        guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance("slack", key, old, new),
+    )
+
+
+def _retired_atlassian_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired Atlassian function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_CONSOLIDATED_FUNCTIONS["atlassian"],
+        guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance("atlassian", key, old, new),
     )
 
 
@@ -1555,7 +1620,7 @@ def _retired_consolidated_filter_checker(
         return _retired_function_filter(
             settings,
             renames,
-            guidance_for=lambda key, new: (
+            guidance_for=lambda key, _old, new: (
                 f"use `{toolkit_name}: {{{key}: [{new}]}}` "
                 f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
                 f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
@@ -1570,6 +1635,7 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
     "filesystem": _retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
+    "atlassian": _retired_atlassian_setting,
     "slack": _retired_slack_setting,
     **{
         name: _retired_consolidated_filter_checker(name)
@@ -1602,6 +1668,7 @@ def retired_tool_override(
     tool_name: str,
     overrides: Mapping[str, object],
     *,
+    retired_functions: Mapping[str, str] | None = None,
     has_enable_toggles: bool = False,
 ) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
@@ -1613,7 +1680,7 @@ def retired_tool_override(
             renames,
             guidance_for=(
                 (
-                    lambda _key, new: (
+                    lambda _key, _old, new: (
                         f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
                         f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
                         f"matching `{new}`) so permissions are not broadened"
@@ -1621,7 +1688,7 @@ def retired_tool_override(
                 )
                 if has_enable_toggles
                 else (
-                    lambda key, new: (
+                    lambda key, _old, new: (
                         f"`{new}` is now a consolidated function with an `action` parameter and `{tool_name}` has no "
                         f"per-action allowlist filter; remove the retired `{key}` entry and use `tool_approval.rules` "
                         f"matching `{new}` if per-action gating is needed"
@@ -1630,6 +1697,18 @@ def retired_tool_override(
             ),
         )
     ) is not None:
+        return retired
+    if (
+        retired_functions
+        and (
+            retired := _retired_function_filter(
+                overrides,
+                retired_functions,
+                guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance(tool_name, key, old, new),
+            )
+        )
+        is not None
+    ):
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
