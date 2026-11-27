@@ -11,7 +11,7 @@ import math
 import os
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -466,13 +466,11 @@ class _DockerLaunch:
 class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     launch_digest: str
-    worker_id: str
     container_name: str
     container_id: str
     host_port: int
     ssh_port: int | None
     ssh: bool
-    lifecycle: WorkerLifecycleState
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
     shared_directory_mounts: tuple[SharedDirectoryMount, ...]
@@ -672,13 +670,11 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                     _ReadyWorkerCacheEntry(
                         spec=spec,
                         launch_digest=launch.digest,
-                        worker_id=metadata.worker_id,
                         container_name=metadata.container_name,
                         container_id=container.id,
                         host_port=host_port,
                         ssh_port=None if handle.ssh_endpoint is None else handle.ssh_endpoint.port,
                         ssh=ssh,
-                        lifecycle=metadata.lifecycle,
                         validated_at=timestamp,
                         workspace_mounts=workspace_mounts,
                         shared_directory_mounts=shared_directory_mounts,
@@ -691,17 +687,17 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
-            cached_handle = self._touch_cached_worker(worker_key, now=timestamp, paths=paths)
-            if cached_handle is not None:
-                return cached_handle
             metadata = self._load_metadata(paths, expected_worker_key=worker_key)
             if metadata is None:
+                self._invalidate_ready_worker(worker_key)
                 return None
             metadata.lifecycle = touch_worker_lifecycle(
                 metadata.lifecycle,
                 now=max(timestamp, metadata.lifecycle.last_used_at),
             )
             container = self._read_owned_container(metadata.worker_key)
+            if not self._container_is_running(container):
+                self._invalidate_ready_worker(worker_key)
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
@@ -1456,7 +1452,26 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 self._invalidate_ready_worker(spec.worker_key)
                 return None
             container = self._read_container(entry.container_name)
-            if container is None or container.id != entry.container_id or not self._container_is_running(container):
+            live_ssh_port = (
+                self._container_host_port(container, WORKER_SSH_PORT)
+                if container is not None and container_config_labels(container).get(LABEL_TAILNET_SSH) == "true"
+                else None
+            )
+            if (
+                container is None
+                or container.id != entry.container_id
+                or not self._container_is_running(container)
+                or self._container_host_port(container, self.config.worker_port) != entry.host_port
+                or live_ssh_port != entry.ssh_port
+            ):
+                self._invalidate_ready_worker(spec.worker_key)
+                return None
+            metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key)
+            if (
+                metadata is None
+                or metadata.lifecycle.status != "ready"
+                or now - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
+            ):
                 self._invalidate_ready_worker(spec.worker_key)
                 return None
         except Exception:
@@ -1471,18 +1486,17 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         except Exception as exc:
             self._invalidate_ready_worker(spec.worker_key)
             failure_reason = str(exc)
-            metadata = _DockerWorkerMetadata(
-                entry.worker_id,
-                entry.spec.worker_key,
-                entry.container_name,
-                entry.lifecycle,
-            )
             self._record_failure_locked(paths, metadata, failure_reason, now=now)
             if isinstance(exc, WorkerBackendError):
                 raise
             raise WorkerBackendError(failure_reason) from exc
-        lifecycle = mark_worker_ready(entry.lifecycle, now=max(now, entry.lifecycle.last_used_at))
-        return self._persist_cached_ready_lifecycle(entry, lifecycle=lifecycle, paths=paths)
+        metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=max(now, metadata.lifecycle.last_used_at))
+        try:
+            self._save_metadata(paths, metadata)
+        except Exception:
+            self._invalidate_ready_worker(spec.worker_key)
+            raise
+        return self._to_handle(metadata, container, now=now, paths=paths)
 
     def _store_ready_worker(self, entry: _ReadyWorkerCacheEntry) -> None:
         with self._ready_workers_lock:
@@ -1496,60 +1510,22 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         self,
         worker_key: str,
         *,
-        spec: WorkerSpec | None = None,
-        launch: WorkerLaunchConfig | None = None,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
         now: float,
     ) -> _ReadyWorkerCacheEntry | None:
         with self._ready_workers_lock:
             entry = self._ready_workers.get(worker_key)
             if entry is None:
                 return None
-            cache_invalid = (
-                (spec is not None and entry.spec != spec)
-                or (launch is not None and entry.launch_digest != launch.digest)
+            if (
+                entry.spec != spec
+                or entry.launch_digest != launch.digest
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
-                or now - entry.lifecycle.last_used_at >= self.idle_timeout_seconds
-            )
-            if cache_invalid:
+            ):
                 self._ready_workers.pop(worker_key, None)
                 return None
             return entry
-
-    def _touch_cached_worker(
-        self,
-        worker_key: str,
-        *,
-        now: float,
-        paths: _DockerWorkerPaths,
-    ) -> WorkerHandle | None:
-        entry = self._cached_ready_worker(worker_key, now=now)
-        if entry is None:
-            return None
-        lifecycle = touch_worker_lifecycle(entry.lifecycle, now=max(now, entry.lifecycle.last_used_at))
-        return self._persist_cached_ready_lifecycle(entry, lifecycle=lifecycle, paths=paths)
-
-    def _persist_cached_ready_lifecycle(
-        self,
-        entry: _ReadyWorkerCacheEntry,
-        *,
-        lifecycle: WorkerLifecycleState,
-        paths: _DockerWorkerPaths,
-    ) -> WorkerHandle:
-        metadata = _DockerWorkerMetadata(entry.worker_id, entry.spec.worker_key, entry.container_name, lifecycle)
-        try:
-            self._save_metadata(paths, metadata)
-        except Exception:
-            self._invalidate_ready_worker(entry.spec.worker_key)
-            raise
-        self._store_ready_worker(replace(entry, lifecycle=lifecycle))
-        return self._handle_from_parts(
-            metadata,
-            container_id=entry.container_id,
-            host_port=entry.host_port,
-            ssh_port=entry.ssh_port,
-            status="ready",
-            paths=paths,
-        )
 
     def _container_image_id(self, container: _DockerContainer) -> str | None:
         image_id = container.attrs.get("Image")
@@ -1632,38 +1608,6 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             return "idle"
         return "ready"
 
-    def _handle_from_parts(
-        self,
-        metadata: _DockerWorkerMetadata,
-        *,
-        container_id: str,
-        host_port: int | None,
-        ssh_port: int | None,
-        status: WorkerStatus,
-        paths: _DockerWorkerPaths,
-    ) -> WorkerHandle:
-        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
-        ssh_host = self.config.endpoint_host.strip("[]")
-        return worker_handle(
-            worker_id=metadata.worker_id,
-            worker_key=metadata.worker_key,
-            lifecycle=metadata.lifecycle,
-            endpoint=endpoint,
-            auth_token=self._control_token(metadata.worker_key),
-            status=status,
-            backend_name=self.backend_name,
-            debug_metadata={
-                "container_name": metadata.container_name,
-                "container_id": container_id,
-                "host_port": str(host_port or ""),
-                "state_root": str(paths.state.root),
-                "api_root": endpoint.removesuffix("/execute").rstrip("/"),
-            },
-            ssh_endpoint=None
-            if ssh_port is None
-            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
-        )
-
     def _to_handle(
         self,
         metadata: _DockerWorkerMetadata,
@@ -1675,17 +1619,30 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         # Only a running container publishes a port, so any other worker has no endpoint.
         running = container if self._container_is_running(container) else None
         host_port = self._container_host_port(running, self.config.worker_port)
+        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
         # The label is the launch's decision; a 2222 binding on a container without it is not an SSH endpoint.
         ssh_port = (
             self._container_host_port(running, WORKER_SSH_PORT)
             if running is not None and container_config_labels(running).get(LABEL_TAILNET_SSH) == "true"
             else None
         )
-        return self._handle_from_parts(
-            metadata,
-            container_id="" if container is None else container.id,
-            host_port=host_port,
-            ssh_port=ssh_port,
+        ssh_host = self.config.endpoint_host.strip("[]")
+        return worker_handle(
+            worker_id=metadata.worker_id,
+            worker_key=metadata.worker_key,
+            lifecycle=metadata.lifecycle,
+            endpoint=endpoint,
+            auth_token=self._control_token(metadata.worker_key),
             status=self._effective_status(metadata, container, now=now),
-            paths=paths,
+            backend_name=self.backend_name,
+            debug_metadata={
+                "container_name": metadata.container_name,
+                "container_id": "" if container is None else container.id,
+                "host_port": str(host_port or ""),
+                "state_root": str(paths.state.root),
+                "api_root": endpoint.removesuffix("/execute").rstrip("/"),
+            },
+            ssh_endpoint=None
+            if ssh_port is None
+            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
         )

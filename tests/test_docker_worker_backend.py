@@ -6638,12 +6638,12 @@ def test_docker_handle_endpoint_needs_label_and_running_container(
     # A binding alone is not the mark: the label is what the opted-in config produced.
     unmarked_container = fake_client.containers.by_name[unmarked.worker_id]
     unmarked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "45000"}]
-    touched = backend.touch_worker(other_key, now=310.0)
+    touched = backend.touch_worker(other_key, now=11.0)
     assert touched is not None
     assert touched.ssh_endpoint is None
 
     marked_container.stop()
-    stopped = backend.touch_worker(_SSH_WORKER_KEY, now=310.0)
+    stopped = backend.touch_worker(_SSH_WORKER_KEY, now=11.0)
     assert stopped is not None
     assert stopped.ssh_endpoint is None
 
@@ -6814,16 +6814,20 @@ def test_docker_backend_ready_cache_invalidates_on_launch_spec_mounts_and_ssh_ch
     first = backend.ensure_worker(spec, now=10.0)
     assert first.ssh_endpoint is not None
     fake_client.containers.get_calls.clear()
+    fake_client.images.gets.clear()
 
-    # Launch digest change invalidates cache.
+    # Launch digest change invalidates cache and runs full reconciliation.
     launch = replace(launch, digest=f"{launch.digest}-v2")
     backend.ensure_worker(spec, now=20.0)
+    assert fake_client.images.gets == [backend.config.image]
     assert len(fake_client.containers.get_calls) == 1
     fake_client.containers.get_calls.clear()
+    fake_client.images.gets.clear()
 
-    # Spec change invalidates cache.
+    # Spec change invalidates cache and runs full reconciliation.
     spec = replace(spec, mirror_grantable_credentials=False)
     backend.ensure_worker(spec, now=30.0)
+    assert fake_client.images.gets == [backend.config.image]
     assert len(fake_client.containers.get_calls) == 1
     fake_client.containers.get_calls.clear()
 
@@ -6940,11 +6944,11 @@ def test_docker_backend_ready_cache_invalidates_on_lifecycle_transitions_and_cre
     assert len(fake_client.containers.get_calls) >= 1
 
 
-def test_docker_backend_cached_touch_skips_daemon_and_keeps_last_used_monotonic(
+def test_docker_backend_touch_inspects_live_container_keeps_last_used_monotonic_and_invalidates_stopped(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Warm touch_worker updates persisted metadata without touching Docker and never moves last_used_at backward."""
+    """touch_worker inspects the live container, never moves last_used_at backward, and invalidates stopped workers."""
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
     first = backend.ensure_worker(spec, now=10.0)
@@ -6958,13 +6962,62 @@ def test_docker_backend_cached_touch_skips_daemon_and_keeps_last_used_monotonic(
 
     assert touched == replace(first, last_used_at=20.0)
     assert backdated == replace(first, last_used_at=20.0)
-    assert fake_client.containers.get_calls == []
+    assert fake_client.containers.get_calls == [first.worker_id, first.worker_id]
     assert fake_client.images.gets == []
     assert container.reloaded == 0
     assert (
         json.loads(_control_metadata_path(tmp_path, spec.worker_key).read_text(encoding="utf-8"))["last_used_at"]
         == 20.0
     )
+
+    # Stopping the container externally makes touch_worker immediately report idle and drop the ready cache entry.
+    container.stop()
+    stopped = backend.touch_worker(spec.worker_key, now=25.0)
+    assert stopped is not None
+    assert stopped.status == "idle"
+    assert stopped.endpoint == ""
+    assert spec.worker_key not in backend._ready_workers
+
+
+def test_docker_backend_ready_cache_detects_restarted_container_port_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A container restarted externally with new ephemeral HTTP or SSH ports reconciles immediately."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_SSH_CONFIG_TEXT,
+        idle_timeout_seconds=600.0,
+    )
+    spec = _spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset())
+    first = backend.ensure_worker(spec, now=10.0)
+    assert first.ssh_endpoint is not None
+    container = fake_client.containers.by_name[first.worker_id]
+
+    # Simulate `docker restart` rebinding the worker HTTP port on the same running container ID.
+    container.attrs["NetworkSettings"]["Ports"]["8766/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "49001"}]
+    fake_client.images.gets.clear()
+    after_http_rebind = backend.ensure_worker(spec, now=20.0)
+    assert fake_client.images.gets == [backend.config.image]
+    assert len(fake_client.containers.run_calls) == 1
+    assert after_http_rebind.debug_metadata["host_port"] == "49001"
+    assert after_http_rebind.endpoint == "http://127.0.0.1:49001/api/sandbox-runner/execute"
+
+    # Simulate `docker restart` rebinding the SSH port on the same running container ID.
+    container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "49002"}]
+    fake_client.images.gets.clear()
+    after_ssh_rebind = backend.ensure_worker(spec, now=30.0)
+    assert fake_client.images.gets == [backend.config.image]
+    assert len(fake_client.containers.run_calls) == 1
+    assert after_ssh_rebind.ssh_endpoint is not None
+    assert after_ssh_rebind.ssh_endpoint.port == 49002
+
+    # Next warm call hits the cache again with the updated live ports.
+    fake_client.images.gets.clear()
+    cached = backend.ensure_worker(spec, now=40.0)
+    assert fake_client.images.gets == []
+    assert cached == replace(after_ssh_rebind, last_used_at=40.0)
 
 
 def test_docker_backend_ready_cache_detects_replaced_container_and_daemon_errors(
