@@ -49,6 +49,7 @@ from mindroom.desktop.playwright_mcp import (
 )
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
+    DESKTOP_SHELL_PROTOCOL_VERSION,
     MAX_INLINE_RESPONSE_BYTES,
     DesktopCommand,
     DesktopProtocolError,
@@ -560,7 +561,10 @@ async def test_other_callers_see_shell_state_without_pending_command(transport: 
     """Remote status and receipts expose no pending command text to another allowed caller."""
     shell = _local_shell()
     bridge = _local_bridge(shell=shell)
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _command(
+        "run_shell",
+        parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+    )
     await bridge.on_to_device_event(_event(command))
     execution = asyncio.create_task(_execute(bridge))
     await _wait_for_pending_shell(bridge)
@@ -754,7 +758,10 @@ async def test_interrupted_shell_command_reports_unknown_outcome_after_restart(
     shell = _local_shell()
     bridge = _local_bridge(shell=shell, journal_path=journal)
     bridge.grant_local_shell(60)
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _command(
+        "run_shell",
+        parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+    )
     monkeypatch.setattr(bridge, "_execute_safely", AsyncMock(side_effect=asyncio.CancelledError))
     with pytest.raises(asyncio.CancelledError):
         await _handle(bridge, _event(command))

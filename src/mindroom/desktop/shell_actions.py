@@ -13,10 +13,16 @@ from mindroom.desktop.command_parameters import (
     optional_int_parameter,
     optional_str_parameter,
     reject_unexpected_parameters,
+    required_int_parameter,
     required_str_parameter,
 )
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES, SHELL_OUTPUT_MIME_TYPE, DesktopProtocolError
+from mindroom.desktop.protocol import (
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    MAX_INLINE_RESPONSE_BYTES,
+    SHELL_OUTPUT_MIME_TYPE,
+    DesktopProtocolError,
+)
 from mindroom.desktop.reply_fitting import fits_inline, leftmost_fitting
 from mindroom.desktop.shell import DesktopShellRequest
 from mindroom.logging_config import get_logger
@@ -141,8 +147,17 @@ async def execute_shell(
         }
     reject_unexpected_parameters(
         parameters,
-        allowed=frozenset({"command", "cwd", "timeout_seconds", "max_runtime_seconds"}),
+        allowed=frozenset({"command", "cwd", "timeout_seconds", "max_runtime_seconds", "shell_protocol"}),
     )
+    if (
+        "shell_protocol" not in parameters
+        or required_int_parameter(parameters, "shell_protocol") != DESKTOP_SHELL_PROTOCOL_VERSION
+    ):
+        msg = (
+            f"Unsupported desktop shell protocol; expected shell_protocol={DESKTOP_SHELL_PROTOCOL_VERSION}. "
+            "Update the MindRoom server and try again."
+        )
+        raise DesktopProtocolError(msg)
     timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
     max_runtime_seconds = _optional_positive_number_parameter(parameters, "max_runtime_seconds")
     request = DesktopShellRequest(

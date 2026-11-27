@@ -19,7 +19,13 @@ from mindroom.custom_tools import desktop_shell as desktop_shell_mod
 from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.media import DesktopMediaError
-from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError, DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.protocol import (
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    DesktopCommand,
+    DesktopProtocolError,
+    DesktopResponse,
+    EncryptedDesktopMedia,
+)
 from mindroom.desktop.shell import DesktopShell
 from mindroom.desktop.shell_actions import execute_shell
 from mindroom.matrix.olm_to_device import OlmToDeviceError
@@ -255,6 +261,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         "command": "git commit -m 'hello world'",
         "cwd": "/Users/me/repo",
         "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
         "max_runtime_seconds": 120,
     }
     assert recorded[0][1] == 120.0
@@ -267,6 +274,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[1][0].parameters == {
         "command": "make test",
         "timeout_seconds": 1,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
         "max_runtime_seconds": 1.0,
     }
 
@@ -276,6 +284,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[2][0].parameters == {
         "command": "echo hi && pwd",
         "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
         "max_runtime_seconds": 120,
     }
 
@@ -285,6 +294,7 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[3][0].parameters == {
         "command": "ls -la",
         "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
         "max_runtime_seconds": 120,
     }
 
@@ -401,6 +411,7 @@ async def test_outdated_helper_parameter_rejection_returns_clear_update_error(
     assert recorded[0][0].parameters == {
         "command": "echo hi",
         "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
         "max_runtime_seconds": 15.0,
     }
 
@@ -1173,6 +1184,7 @@ async def test_helper_enforced_timeout_formats_like_native_and_saves_no_output_f
     assert recorded_job[0][0].parameters == {
         "command": "long-job",
         "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
     }
 
     # Helper returns state="killed", timed_out=True across a paged drain -> matches native timeout formatting.
@@ -1412,3 +1424,58 @@ async def test_untimed_desktop_shell_in_subagent_gets_default_timeout_while_top_
     assert "working" in result
     assert recorded_sub[0][0].parameters["max_runtime_seconds"] == 0.05
     assert any(cmd.action == "kill_shell" and cmd.parameters["handle"] == "shell:sub" for cmd, _ in recorded_sub)
+
+
+@pytest.mark.asyncio
+async def test_untimed_managed_job_against_outdated_helper_fails_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An untimed managed job (no max_runtime_seconds) still sends shell_protocol so outdated helpers fail closed."""
+    legacy_allowed = frozenset({"command", "cwd", "timeout_seconds"})
+    executed = False
+
+    def legacy_helper(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        nonlocal executed
+        unexpected = sorted(set(cmd.parameters) - legacy_allowed)
+        if unexpected:
+            return DesktopResponse(
+                cmd.request_id,
+                cmd.session_id,
+                False,
+                error=f"Unexpected desktop parameters: {', '.join(unexpected)}.",
+            )
+        executed = True
+        return _shell_reply(output="should-not-run\n")
+
+    tool, recorded = _setup_tool(monkeypatch, legacy_helper)
+    with job_control_context(JobControl(job_id="job-outdated")), structured_tool_result() as meta:
+        result = await tool.run_desktop_shell("long-job")
+
+    assert not executed
+    assert isinstance(result, str)
+    assert result == f"Error: {desktop_shell_mod._OUTDATED_HELPER_ERROR}"
+    assert meta == {"not_started": True}
+    assert len(recorded) == 1
+    assert recorded[0][0].parameters == {
+        "command": "long-job",
+        "timeout_seconds": 2,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+    }
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "untouched.txt"
+    existing.write_text("keep")
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    tool_file, _ = _setup_tool(monkeypatch, legacy_helper)
+    fn = next(fn for fn in adapt_toolkit(tool_file).functions if fn.name == "run_desktop_shell")
+    with job_control_context(JobControl(job_id="job-outdated-file")), structured_tool_result() as meta_file:
+        receipt = json.loads(
+            await with_output_files(fn, policy).entrypoint(args="long-job", mindroom_output_path="untouched.txt"),
+        )["mindroom_tool_output"]
+    assert not executed
+    assert meta_file == {"not_started": True}
+    assert receipt["status"] == "error"
+    assert receipt["error"] == desktop_shell_mod._OUTDATED_HELPER_ERROR
+    assert existing.read_text() == "keep"

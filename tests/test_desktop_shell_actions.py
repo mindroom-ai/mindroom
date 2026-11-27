@@ -16,7 +16,12 @@ import nio
 import pytest
 
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media, upload_encrypted_media
-from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError, EncryptedDesktopMedia
+from mindroom.desktop.protocol import (
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    DesktopCommand,
+    DesktopProtocolError,
+    EncryptedDesktopMedia,
+)
 from mindroom.desktop.reply_fitting import fits_inline
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
@@ -97,7 +102,14 @@ async def _wait_for_finished_handle(shell: DesktopShell, handle: str) -> None:
 async def test_shell_actions_require_a_shell() -> None:
     """Without local shell access there is nothing to run, check, or kill."""
     with pytest.raises(DesktopProtocolError, match=r"^Local shell access is disabled\.$"):
-        await execute_shell(_CLIENT, None, _command("run_shell", parameters={"command": PRIVATE_COMMAND}))
+        await execute_shell(
+            _CLIENT,
+            None,
+            _command(
+                "run_shell",
+                parameters={"command": PRIVATE_COMMAND, "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+            ),
+        )
 
 
 def test_disabled_shell_reports_empty_status_to_everyone() -> None:
@@ -118,7 +130,15 @@ def test_disabled_shell_reports_empty_status_to_everyone() -> None:
 async def test_run_shell_defaults_to_local_home_and_requires_local_approval() -> None:
     """Omitted cwd resolves locally, and a local rejection starts no process."""
     shell = _local_shell()
-    execution = asyncio.create_task(_execute(shell, _command("run_shell", parameters={"command": PRIVATE_COMMAND})))
+    execution = asyncio.create_task(
+        _execute(
+            shell,
+            _command(
+                "run_shell",
+                parameters={"command": PRIVATE_COMMAND, "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+            ),
+        ),
+    )
     pending = await _wait_for_pending(shell)
     assert pending == {
         "request_id": "request-1",
@@ -171,7 +191,7 @@ async def test_shell_actions_reject_unrelated_or_malformed_parameters(
     """Strict parameters are checked before any approval request exists."""
     shell = _local_shell()
     if action == "run_shell":
-        parameters = {**parameters, "cwd": str(tmp_path)}
+        parameters = {**parameters, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION}
     with pytest.raises(DesktopProtocolError, match=f"^{re.escape(error)}$"):
         await _execute(shell, _command(action, parameters=parameters))
     assert shell.status()["pending"] is None
@@ -182,7 +202,10 @@ async def test_shell_actions_reject_unrelated_or_malformed_parameters(
 async def test_caller_shell_status_hides_another_callers_pending_command(tmp_path: Path) -> None:
     """Another allowed caller learns only that approval is pending; the local view shows the command."""
     shell = _local_shell()
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _command(
+        "run_shell",
+        parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+    )
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_pending(shell)
     status = caller_shell_status(shell, _command("status", requester_id=BOB))
@@ -872,7 +895,12 @@ async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tm
                 _command(
                     "run_shell",
                     request_id=f"bad-max-{idx}",
-                    parameters={"command": "echo hi", "cwd": str(tmp_path), "max_runtime_seconds": bad_value},
+                    parameters={
+                        "command": "echo hi",
+                        "cwd": str(tmp_path),
+                        "max_runtime_seconds": bad_value,
+                        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+                    },
                 ),
             )
 
@@ -910,4 +938,41 @@ async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tm
     assert payload["state"] == "killed"
     assert payload["timed_out"] is True
     assert payload["output"] == "partial\n"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_rejects_missing_or_mismatched_shell_protocol_before_approval(tmp_path: Path) -> None:
+    """run_shell fails closed before approval when shell_protocol is missing, mismatched, or non-integer."""
+    shell = _local_shell()
+    marker = tmp_path / "should-not-run"
+
+    # Missing or mismatched protocol tells the caller to update the MindRoom server.
+    for idx, extra in enumerate(({}, {"shell_protocol": 1}, {"shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION + 1})):
+        with pytest.raises(DesktopProtocolError, match="Update the MindRoom server"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-proto-{idx}",
+                    parameters={"command": f"touch {marker}", "cwd": str(tmp_path), **extra},
+                ),
+            )
+        assert shell.status()["pending"] is None
+        assert not marker.exists()
+
+    # Non-integer protocol values are also rejected before approval.
+    for idx, bad_value in enumerate(("2", True, None)):
+        with pytest.raises(DesktopProtocolError, match="Desktop parameter shell_protocol must be an integer"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-proto-type-{idx}",
+                    parameters={"command": f"touch {marker}", "cwd": str(tmp_path), "shell_protocol": bad_value},
+                ),
+            )
+        assert shell.status()["pending"] is None
+        assert not marker.exists()
+
     await shell.close()

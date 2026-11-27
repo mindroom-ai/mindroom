@@ -433,7 +433,11 @@ class _DesktopShellRunner:
         """Start, poll, drain, and format one desktop shell command."""
         stop_after = shell_call_timeout(timeout_limit)
         start_wait = 1 if (timeout_limit is not None and timeout_limit <= 1) else 2
-        params: _Params = {"command": command, "timeout_seconds": start_wait}
+        params: _Params = {
+            "command": command,
+            "timeout_seconds": start_wait,
+            "shell_protocol": protocol.DESKTOP_SHELL_PROTOCOL_VERSION,
+        }
         if cwd is not None:
             params["cwd"] = cwd
         if stop_after is not None:
