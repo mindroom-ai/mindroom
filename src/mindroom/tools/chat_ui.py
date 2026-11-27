@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -30,38 +30,26 @@ if TYPE_CHECKING:
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     config_fields=[
-        ConfigField(
-            name="enable_show_canvas",
-            label="Enable Show Canvas",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_show_canvas",
+            "Enable Show Canvas",
             default=False,
-            description=(
-                "Let the agent show interactive web pages in the Canvas panel. "
-                "MindRoom Chat shows them unless its deployment turns canvases off (mindroom.canvas.enabled)."
-            ),
+            description="Let the agent show interactive web pages in the Canvas panel. "
+            "MindRoom Chat shows them unless its deployment turns canvases off (mindroom.canvas.enabled).",
         ),
-        ConfigField(
-            name="enable_canvas_libraries",
-            label="Enable Canvas Libraries",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_canvas_libraries",
+            "Enable Canvas Libraries",
             default=False,
-            description=(
-                "Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. "
-                "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries)."
-            ),
+            description="Tell the agent its canvas pages may load libraries from https://cdn.jsdelivr.net/npm/. "
+            "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries).",
         ),
-        ConfigField(
-            name="enable_canvas_remote_assets",
-            label="Enable Canvas Remote Assets",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_canvas_remote_assets",
+            "Enable Canvas Remote Assets",
             default=False,
-            description=(
-                "Tell the agent its canvas pages may load images, styles, fonts, media and scripts from any https: address. "
-                "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.remoteAssets)."
-            ),
+            description="Tell the agent its canvas pages may load images, styles, fonts, media and scripts from any https: address. "
+            "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.remoteAssets).",
         ),
     ],
     requires_primary_runtime=True,

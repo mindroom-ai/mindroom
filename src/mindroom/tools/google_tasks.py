@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -31,20 +31,10 @@ if TYPE_CHECKING:
     icon="SiGoogletasks",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="read_tasks",
-            label="Read Tasks",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow listing task lists and tasks.",
-        ),
-        ConfigField(
-            name="manage_tasks",
-            label="Manage Tasks",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field("read_tasks", "Read Tasks", description="Allow listing task lists and tasks."),
+        bool_config_field(
+            "manage_tasks",
+            "Manage Tasks",
             description="Allow creating, updating, completing, and deleting tasks.",
         ),
     ],

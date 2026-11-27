@@ -162,7 +162,7 @@ def _tool_ctx(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
     orch = SimpleNamespace(
         agent_bots={"dev": SimpleNamespace(running=True, client=client, agent_name="dev")},
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        reactive_triggers=SimpleNamespace(notify_work=MagicMock()),
+        reactive_triggers=SimpleNamespace(notify_work=MagicMock(), event_sources=None),
     )
     return make_test_tool_runtime_context(
         agent_name="dev",

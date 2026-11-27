@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -31,12 +31,9 @@ if TYPE_CHECKING:
     icon="NotebookPen",
     icon_color="text-purple-600",
     config_fields=[
-        ConfigField(
-            name="write",
-            label="Allow Write Operations",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "write",
+            "Allow Write Operations",
             description="Allow creating pages and appending text to pages.",
         ),
     ],

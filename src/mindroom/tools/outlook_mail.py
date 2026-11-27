@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -32,16 +32,11 @@ if TYPE_CHECKING:
     icon="Mail",
     icon_color="text-sky-600",
     config_fields=[
-        ConfigField(
-            name="write",
-            label="Allow Write Operations",
-            type="boolean",
-            required=False,
-            default=True,
-            description=(
-                "Allow creating drafts, sending and replying, marking read, moving messages, "
-                "and changing automatic replies."
-            ),
+        bool_config_field(
+            "write",
+            "Allow Write Operations",
+            description="Allow creating drafts, sending and replying, marking read, moving messages, "
+            "and changing automatic replies.",
         ),
     ],
     managed_init_args=(

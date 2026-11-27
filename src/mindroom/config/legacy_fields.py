@@ -376,6 +376,17 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
+# LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
+# Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
+# Last legacy release: v2026.11.651; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
+# Handling: Reject `slack_watch` in `include_tools`/`exclude_tools` on `slack` and fail closed in `tool_approval.rules`
+#   whenever both `slack` and `triggers` toolkits are enabled and `slack_watch` conflicts with `triggers` (allowing broad
+#   `slack_*` globs paired with an explicit exact `triggers` rule).
+# Coverage: tests/slack/test_event_source.py::test_retired_slack_watch_config_validation_fails_closed.
+_RETIRED_SLACK_FUNCTIONS: dict[str, str] = {
+    "slack_watch": "triggers",
+}
+
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -893,11 +904,10 @@ def _retired_approval_pair_error(
     new: str,
     default: str,
     default_timeout_days: float,
+    broad_probe: str | None = None,
 ) -> str | None:
-    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
-    if first_new is not None and rules[first_new].match == new:
-        return None
     first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
     old_decision = _effective_approval_decision(
         rules[first_old] if first_old is not None else None,
         default=default,
@@ -909,6 +919,13 @@ def _retired_approval_pair_error(
         default_timeout_days=default_timeout_days,
     )
     if old_decision == new_decision:
+        return None
+    if first_new is not None and rules[first_new].match == new:
+        if broad_probe is not None and first_old is not None and not fnmatchcase(broad_probe, rules[first_old].match):
+            return (
+                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} targets retired {old}, "
+                f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
+            )
         return None
     if first_old is not None:
         return (
@@ -925,13 +942,15 @@ def _retired_approval_pair_error(
     return None
 
 
-def retired_trigger_approval_error(
+def _first_retired_approval_error(
     rules: Sequence[_ApprovalRule],
+    renames: Mapping[str, str],
     default: str,
     default_timeout_days: float = 7.0,
+    *,
+    broad_probe: str | None = None,
 ) -> str | None:
-    """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
-    for old, new in _RETIRED_TRIGGER_FUNCTIONS.items():
+    for old, new in renames.items():
         if (
             error := _retired_approval_pair_error(
                 rules,
@@ -939,10 +958,35 @@ def retired_trigger_approval_error(
                 new=new,
                 default=default,
                 default_timeout_days=default_timeout_days,
+                broad_probe=broad_probe,
             )
         ) is not None:
             return error
     return None
+
+
+def retired_trigger_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
+    return _first_retired_approval_error(rules, _RETIRED_TRIGGER_FUNCTIONS, default, default_timeout_days)
+
+
+def retired_slack_watch_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide `triggers` differently from retired `slack_watch`."""
+    return _first_retired_approval_error(
+        rules,
+        _RETIRED_SLACK_FUNCTIONS,
+        default,
+        default_timeout_days,
+        broad_probe="slack_post",
+    )
 
 
 def retired_consolidated_approval_error(
@@ -954,20 +998,11 @@ def retired_consolidated_approval_error(
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
-    if not effective_renames:
-        return None
-    for old, new in effective_renames.items():
-        if (
-            error := _retired_approval_pair_error(
-                rules,
-                old=old,
-                new=new,
-                default=default,
-                default_timeout_days=default_timeout_days,
-            )
-        ) is not None:
-            return error
-    return None
+    return (
+        _first_retired_approval_error(rules, effective_renames, default, default_timeout_days)
+        if effective_renames
+        else None
+    )
 
 
 def _retired_function_filter(
@@ -1010,11 +1045,25 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     )
 
 
+def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired Slack function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        _RETIRED_SLACK_FUNCTIONS,
+        guidance_for=lambda _key, _new: (
+            '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
+            "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
+        ),
+    )
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
         return retired
     if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
+        return retired
+    if tool_name == "slack" and (retired := _retired_slack_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

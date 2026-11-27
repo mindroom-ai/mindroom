@@ -13,7 +13,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, run_fetch_sync
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.trafilatura_call_limit import CALL_SECONDS
 
@@ -48,14 +55,11 @@ class _TrafilaturaImports(NamedTuple):
 
 def _require_trafilatura() -> _TrafilaturaImports:
     """Import and return the Trafilatura functions and settings needed by the toolkit."""
-    try:
-        from trafilatura import extract, extract_metadata, html2txt
-        from trafilatura.downloads import USER_AGENT, Response
-        from trafilatura.meta import reset_caches
-        from trafilatura.settings import DEFAULT_CONFIG
-    except ImportError as exc:
-        msg = "`trafilatura` not installed. Please install using `pip install trafilatura`"
-        raise ImportError(msg) from exc
+    from trafilatura import extract, extract_metadata, html2txt
+    from trafilatura.downloads import USER_AGENT, Response
+    from trafilatura.meta import reset_caches
+    from trafilatura.settings import DEFAULT_CONFIG
+
     return _TrafilaturaImports(
         extract=extract,
         extract_metadata=extract_metadata,
@@ -238,7 +242,6 @@ class _TrafilaturaTools(Toolkit):
         enable_crawl_website: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_trafilatura()
         _install_server_fetch_guard()
 
         self.output_format = output_format
@@ -523,62 +526,14 @@ class _TrafilaturaTools(Toolkit):
             default="txt",
             description="Output format: txt, json, markdown, xml, csv, or html",
         ),
-        ConfigField(
-            name="include_comments",
-            label="Include Comments",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="include_tables",
-            label="Include Tables",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="include_images",
-            label="Include Images",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="include_formatting",
-            label="Include Formatting",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="include_links",
-            label="Include Links",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="with_metadata",
-            label="Include Metadata",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="favor_precision",
-            label="Favor Precision",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="favor_recall",
-            label="Favor Recall",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("include_comments", "Include Comments"),
+        bool_config_field("include_tables", "Include Tables"),
+        bool_config_field("include_images", "Include Images", default=False),
+        bool_config_field("include_formatting", "Include Formatting", default=False),
+        bool_config_field("include_links", "Include Links", default=False),
+        bool_config_field("with_metadata", "Include Metadata", default=False),
+        bool_config_field("favor_precision", "Favor Precision", default=False),
+        bool_config_field("favor_recall", "Favor Recall", default=False),
         ConfigField(
             name="target_language",
             label="Target Language",
@@ -587,13 +542,7 @@ class _TrafilaturaTools(Toolkit):
             default=None,
             placeholder="e.g., en, de, fr (ISO 639-1)",
         ),
-        ConfigField(
-            name="deduplicate",
-            label="Deduplicate",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("deduplicate", "Deduplicate", default=False),
         ConfigField(
             name="max_tree_size",
             label="Max Tree Size",
@@ -615,48 +564,12 @@ class _TrafilaturaTools(Toolkit):
             required=False,
             default=100000,
         ),
-        ConfigField(
-            name="enable_extract_text",
-            label="Enable Extract Text",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_extract_metadata_only",
-            label="Enable Extract Metadata Only",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_html_to_text",
-            label="Enable HTML to Text",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_extract_batch",
-            label="Enable Extract Batch",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_crawl_website",
-            label="Enable Crawl Website",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_extract_text", "Enable Extract Text"),
+        bool_config_field("enable_extract_metadata_only", "Enable Extract Metadata Only"),
+        bool_config_field("enable_html_to_text", "Enable HTML to Text"),
+        bool_config_field("enable_extract_batch", "Enable Extract Batch"),
+        bool_config_field("enable_crawl_website", "Enable Crawl Website"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["trafilatura"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#trafilatura",
@@ -664,6 +577,5 @@ class _TrafilaturaTools(Toolkit):
 )
 def trafilatura_tools() -> type[Toolkit]:
     """Return Trafilatura tools whose downloads follow the server-fetch policy within one time limit per call."""
-    _require_trafilatura()
     _install_server_fetch_guard()
     return _TrafilaturaTools

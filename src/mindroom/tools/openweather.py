@@ -10,14 +10,21 @@ import httpx
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -91,7 +98,7 @@ class _OpenWeatherTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``openweather_get`` actions to the ones enabled on this instance."""
         if function.name == "openweather_get":
-            return narrow_action_enum(function, self._enabled_actions)
+            return restrict_actions(function, self._enabled_actions)
         return function
 
     def _request_json(self, url: str, params: dict[str, Any]) -> Any:  # noqa: ANN401 - JSON dict or list
@@ -191,41 +198,11 @@ class _OpenWeatherTools(Toolkit):
             required=False,
             default="metric",
         ),
-        ConfigField(
-            name="enable_current_weather",
-            label="Enable Current Weather",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_forecast",
-            label="Enable Forecast",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_air_pollution",
-            label="Enable Air Pollution",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_geocoding",
-            label="Enable Geocoding",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_current_weather", "Enable Current Weather"),
+        bool_config_field("enable_forecast", "Enable Forecast"),
+        bool_config_field("enable_air_pollution", "Enable Air Pollution"),
+        bool_config_field("enable_geocoding", "Enable Geocoding"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",

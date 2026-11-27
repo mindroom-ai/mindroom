@@ -230,11 +230,22 @@ def test_postgres_scoped_credentials_read_only_and_export(
     assert explain_tool.postgres_inspect("inspect_query", query="SELECT ';' AS separator;") == "QUERY PLAN\nResult"
     assert explain_conn.cursor_obj.executed[0][0] == "EXPLAIN SELECT ';' AS separator"
 
-    export_conn = _FakeConnection([([("id",), ("name",)], [{"id": 1, "name": "alice"}])])
+    export_conn = _FakeConnection(
+        [
+            ([("id",), ("name",)], [{"id": 1, "name": "alice"}]),
+            ([("id",), ("name",)], [{"id": 1, "name": "alice"}]),
+        ],
+    )
     export_tool = pg_cls(connection=export_conn, table_schema="public")
     out_csv = tmp_path / "users.csv"
     assert "Successfully exported" in export_tool.export_table_to_path("users", str(out_csv))
     assert out_csv.read_text(encoding="utf-8").splitlines() == ["id,name", "1,alice"]
+    assert export_conn.rolled_back is False
+    assert "Error exporting table:" in export_tool.export_table_to_path(
+        "users",
+        str(tmp_path / "missing_dir" / "users.csv"),
+    )
+    assert export_conn.rolled_back is True
     export_tool.close()
     assert export_conn.closed is False
 
@@ -702,3 +713,98 @@ def test_postgres_commits_search_path_before_failed_query_rollback(
 
     tool.close()
     assert conn.closed is True
+
+
+def test_postgres_summarize_table_skips_interval_and_point_columns() -> None:
+    """PostgreSQL summarize_table skips interval/point columns and summarizes integer/text columns."""
+    pg_cls = cast("Any", builtin_tool_registry().factory("postgres")())
+    conn = _FakeConnection(
+        [
+            (
+                [("column_name",), ("data_type",)],
+                [
+                    {"column_name": "id", "data_type": "integer"},
+                    {"column_name": "duration", "data_type": "interval"},
+                    {"column_name": "coords", "data_type": "point"},
+                    {"column_name": "label", "data_type": "text"},
+                ],
+            ),
+            (
+                [
+                    ("total_rows",),
+                    ("non_null_rows",),
+                    ("min",),
+                    ("max",),
+                    ("average",),
+                    ("std_deviation",),
+                ],
+                [
+                    {
+                        "total_rows": 3,
+                        "non_null_rows": 3,
+                        "min": 1,
+                        "max": 5,
+                        "average": 3.0,
+                        "std_deviation": 2.0,
+                    },
+                ],
+            ),
+            (
+                [("total_rows",), ("non_null_rows",), ("unique_values",), ("avg_length",)],
+                [{"total_rows": 3, "non_null_rows": 2, "unique_values": 2, "avg_length": 4.5}],
+            ),
+        ],
+    )
+    tool = pg_cls(connection=conn, table_schema="analytics")
+
+    summary = tool.postgres_inspect("summarize_table", table="measurements")
+
+    rendered_queries = [
+        query.as_string(None) if isinstance(query, psycopg.sql.Composable) else str(query)
+        for query, _params in conn.cursor_obj.executed
+    ]
+    assert len(rendered_queries) == 3
+    assert 'STDDEV("id")' in rendered_queries[1]
+    assert 'FROM "analytics"."measurements"' in rendered_queries[1]
+    assert 'AVG(LENGTH("label"::text))' in rendered_queries[2]
+    assert all('"duration"' not in q and '"coords"' not in q for q in rendered_queries)
+
+    assert "Summary for table: measurements" in summary
+    assert "--- Column: id (Type: integer) ---" in summary
+    assert "  std_deviation: 2.00" in summary
+    assert "--- Column: label (Type: text) ---" in summary
+    assert "  avg_length: 4.50" in summary
+    assert "duration" not in summary
+    assert "interval" not in summary
+    assert "coords" not in summary
+    assert "point" not in summary
+    assert conn.rolled_back is False
+
+
+def test_redshift_local_csv_export_failure_does_not_rollback_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed local CSV export in Redshift does not roll back the active transaction."""
+    rs_cls = cast("Any", builtin_tool_registry().factory("redshift")())
+    connections: list[_StatefulRedshiftConnection] = []
+
+    def fake_connect(**_kwargs: object) -> _StatefulRedshiftConnection:
+        conn = _StatefulRedshiftConnection()
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(redshift_connector, "connect", fake_connect)
+    tool = rs_cls(host="rs.example", database="dev", user="admin", password=_DUMMY_SECRET)
+
+    assert tool.run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
+    assert len(connections) == 1
+
+    missing_path = tmp_path / "missing_dir" / "t.csv"
+    assert "Error exporting table:" in tool.export_table_to_path("t", str(missing_path))
+    assert connections[0].rolled_back is False
+    # Uncommitted temp-table state remains usable because the connection was not rolled back.
+    assert tool.run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
+
+    tool.close()
+    assert connections[0].closed is True

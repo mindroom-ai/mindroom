@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -29,34 +29,10 @@ if TYPE_CHECKING:
     icon="FaVideo",
     icon_color="text-purple-600",
     config_fields=[
-        ConfigField(
-            name="enable_process_video",
-            label="Enable Process Video",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_generate_captions",
-            label="Enable Generate Captions",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_embed_captions",
-            label="Enable Embed Captions",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_process_video", "Enable Process Video"),
+        bool_config_field("enable_generate_captions", "Enable Generate Captions"),
+        bool_config_field("enable_embed_captions", "Enable Embed Captions"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["moviepy"],

@@ -104,7 +104,7 @@ class ScriptCheckPoller:
     async def poll_due_once(self, *, now: float | None = None) -> int:
         """Poll due script_check triggers once and return newly enqueued firing count."""
         pol = self._config_provider().external_trigger_policy
-        if self._tick_runner is None or not (pol.enabled and pol.reactive_enabled and pol.script_check_enabled):
+        if self._tick_runner is None or not (pol.is_reactive_active and pol.script_check_enabled):
             return 0
         fixed_now = now is not None
         current_time = time.time() if now is None else now

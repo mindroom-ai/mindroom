@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -32,44 +33,17 @@ if TYPE_CHECKING:
     icon="SiGoogledrive",
     icon_color="text-green-600",
     config_fields=[
-        ConfigField(
-            name="list_files",
-            label="List Files",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow listing recent Google Drive files.",
-        ),
-        ConfigField(
-            name="search_files",
-            label="Search Files",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow searching Google Drive metadata.",
-        ),
-        ConfigField(
-            name="read_file",
-            label="Read Files",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow reading Google Drive files as text.",
-        ),
-        ConfigField(
-            name="download_file",
-            label="Download Files",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field("list_files", "List Files", description="Allow listing recent Google Drive files."),
+        bool_config_field("search_files", "Search Files", description="Allow searching Google Drive metadata."),
+        bool_config_field("read_file", "Read Files", description="Allow reading Google Drive files as text."),
+        bool_config_field(
+            "download_file",
+            "Download Files",
             description="Allow saving Google Drive files, including binary files, into the agent workspace.",
         ),
-        ConfigField(
-            name="write",
-            label="Allow Write Operations",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "write",
+            "Allow Write Operations",
             description="Allow uploading, replacing file contents, creating folders, moving or renaming, and trashing.",
         ),
         ConfigField(

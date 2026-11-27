@@ -7,24 +7,20 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = get_logger(__name__)
-
-
-def _require_firecrawl() -> tuple[type[Any], type[Any]]:
-    """Import and return Firecrawl SDK classes, raising a helpful ImportError when absent."""
-    try:
-        from firecrawl import FirecrawlApp
-        from firecrawl.types import ScrapeOptions
-    except ImportError as exc:
-        msg = "`firecrawl-py` not installed. Please install using `pip install firecrawl-py`"
-        raise ImportError(msg) from exc
-    return FirecrawlApp, ScrapeOptions
 
 
 def _serialize(value: Any) -> str:  # noqa: ANN401
@@ -50,7 +46,8 @@ class _FirecrawlTools(Toolkit):
         search_params: dict[str, Any] | None = None,
         api_url: str | None = "https://api.firecrawl.dev",
     ) -> None:
-        firecrawl_app_cls, _ = _require_firecrawl()
+        from firecrawl import FirecrawlApp
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("firecrawl_api_key_missing")
@@ -58,7 +55,8 @@ class _FirecrawlTools(Toolkit):
         self.formats = formats
         self.limit = limit
         self.poll_interval = poll_interval
-        self.app = firecrawl_app_cls(api_key=self.api_key, api_url=api_url)
+        firecrawl_app: Any = FirecrawlApp
+        self.app: Any = firecrawl_app(api_key=self.api_key, api_url=api_url)
         self.search_params = search_params
 
         tools: list[Callable[..., Any]] = []
@@ -97,13 +95,15 @@ class _FirecrawlTools(Toolkit):
             The results of the crawling.
 
         """
-        _, scrape_options_cls = _require_firecrawl()
+        from firecrawl.types import ScrapeOptions
+
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         elif self.limit is not None:
             params["limit"] = self.limit
         if self.formats:
+            scrape_options_cls: Any = ScrapeOptions
             params["scrape_options"] = scrape_options_cls(formats=self.formats)
         params["poll_interval"] = self.poll_interval
 
@@ -128,11 +128,13 @@ class _FirecrawlTools(Toolkit):
             limit: The maximum number of results to return. Defaults to the limit set on the toolkit.
 
         """
-        _, scrape_options_cls = _require_firecrawl()
+        from firecrawl.types import ScrapeOptions
+
         params: dict[str, Any] = {}
         if self.limit is not None:
             params["limit"] = self.limit
         if self.formats:
+            scrape_options_cls: Any = ScrapeOptions
             params["scrape_options"] = scrape_options_cls(formats=self.formats)
         if self.search_params:
             params.update(self.search_params)
@@ -167,41 +169,11 @@ class _FirecrawlTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_scrape",
-            label="Enable Scrape",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_mapping",
-            label="Enable Mapping",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_search",
-            label="Enable Search",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_scrape", "Enable Scrape"),
+        bool_config_field("enable_crawl", "Enable Crawl", default=False),
+        bool_config_field("enable_mapping", "Enable Mapping", default=False),
+        bool_config_field("enable_search", "Enable Search", default=False),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="formats",
             label="Formats",
@@ -237,5 +209,4 @@ class _FirecrawlTools(Toolkit):
 )
 def firecrawl_tools() -> type[Toolkit]:
     """Return Firecrawl tools for web scraping and crawling."""
-    _require_firecrawl()
     return _FirecrawlTools

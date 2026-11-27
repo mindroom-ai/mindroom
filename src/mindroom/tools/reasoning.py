@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -23,27 +30,9 @@ if TYPE_CHECKING:
     icon="FaBrain",
     icon_color="text-purple-500",
     config_fields=[
-        ConfigField(
-            name="enable_think",
-            label="Enable Think",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_analyze",
-            label="Enable Analyze",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="add_few_shot",
-            label="Add Few-Shot Examples",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_think", "Enable Think"),
+        bool_config_field("enable_analyze", "Enable Analyze"),
+        bool_config_field("add_few_shot", "Add Few-Shot Examples", default=False),
         ConfigField(
             name="instructions",
             label="Instructions",
@@ -60,13 +49,7 @@ if TYPE_CHECKING:
             default=None,
             description="Custom few-shot examples for the reasoning tools",
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#reasoning",

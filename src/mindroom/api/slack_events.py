@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
     from mindroom.slack.app import SlackAppCredentials
     from mindroom.slack.delivery import SlackRuntime
     from mindroom.slack.turns import DeliveryResult
@@ -67,7 +66,7 @@ async def post_slack_event(request: Request) -> Response:
     if payload.get("type") == "url_verification":
         return JSONResponse({"challenge": payload.get("challenge")})
     attempt = create_background_task(
-        _deliver_now(payload, runtime, config, runtime_paths, credentials_manager, app),
+        _deliver_now(payload, runtime, config, runtime_paths, app),
         name="slack_event_delivery",
         owner=runtime,
     )
@@ -97,7 +96,6 @@ async def _deliver_now(
     runtime: SlackRuntime,
     config: Config,
     runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager,
     app: SlackAppCredentials,
 ) -> DeliveryResult:
     """Deliver with a Slack client of the task's own, which outlives the request."""
@@ -107,7 +105,6 @@ async def _deliver_now(
             runtime=runtime,
             config=config,
             runtime_paths=runtime_paths,
-            credentials_manager=credentials_manager,
             app=app,
             client=client,
             now=int(time.time()),

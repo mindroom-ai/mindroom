@@ -11795,7 +11795,7 @@ A command with `timeout` <= 120 that is still running after `timeout` seconds is
 When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) (with `background_after` unset) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
 A managed top-level job still saves `mindroom_output_path` when it completes; a command stopped at its timeout or backgrounded in the current turn saves no file.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
-A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
+A command that exits non-zero or stops at its timeout returns an error result, so its job ends `failed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` or `Stopped after <timeout>s.` line (or, with `mindroom_output_path`, the output-file receipt), and `job(action="wait")` / `job(action="collect")` still deliver that full output.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
 
@@ -15762,7 +15762,6 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
 | `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
 | `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
-| `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
 
 Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
 `slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
@@ -15959,49 +15958,48 @@ A channel has one answering agent, so two agents cannot both set `room` with the
 
 ## Watches
 
-A watch forwards a person's own Slack mentions and direct messages into the Matrix room where they start it.
+A Slack watch forwards a person's own Slack mentions, bound thread replies, and direct messages into a private Matrix room through the unified `triggers` toolkit (`source_id="slack"`).
 It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
+Existing `<control_state>/slack/watches.json` watches and live thread bindings are migrated automatically on startup and archived as `watches.json.migrated`.
 
-In the room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `slack_watch`:
+In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers(action="subscribe_event", source_id="slack", ...)`:
 
-- `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
-- `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
-- `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
-- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
-- `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
-  Replies in a thread where the person was mentioned also arrive, within those channels.
+- `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
+- `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
+- Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives, and `max_fires_per_hour=60` (capped by `external_trigger_policy.max_fires_per_hour`).
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
-Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel unless it is a direct message, and a link.
-Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
-The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
-A watch lasts until it is stopped.
+Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
+Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.
+The agent's turn runs as the watch's owner.
 
-A watch delivers only while all of these hold, so someone else never reads a private message:
+A Slack watch delivers only while all of these hold, so someone else never reads a private message:
 
 - Only the owner and MindRoom's own accounts are in the room, and nobody is invited; a bridge or other bot counts as a person.
 - The room hides earlier messages from people who join later.
   A [personal room](https://docs.mindroom.chat/personal-rooms/) MindRoom created already does.
-- The owner's Slack connection works and is still the Slack account the watch started with.
+- The target agent still has personal Slack configured, the Slack app has an `app_token`, and the owner's Slack connection is still the Slack account bound at subscribe time.
 
-`slack_watch(action="status")` reports a paused watch with one of these texts:
+`triggers(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
 
-| Status | Fix |
+| `paused_reason` | Fix |
 | --- | --- |
-| `paused: Slack is not connected` | Connect Slack again from the link the agent gives. |
-| `paused: Slack account changed; start the watch again` | Start the watch again. |
-| `paused: you are not in this room` | Rejoin the room. |
-| `paused: another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
-| `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
-| `paused: room members could not be checked` | Try again when the homeserver answers. |
+| `Slack is not connected` | Connect Slack again from the link the agent gives. |
+| `Slack account changed; recreate this subscription` | Delete and recreate the Slack trigger subscription. |
+| `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
+| `the watch's agent no longer has personal Slack` | Re-enable personal `slack` on the target agent or recreate the subscription with another agent. |
+| `you are not in this room` | Rejoin the room. |
+| `another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
+| `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
+| `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn that a watch started, `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
-A new message from the owner in the same thread can post.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
 ## MCP
 
 `slack` works through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/): select the agent and the `slack` tool on the Connections portal, and calls use the signed-in person's own Slack account, as in Matrix.
-`slack_watch` does not work there.
 A project agent's channels are readable over MCP by everyone allowed to use that agent, and writable unless `write` is `false`, because its calls use the app's token.
 Which agents the gateway offers is described in [Agent eligibility](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility).
 
@@ -21116,6 +21114,7 @@ async def lifespan(lifecycle: PluginLifecycle):
 | `context()` | The plugin's [context](#plugin-context) under the config MindRoom serves now; it raises once that config no longer loads the plugin |
 | `process_state` | A dict that every start of this plugin shares for as long as the MindRoom process runs; a reload cancels no task kept in it |
 | `stop_reason` | Set before the stop code runs: `"reload"` when the plugin's new lifespan already started and can take over `process_state`, `"disabled"` when no new lifespan did because a config change removed or disabled the plugin or its new code failed to load or start, and `"shutdown"` when MindRoom stops, after its agents have stopped |
+| `register_event_source(source)` | Registers an [`EventSource`](#event-sources) on the primary runtime's reactive trigger service, returns its `EventSourceEmitter`, and auto-unregisters it when the lifespan stops |
 
 MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
 `mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
@@ -21130,6 +21129,71 @@ A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespa
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
+
+## Event sources
+
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
+
+Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
+Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
+
+```python
+# lifecycle.py
+from contextlib import asynccontextmanager
+
+from mindroom.plugin_api import EventSource, EventSourceDescriptor, PluginLifecycle
+
+
+class AlertsEventSource(EventSource):
+    source_id = "my-plugin-alerts"
+    description = "Incoming operational alerts from my-plugin."
+    allowed_kinds = ("fired", "resolved")
+    match_fields = ("severity",)
+    default_once = False
+    default_new_thread = True
+    default_thread_key_from_event = True
+
+
+@asynccontextmanager
+async def lifespan(lifecycle: PluginLifecycle):
+    emitter = lifecycle.register_event_source(AlertsEventSource())
+    lifecycle.process_state["alerts_emitter"] = emitter
+    yield
+```
+
+HTTP routes in `routes_module` can look up the active emitter for one of the plugin's own registered sources with `event_source_emitter(request, source_id)` from `mindroom.plugin_http`:
+
+```python
+# routes.py
+from fastapi import APIRouter, Request
+
+from mindroom.plugin_http import event_source_emitter
+
+router = APIRouter()
+
+
+@router.post("/webhook")
+async def receive_alert(request: Request) -> dict[str, int]:
+    # Verify the incoming provider signature or shared secret before emitting.
+    verify_provider_signature(request)
+    payload = await request.json()
+    emitter = event_source_emitter(request, "my-plugin-alerts")
+    enqueued = await emitter.emit(
+        kind=payload["kind"],
+        event_id=payload["id"],
+        title=payload.get("title"),
+        text=payload.get("body"),
+        thread_key=payload.get("incident_id"),
+        data={"severity": payload.get("severity", "info")},
+    )
+    return {"enqueued": enqueued}
+```
+
+Key contracts:
+
+- **Namespace:** A plugin's `source_id` must match `^[A-Za-z0-9_-]{1,64}$` and equal the plugin's `name` or start with `<name>_` or `<name>-`. Collisions with built-in sources, YAML `external_trigger_policy.event_sources`, or other plugins raise `ValueError`.
+- **Reload safety:** Registrations are token-fenced. During hot reload, the new lifespan atomically replaces the plugin's registration; when the old lifespan exits, its teardown leaves the replacement intact, and any call to the old `EventSourceEmitter.emit(...)` fails closed with `EventSourceInactiveError`.
+- **Access control & hooks on `EventSource`:** Override `describe_for_user(ctx) -> EventSourceDescriptor | None` to restrict which users can discover or subscribe to your source (returning `None` hides the source; otherwise any user with the `triggers` tool can subscribe). Always authenticate incoming webhook requests in your route before calling `event_source_emitter(...).emit(...)`. You can also override `validate_subscription(ctx, *, kind, match, existing_binding=None) -> ValidatedSubscription`, `matches_rule(rule, event, *, audience=None, has_thread_binding=False) -> bool`, `dry_run_audience(rule)`, `check_delivery_access(ctx, *, rule, event=None) -> EventSourceAccessDenial | None`, and `check_history_access(ctx, *, rule, event=None)` for per-user discovery, OAuth or room-privacy checks, ephemeral audience filtering, and private history gating. `EventSourceDescriptor.private_room_only` controls core listing visibility for non-owners, while plugins must enforce room and user access inside `validate_subscription`, `check_delivery_access` (returning `EventSourceAccessDenial`), and `check_history_access`. Returning `EventSourceAccessDenial(reason=..., retry=True)` retries the firing later, whereas `retry=False` (the default) skips it permanently.
 
 ## Worker services
 
@@ -22310,8 +22374,8 @@ async def check_for_injection(ctx: ToolResultTransformContext) -> str | None:
 - `ctx.result` is the text the model would read for the result.
   A hook returns a `str` to replace it or `None` to keep it.
   Hooks run one after another in priority order, and each sees the text the hook before it returned.
-- The hooks run only for a call that returned a result, not for one that raised, answered with a failed `ToolOutcome`, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
-  Failure text, such as the text of an MCP server's `isError` result, is not checked.
+- The hooks run for every call that returned a result, including tool-returned failed `ToolOutcome`s (such as failed shell commands), not for one that raised, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
+  Raised failure text, such as an unhandled exception or an MCP server's `isError` exception, is not checked.
 - What the hooks leave is what the model, the reply's record of the call (which an interrupted reply replays to its next attempt), the tool-call log, and `tool:after_call` hooks read.
   The hooks run after the call's shell commands, outside the environment they had, on the result with given secrets masked.
   A Stop while a hook runs leaves no result recorded, even when the hook catches it.

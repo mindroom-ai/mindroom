@@ -11,13 +11,19 @@ from uuid import uuid4
 from mindroom.llm.media import Image
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import ModuleType
 
 logger = get_logger(__name__)
 
@@ -68,16 +74,6 @@ _DATASETS: dict[str, str] = {
 }
 
 
-def _require_requests() -> ModuleType:
-    """Import and return ``requests``, raising a helpful ImportError when absent."""
-    try:
-        import requests
-    except ImportError as exc:
-        msg = "`requests` not installed."
-        raise ImportError(msg) from exc
-    return requests
-
-
 class _BrightDataTools(Toolkit):
     """Web scraping, screenshots, search engines, and structured data feeds via Bright Data."""
 
@@ -94,7 +90,6 @@ class _BrightDataTools(Toolkit):
         verbose: bool = False,
         timeout: int = 600,
     ) -> None:
-        _require_requests()
         self.api_key = api_key
         if not self.api_key:
             logger.error("brightdata_api_key_missing")
@@ -127,7 +122,8 @@ class _BrightDataTools(Toolkit):
         super().__init__(name="brightdata_tools", tools=tools)
 
     def _make_request(self, payload: dict[str, Any]) -> str:
-        requests = _require_requests()
+        import requests
+
         if self.verbose:
             logger.info("brightdata_request", url=payload["url"])
         response = requests.post(
@@ -182,7 +178,8 @@ class _BrightDataTools(Toolkit):
         if not url:
             return ToolValue(content="Please provide a URL to screenshot")
         try:
-            requests = _require_requests()
+            import requests
+
             logger.info("brightdata_screenshot", url=url)
             payload = {
                 "url": url,
@@ -301,7 +298,8 @@ class _BrightDataTools(Toolkit):
             return f"Invalid source_type: {source_type}. Valid options are: {valid_sources}"
 
         try:
-            requests = _require_requests()
+            import requests
+
             logger.info("brightdata_web_data_feed", source_type=source_type, url=url)
             request_data: dict[str, Any] = {"url": url}
             if source_type == "facebook_company_reviews" and num_of_reviews is not None:
@@ -324,7 +322,8 @@ class _BrightDataTools(Toolkit):
             return f"Error retrieving {source_type} data from {url}: {exc}"
 
     def _poll_snapshot(self, snapshot_id: str, source_type: str) -> str:
-        requests = _require_requests()
+        import requests
+
         attempts = 0
         max_attempts = self.timeout
         while attempts < max_attempts:
@@ -366,41 +365,11 @@ class _BrightDataTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_scrape_markdown",
-            label="Enable Scrape Markdown",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_screenshot",
-            label="Enable Screenshot",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_engine",
-            label="Enable Search Engine",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_web_data_feed",
-            label="Enable Web Data Feed",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_scrape_markdown", "Enable Scrape Markdown"),
+        bool_config_field("enable_screenshot", "Enable Screenshot"),
+        bool_config_field("enable_search_engine", "Enable Search Engine"),
+        bool_config_field("enable_web_data_feed", "Enable Web Data Feed"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="serp_zone",
             env=("BRIGHT_DATA_SERP_ZONE",),
@@ -417,13 +386,7 @@ class _BrightDataTools(Toolkit):
             required=False,
             default="web_unlocker1",
         ),
-        ConfigField(
-            name="verbose",
-            label="Verbose",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("verbose", "Verbose", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",
@@ -438,5 +401,4 @@ class _BrightDataTools(Toolkit):
 )
 def brightdata_tools() -> type[Toolkit]:
     """Return BrightData tools for web scraping and data extraction."""
-    _require_requests()
     return _BrightDataTools

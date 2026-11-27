@@ -363,7 +363,7 @@ def test_sqlite_migration_v1_and_v2_to_v3(tmp_path: Path, legacy_version: int) -
 
     upgraded = ReactiveTriggerStore(paths)
     with closing(sqlite3.connect(upgraded.db_path)) as conn:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         assert {"github_pr_checkpoints", "script_check_checkpoints"} <= tables
     assert upgraded.get_trigger("legacy_room") is not None
@@ -1590,7 +1590,7 @@ def _tool_context_for_triggers(
     orch = SimpleNamespace(
         agent_bots={**dict.fromkeys(cfg.agents, bot_stub), **dict.fromkeys(cfg.teams, bot_stub)},
         agent_reply_memberships=memberships,
-        reactive_triggers=SimpleNamespace(notify_work=notify_mock),
+        reactive_triggers=SimpleNamespace(notify_work=notify_mock, event_sources=None),
         script_runtime=SimpleNamespace(tool_manager=manager),
     )
     target = MessageTarget(
@@ -2895,7 +2895,7 @@ def _setup_team_script_check_env(
     orch_ref[0] = SimpleNamespace(
         agent_bots=bots_map,
         agent_reply_memberships=memberships,
-        reactive_triggers=SimpleNamespace(notify_work=MagicMock()),
+        reactive_triggers=SimpleNamespace(notify_work=MagicMock(), event_sources=None),
         script_runtime=SimpleNamespace(tool_manager=lifecycle.manager),
     )
     author_target = MessageTarget(

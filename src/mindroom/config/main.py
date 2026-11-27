@@ -63,6 +63,7 @@ from mindroom.config.legacy_fields import (
     rename_legacy_knowledge_reranker,
     retired_consolidated_approval_error,
     retired_dynamic_workflow_approval_error,
+    retired_slack_watch_approval_error,
     retired_tool_message,
     retired_trigger_approval_error,
 )
@@ -1722,6 +1723,20 @@ class Config(BaseModel):
         """Fail closed when approval rules target retired function names of enabled consolidated toolkits."""
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        if (
+            "slack" in enabled_toolkits
+            and "triggers" in enabled_toolkits
+            and (
+                slack_watch_error := retired_slack_watch_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
+            is not None
+        ):
+            raise ToolConfigOverrideError(slack_watch_error)
 
         for toolkit_name in sorted(enabled_toolkits):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)

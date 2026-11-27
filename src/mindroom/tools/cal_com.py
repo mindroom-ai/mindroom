@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -17,11 +24,24 @@ from mindroom.tools.native_helpers import (
     error_json,
     require_non_empty,
     resolve_toggle,
+    restrict_actions,
     safe_path_segment,
 )
 
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
+
 _ReadAction = Literal["available_slots", "upcoming_bookings"]
 _WriteAction = Literal["create_booking", "reschedule_booking", "cancel_booking"]
+_READ_ACTION_FIELDS: dict[str, str] = {
+    "available_slots": "start_date end_date",
+    "upcoming_bookings": "email",
+}
+_WRITE_ACTION_FIELDS: dict[str, str] = {
+    "create_booking": "start_time name email",
+    "reschedule_booking": "booking_uid start_time reason",
+    "cancel_booking": "booking_uid reason",
+}
 _CALCOM_API_BASE = "https://api.cal.com/v2"
 _CALCOM_API_VERSION = "2024-08-13"
 
@@ -50,18 +70,38 @@ class _CalComTools(Toolkit):
         self.timeout = timeout
 
         enable_all = resolve_toggle(all, default=False)
-        self._allow_slots = resolve_toggle(enable_get_available_slots, default=True, enable_all=enable_all)
-        self._allow_upcoming = resolve_toggle(enable_get_upcoming_bookings, default=True, enable_all=enable_all)
-        self._allow_create = resolve_toggle(enable_create_booking, default=True, enable_all=enable_all)
-        self._allow_reschedule = resolve_toggle(enable_reschedule_booking, default=True, enable_all=enable_all)
-        self._allow_cancel = resolve_toggle(enable_cancel_booking, default=True, enable_all=enable_all)
+        self._read_actions: tuple[_ReadAction, ...] = tuple(
+            action
+            for action, value in (
+                ("available_slots", enable_get_available_slots),
+                ("upcoming_bookings", enable_get_upcoming_bookings),
+            )
+            if resolve_toggle(value, default=True, enable_all=enable_all)
+        )
+        self._write_actions: tuple[_WriteAction, ...] = tuple(
+            action
+            for action, value in (
+                ("create_booking", enable_create_booking),
+                ("reschedule_booking", enable_reschedule_booking),
+                ("cancel_booking", enable_cancel_booking),
+            )
+            if resolve_toggle(value, default=True, enable_all=enable_all)
+        )
 
         tools: list[Any] = []
-        if self._allow_slots or self._allow_upcoming:
+        if self._read_actions:
             tools.append(self.cal_com_read)
-        if self._allow_create or self._allow_reschedule or self._allow_cancel:
+        if self._write_actions:
             tools.append(self.cal_com_write)
         super().__init__(name="cal_com", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict Cal.com action schemas and descriptions to enabled actions."""
+        if function.name == "cal_com_read":
+            return restrict_actions(function, self._read_actions, action_fields=_READ_ACTION_FIELDS)
+        if function.name == "cal_com_write":
+            return restrict_actions(function, self._write_actions, action_fields=_WRITE_ACTION_FIELDS)
+        return function
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -93,7 +133,7 @@ class _CalComTools(Toolkit):
         return dt.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     def _get_available_slots(self, headers: dict[str, str], start_date: str | None, end_date: str | None) -> str:
-        if not self._allow_slots:
+        if "available_slots" not in self._read_actions:
             return error_json("Checking available slots is disabled.")
         params = {
             "startTime": f"{require_non_empty(start_date, 'start_date')}T00:00:00Z",
@@ -118,7 +158,7 @@ class _CalComTools(Toolkit):
         return f"Available slots: {', '.join(formatted)}"
 
     def _get_upcoming_bookings(self, headers: dict[str, str], email: str | None) -> str:
-        if not self._allow_upcoming:
+        if "upcoming_bookings" not in self._read_actions:
             return error_json("Listing upcoming bookings is disabled.")
         params = {"status": "upcoming"}
         if email:
@@ -163,7 +203,7 @@ class _CalComTools(Toolkit):
         name: str | None,
         email: str | None,
     ) -> str:
-        if not self._allow_create:
+        if "create_booking" not in self._write_actions:
             return error_json("Creating bookings is disabled.")
         payload = {
             "start": self._to_utc_iso(require_non_empty(start_time, "start_time")),
@@ -189,7 +229,7 @@ class _CalComTools(Toolkit):
         start_time: str | None,
         reason: str | None,
     ) -> str:
-        if not self._allow_reschedule:
+        if "reschedule_booking" not in self._write_actions:
             return error_json("Rescheduling bookings is disabled.")
         safe_uid = safe_path_segment(require_non_empty(booking_uid, "booking_uid"), "booking_uid")
         payload = {
@@ -208,7 +248,7 @@ class _CalComTools(Toolkit):
         return f"Failed to reschedule booking: {response.text}"
 
     def _cancel_booking(self, headers: dict[str, str], booking_uid: str | None, reason: str | None) -> str:
-        if not self._allow_cancel:
+        if "cancel_booking" not in self._write_actions:
             return error_json("Cancelling bookings is disabled.")
         safe_uid = safe_path_segment(require_non_empty(booking_uid, "booking_uid"), "booking_uid")
         payload = {"cancellationReason": require_non_empty(reason, "reason")}
@@ -283,48 +323,12 @@ class _CalComTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_get_available_slots",
-            label="Enable Get Available Slots",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_create_booking",
-            label="Enable Create Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_upcoming_bookings",
-            label="Enable Get Upcoming Bookings",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_reschedule_booking",
-            label="Enable Reschedule Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_cancel_booking",
-            label="Enable Cancel Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_get_available_slots", "Enable Get Available Slots"),
+        bool_config_field("enable_create_booking", "Enable Create Booking"),
+        bool_config_field("enable_get_upcoming_bookings", "Enable Get Upcoming Bookings"),
+        bool_config_field("enable_reschedule_booking", "Enable Reschedule Booking"),
+        bool_config_field("enable_cancel_booking", "Enable Cancel Booking"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",

@@ -7,23 +7,20 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = get_logger(__name__)
-
-
-def _require_linkup() -> type[Any]:
-    """Import and return ``linkup.LinkupClient``, raising a helpful ImportError when absent."""
-    try:
-        from linkup import LinkupClient
-    except ImportError as exc:
-        msg = "`linkup-sdk` not installed. Please install using `pip install linkup-sdk`"
-        raise ImportError(msg) from exc
-    return LinkupClient
 
 
 class _LinkupTools(Toolkit):
@@ -37,12 +34,13 @@ class _LinkupTools(Toolkit):
         enable_web_search_with_linkup: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        linkup_client_cls = _require_linkup()
+        from linkup import LinkupClient
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("linkup_api_key_missing")
 
-        self.linkup = linkup_client_cls(api_key=self.api_key)
+        self.linkup: Any = LinkupClient(api_key=self.api_key)
         self.depth = depth
         self.output_type = output_type
 
@@ -119,20 +117,8 @@ class _LinkupTools(Toolkit):
             required=False,
             default="searchResults",
         ),
-        ConfigField(
-            name="enable_web_search_with_linkup",
-            label="Enable Web Search With Linkup",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_web_search_with_linkup", "Enable Web Search With Linkup"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["linkup-sdk"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#linkup",
@@ -140,5 +126,4 @@ class _LinkupTools(Toolkit):
 )
 def linkup_tools() -> type[Toolkit]:
     """Return Linkup tools for web search."""
-    _require_linkup()
     return _LinkupTools

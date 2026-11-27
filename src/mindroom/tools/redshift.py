@@ -1,46 +1,47 @@
-"""Amazon Redshift tool configuration and native implementation."""
+"""Redshift tool configuration and native implementation."""
 
 from __future__ import annotations
 
-import csv
-from contextlib import suppress
-from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, LiteralString
 
-from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY
-from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import (
-    UNSET,
-    format_tabular_rows,
-    quote_sql_identifier,
-    require_non_empty,
-    resolve_bool_toggle,
-)
+from mindroom.tools._sql_cursor import SqlCursorToolkit, SqlInspectAction
+from mindroom.tools.native_helpers import UNSET, quote_sql_identifier, require_non_empty, resolve_bool_toggle
 
-logger = get_logger(__name__)
-
-_RedshiftInspectAction = Literal["show_tables", "describe_table", "summarize_table", "inspect_query"]
-_NUMERIC_TYPES = (
-    "integer",
-    "int",
-    "bigint",
-    "smallint",
-    "numeric",
-    "decimal",
-    "real",
-    "double precision",
-    "float",
-)
-_TEXT_TYPES = ("char", "varchar", "text", "uuid")
+if TYPE_CHECKING:
+    from mindroom.tool_system.authoring import Toolkit
 
 
-class _RedshiftTools(Toolkit):
+class _RedshiftTools(SqlCursorToolkit):
     """Inspect, query, and export Amazon Redshift data warehouse tables."""
 
-    requires_connect = True
+    _db_label = "Redshift"
+    _inspect_tool_name = "redshift_inspect"
+    _numeric_types: tuple[str, ...] = (
+        "integer",
+        "int",
+        "bigint",
+        "smallint",
+        "numeric",
+        "decimal",
+        "real",
+        "double precision",
+        "float",
+    )
+    _text_stats_sql: LiteralString = (
+        "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
+        "COUNT(DISTINCT {col}) AS unique_values, AVG(LEN({col})) AS avg_length "
+        "FROM {tbl};"
+    )
 
     def __init__(
         self,
@@ -74,12 +75,10 @@ class _RedshiftTools(Toolkit):
         self.session_token = session_token
         self.profile = profile
         self.ssl = ssl is not False
-        self.table_schema = table_schema or "public"
-        self._connection: Any | None = None
-
         super().__init__(
             name="redshift_tools",
             tools=[self.redshift_inspect, self.run_query, self.export_table_to_path],
+            table_schema=table_schema,
         )
 
     def _build_connection_kwargs(self) -> dict[str, Any]:
@@ -121,107 +120,25 @@ class _RedshiftTools(Toolkit):
             kwargs["password"] = require_non_empty(self.password, "password")
         return kwargs
 
-    def _ensure_connection(self) -> Any:  # noqa: ANN401 - optional redshift_connector connection
-        if self._connection is None:
-            import redshift_connector
-
-            self._connection = redshift_connector.connect(**self._build_connection_kwargs())
-        return self._connection
-
-    def connect(self) -> None:
-        """Open the Redshift connection for the run."""
-        self._ensure_connection()
-
-    def close(self) -> None:
-        """Close and clear the cached Redshift connection."""
-        connection = self._connection
-        self._connection = None
-        if connection is not None:
-            with suppress(Exception):
-                connection.close()
-
-    def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
+    def _open_connection(self) -> Any:  # noqa: ANN401 - redshift_connector is an optional runtime import
         import redshift_connector
 
-        try:
-            connection = self._ensure_connection()
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, params)
-                    if cursor.description is None:
-                        return "Query executed successfully."
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = cursor.fetchall()
-                    if not rows:
-                        return f"Query returned no results.\nColumns: {', '.join(columns)}"
-                    return format_tabular_rows(columns, [tuple(row) for row in rows])
-            except redshift_connector.Error:
-                with suppress(Exception):
-                    connection.rollback()
-                raise
-        except Exception as exc:
-            logger.exception("Error executing Redshift query")
-            return f"Error executing query: {exc}"
+        return redshift_connector.connect(**self._build_connection_kwargs())
 
-    def _summarize_table(self, table: str) -> str:
+    def _should_rollback(self, exc: Exception) -> bool:
         import redshift_connector
 
-        connection: Any | None = None
-        try:
-            full_table = f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table)}"
-            connection = self._ensure_connection()
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT column_name, data_type FROM information_schema.columns "
-                    "WHERE table_schema = %s AND table_name = %s;",
-                    (self.table_schema, table),
-                )
-                columns = cursor.fetchall()
-                if not columns:
-                    return f"Error: Table '{table}' not found in schema '{self.table_schema}'."
+        return isinstance(exc, redshift_connector.Error)
 
-                summary_parts = [f"Summary for table: {table}\n"]
-                for col_name, data_type in columns:
-                    col_ident = quote_sql_identifier(str(col_name))
-                    lower_type = str(data_type).lower()
-                    if any(token in lower_type for token in _NUMERIC_TYPES):
-                        stmt = (
-                            f"SELECT COUNT(*) AS total_rows, COUNT({col_ident}) AS non_null_rows, "  # noqa: S608 - quoted idents
-                            f"MIN({col_ident}) AS min, MAX({col_ident}) AS max, "
-                            f"AVG({col_ident}) AS average, STDDEV({col_ident}) AS std_deviation "
-                            f"FROM {full_table};"
-                        )
-                    elif any(token in lower_type for token in _TEXT_TYPES):
-                        stmt = (
-                            f"SELECT COUNT(*) AS total_rows, COUNT({col_ident}) AS non_null_rows, "  # noqa: S608 - quoted idents
-                            f"COUNT(DISTINCT {col_ident}) AS unique_values, AVG(LEN({col_ident})) AS avg_length "
-                            f"FROM {full_table};"
-                        )
-                    else:
-                        continue
-                    cursor.execute(stmt)
-                    stats = cursor.fetchone()
-                    summary_parts.append(f"\n--- Column: {col_name} (Type: {data_type}) ---")
-                    if stats is None:
-                        summary_parts.append("  No statistics available")
-                        continue
-                    for key, value in zip([desc[0] for desc in cursor.description], stats, strict=True):
-                        rendered = f"{value:.2f}" if isinstance(value, float) else str(value)
-                        summary_parts.append(f"  {key}: {rendered}")
-                return "\n".join(summary_parts)
-        except redshift_connector.Error as exc:
-            if connection is not None:
-                with suppress(Exception):
-                    connection.rollback()
-            logger.exception("Error summarizing Redshift table", table=table)
-            return f"Error summarizing table: {exc}"
-        except Exception as exc:
-            logger.exception("Error summarizing Redshift table", table=table)
-            return f"Error summarizing table: {exc}"
+    def _format_sql_query(self, template: LiteralString, *, table: str, col: str | None = None) -> str:
+        parts = {"tbl": f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table)}"}
+        if col is not None:
+            parts["col"] = quote_sql_identifier(col)
+        return template.format(**parts)
 
     def redshift_inspect(
         self,
-        action: _RedshiftInspectAction,
+        action: SqlInspectAction,
         table: str | None = None,
         query: str | None = None,
     ) -> str:
@@ -233,27 +150,7 @@ class _RedshiftTools(Toolkit):
         - `summarize_table`: compute per-column statistics for `table`.
         - `inspect_query`: return `EXPLAIN` execution plan for `query`.
         """
-        try:
-            if action == "show_tables":
-                return self._run_db_query(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;",
-                    (self.table_schema,),
-                )
-            if action == "describe_table":
-                table_name = require_non_empty(table, "table")
-                return self._run_db_query(
-                    "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-                    "WHERE table_schema = %s AND table_name = %s;",
-                    (self.table_schema, table_name),
-                )
-            if action == "summarize_table":
-                return self._summarize_table(require_non_empty(table, "table"))
-            if action == "inspect_query":
-                stmt = require_non_empty(require_non_empty(query, "query").rstrip(";"), "query")
-                return self._run_db_query(f"EXPLAIN {stmt}")
-        except Exception as exc:
-            return f"Error in redshift_inspect ({action}): {exc}"
-        return f"Unsupported action: {action}"
+        return self._inspect_db(action, table=table, query=query)
 
     def run_query(self, query: str) -> str:
         """Run a SQL query against Amazon Redshift and return CSV-formatted rows."""
@@ -261,34 +158,7 @@ class _RedshiftTools(Toolkit):
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a Redshift table as a local CSV file at `path`."""
-        import redshift_connector
-
-        connection: Any | None = None
-        try:
-            table_name = require_non_empty(table, "table")
-            target_path = Path(require_non_empty(path, "path"))
-            full_table = f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table_name)}"
-            stmt = f"SELECT * FROM {full_table};"  # noqa: S608 - schema and table quoted via quote_sql_identifier
-            connection = self._ensure_connection()
-            with connection.cursor() as cursor:
-                cursor.execute(stmt)
-                if cursor.description is None:
-                    return f"Error: Query returned no description for table '{table_name}'."
-                columns = [desc[0] for desc in cursor.description]
-                with target_path.open("w", newline="", encoding="utf-8") as handle:
-                    writer = csv.writer(handle)
-                    writer.writerow(columns)
-                    writer.writerows(cursor)
-        except redshift_connector.Error as exc:
-            if connection is not None:
-                with suppress(Exception):
-                    connection.rollback()
-            logger.exception("Error exporting Redshift table", table=table, path=path)
-            return f"Error exporting table: {exc}"
-        except Exception as exc:
-            logger.exception("Error exporting Redshift table", table=table, path=path)
-            return f"Error exporting table: {exc}"
-        return f"Successfully exported table '{table_name}' to '{target_path}'."
+        return self._export_table(table, path)
 
 
 @register_tool_with_metadata(
@@ -340,11 +210,9 @@ class _RedshiftTools(Toolkit):
             type="password",
             required=True,
         ),
-        ConfigField(
-            name="iam",
-            label="Use IAM Authentication",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "iam",
+            "Use IAM Authentication",
             default=False,
             description="Use IAM authentication instead of password",
         ),
@@ -407,13 +275,7 @@ class _RedshiftTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="ssl",
-            label="SSL",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("ssl", "SSL"),
         ConfigField(
             name="table_schema",
             label="Table Schema",

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -42,13 +49,7 @@ if TYPE_CHECKING:
             ],
             description="Dream Machine video model used for text and image generation requests",
         ),
-        ConfigField(
-            name="wait_for_completion",
-            label="Wait For Completion",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("wait_for_completion", "Wait For Completion"),
         ConfigField(
             name="poll_interval",
             label="Poll Interval",
@@ -63,27 +64,9 @@ if TYPE_CHECKING:
             required=False,
             default=300,
         ),
-        ConfigField(
-            name="enable_generate_video",
-            label="Enable Generate Video",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_image_to_video",
-            label="Enable Image To Video",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_generate_video", "Enable Generate Video"),
+        bool_config_field("enable_image_to_video", "Enable Image To Video"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["lumaai"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#lumalabs",

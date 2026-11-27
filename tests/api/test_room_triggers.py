@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 from fastapi.testclient import TestClient
@@ -19,9 +20,11 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
+from mindroom.event_sources import EventSource, EventSourceEmitter, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers.models import (
+    ExternalEventSourceSpec,
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
     ReactiveTriggerRecord,
@@ -39,6 +42,7 @@ from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.access_schema_support import joined_members_response
 from tests.api.test_plugin_room_readers import _bound, _client, _never_answers
 from tests.conftest import test_runtime_paths
+from tests.event_source_fakes import FakeEventSource, owner_only_room_check
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_external_trigger_store import _PUBLIC_KEY
 from tests.test_plugin_routes import _api_state, _signed_in
@@ -118,6 +122,15 @@ class _Harness:
         self.external_store = ExternalTriggerStore(self.paths)
         self.reactive_store = ReactiveTriggerStore(self.paths)
         self.http = TestClient(self.app)
+
+    def use_event_sources(self, *sources: EventSource) -> tuple[EventSourceRegistry, dict[str, EventSourceEmitter]]:
+        """Register event sources on this app's embedded runtime."""
+        registry = EventSourceRegistry(lambda: self.config, AsyncMock(return_value=0))
+        emitters = {src.source_id: registry.register(src) for src in sources}
+        ensure_app_state(self.app).embedded = SimpleNamespace(  # type: ignore[assignment]
+            reactive_triggers=SimpleNamespace(event_sources=registry),
+        )
+        return registry, emitters
 
     def add_webhook(
         self,
@@ -295,6 +308,8 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "owner_user_id": ALICE,
         "can_manage": True,
         "script_check": None,
+        "source_id": None,
+        "paused_reason": None,
     }
     assert alice_rows["wh_deploy"] == expected_wh_deploy
     for row in triggers:
@@ -678,3 +693,230 @@ def test_script_check_trigger_summary_owner_health_and_cross_room_redaction(tmp_
         "consecutive_errors": 2,
         "last_error_code": "timeout",
     }
+
+
+def _private_room_source(source_id: str) -> FakeEventSource:
+    return FakeEventSource(source_id, private_room_only=True, delivery_check=owner_only_room_check)
+
+
+def _member_event(user_id: str, event_id: str, ts: int = 1_000) -> dict[str, object]:
+    return {
+        "type": "m.room.member",
+        "state_key": user_id,
+        "sender": user_id,
+        "event_id": event_id,
+        "origin_server_ts": ts,
+        "content": {"membership": "join"},
+    }
+
+
+def test_registered_event_source_hides_private_room_triggers_and_reports_owner_paused_reason(
+    tmp_path: Path,
+) -> None:
+    """GET hides private_room_only triggers from non-owners, computes live owner paused_reason, and omits match/binding."""
+    room_events: dict[str, list[dict[str, object]]] = {ROOM_A: [_member_event(ALICE, "$m1")]}
+    h = _Harness(tmp_path, room_state_events=room_events)
+    h.use_event_sources(_private_room_source("slack_priv"), FakeEventSource("public_src"))
+
+    h.add_reactive(
+        "tr_slack",
+        ExternalEventSourceSpec(
+            source_id="slack_priv",
+            kind="message",
+            match={"channel_id": ["C_SECRET"]},
+            binding={"team_id": "T_SECRET", "slack_user_id": "U_SECRET"},
+            source_origin="registered",
+        ),
+        description="My private Slack watch",
+        prompt="Summarize private Slack DM",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_public",
+        ExternalEventSourceSpec(
+            source_id="public_src",
+            kind="deploy",
+            match={"env": "prod"},
+            binding={"token": "BIND_SECRET"},
+            source_origin="registered",
+        ),
+        description="Deploy alerts",
+        prompt="Announce deploy",
+        created_at=2.0,
+    )
+    h.add_reactive(
+        "tr_yaml",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push", match={"repo": "org/app"}),
+        description="GitHub push",
+        prompt="Review push",
+        created_at=3.0,
+    )
+
+    # Owner sees all 3 triggers with source_id, live paused_reason=None, and zero match/binding leakage.
+    h.client.room_get_state.reset_mock()
+    alice_resp = h.req("GET", ROOM_A, ALICE)
+    assert alice_resp.status_code == 200
+    alice_rows = {row["trigger_id"]: row for row in alice_resp.json()["triggers"]}
+    assert set(alice_rows) == {"tr_slack", "tr_public", "tr_yaml"}
+    assert {tid: (row["source_id"], row["paused_reason"]) for tid, row in alice_rows.items()} == {
+        "tr_slack": ("slack_priv", None),
+        "tr_public": ("public_src", None),
+        "tr_yaml": ("github_wh", None),
+    }
+    assert h.client.room_get_state.call_count == 1
+    for secret in ("binding", "match", "C_SECRET", "T_SECRET", "U_SECRET", "BIND_SECRET"):
+        assert secret not in alice_resp.text
+
+    # When another person joins ROOM_A, owner sees live paused_reason and non-owner cannot see private_room_only trigger.
+    room_events[ROOM_A].append(_member_event(BOB, "$m2", 2_000))
+    alice_paused = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
+    assert (alice_paused["tr_slack"]["paused_reason"], alice_paused["tr_public"]["paused_reason"]) == (
+        "Room has another member",
+        None,
+    )
+
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    bob_rows = {row["trigger_id"]: row for row in bob_resp.json()["triggers"]}
+    assert set(bob_rows) == {"tr_public", "tr_yaml"}
+    assert "tr_slack" not in bob_resp.text
+    assert "My private Slack watch" not in bob_resp.text
+    assert (bob_rows["tr_public"]["source_id"], bob_rows["tr_public"]["paused_reason"]) == ("public_src", None)
+
+    # Owner PATCH also projects source_id and live paused_reason.
+    patched = h.req("PATCH", ROOM_A, ALICE, "tr_slack", {"enabled": False})
+    assert (patched.status_code, patched.json()["source_id"], patched.json()["paused_reason"]) == (
+        200,
+        "slack_priv",
+        "Room has another member",
+    )
+
+    # Unreadable room state fails closed into paused_reason instead of failing GET with 503.
+    h.client.room_get_state.side_effect = nio.LocalProtocolError("connection reset")
+    alice_unreadable = h.req("GET", ROOM_A, ALICE)
+    assert alice_unreadable.status_code == 200
+    rows_unreadable = {row["trigger_id"]: row for row in alice_unreadable.json()["triggers"]}
+    assert rows_unreadable["tr_slack"]["paused_reason"] == "Cannot verify private room state"
+
+
+def test_unregistered_private_event_source_stays_hidden_from_non_owners(tmp_path: Path) -> None:
+    """Disabling/unregistering a private_room_only plugin source keeps its stored rule hidden from non-owners."""
+    h = _Harness(tmp_path)
+    registry, emitters = h.use_event_sources(_private_room_source("slack_priv"), FakeEventSource("public_src"))
+    h.add_reactive(
+        "tr_slack",
+        ExternalEventSourceSpec(
+            source_id="slack_priv",
+            kind="message",
+            binding={"team_id": "T1"},
+            source_origin="registered",
+        ),
+        description="Private Slack watch",
+        prompt="Summarize",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_yaml",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push"),
+        description="GitHub push",
+        prompt="Review",
+        created_at=2.0,
+    )
+
+    assert registry.unregister("slack_priv", emitters["slack_priv"].token) is True
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    assert {row["trigger_id"] for row in bob_resp.json()["triggers"]} == {"tr_yaml"}
+    assert "tr_slack" not in bob_resp.text
+    alice_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
+    assert "tr_slack" in alice_rows
+    assert alice_rows["tr_slack"]["paused_reason"] is None
+
+
+def test_dynamic_descriptor_private_room_only_hides_trigger_in_room_api(tmp_path: Path) -> None:
+    """Persisted descriptor-level private_room_only hides a trigger in GET room triggers even when class-level is False."""
+    h = _Harness(tmp_path)
+    h.use_event_sources(
+        FakeEventSource(
+            "dyn_private",
+            allowed_kinds=("alert",),
+            private_room_only=False,
+            descriptor_private_room_only=True,
+        ),
+    )
+    h.add_reactive(
+        "dyn_priv_api",
+        ExternalEventSourceSpec(
+            source_id="dyn_private",
+            kind="alert",
+            match={"env": "staging"},
+            source_origin="registered",
+            private_room_only=True,
+        ),
+        description="Dynamic private rule",
+        prompt="Secret dynamic alert",
+        created_at=1.0,
+    )
+    alice_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    assert "dyn_priv_api" in alice_rows
+    assert "dyn_priv_api" not in bob_resp.text
+
+
+def test_broken_plugin_check_delivery_access_returns_source_error_without_500(tmp_path: Path) -> None:
+    """A raising check_delivery_access hook degrades to paused_reason='source_error' instead of 500."""
+    h = _Harness(tmp_path)
+    h.use_event_sources(FakeEventSource("exploding_src", delivery_error=RuntimeError("plugin crashed")))
+    h.add_reactive(
+        "tr_broken",
+        ExternalEventSourceSpec(source_id="exploding_src", kind="alert", source_origin="registered"),
+        description="Broken source trigger",
+        prompt="Handle alert",
+        created_at=1.0,
+    )
+
+    resp = h.req("GET", ROOM_A, ALICE)
+    assert resp.status_code == 200
+    rows = {row["trigger_id"]: row for row in resp.json()["triggers"]}
+    assert rows["tr_broken"]["paused_reason"] == "source_error"
+
+
+def test_hidden_private_trigger_returns_404_on_patch_and_delete_for_non_owner(tmp_path: Path) -> None:
+    """Non-owners get 404 (matching absent IDs) on PATCH/DELETE of hidden private triggers, while visible triggers still return 403."""
+    h = _Harness(tmp_path)
+    registry, emitters = h.use_event_sources(_private_room_source("slack"))
+    h.add_reactive(
+        "tr_slack_priv",
+        ExternalEventSourceSpec(
+            source_id="slack",
+            kind="message",
+            binding={"team_id": "T1", "slack_user_id": "U1"},
+            source_origin="registered",
+            private_room_only=True,
+        ),
+        description="Private Slack watch",
+        prompt="Summarize",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_visible",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push"),
+        description="GitHub push",
+        prompt="Review",
+        created_at=2.0,
+    )
+
+    assert h.req("PATCH", ROOM_A, BOB, "tr_slack_priv", {"enabled": False}).status_code == 404
+    assert h.req("DELETE", ROOM_A, BOB, "tr_slack_priv").status_code == 404
+    assert h.req("PATCH", ROOM_A, BOB, "tr_visible", {"enabled": False}).status_code == 403
+    assert h.req("DELETE", ROOM_A, BOB, "tr_visible").status_code == 403
+
+    # Still 404 after the registered source is unregistered.
+    assert registry.unregister("slack", emitters["slack"].token) is True
+    assert h.req("PATCH", ROOM_A, BOB, "tr_slack_priv", {"enabled": False}).status_code == 404
+    assert h.req("DELETE", ROOM_A, BOB, "tr_slack_priv").status_code == 404
+
+    # Owner can still toggle and delete their own private trigger.
+    assert h.req("PATCH", ROOM_A, ALICE, "tr_slack_priv", {"enabled": False}).status_code == 200
+    assert h.req("DELETE", ROOM_A, ALICE, "tr_slack_priv").status_code == 204

@@ -386,9 +386,9 @@ def test_store_requires_control_state_and_initializes_wal_schema(tmp_path: Path)
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         assert str(journal_mode).lower() == "wal"
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {"github_pr_checkpoints", "script_check_checkpoints"} <= tables
+        assert {"github_pr_checkpoints", "script_check_checkpoints", "applied_migrations"} <= tables
 
 
 def test_trigger_crud_filtering_quota_and_cascade_delete(tmp_path: Path) -> None:
@@ -1172,9 +1172,9 @@ def test_schema_v1_migrates_to_v2_preserving_rows_and_rejects_unknown_version(tm
 
     store = ReactiveTriggerStore(paths)
     with closing(sqlite3.connect(db_path)) as conn:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert {"github_pr_checkpoints", "script_check_checkpoints"} <= tables
+        assert {"github_pr_checkpoints", "script_check_checkpoints", "applied_migrations"} <= tables
 
     loaded = store.get_trigger("legacy_msg")
     assert loaded is not None
