@@ -13,6 +13,7 @@ from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX
 from mindroom.config.models import ModelConfig
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY, TURN_INTENT_RUN_METADATA_KEY
+from mindroom.history.conversation_text import utterances
 from mindroom.history.native_compaction_hook import native_compaction_after_turn_hook
 from mindroom.history.request_size import RequestSizer
 from mindroom.history.types import HistoryScope
@@ -348,53 +349,81 @@ async def test_noops_approval_resume_and_single_iteration_fallback(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_native_compaction_preserves_session_run_metadata_and_exclusions(tmp_path: Path) -> None:
-    """Replayed history matching session_runs preserves user attribution and excludes runtime/automation prompts."""
+    """Replayed history matching session_runs preserves metadata, skips unrelated runs, and dedups repeated IDs."""
     config, runtime_context, observed = _setup(tmp_path)
     user_q = Message(role="user", content="Alice question")
     user_a = Message(role="assistant", content="Alice answer")
+    second_run_a = Message(role="assistant", content="Second run answer")
     job_prompt = Message(role="user", content="Background job finished runtime prompt")
     job_reply = Message(role="assistant", content="Job follow-up reply")
     auto_prompt = Message(role="user", content="Automation trigger prompt")
     auto_reply = Message(role="assistant", content="Automation reply")
-    stored_runs = [
-        RunRecord(run_id="run-user", agent_id="test_agent", user_id="@alice:localhost", messages=[user_q, user_a]),
-        RunRecord(
-            run_id="run-job",
-            agent_id="test_agent",
-            messages=[job_prompt, job_reply],
-            metadata={TURN_INTENT_RUN_METADATA_KEY: TurnIntent.JOB_FOLLOW_UP},
-        ),
-        RunRecord(
-            run_id="run-auto",
-            agent_id="test_agent",
-            messages=[auto_prompt, auto_reply],
-            metadata={HOOK_SOURCE_RUN_METADATA_KEY: f"{AUTOMATION_HOOK_PREFIX}nightly"},
-        ),
-    ]
+    unrelated_before = RunRecord(
+        run_id="run-unrelated-before",
+        agent_id="test_agent",
+        user_id="@charlie:localhost",
+        messages=[Message(role="user", content="Unrelated earlier question")],
+    )
+    run_user = RunRecord(
+        run_id="run-user",
+        agent_id="test_agent",
+        user_id="@alice:localhost",
+        messages=[user_q, user_a],
+    )
+    run_dup = RunRecord(
+        run_id="run-dup",
+        agent_id="test_agent",
+        user_id="@eve:localhost",
+        messages=[Message(id=user_q.id, role="user", content="Duplicate question"), second_run_a],
+    )
+    run_job = RunRecord(
+        run_id="run-job",
+        agent_id="test_agent",
+        messages=[job_prompt, job_reply],
+        metadata={TURN_INTENT_RUN_METADATA_KEY: TurnIntent.JOB_FOLLOW_UP},
+    )
+    run_auto = RunRecord(
+        run_id="run-auto",
+        agent_id="test_agent",
+        messages=[auto_prompt, auto_reply],
+        metadata={HOOK_SOURCE_RUN_METADATA_KEY: f"{AUTOMATION_HOOK_PREFIX}nightly"},
+    )
+    unrelated_after = RunRecord(
+        run_id="run-unrelated-after",
+        agent_id="test_agent",
+        user_id="@dana:localhost",
+        messages=[Message(role="user", content="Unrelated later question")],
+    )
+    stored_runs = [unrelated_before, run_user, run_dup, run_job, run_auto, unrelated_after]
     messages = [
         Message(role="system", content="System prompt"),
-        *(replace(msg, from_history=True) for run in stored_runs for msg in run.messages),
+        *(replace(msg, from_history=True) for run in (run_user, run_job, run_auto) for msg in run.messages),
+        replace(second_run_a, from_history=True),
         Message(role="user", content="Current turn question"),
     ]
     record = RunRecord(run_id="run-now", agent_id="test_agent", user_id="@bob:localhost", metrics=RunMetrics())
     turn = _ckpt_msg("Final answer", items=[{"type": "compaction", "content": "Summary"}])
 
-    await _run_native(
-        config,
-        runtime_context,
-        [turn],
-        messages,
-        record=record,
-        session_runs=lambda: stored_runs,
-    )
+    with patch("mindroom.history.compaction.utterances", wraps=utterances) as mock_utterances:
+        await _run_native(
+            config,
+            runtime_context,
+            [turn],
+            messages,
+            record=record,
+            session_runs=lambda: stored_runs,
+        )
 
     assert len(observed) == 1
     assert observed[0].transcript == (
         TranscriptLine(role="user", sender="@alice:localhost", display_name=None, text="Alice question"),
         TranscriptLine(role="assistant", sender=None, display_name=None, text="Alice answer"),
         TranscriptLine(role="assistant", sender=None, display_name=None, text="Job follow-up reply"),
+        TranscriptLine(role="assistant", sender=None, display_name=None, text="Second run answer"),
         TranscriptLine(role="user", sender="@bob:localhost", display_name=None, text="Current turn question"),
     )
+    inspected_run_ids = [call.args[0].run_id for call in mock_utterances.call_args_list if call.args[0].run_id]
+    assert inspected_run_ids == ["run-user", "run-dup", "run-job", "run-auto"]
 
 
 @pytest.mark.asyncio
@@ -403,14 +432,33 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
     reset_scope = "openrouter:openai/gpt-5.4"
     capabilities = Capabilities(replay_reset_scope=reset_scope)
     config, runtime_context, observed = _setup(tmp_path, provider="openrouter", model_id="openai/gpt-5.4")
-
-    # 1. Recovery on the compacting turn itself (response carries ENCRYPTED_REPLAY_RESET_KEY).
+    probe_model = _NativeScriptedModel(
+        turns=[],
+        identity=ModelIdentity(id="openai/gpt-5.4", provider="openrouter"),
+        capabilities=capabilities,
+    )
     earliest_text = "Earliest pre-compaction question " * 80
     old_ckpt = _ckpt_msg(
         "Earlier checkpoint reply",
         items=[{"type": "compaction", "id": "cmp_old", "encrypted_content": "stale-enc"}],
     )
     old_ckpt.from_history = True
+
+    async def run_openrouter(turn: Message, msgs: list[Message]) -> CompactionHookContext:
+        observed.clear()
+        await _run_native(
+            config,
+            runtime_context,
+            [turn],
+            msgs,
+            provider="openrouter",
+            model_id="openai/gpt-5.4",
+            capabilities=capabilities,
+        )
+        assert len(observed) == 1
+        return observed[0]
+
+    # 1. Recovery on the compacting turn itself (response carries ENCRYPTED_REPLAY_RESET_KEY).
     anchored_reply = Message(
         role="assistant",
         content="Pre-strip answer",
@@ -425,32 +473,15 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
         anchored_reply,
         Message(role="user", content="Current question"),
     ]
-    probe_model = _NativeScriptedModel(
-        turns=[],
-        identity=ModelIdentity(id="openai/gpt-5.4", provider="openrouter"),
-        capabilities=capabilities,
-    )
     sent_request = replace(_TEMPLATE, messages=tuple(messages))
-    pre_strip_prefixes = request_prefixes(probe_model, sent_request)
-    anchored_reply.provider_data = {REQUEST_IDENTITY_KEY: pre_strip_prefixes[4]}
-
+    anchored_reply.provider_data = {REQUEST_IDENTITY_KEY: request_prefixes(probe_model, sent_request)[4]}
     recovered_turn = _ckpt_msg(
         "Recovered answer",
         items=[{"type": "compaction", "id": "cmp_new", "encrypted_content": "fresh-enc"}],
         extra_provider_data={ENCRYPTED_REPLAY_RESET_KEY: reset_scope},
     )
-    await _run_native(
-        config,
-        runtime_context,
-        [recovered_turn],
-        messages,
-        provider="openrouter",
-        model_id="openai/gpt-5.4",
-        capabilities=capabilities,
-    )
+    ctx = await run_openrouter(recovered_turn, messages)
 
-    assert len(observed) == 1
-    ctx = observed[0]
     full_stripped_tokens = probe_model.request_tokens(replace(sent_request, strip_encrypted_replay=True))
     pre_strip_tokens = probe_model.request_tokens(sent_request)
     anchored_pre_strip = RequestSizer(probe_model, "openrouter").size(sent_request)
@@ -463,7 +494,6 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
     assert ctx.transcript[0].text == earliest_text
 
     # 2. Prior ENCRYPTED_REPLAY_RESET_KEY boundary on reset_scope without a reset on the new compacting turn.
-    observed.clear()
     prior_reset = Message(
         role="assistant",
         content="Prior recovered reply",
@@ -479,27 +509,16 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
         Message(role="user", content="Post-reset question"),
     ]
     post_reset_request = replace(_TEMPLATE, messages=tuple(messages_after_reset))
-    prior_reset_prefixes = request_prefixes(probe_model, post_reset_request)
     prior_reset.provider_data = {
         ENCRYPTED_REPLAY_RESET_KEY: reset_scope,
-        REQUEST_IDENTITY_KEY: prior_reset_prefixes[3],
+        REQUEST_IDENTITY_KEY: request_prefixes(probe_model, post_reset_request)[3],
     }
     plain_ckpt_turn = _ckpt_msg(
         "Post-reset compacted answer",
         items=[{"type": "compaction", "id": "cmp_post", "encrypted_content": "post-enc"}],
     )
-    await _run_native(
-        config,
-        runtime_context,
-        [plain_ckpt_turn],
-        messages_after_reset,
-        provider="openrouter",
-        model_id="openai/gpt-5.4",
-        capabilities=capabilities,
-    )
+    ctx2 = await run_openrouter(plain_ckpt_turn, messages_after_reset)
 
-    assert len(observed) == 1
-    ctx2 = observed[0]
     no_scope_model = _NativeScriptedModel(
         turns=[],
         identity=ModelIdentity(id="openai/gpt-5.4", provider="openrouter"),

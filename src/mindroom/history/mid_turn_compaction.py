@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import (
         CompactionLifecycle,
         CompactionLifecycleProgress,
+        CompactionMode,
         CompactionOutcome,
         HistoryPreparationInputs,
         HistoryScope,
@@ -249,6 +250,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
+    hook_mode: CompactionMode = "manual" if requested else "auto"
     fold = await _summarize(
         compaction,
         policy,
@@ -262,6 +264,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         lambda rewritten: compaction.model.request_tokens(
             replace(state.request(rewritten), native_compaction=None),
         ),
+        hook_mode=hook_mode,
     )
     if fold is None:
         compaction.stopped = True
@@ -329,6 +332,8 @@ async def _summarize(
     request_tokens: int,
     live_request: ModelRequest,
     size_request: Callable[[list[Message]], int],
+    *,
+    hook_mode: CompactionMode = "auto",
 ) -> _Fold | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
 
@@ -391,7 +396,7 @@ async def _summarize(
                     session_id=record.session_id or "",
                     token_count_before=request_tokens,
                     kind="run_local",
-                    mode="auto",
+                    mode=hook_mode,
                     compacted_run_count=compacted_run_count,
                 )
                 _apply_rewrite(messages, rewritten, prompt_to_mark, layout, record)
@@ -404,7 +409,7 @@ async def _summarize(
                     token_count_after=rewritten_tokens,
                     compaction_summary=summary,
                     kind="run_local",
-                    mode="auto",
+                    mode=hook_mode,
                     summary_model=summary_model.name,
                     compacted_at=iso_utc_now(),
                     compacted_run_count=compacted_run_count,
@@ -433,6 +438,7 @@ async def _summarize(
             store=store,
             session=session,
             max_summary_tokens=None if policy.limit is None else policy.limit - kept_tokens,
+            hook_mode=hook_mode,
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
@@ -453,6 +459,7 @@ async def _compact_scope(
     store: ConversationStore,
     session: ConversationSession,
     max_summary_tokens: int | None,
+    hook_mode: CompactionMode = "auto",
 ) -> _Fold | None:
     """Append one summary row to ``session``'s scope, covering its runs after the latest row and this run's exchanges.
 
@@ -544,6 +551,7 @@ async def _compact_scope(
             rewritten_request_tokens=size_rewritten,
             complete=complete,
             fork=fork,
+            hook_mode=hook_mode,
         )
 
     result = await run_scope_compaction_with_lifecycle(

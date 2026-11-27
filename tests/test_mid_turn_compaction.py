@@ -2136,6 +2136,7 @@ async def test_compact_context_tool_compacts_immediately_mid_turn_once(
     config, paths = _config(tmp_path, context_window=48_000)
     storage = seeded_storage(config, paths)
     lifecycle = RecordingCompactionLifecycle()
+    hook_context, observed = _observed_compaction_hooks(config, paths)
     model = ScriptedModel(
         [
             calls(tool_call("compact_context", "call-compact")),
@@ -2144,18 +2145,19 @@ async def test_compact_context_tool_compacts_immediately_mid_turn_once(
         ],
     )
 
-    output = await _run(
-        _scoped_agent(
-            model,
-            config,
-            paths,
-            storage,
-            tools=[_ping],
-            extra_toolkits=(_compact_context_toolkit(config, paths),),
-            lifecycle=lifecycle,
-        ),
-        "Compact and continue",
-    )
+    with tool_runtime_context(hook_context):
+        output = await _run(
+            _scoped_agent(
+                model,
+                config,
+                paths,
+                storage,
+                tools=[_ping],
+                extra_toolkits=(_compact_context_toolkit(config, paths),),
+                lifecycle=lifecycle,
+            ),
+            "Compact and continue",
+        )
 
     assert output.content == "All done."
     assert len(summary_calls.inputs) == 1
@@ -2165,6 +2167,9 @@ async def test_compact_context_tool_compacts_immediately_mid_turn_once(
     assert len(summary_rows_of(storage, TEST_AGENT_SCOPE.key)) == 1
     assert not has_queued_force_compaction(storage, "session-1")
     assert [event.mode for event in lifecycle.events if isinstance(event, CompactionOutcome)] == ["auto"]
+    assert [ctx.event_name for ctx in observed] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert observed[0].kind == observed[1].kind == "mid_turn"
+    assert observed[0].mode == observed[1].mode == "manual"
 
 
 @pytest.mark.asyncio
@@ -2177,6 +2182,7 @@ async def test_compact_context_tool_works_with_auto_disabled_and_compaction_mode
     """Mid-turn compact_context runs when automatic compaction is disabled or only compaction.model has a window."""
     config, paths = _config(tmp_path, enabled=False, context_window=context_window, summary_context_window=32_000)
     storage = seeded_storage(config, paths)
+    hook_context, observed = _observed_compaction_hooks(config, paths)
     model = ScriptedModel(
         [
             calls(tool_call("compact_context", "call-compact")),
@@ -2184,23 +2190,62 @@ async def test_compact_context_tool_works_with_auto_disabled_and_compaction_mode
         ],
     )
 
-    output = await _run(
-        _scoped_agent(
-            model,
-            config,
-            paths,
-            storage,
-            tools=[],
-            extra_toolkits=(_compact_context_toolkit(config, paths),),
-        ),
-        "Compact now",
-    )
+    with tool_runtime_context(hook_context):
+        output = await _run(
+            _scoped_agent(
+                model,
+                config,
+                paths,
+                storage,
+                tools=[],
+                extra_toolkits=(_compact_context_toolkit(config, paths),),
+            ),
+            "Compact now",
+        )
 
     assert output.content == "Done after compaction."
     assert len(summary_calls.inputs) == 1
     assert any(is_scope_summary(message) for message in model.requests[1].messages)
     assert len(summary_rows_of(storage, TEST_AGENT_SCOPE.key)) == 1
     assert not has_queued_force_compaction(storage, "session-1")
+    assert [ctx.event_name for ctx in observed] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert observed[0].kind == observed[1].kind == "mid_turn"
+    assert observed[0].mode == observed[1].mode == "manual"
+
+
+@pytest.mark.asyncio
+async def test_compact_context_tool_run_local_emits_manual_mode_hooks(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+) -> None:
+    """Explicit compact_context on a run-local fold emits before/after hooks with mode='manual'."""
+    config, paths = _config(tmp_path, enabled=False, context_window=48_000)
+    hook_context, observed = _observed_compaction_hooks(config, paths)
+    model = ScriptedModel(
+        [
+            calls(tool_call("compact_context", "call-compact")),
+            answer("Done after run-local compaction."),
+        ],
+    )
+
+    with tool_runtime_context(hook_context):
+        output = await _run(
+            _Agent(
+                model,
+                config,
+                paths,
+                tools=[],
+                extra_toolkits=(_compact_context_toolkit(config, paths),),
+            ),
+            "Compact run-local now",
+        )
+
+    assert output.content == "Done after run-local compaction."
+    assert len(summary_calls.inputs) == 1
+    assert any(is_compaction_summary(message) for message in model.requests[1].messages)
+    assert [ctx.event_name for ctx in observed] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    assert observed[0].kind == observed[1].kind == "run_local"
+    assert observed[0].mode == observed[1].mode == "manual"
 
 
 @pytest.mark.asyncio

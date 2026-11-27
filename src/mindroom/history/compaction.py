@@ -110,6 +110,30 @@ def _compaction_transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine
     return tuple(_utterance_line(said) for run in runs for said in utterances(run))
 
 
+def _stored_lines_by_message_id(
+    selected_ids: set[str],
+    session_runs: Sequence[AnyRunRecord],
+) -> dict[str, list[TranscriptLine]]:
+    """Index stored-run transcript lines by message id, inspecting only runs matching ``selected_ids``."""
+    stored_lines: dict[str, list[TranscriptLine]] = {}
+    remaining_ids = set(selected_ids)
+    for run in session_runs:
+        if not remaining_ids:
+            break
+        matched_ids = {msg.id for msg in run.messages if msg.id and msg.id in remaining_ids}
+        if not matched_ids:
+            continue
+        remaining_ids -= matched_ids
+        run_lines: dict[str, list[TranscriptLine]] = {msg_id: [] for msg_id in matched_ids}
+        for said in utterances(run):
+            msg_id = said.message.id
+            if msg_id and msg_id in run_lines:
+                run_lines[msg_id].append(_utterance_line(said))
+        for msg_id, msg_lines in run_lines.items():
+            stored_lines.setdefault(msg_id, msg_lines)
+    return stored_lines
+
+
 def projected_messages_transcript(
     history_messages: Sequence[Message],
     current_messages: Sequence[Message],
@@ -124,18 +148,14 @@ def projected_messages_transcript(
     """
     lines: list[TranscriptLine] = []
     if history_messages:
-        known_stored_ids = {msg.id for run in session_runs for msg in run.messages if msg.id}
-        stored_lines_by_msg_id: dict[str, list[TranscriptLine]] = {}
-        for run in session_runs:
-            for said in utterances(run):
-                if said.message.id:
-                    stored_lines_by_msg_id.setdefault(said.message.id, []).append(_utterance_line(said))
+        selected_ids = {msg.id for msg in history_messages if msg.id}
+        stored_lines_by_msg_id = _stored_lines_by_message_id(selected_ids, session_runs)
         seen_stored_ids: set[str] = set()
         for msg in history_messages:
-            if msg.id and msg.id in known_stored_ids:
+            if msg.id and msg.id in stored_lines_by_msg_id:
                 if msg.id not in seen_stored_ids:
                     seen_stored_ids.add(msg.id)
-                    lines.extend(stored_lines_by_msg_id.get(msg.id, ()))
+                    lines.extend(stored_lines_by_msg_id[msg.id])
             else:
                 lines.extend(_compaction_transcript([RunRecord(run_id="", messages=[msg])]))
     if current_messages:
@@ -474,6 +494,7 @@ async def compact_running_turn(
     rewritten_request_tokens: Callable[[str], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
     fork: SummaryFork | None = None,
+    hook_mode: CompactionMode = "auto",
 ) -> CompactionOutcome:
     """Summarize ``basis.runs`` and ``snapshots``, validate and size pre-commit, then append one row storing ``fold``."""
     scope = owner_scope(session)
@@ -501,7 +522,7 @@ async def compact_running_turn(
         session_id=session.session_id,
         token_count_before=before_tokens,
         kind="mid_turn",
-        mode="auto",
+        mode=hook_mode,
     )
 
     async def commit_and_report() -> CompactionOutcome:
@@ -534,6 +555,7 @@ async def compact_running_turn(
             transcript=transcript,
             complete=complete,
             kind="mid_turn",
+            hook_mode=hook_mode,
             workspace_root=resolved_workspace,
         )
 
@@ -547,6 +569,7 @@ async def _report_committed(
     transcript: Sequence[TranscriptLine],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
     kind: CompactionKind,
+    hook_mode: CompactionMode | None = None,
     workspace_root: Path | None | _UnsetWorkspaceRoot = _UNSET_WORKSPACE_ROOT,
 ) -> CompactionOutcome:
     await emit_compaction_hook(
@@ -558,7 +581,7 @@ async def _report_committed(
         token_count_after=outcome.after_tokens,
         compaction_summary=outcome.summary,
         kind=kind,
-        mode=outcome.mode,
+        mode=outcome.mode if hook_mode is None else hook_mode,
         summary_model=outcome.summary_model,
         compacted_at=outcome.compacted_at,
         compacted_run_count=outcome.compacted_run_count,
