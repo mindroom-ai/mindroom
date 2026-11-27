@@ -2089,6 +2089,46 @@ def test_call_tool_malformed_wire_calls_end_to_end() -> None:
         assert forbidden not in message
 
 
+def test_call_tool_dotted_name_resolution_and_diagnostics(tmp_path: Path) -> None:
+    """Real offered functions resolve ``toolkit.fn`` via ``resolve_call_tool_calls`` and fallback gives targeted hints."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": {"defer": True, "enable_show_canvas": True}}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+    agent = _code_agent(config, tmp_path)
+
+    dotted = {
+        "id": "c1",
+        "type": "function",
+        "function": {
+            "name": "call_tool",
+            "arguments": json.dumps(
+                {"name": "chat_ui.show_canvas", "arguments": {"title": "Deploy", "html": "<p>ok</p>"}},
+            ),
+        },
+    }
+    [resolved] = resolve_call_tool_calls([dotted], agent.spec.functions)
+    assert resolved["function"]["name"] == "show_canvas"
+    assert json.loads(resolved["function"]["arguments"]) == {"title": "Deploy", "html": "<p>ok</p>"}
+
+    wrong_prefix = {
+        "id": "c2",
+        "type": "function",
+        "function": {"name": "call_tool", "arguments": json.dumps({"name": "other.show_canvas", "arguments": {}})},
+    }
+    [stayed] = resolve_call_tool_calls([wrong_prefix], agent.spec.functions)
+    assert stayed is wrong_prefix
+
+    call_tool_fn = offered_function(agent, "call_tool")
+    same_owner_msg = _tool_payload(call_tool_fn.entrypoint(name="chat_ui.show_canvas", arguments={}))["message"]
+    assert "exact unprefixed function name 'show_canvas'" in same_owner_msg
+    wrong_owner_msg = _tool_payload(call_tool_fn.entrypoint(name="other.show_canvas", arguments={}))["message"]
+    assert "'show_canvas' belongs to toolkit 'chat_ui', not 'other'" in wrong_owner_msg
+    unknown_msg = _tool_payload(call_tool_fn.entrypoint(name="chat_ui.nope", arguments={}))["message"]
+    assert unknown_msg == (
+        "'chat_ui.nope' was not called. Use an exact function name from tool_search and pass arguments as a JSON object."
+    )
+
+
 def test_search_toolkit_results_are_never_redirected_to_output_files(
     tmp_path: Path,
 ) -> None:

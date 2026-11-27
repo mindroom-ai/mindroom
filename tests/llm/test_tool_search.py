@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -113,3 +114,34 @@ def test_a_mixed_batch_rewrites_only_the_wrapper() -> None:
 
     assert [call["function"]["name"] for call in resolved] == ["crm_lookup", "shell"]
     assert resolved[1] is eager_call
+
+
+def test_dotted_toolkit_prefix_resolves_only_when_owner_matches() -> None:
+    """``call_tool(name='<toolkit>.<fn>')`` resolves when ``<toolkit>`` owns ``<fn>``, without misrouting."""
+    offered = {
+        "show_canvas": SimpleNamespace(toolkit="chat_ui", registered_toolkit="chat_ui"),
+        "browser": SimpleNamespace(toolkit="browser", registered_toolkit="browser_control"),
+        "call_tool": SimpleNamespace(toolkit="dynamic_tools", registered_toolkit="dynamic_tools"),
+        "a.b": SimpleNamespace(toolkit="literal", registered_toolkit="literal"),
+    }
+
+    resolved = resolve_call_tool_calls(
+        [
+            _call("c1", "call_tool", '{"name": "chat_ui.show_canvas", "arguments": {"title": "Status"}}'),
+            _call("c2", "call_tool", '{"name": "browser_control.browser", "arguments": {"action": "open"}}'),
+            _call("c3", "call_tool", '{"name": "a.b", "arguments": {}}'),
+        ],
+        offered,
+    )
+    assert [call["function"]["name"] for call in resolved] == ["show_canvas", "browser", "a.b"]
+    assert json.loads(resolved[0]["function"]["arguments"]) == {"title": "Status"}
+
+    unresolved_calls = [
+        _call("u1", "call_tool", '{"name": "wrong.show_canvas", "arguments": {}}'),
+        _call("u2", "call_tool", '{"name": "chat_ui.unknown", "arguments": {}}'),
+        _call("u3", "call_tool", '{"name": "dynamic_tools.call_tool", "arguments": {}}'),
+        _call("u4", "call_tool", '{"name": ".show_canvas", "arguments": {}}'),
+    ]
+    assert resolve_call_tool_calls(unresolved_calls, offered) == unresolved_calls
+    plain_call = _call("u5", "call_tool", '{"name": "chat_ui.show_canvas", "arguments": {}}')
+    assert resolve_call_tool_calls([plain_call], {"show_canvas"}) == [plain_call]
