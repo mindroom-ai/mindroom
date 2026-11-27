@@ -24,8 +24,10 @@ from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     GitHubPRSourceSpec,
     RoomMessageSourceSpec,
+    ScriptCheckSourceSpec,
     ThreadTagSourceSpec,
 )
+from mindroom.reactive_triggers.script_check import check_script_check_source_access
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.requester_identity import (
     equivalent_requester_ids,
@@ -152,6 +154,16 @@ async def check_reactive_source_access(
         r = fn(owner_user_id=rule.owner_user_id, source_spec=source, config=config, runtime_paths=runtime_paths)
         return DispatchResult(status="skipped", reason=r) if r is not None else None
 
+    if isinstance(source, ScriptCheckSourceSpec):
+        return _check_script_check_source_access(
+            rule=rule,
+            source=source,
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+        )
+
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
         return await _check_room_source_access(
             rule=rule,
@@ -164,6 +176,39 @@ async def check_reactive_source_access(
             known_room_states=known_room_states,
         )
     return None
+
+
+def _check_script_check_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    source: ScriptCheckSourceSpec,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+) -> DispatchResult | None:
+    reason = check_script_check_source_access(
+        owner_user_id=rule.owner_user_id,
+        source_spec=source,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    if reason is not None:
+        return DispatchResult(status="skipped", reason=reason)
+    try:
+        allowed = is_sender_allowed_for_agent_reply_in_room(
+            rule.owner_user_id,
+            source.agent,
+            config,
+            source.room_id,
+            runtime_paths,
+            memberships,
+            require_resolved_membership=True,
+            observed_room=_observed_room_for_bot(source_bot, source.room_id),
+        )
+    except ReplyMembershipPendingError:
+        return DispatchResult(status="retry", reason="source_membership_pending")
+    return None if allowed else DispatchResult(status="skipped", reason="source_room_not_authorized")
 
 
 async def _resolve_source_room_state(

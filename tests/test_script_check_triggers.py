@@ -6,14 +6,17 @@ import asyncio
 import hashlib
 import json
 import math
+import os
+import socket
 import sqlite3
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import nio
 import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
@@ -21,13 +24,17 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 import mindroom.tools  # noqa: F401
-from mindroom.api.script_gateway import bind_script_tool_broker
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.script_gateway import bind_script_tool_broker, serve_script_gateway_listener
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.message_target import MessageTarget
+from mindroom.orchestration.script_checks import build_script_check_tick_runner
+from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle, _LiveScriptRuntimeResolver
 from mindroom.reactive_triggers import (
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
@@ -40,7 +47,9 @@ from mindroom.reactive_triggers import (
     ScriptCheckSourceSpec,
     TriggerTargetSpec,
 )
+from mindroom.reactive_triggers.dispatch import check_reactive_source_access
 from mindroom.reactive_triggers.management import refresh_reactive_state_on_reenable, set_trigger_enabled_sync
+from mindroom.reactive_triggers.models import TriageSpec, TriggerEvent
 from mindroom.reactive_triggers.script_check import (
     MAX_SCRIPT_CHECK_RESULT_BYTES,
     MAX_SCRIPT_CHECK_SOURCE_BYTES,
@@ -54,18 +63,28 @@ from mindroom.reactive_triggers.script_check import (
     validate_script_check_source,
     validate_script_check_state,
 )
+from mindroom.reactive_triggers.service import ReactiveTriggerService
+from mindroom.reactive_triggers.triage import TriageOutcome
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, ScriptToolCallRequest
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManager, ScriptRunManagerError
-from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptToolGrant
+from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptRunState, ScriptToolGrant
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient
+from mindroom.shell.supervisor import _ShellSupervisorManager
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
 from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -910,3 +929,525 @@ async def test_script_run_manager_hides_script_check_runs_and_skips_plain_limits
         ctx_no_local = _script_context(tmp_path / "nolocal", tools=["calculator"], allow_local=False)
         with pytest.raises(ScriptRunManagerError, match=r"worker|sandbox|local|shell"):
             await manager.run(ctx_no_local, source=_SAMPLE_SOURCE, script_check_rule_uid="rule-denied")
+
+
+class _LiveFeedToolkit(Toolkit):
+    items: ClassVar[list[str]] = ["a"]
+
+    def __init__(self) -> None:
+        super().__init__(name="live_feed")
+        self.register(Function(name="fetch_items", entrypoint=self.fetch_items))
+        self.register(Function(name="confirm_op", entrypoint=self.confirm_op, requires_confirmation=True))
+
+    def fetch_items(self) -> str:
+        return json.dumps({"items": list(self.items)})
+
+    def confirm_op(self) -> str:
+        return "confirmed"
+
+
+class _FakeBot:
+    def __init__(self, ctx: ToolRuntimeContext, *, send_log: list[dict[str, Any]]) -> None:
+        self.agent_name = ctx.agent_name
+        self.running = True
+        self.config = ctx.config
+        self.send_log = send_log
+        self.conversation_reader = ctx.conversation_reader
+        self.orchestrator: Any = None
+        client = make_matrix_client_mock(user_id="@mindroom_coder:example.org")
+        client.rooms = {
+            _ROOM: SimpleNamespace(users={_OWNER: object(), "@mindroom_coder:example.org": object()}, encrypted=False),
+        }
+        client.room_send = AsyncMock(side_effect=self._room_send)
+        client.room_get_state = AsyncMock(
+            return_value=nio.RoomGetStateResponse(
+                events=[{"type": "m.room.member", "state_key": _OWNER, "content": {"membership": "join"}}],
+                room_id=_ROOM,
+            ),
+        )
+        self.client = client
+        self.tool_runtime_support = SimpleNamespace(
+            build_context=lambda target, **kw: replace(
+                ctx,
+                target=target,
+                requester_id=kw.get("user_id") or ctx.requester_id,
+                agent_name=kw.get("agent_name") or ctx.agent_name,
+                correlation_id=kw.get("correlation_id"),
+                client=self.client,
+            ),
+        )
+
+    async def _room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[str, Any],
+        **_kwargs: object,
+    ) -> nio.RoomSendResponse:
+        self.send_log.append({"room_id": room_id, "message_type": message_type, "content": content})
+        return nio.RoomSendResponse(event_id=f"$sent_{len(self.send_log)}", room_id=room_id)
+
+
+@asynccontextmanager
+async def _live_script_check_harness(
+    tmp_path: Path,
+    *,
+    tools: list[str],
+    policy: dict[str, Any] | None = None,
+) -> AsyncIterator[SimpleNamespace]:
+    ctx = _script_context(tmp_path, tools=tools, policy=policy, allow_local=True)
+    send_log: list[dict[str, Any]] = []
+    bot = _FakeBot(ctx, send_log=send_log)
+    memberships = AgentReplyMembershipIndex()
+    script_store = ScriptRunStore(ctx.runtime_paths)
+    resolver = _SimpleResolver(ctx)
+    broker = ScriptToolBroker(store=script_store, runtime_resolver=resolver)
+    broker.open_call_admission()
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+    listener_paths = resolve_primary_runtime_paths(
+        config_path=ctx.runtime_paths.config_path,
+        storage_path=ctx.runtime_paths.storage_root,
+        process_env={**ctx.runtime_paths.process_env, "MINDROOM_SCRIPT_GATEWAY_PORT": str(port)},
+    )
+    manager = ScriptRunManager(
+        store=script_store,
+        broker=broker,
+        worker_client=ScriptWorkerClient(),
+        worker_backend=None,
+        gateway_url=f"http://127.0.0.1:{port}/api/script-gateway",
+    )
+    trig_store = ReactiveTriggerStore(ctx.runtime_paths)
+    runner = build_script_check_tick_runner(
+        runtime_paths=ctx.runtime_paths,
+        bots=lambda: {"coder": bot},  # type: ignore[arg-type,return-value]
+        memberships=memberships,
+        manager_provider=lambda: manager,
+        broker=broker,
+    )
+    service = ReactiveTriggerService(
+        runtime_paths=ctx.runtime_paths,
+        config_provider=lambda: ctx.config,
+        bots=lambda: {"coder": bot},  # type: ignore[arg-type,return-value]
+        memberships=memberships,
+        store=trig_store,
+        script_check_runner=runner,
+    )
+    supervisor = _ShellSupervisorManager()
+    socket_path = supervisor.ensure()
+    try:
+        with (
+            patch("mindroom.script_runs.manager.ensure_shell_supervisor", return_value=socket_path),
+            patch("mindroom.script_runs.manager.background_script_supervision_supported", return_value=True),
+        ):
+            async with serve_script_gateway_listener(
+                listener_paths,
+                host="127.0.0.1",
+                broker=broker,
+                log_level="WARNING",
+                agent_cli_registry=None,
+                workflow_engine=None,
+            ):
+                yield SimpleNamespace(
+                    ctx=ctx,
+                    bot=bot,
+                    send_log=send_log,
+                    script_store=script_store,
+                    trig_store=trig_store,
+                    resolver=resolver,
+                    broker=broker,
+                    manager=manager,
+                    service=service,
+                )
+    finally:
+        await service.stop()
+        supervisor.shutdown()
+
+
+def _create_live_rule(
+    harness: SimpleNamespace,
+    trigger_id: str,
+    source: str,
+    *,
+    state: dict[str, Any] | None = None,
+    triage: TriageSpec | None = None,
+    reopen_on_fire: bool = False,
+) -> ReactiveTriggerRecord:
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    rule = ReactiveTriggerRecord(
+        trigger_id=trigger_id,
+        owner_user_id=_OWNER,
+        source=ScriptCheckSourceSpec(agent="coder", room_id=_ROOM, source_digest=digest, poll_interval_seconds=60),
+        triage=triage,
+        target=TriggerTargetSpec(
+            agent="coder",
+            room_id=_ROOM,
+            thread_id="$thread:example.org",
+            reopen_on_fire=reopen_on_fire,
+            prompt="Check alert",
+        ),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    cp = ScriptCheckCheckpoint(
+        revision=1,
+        source_utf8=source,
+        identity_json=dict(serialize_tool_execution_identity(harness.ctx.execution_identity)),
+        state={} if state is None else state,
+        next_poll_at=0.0,
+        updated_at=1000.0,
+    )
+    return harness.trig_store.create_trigger(rule, initial_script_check_checkpoint=cp)
+
+
+@pytest.mark.asyncio
+async def test_script_check_e2e_live_subprocess_ticks_state_triage_dispatch_and_reopen(tmp_path: Path) -> None:
+    """Real subprocess executes check(): None commits state with 0 LLM calls; dict flows through triage/dispatch/reopen."""
+    _LiveFeedToolkit.items = ["a"]
+    src = (
+        "import json\n"
+        "def check():\n"
+        "    items = json.loads(tool('live_feed', 'fetch_items'))['items']\n"
+        "    seen = set(state.get('seen', []))\n"
+        "    new = [x for x in items if x not in seen]\n"
+        "    state.set('seen', items)\n"
+        "    state.set('ticks', state.get('ticks', 0) + 1)\n"
+        "    return {'title': 'Fresh items', 'items': new} if new else None\n"
+    )
+    with registered_toolkit("live_feed", _LiveFeedToolkit):
+        async with _live_script_check_harness(
+            tmp_path,
+            tools=["triggers", "script", "live_feed"],
+        ) as h:
+            rule = _create_live_rule(
+                h,
+                "sc_live",
+                src,
+                state={"seen": ["a"]},
+                triage=TriageSpec(provider="llm", instructions="Act on new items", model="default"),
+                reopen_on_fire=True,
+            )
+            triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="new item"))
+            reopen_mock = AsyncMock(return_value=True)
+            with (
+                patch("mindroom.reactive_triggers.service.evaluate_triage", triage_mock),
+                patch("mindroom.reactive_triggers.dispatch.reopen_thread_if_resolved", reopen_mock),
+            ):
+                # Tick 1: returns None -> 0 LLM calls, state preserved, script_runs row pruned
+                assert await h.service.poll_script_checks_once() == 0
+                await h.service.drain_due_firings_once()
+                assert triage_mock.await_count == 0
+                assert h.send_log == []
+                assert _require_cp(h.trig_store, rule.trigger_id).state == {"seen": ["a"], "ticks": 1}
+                assert h.script_store.list_runs(include_finished=True) == []
+
+                # Tick 2: live tool returns fresh data ["a", "b"] (no cache) -> dict flows through triage/dispatch/reopen
+                _LiveFeedToolkit.items = ["a", "b"]
+                cp1 = _require_cp(h.trig_store, rule.trigger_id)
+                h.trig_store.upsert_script_check_checkpoint(
+                    rule.trigger_id,
+                    cp1.model_copy(update={"next_poll_at": 0.0}),
+                    expected_rule_uid=rule.rule_uid,
+                )
+                assert await h.service.poll_script_checks_once() == 1
+                assert _require_cp(h.trig_store, rule.trigger_id).state == {"seen": ["a", "b"], "ticks": 2}
+                await h.service.drain_due_firings_once()
+                assert triage_mock.await_count == 1
+                assert reopen_mock.await_count == 1
+                assert len(h.send_log) == 1
+                assert '"b"' in h.send_log[0]["content"]["body"]
+                assert h.script_store.list_runs(include_finished=True) == []
+
+
+@pytest.mark.asyncio
+async def test_script_check_e2e_guards_approval_agent_module_load_and_stale_revision(tmp_path: Path) -> None:
+    """Swallowed approval denial, agent(), module-level tool/state, and stale revisions never commit bad state."""
+    with registered_toolkit("live_feed", _LiveFeedToolkit):
+        async with _live_script_check_harness(tmp_path, tools=["triggers", "script", "live_feed"]) as h:
+            # 1. Swallowed approval denial fails tick without committing state or requesting cards
+            swallow_src = (
+                "def check():\n"
+                "    try:\n"
+                "        tool('live_feed', 'confirm_op')\n"
+                "    except Exception:\n"
+                "        state.set('leaked', 1)\n"
+                "        return None\n"
+                "    return {'ok': True}\n"
+            )
+            r_app = _create_live_rule(h, "sc_app", swallow_src, state={"safe": 1})
+            assert await h.service.poll_script_checks_once() == 0
+            cp_app = _require_cp(h.trig_store, r_app.trigger_id)
+            assert (cp_app.state, cp_app.last_error_code, cp_app.consecutive_errors) == (
+                {"safe": 1},
+                "approval_required",
+                1,
+            )
+            assert h.resolver.approval_requests == 0
+            assert h.script_store.list_runs(include_finished=True) == []
+
+            # 2. agent() blocked, module-level tool() blocked, module-level state.set() blocked
+            for tid, bad_src in (
+                ("sc_agent", "def check():\n    agent('coder', 'hi')\n"),
+                ("sc_mod_tool", "tool('live_feed', 'fetch_items')\ndef check():\n    return None\n"),
+                ("sc_mod_state", "state.set('x', 1)\ndef check():\n    return None\n"),
+            ):
+                r_bad = _create_live_rule(h, tid, bad_src, state={"orig": 1})
+                assert await h.service.poll_script_checks_once() == 0
+                cp_bad = _require_cp(h.trig_store, r_bad.trigger_id)
+                assert (cp_bad.state, cp_bad.last_error_code, cp_bad.consecutive_errors) == (
+                    {"orig": 1},
+                    "script_error",
+                    1,
+                )
+
+            # 3. Stale revision rejected if checkpoint is updated while tick is executing
+            marker = tmp_path / "tick_started"
+            slow_src = (
+                "import pathlib, time\n"
+                "def check():\n"
+                f"    pathlib.Path({str(marker)!r}).write_text('1', encoding='utf-8')\n"
+                "    time.sleep(0.5)\n"
+                "    state.set('from_stale_tick', True)\n"
+                "    return {'stale': True}\n"
+            )
+            r_rev = _create_live_rule(h, "sc_rev", slow_src, state={"v": 1})
+            poll_task = asyncio.create_task(h.service.poll_script_checks_once())
+            for _ in range(100):
+                if marker.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert marker.exists()
+            cp_live = _require_cp(h.trig_store, r_rev.trigger_id)
+            h.trig_store.upsert_script_check_checkpoint(
+                r_rev.trigger_id,
+                cp_live.model_copy(update={"revision": cp_live.revision + 1, "state": {"v": 2}, "next_poll_at": 9e9}),
+                expected_rule_uid=r_rev.rule_uid,
+                expected_revision=cp_live.revision,
+            )
+            assert await poll_task == 0
+            cp_after = _require_cp(h.trig_store, r_rev.trigger_id)
+            assert (cp_after.revision, cp_after.state) == (2, {"v": 2})
+            assert h.trig_store.list_firings(trigger_id=r_rev.trigger_id) == []
+
+
+@pytest.mark.asyncio
+async def test_script_check_e2e_timeout_and_shutdown_cancellation(tmp_path: Path) -> None:
+    """Timeout kills hung subprocess & prunes row; stop_script_checks() cancels active tick cleanly."""
+    marker = tmp_path / "hung_pid"
+    hang_src = (
+        "import os, pathlib, time\n"
+        "def check():\n"
+        f"    pathlib.Path({str(marker)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "    time.sleep(30)\n"
+        "    return {'never': True}\n"
+    )
+    async with _live_script_check_harness(
+        tmp_path,
+        tools=["triggers", "script"],
+        policy={"script_check_timeout_seconds": 5},
+    ) as h:
+        # 1. Shutdown cancellation via stop_script_checks()
+        r_cancel = _create_live_rule(h, "sc_cancel", hang_src, state={"s": 1})
+        h.service._schedule_script_check_poll()
+        for _ in range(100):
+            if marker.exists():
+                break
+            await asyncio.sleep(0.05)
+        assert marker.exists()
+        pid_cancelled = int(marker.read_text(encoding="utf-8"))
+        await h.service.stop_script_checks()
+        assert h.script_store.list_runs(include_finished=True) == []
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid_cancelled, 0)
+        assert _require_cp(h.trig_store, r_cancel.trigger_id).state == {"s": 1}
+
+        # 2. Timeout kills hung process and prunes script_runs row
+        h.service.start()
+        await h.service.stop()
+        h.service._script_checks_stopped = False
+        marker.unlink()
+        assert await h.service.poll_script_checks_once() == 0
+        cp_to = _require_cp(h.trig_store, r_cancel.trigger_id)
+        assert (cp_to.last_error_code, cp_to.consecutive_errors, cp_to.state) == ("timeout", 1, {"s": 1})
+        assert h.script_store.list_runs(include_finished=True) == []
+        pid_timed_out = int(marker.read_text(encoding="utf-8"))
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid_timed_out, 0)
+
+
+@pytest.mark.asyncio
+async def test_script_runtime_lifecycle_and_dispatch_source_access_for_script_check(tmp_path: Path) -> None:
+    """Lifecycle prunes/hides/revokes script_check runs properly and dispatch verifies live source access."""
+    ctx_both = _script_context(tmp_path / "lc", tools=["triggers", "script", "workflow"], allow_local=True)
+    store = ScriptRunStore(ctx_both.runtime_paths)
+    bot = _FakeBot(ctx_both, send_log=[])
+    memberships = AgentReplyMembershipIndex()
+    bot.orchestrator = SimpleNamespace(agent_reply_memberships=memberships)
+    cfg_box = [ctx_both.config]
+    resolver = _LiveScriptRuntimeResolver(
+        runtime_paths=ctx_both.runtime_paths,
+        bot_provider=lambda name: bot if name == "coder" else None,  # type: ignore[arg-type,return-value]
+        worker_backend_provider=lambda _run: None,
+    )
+    broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=ScriptWorkerClient(),
+        worker_backend=None,
+        gateway_url="http://127.0.0.1:8765",
+    )
+    lifecycle = ScriptRuntimeLifecycle(
+        runtime_paths=ctx_both.runtime_paths,
+        store=store,
+        broker=broker,
+        manager=manager,
+        resolver=resolver,
+        config_provider=lambda: cfg_box[0],
+        worker_lease_provider=lambda _loc: None,
+        api_enabled=False,
+    )
+
+    # Active script_check runs are hidden from active_runs() while plain scripts remain visible
+    plain, _ = _create_script_run(store, ctx_both, f"script-{'1' * 32}")
+    sc_active, _ = _create_script_run(store, ctx_both, f"script-{'2' * 32}", script_check_rule_uid="rule-2")
+    assert [r.run_id for r in await lifecycle.active_runs()] == [plain.run_id]
+
+    # Terminal script_check runs prune immediately without calling prune_approvals; recent plain scripts stay
+    plain_done, _ = _create_script_run(store, ctx_both, f"script-{'3' * 32}")
+    sc_done, _ = _create_script_run(store, ctx_both, f"script-{'4' * 32}", script_check_rule_uid="rule-4")
+    store.transition_run(plain_done.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    store.transition_run(sc_done.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    prune_approvals_mock = AsyncMock(return_value=True)
+    with patch.object(_LiveScriptRuntimeResolver, "prune_approvals", prune_approvals_mock):
+        await lifecycle._prune_pass()
+    assert prune_approvals_mock.await_count == 0
+    remaining_ids = {r.run_id for r in store.list_runs(include_finished=True)}
+    assert sc_done.run_id not in remaining_ids
+    assert plain_done.run_id in remaining_ids
+
+    # Dropping 'script' while keeping 'triggers'+'workflow' does NOT revoke script_check (only plain script)
+    cfg_wf_only = _script_context(tmp_path / "lc", tools=["triggers", "workflow"], allow_local=True).config
+    with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_mock:
+        await lifecycle._apply_update(
+            cfg_wf_only,
+            removed_entities=frozenset(),
+            authorization_changed=False,
+            plugins_changed=False,
+        )
+        assert interrupt_mock.await_count == 1
+        assert [r.run_id for r in interrupt_mock.await_args.args[0]] == [plain.run_id]
+
+    # Removing 'triggers' revokes script_check runs (even when 'workflow' remains)
+    cfg_no_trig = _script_context(tmp_path / "lc", tools=["workflow"], allow_local=True).config
+    with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_mock:
+        await lifecycle._apply_update(
+            cfg_no_trig,
+            removed_entities=frozenset(),
+            authorization_changed=False,
+            plugins_changed=False,
+        )
+        assert {r.run_id for r in interrupt_mock.await_args.args[0]} == {plain.run_id, sc_active.run_id}
+
+    # Disabling script_check_enabled DOES revoke active script_check runs
+    cfg_disabled = _script_context(
+        tmp_path / "lc",
+        tools=["triggers", "script", "workflow"],
+        policy={"script_check_enabled": False},
+        allow_local=True,
+    ).config
+    with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_mock:
+        await lifecycle._apply_update(
+            cfg_disabled,
+            removed_entities=frozenset(),
+            authorization_changed=False,
+            plugins_changed=False,
+        )
+        assert [r.run_id for r in interrupt_mock.await_args.args[0]] == [sc_active.run_id]
+
+    # Startup cleanup retires & prunes orphaned script_check runs
+    store.transition_run(plain.run_id, state=ScriptRunState.EXITED, exit_code=0)
+    with patch.object(
+        ScriptRunManager,
+        "reconcile_durable",
+        AsyncMock(
+            side_effect=lambda *, run_id, **_kw: store.transition_run(
+                run_id,
+                state=ScriptRunState.INTERRUPTED,
+            ),
+        ),
+    ):
+        await lifecycle._startup_cleanup_pass()
+    assert sc_active.run_id not in {r.run_id for r in store.list_runs(include_finished=True)}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_check_reactive_source_access_for_script_check(tmp_path: Path) -> None:
+    """dispatch.check_reactive_source_access verifies policy, capability, and live room membership."""
+    ctx_both = _script_context(tmp_path / "disp", tools=["triggers", "script", "workflow"], allow_local=True)
+    cfg_disabled = _script_context(
+        tmp_path / "disp",
+        tools=["triggers", "script", "workflow"],
+        policy={"script_check_enabled": False},
+        allow_local=True,
+    ).config
+    bot = _FakeBot(ctx_both, send_log=[])
+    memberships = AgentReplyMembershipIndex()
+    rule = _sc_rule("sc_disp", agent="coder")
+    ev = TriggerEvent(
+        source_type="script_check",
+        source_id=rule.trigger_id,
+        kind="script_check.match",
+        event_id="e1",
+        timestamp=1.0,
+    )
+    assert (
+        await check_reactive_source_access(
+            rule=rule,
+            event=ev,
+            source_bot=bot,  # type: ignore[arg-type]
+            config=ctx_both.config,
+            runtime_paths=ctx_both.runtime_paths,
+            memberships=memberships,
+        )
+        is None
+    )
+    with patch(
+        "mindroom.reactive_triggers.dispatch.is_sender_allowed_for_agent_reply_in_room",
+        side_effect=ReplyMembershipPendingError(),
+    ):
+        res = await check_reactive_source_access(
+            rule=rule,
+            event=ev,
+            source_bot=bot,  # type: ignore[arg-type]
+            config=ctx_both.config,
+            runtime_paths=ctx_both.runtime_paths,
+            memberships=memberships,
+        )
+        assert res is not None
+        assert res.status == "retry"
+    with patch(
+        "mindroom.reactive_triggers.dispatch.is_sender_allowed_for_agent_reply_in_room",
+        return_value=False,
+    ):
+        res = await check_reactive_source_access(
+            rule=rule,
+            event=ev,
+            source_bot=bot,  # type: ignore[arg-type]
+            config=ctx_both.config,
+            runtime_paths=ctx_both.runtime_paths,
+            memberships=memberships,
+        )
+        assert res is not None
+        assert res.status == "skipped"
+    res_dis = await check_reactive_source_access(
+        rule=rule,
+        event=ev,
+        source_bot=bot,  # type: ignore[arg-type]
+        config=cfg_disabled,
+        runtime_paths=ctx_both.runtime_paths,
+        memberships=memberships,
+    )
+    assert res_dis is not None
+    assert res_dis.status == "skipped"

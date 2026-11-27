@@ -142,6 +142,7 @@ from .orchestration.runtime import (
     run_with_retry,
     wait_for_matrix_homeserver,
 )
+from .orchestration.script_checks import build_script_check_tick_runner
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.storage_preparation import prepare_runtime_storage
 from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
@@ -472,6 +473,15 @@ class _MultiAgentOrchestrator:
                 required_backend_locator=required_backend_locator,
             ),
             api_enabled=self.api_enabled,
+        )
+        self.reactive_triggers.set_script_check_runner(
+            build_script_check_tick_runner(
+                runtime_paths=self.runtime_paths,
+                bots=lambda: self.agent_bots,
+                memberships=self.agent_reply_memberships,
+                manager_provider=lambda: self._script_runtime.tool_manager,
+                broker=self._script_runtime.broker,
+            ),
         )
         self._workflow_runtime = build_workflow_runtime(self._script_runtime)
         self._rooms = RoomSetup(
@@ -1529,6 +1539,7 @@ class _MultiAgentOrchestrator:
         await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
         await run_shutdown_step("call_transcripts", self._call_transcripts_runtime.stop())
         await run_shutdown_step("workflow_runtime", self._workflow_runtime.shutdown())
+        await run_shutdown_step("reactive_triggers_script_checks", self.reactive_triggers.stop_script_checks())
         try:
             await run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:

@@ -35,9 +35,11 @@ from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
+    ScriptCheckSourceSpec,
     ThreadTagSourceSpec,
     TriggerEvent,
 )
+from mindroom.reactive_triggers.script_check import ScriptCheckPoller, ScriptCheckTickRunner
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.reactive_triggers.triage import evaluate_triage
 from mindroom.requester_identity import (
@@ -63,6 +65,7 @@ logger = get_logger(__name__)
 
 _POLL_INTERVAL_SECONDS = 5.0
 _GITHUB_PR_POLL_INTERVAL_SECONDS = 15.0
+_SCRIPT_CHECK_POLL_INTERVAL_SECONDS = 15.0
 _PRUNE_INTERVAL_SECONDS = 3600.0
 _RESTORE_RETRY_DELAY_SECONDS = 30.0
 _READ_TIMEOUT_SECONDS = 60.0
@@ -167,6 +170,7 @@ class ReactiveTriggerService:
         bots: Callable[[], Mapping[str, AgentBot]],
         memberships: AgentReplyMembershipIndex,
         store: ReactiveTriggerStore | None = None,
+        script_check_runner: ScriptCheckTickRunner | None = None,
     ) -> None:
         """Initialize the reactive trigger service and its supervised delivery loop."""
         self.runtime_paths = runtime_paths
@@ -182,6 +186,7 @@ class ReactiveTriggerService:
 
         self._poll_interval_seconds = _POLL_INTERVAL_SECONDS
         self._github_pr_poll_interval_seconds = _GITHUB_PR_POLL_INTERVAL_SECONDS
+        self._script_check_poll_interval_seconds = _SCRIPT_CHECK_POLL_INTERVAL_SECONDS
         self._wake_event = asyncio.Event()
         self._running_loop: asyncio.AbstractEventLoop | None = None
         self._loop = SupervisedLoop(self.name, self._run)
@@ -192,6 +197,9 @@ class ReactiveTriggerService:
         self._reconcile_task: asyncio.Task[None] | None = None
         self._github_pr_poll_task: asyncio.Task[None] | None = None
         self._pr_poll_requested = False
+        self._script_check_poll_task: asyncio.Task[None] | None = None
+        self._script_check_poll_requested = False
+        self._script_checks_stopped = False
         self._github_pr_poller = (
             None
             if self._store is None
@@ -199,7 +207,18 @@ class ReactiveTriggerService:
                 store=self._store,
                 config_provider=self.config_provider,
                 runtime_paths=self.runtime_paths,
-                on_enqueued=lambda: self.notify_work(poll_github_prs=False),
+                on_enqueued=lambda: self.notify_work(poll_github_prs=False, poll_script_checks=False),
+            )
+        )
+        self._script_check_poller = (
+            None
+            if self._store is None
+            else ScriptCheckPoller(
+                store=self._store,
+                config_provider=self.config_provider,
+                runtime_paths=self.runtime_paths,
+                tick_runner=script_check_runner,
+                on_enqueued=lambda: self.notify_work(poll_github_prs=False, poll_script_checks=False),
             )
         )
         self._live_during_restore: dict[str, set[tuple[str, str]]] = {}
@@ -225,14 +244,31 @@ class ReactiveTriggerService:
         else:
             await self.stop()
 
+    def set_script_check_runner(self, runner: ScriptCheckTickRunner | None) -> None:
+        """Bind or clear the script_check tick runner callable."""
+        if self._script_check_poller is not None:
+            self._script_check_poller.set_tick_runner(runner)
+        if runner is not None:
+            self._script_checks_stopped = False
+
     def start(self) -> None:
         """Start the supervised background loop unless it is already running."""
         if self._store is None:
             return
+        self._script_checks_stopped = False
         self._loop.start()
 
+    async def stop_script_checks(self) -> None:
+        """Stop scheduling new script_check ticks and cancel any active script_check poll task."""
+        self._script_checks_stopped = True
+        self._script_check_poll_requested = False
+        if (poll_task := self._script_check_poll_task) is not None:
+            self._script_check_poll_task = None
+            poll_task.cancel()
+            await asyncio.gather(poll_task, return_exceptions=True)
+
     async def stop(self) -> None:
-        """Stop the background loop, cancel reconcile/restore/PR poll tasks, and reset transient wait/restore caches."""
+        """Stop the background loop, cancel reconcile/restore/poll tasks, and reset transient wait/restore caches."""
         reconcile_task = self._reconcile_task
         self._reconcile_task = None
         if reconcile_task is not None:
@@ -249,15 +285,18 @@ class ReactiveTriggerService:
             self._github_pr_poll_task = None
             poll_task.cancel()
             await asyncio.gather(poll_task, return_exceptions=True)
+        await self.stop_script_checks()
         self._restored_rooms.clear()
         self._refetch_waits.clear()
         self._unfinished_waits.clear()
         self._room_member_cache.clear()
 
-    def notify_work(self, *, poll_github_prs: bool = True) -> None:
+    def notify_work(self, *, poll_github_prs: bool = True, poll_script_checks: bool = True) -> None:
         """Wake the delivery loop immediately when new reactive trigger work is enqueued."""
         if poll_github_prs:
             self._pr_poll_requested = True
+        if poll_script_checks and not self._script_checks_stopped:
+            self._script_check_poll_requested = True
         running_loop = self._running_loop
         if running_loop is not None and not running_loop.is_closed():
             try:
@@ -331,9 +370,33 @@ class ReactiveTriggerService:
                 if self._github_pr_poll_task is asyncio.current_task():
                     self._github_pr_poll_task = None
                     if self._pr_poll_requested:
-                        self.notify_work()
+                        self.notify_work(poll_github_prs=True, poll_script_checks=False)
 
         self._github_pr_poll_task = asyncio.create_task(_poll())
+
+    async def poll_script_checks_once(self) -> int:
+        """Poll due script_check triggers once and return the number of enqueued firings."""
+        if self._script_check_poller is None or self._script_checks_stopped:
+            return 0
+        return await self._script_check_poller.poll_due_once()
+
+    def _schedule_script_check_poll(self) -> None:
+        if self._script_check_poller is None or self._script_checks_stopped:
+            return
+        if self._script_check_poll_task is not None and not self._script_check_poll_task.done():
+            self._script_check_poll_requested = True
+            return
+
+        async def _poll() -> None:
+            try:
+                await self._run_guarded(self.poll_script_checks_once, "Reactive trigger script_check poll failed")
+            finally:
+                if self._script_check_poll_task is asyncio.current_task():
+                    self._script_check_poll_task = None
+                    if self._script_check_poll_requested and not self._script_checks_stopped:
+                        self.notify_work(poll_github_prs=False, poll_script_checks=True)
+
+        self._script_check_poll_task = asyncio.create_task(_poll())
 
     async def _run_guarded(self, coro: Callable[[], Awaitable[object]], error_message: str) -> None:
         try:
@@ -346,6 +409,7 @@ class ReactiveTriggerService:
         self._running_loop = asyncio.get_running_loop()
         next_poll_at = 0.0
         next_github_pr_poll_at = 0.0
+        next_script_check_poll_at = 0.0
         next_prune_at = time.monotonic() + _PRUNE_INTERVAL_SECONDS
         try:
             while True:
@@ -360,6 +424,13 @@ class ReactiveTriggerService:
                     self._schedule_github_pr_poll()
                     next_github_pr_poll_at = time.monotonic() + self._github_pr_poll_interval_seconds
 
+                if not self._script_checks_stopped and (
+                    self._script_check_poll_requested or now_mono >= next_script_check_poll_at
+                ):
+                    self._script_check_poll_requested = False
+                    self._schedule_script_check_poll()
+                    next_script_check_poll_at = time.monotonic() + self._script_check_poll_interval_seconds
+
                 await self._run_guarded(self.drain_due_firings_once, "Reactive trigger firing drain failed")
 
                 now_mono = time.monotonic()
@@ -367,7 +438,12 @@ class ReactiveTriggerService:
                     await self._run_guarded(self._prune_old_firings, "Reactive trigger firing prune failed")
                     next_prune_at = now_mono + _PRUNE_INTERVAL_SECONDS
 
-                due = min(self._poll_interval_seconds, next_poll_at - now_mono, next_github_pr_poll_at - now_mono)
+                due = min(
+                    self._poll_interval_seconds,
+                    next_poll_at - now_mono,
+                    next_github_pr_poll_at - now_mono,
+                    next_script_check_poll_at - now_mono,
+                )
                 wait_seconds = max(0.0, due)
                 with contextlib.suppress(TimeoutError):
                     async with asyncio.timeout(wait_seconds):
@@ -669,6 +745,8 @@ class ReactiveTriggerService:
         source = rule.source
         if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
             return self._pick_bot_for_room(source.room_id, preferred_agent=rule.target.agent)
+        if isinstance(source, ScriptCheckSourceSpec):
+            return self._pick_bot_for_room(source.room_id, preferred_agent=source.agent)
         return None
 
     async def _get_room_joined_members(
