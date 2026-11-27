@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 
 
 def function_provenance(tool: JobTool, arguments: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Read exact MCP bridge identity without importing or warming tools."""
+    """Read exact MCP bridge identity or action provenance without importing or warming tools."""
+    if tool.toolkit_name == "knowledge_graph" and tool.function.name == "knowledge_graph":
+        if isinstance((action := (arguments or {}).get("action")), str):
+            return {"action": action}
+        return {}
     toolkit = tool.toolkit
     if not isinstance(toolkit, MindRoomMCPToolkit):
         return {}

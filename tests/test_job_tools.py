@@ -113,7 +113,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
         return Toolkit(name="ci", tools=[job, lookup])
 
     try:
-        with patch("mindroom.agents.build_agent_toolkit", side_effect=plugin_toolkit):
+        with patch("mindroom.tool_system.toolkit_builder.build_agent_toolkit", side_effect=plugin_toolkit):
             if filtered:
                 build = create_agent(
                     "leader",

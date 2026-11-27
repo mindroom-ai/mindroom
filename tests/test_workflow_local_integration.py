@@ -214,7 +214,7 @@ def main(args):
 
 async def _start_job(stack: LocalWorkflowStack, source: str, **arguments: object) -> dict[str, str]:
     """Start a run as its job, as an agent's `workflow(action="start", ...)` call does, and return the handle."""
-    handle = json.loads(await stack.call("workflow", action="start", source=source, **arguments))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=source, **arguments))
     stack.run_id = handle["run_id"]
     return handle
 
@@ -300,11 +300,13 @@ async def test_real_run_killed_before_the_receipt_is_indeterminate_and_writes_on
     assert await local_stack.collect(job) == run.error
     assert run.error is not None
     assert (
-        f'ToolError: This call may already have run (attempt 1). Check its effect; to run it again call workflow(action="resume", run_id=..., rerun=["n{node.seq}"]).'
+        f'ToolError: This call may already have run (attempt 1). Check its effect; to run it again call workflow_write(action="resume", run_id=..., rerun=["n{node.seq}"]).'
         in run.error
     )
 
-    resumed = json.loads(await local_stack.call("workflow", action="resume", run_id=run.run_id, rerun=[f"n{node.seq}"]))
+    resumed = json.loads(
+        await local_stack.call("workflow_write", action="resume", run_id=run.run_id, rerun=[f"n{node.seq}"]),
+    )
     again = await _ended_job(local_stack, resumed["job_id"])
 
     assert (again.status, local_stack.counting_tool.lines) == ("completed", ["a", "a"])

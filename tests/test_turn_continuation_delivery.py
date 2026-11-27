@@ -60,7 +60,7 @@ def _continuing_tool_execution() -> ToolExecution:
     """Return a model switch for the current response, which forces one more attempt."""
     return ToolExecution(
         tool_call_id="call-switch-after-toolcall",
-        tool_name="thread_model_write",
+        tool_name="thread_model",
         tool_args={"action": "switch", "model_name": "large", "when": "after-toolcall"},
         result=json.dumps(
             {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "after-toolcall"},

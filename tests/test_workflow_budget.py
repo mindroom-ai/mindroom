@@ -169,16 +169,22 @@ async def test_resume_with_higher_limit_continues_and_reuses_completed_nodes(sta
 
     # Without raising max_cost_usd (or with a limit not above spent), resume is refused.
     with pytest.raises(CallFailed, match=r"max_cost_usd above \$1\.80"):
-        await stack.call("workflow", action="resume", run_id=stack.run_id, call_id="resume-same")
+        await stack.call("workflow_write", action="resume", run_id=stack.run_id, call_id="resume-same")
     with pytest.raises(CallFailed, match=r"max_cost_usd above \$1\.80"):
-        await stack.call("workflow", action="resume", run_id=stack.run_id, max_cost_usd=1.8, call_id="resume-equal")
+        await stack.call(
+            "workflow_write",
+            action="resume",
+            run_id=stack.run_id,
+            max_cost_usd=1.8,
+            call_id="resume-equal",
+        )
     with pytest.raises(CallFailed, match="max_cost_usd must be a positive amount in USD"):
-        await stack.call("workflow", action="resume", run_id=stack.run_id, max_cost_usd=0, call_id="resume-zero")
+        await stack.call("workflow_write", action="resume", run_id=stack.run_id, max_cost_usd=0, call_id="resume-zero")
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED
 
     # Resuming with a higher limit reuses completed nodes without re-running them, then stops at the new limit.
     handle = json.loads(
-        await stack.call("workflow", action="resume", run_id=stack.run_id, max_cost_usd=2.5, call_id="resume-up"),
+        await stack.call("workflow_write", action="resume", run_id=stack.run_id, max_cost_usd=2.5, call_id="resume-up"),
     )
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
     assert stack.store.get_run(stack.run_id).max_cost_usd == 2.5
@@ -295,12 +301,18 @@ async def test_cost_limit_under_a_cent_formats_amounts(stack: WorkflowStack) -> 
 async def test_start_workflow_saves_the_limit_and_refuses_one_that_is_no_amount(stack: WorkflowStack) -> None:
     """`max_cost_usd` is the run's, and anything but a positive number is refused before a run exists."""
     source = "def main(args):\n    return 'counted'\n"
-    handle = json.loads(await stack.call("workflow", action="start", source=source, max_cost_usd=2.5))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=source, max_cost_usd=2.5))
 
     assert stack.store.get_run(handle["run_id"]).max_cost_usd == 2.5
     for wrong in (0, -1, "much", float("inf"), float("nan")):
         with pytest.raises(CallFailed, match="max_cost_usd must be a positive amount in USD"):
-            await stack.call("workflow", action="start", source=source, max_cost_usd=wrong, call_id=f"wrong-{wrong}")
+            await stack.call(
+                "workflow_write",
+                action="start",
+                source=source,
+                max_cost_usd=wrong,
+                call_id=f"wrong-{wrong}",
+            )
     assert len(stack.store.list_runs()) == 1
 
 
@@ -338,7 +350,7 @@ async def test_nested_run_stops_at_ancestors_cost_limit_and_parent_stops_too(sta
 
     start_inner = tool_args(
         "workflow",
-        "workflow",
+        "workflow_write",
         action="start",
         source="def main(args): return 'inner'",
         max_concurrent=1,
@@ -382,7 +394,7 @@ async def test_nested_run_with_lower_own_limit_stops_without_stopping_parent(sta
 
     start_inner = tool_args(
         "workflow",
-        "workflow",
+        "workflow_write",
         action="start",
         source="def main(args): return 'inner'",
         max_cost_usd=0.10,
@@ -413,7 +425,7 @@ async def test_nested_run_with_lower_own_limit_stops_without_stopping_parent(sta
 async def test_raising_parent_limit_continues_stopped_nested_child(stack: WorkflowStack) -> None:
     """Raising a parent's cost limit continues the same stopped child and delivers its real report with 2 turns total."""
     inner_source = "def main(args):\n    return 'inner'\n"
-    launch = tool_args("workflow", "workflow", action="start", source=inner_source)
+    launch = tool_args("workflow", "workflow_write", action="start", source=inner_source)
     await stack.start(max_cost_usd=0.10, max_concurrent=1)
     parent = stack.run_id
     model = stack.child_script(answer("first", _usd(0.20)), answer("next", _usd(0.20)))
@@ -433,7 +445,7 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
     assert stopped_node.state is not WorkflowNodeState.COMPLETED
     assert len(model.requests) == 1
 
-    await stack.call("workflow", action="resume", run_id=parent, max_cost_usd=1.0, call_id="raise-parent-limit")
+    await stack.call("workflow_write", action="resume", run_id=parent, max_cost_usd=1.0, call_id="raise-parent-limit")
     await stack.until(lambda: stack.store.get_run(parent).attempt == 2)
 
     replayed = await stack.submit("@0", "tool", launch)
@@ -462,7 +474,7 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
     await stack.finish_attempt(result=parent_node.result)
     assert stack.store.get_run(parent).result == "firstnext"
     assert len(model.requests) == 2
-    reported = json.loads(await stack.call("workflow", action="get", run_id=parent))["usage"]
+    reported = json.loads(await stack.call("workflow_read", action="get", run_id=parent))["usage"]
     assert (reported["attempt_cost_usd"], reported["cost_usd"]) == pytest.approx((0.20, 0.40))
 
 
@@ -515,7 +527,7 @@ async def test_delegation_submitted_after_cost_limit_does_not_request_approval(
 @pytest.mark.asyncio
 async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat_write(stack: WorkflowStack) -> None:
     """Replacing an interrupted nested launch at @0 with another tool keeps that tool's completion across resumes."""
-    launch = tool_args("workflow", "workflow", action="start", source="def main(args):\n    return 'inner'\n")
+    launch = tool_args("workflow", "workflow_write", action="start", source="def main(args):\n    return 'inner'\n")
     append = tool_args("counter", "append", line="done")
     await stack.start(max_cost_usd=0.10, max_concurrent=1)
     parent = stack.run_id
@@ -534,7 +546,7 @@ async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat
 
     edited = "def main(args):\n    return 'edited'\n"
     await stack.call(
-        "workflow",
+        "workflow_write",
         action="resume",
         run_id=parent,
         source=edited,
@@ -553,7 +565,7 @@ async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat
     await stack.finish_attempt(result="done")
     await stack.jobs.wait(second_job, owner=stack.context.execution_identity, depth=0)
 
-    await stack.call("workflow", action="resume", run_id=parent, call_id="resume-again")
+    await stack.call("workflow_write", action="resume", run_id=parent, call_id="resume-again")
     await stack.until(lambda: stack.store.get_run(parent).attempt == 3)
 
     replayed = await stack.submit("@0", "tool", append)
@@ -565,8 +577,8 @@ async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat
 async def test_resuming_nested_launch_with_boolean_instead_of_int_starts_new_child(stack: WorkflowStack) -> None:
     """Changing nested launch args from `1` to `True` starts a new child instead of reusing the integer-arg child."""
     inner_source = "def main(args):\n    return 'inner'\n"
-    launch_int = tool_args("workflow", "workflow", action="start", source=inner_source, args={"enabled": 1})
-    launch_bool = tool_args("workflow", "workflow", action="start", source=inner_source, args={"enabled": True})
+    launch_int = tool_args("workflow", "workflow_write", action="start", source=inner_source, args={"enabled": 1})
+    launch_bool = tool_args("workflow", "workflow_write", action="start", source=inner_source, args={"enabled": True})
     await stack.start(max_cost_usd=0.10, max_concurrent=1)
     parent = stack.run_id
     stack.child_script(answer("first", _usd(0.20)))
@@ -584,7 +596,7 @@ async def test_resuming_nested_launch_with_boolean_instead_of_int_starts_new_chi
 
     edited = "def main(args):\n    return 'bool'\n"
     await stack.call(
-        "workflow",
+        "workflow_write",
         action="resume",
         run_id=parent,
         source=edited,

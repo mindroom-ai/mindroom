@@ -141,7 +141,7 @@ def _trace(tool_name: str) -> ToolTraceEntry:
 def _model_switch_execution(when: str) -> ToolExecution:
     return ToolExecution(
         tool_call_id="call-switch-model",
-        tool_name="thread_model_write",
+        tool_name="thread_model",
         tool_args={"action": "switch", "model_name": "large", "when": when},
         result=json.dumps(
             {
@@ -1015,7 +1015,7 @@ def test_continuation_advances_and_resets_turn_state() -> None:
     prompts: list[str] = []
     live_at_start: list[object] = []
     prior_tools_at_start: list[tuple[ToolTraceEntry, ...]] = []
-    first_trace = _trace("thread_model_write")
+    first_trace = _trace("thread_model")
 
     async def _attempt(
         run: TurnRunState,
@@ -1476,7 +1476,7 @@ def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt
     Its finished calls already carried over through the turn state, so keeping them here would count them twice.
     """
     recorder = _FakeTurnRecorder()
-    switch = _trace("thread_model_write")
+    switch = _trace("thread_model")
     attempts = 0
 
     async def _attempt(

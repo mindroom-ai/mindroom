@@ -1501,17 +1501,17 @@ def test_thread_model_tool_registered(tmp_path: Path) -> None:
 
     assert "thread_model" in builtin_tool_registry()
     assert isinstance(toolkit, ThreadModelTools)
-    assert "thread_model_read" in toolkit.functions
-    assert builtin_tool_registry().entries["thread_model"].function_names == ("thread_model_read", "thread_model_write")
+    assert set(toolkit.functions) == {"thread_model"}
+    assert builtin_tool_registry().entries["thread_model"].function_names == ("thread_model",)
 
 
 def test_thread_model_switch_may_stop_the_run_but_does_not_stop_every_call() -> None:
     """Only a switch for the current response stops the run, and every switch still runs inside the run that made it."""
     tool = ThreadModelTools()
-    function = toolkit_offers(tool, "thread_model_write")
+    function = toolkit_offers(tool, "thread_model")
 
     assert (function.stop_after_call, function.may_stop_run, function.controls_run) == (False, True, True)
-    assert function.parameters["properties"]["action"]["enum"] == ["switch", "reset"]
+    assert function.parameters["properties"]["action"]["enum"] == ["list", "get", "switch", "reset"]
     assert function.parameters["properties"]["model_name"]["type"] == "string"
     assert "anyOf" not in function.parameters["properties"]["model_name"]
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
@@ -1532,25 +1532,25 @@ def _configured_thread_model_functions(context: ToolRuntimeContext, workspace: P
 
 
 def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
-    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for list_models."""
+    """`thread_model` results are for its run, so the model cannot ask to save them to a file."""
     functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
 
-    assert OUTPUT_PATH_ARGUMENT not in functions["thread_model_write"].parameters["properties"]
-    assert OUTPUT_PATH_ARGUMENT in functions["thread_model_read"].parameters["properties"]
+    assert list(functions) == ["thread_model"]
+    assert OUTPUT_PATH_ARGUMENT not in functions["thread_model"].parameters["properties"]
 
 
-def test_thread_model_write_is_non_strict_on_openai_responses_wire(tmp_path: Path) -> None:
-    """`thread_model_write` explicitly sets strict=False so Responses API keeps optional switch args optional."""
-    direct = toolkit_offers(ThreadModelTools(), "thread_model_write")
+def test_thread_model_is_non_strict_on_openai_responses_wire(tmp_path: Path) -> None:
+    """`thread_model` explicitly sets strict=False so Responses API keeps optional switch args optional."""
+    direct = toolkit_offers(ThreadModelTools(), "thread_model")
     assert direct.strict is False
 
     functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
-    write_fn = functions["thread_model_write"]
-    assert write_fn.strict is False
-    assert OUTPUT_PATH_ARGUMENT not in write_fn.parameters["properties"]
+    fn = functions["thread_model"]
+    assert fn.strict is False
+    assert OUTPUT_PATH_ARGUMENT not in fn.parameters["properties"]
 
-    [wire_tool] = _tool_dicts([write_fn.definition()])
-    assert wire_tool["name"] == "thread_model_write"
+    [wire_tool] = _tool_dicts([fn.definition()])
+    assert wire_tool["name"] == "thread_model"
     assert wire_tool["strict"] is False
     assert wire_tool["parameters"]["required"] == ["action"]
 
@@ -1559,7 +1559,7 @@ def test_thread_model_write_is_non_strict_on_openai_responses_wire(tmp_path: Pat
 async def test_a_configured_switch_for_the_current_response_is_never_auto_saved(tmp_path: Path) -> None:
     """A saved result would answer with a receipt, which no longer stops the run or names the new model."""
     context = _make_tool_context(tmp_path)
-    switch = _configured_thread_model_functions(context, tmp_path / "workspace")["thread_model_write"]
+    switch = _configured_thread_model_functions(context, tmp_path / "workspace")["thread_model"]
 
     with tool_runtime_context(context):
         outcome = await execute_tool_call(
@@ -1577,7 +1577,7 @@ async def test_a_configured_switch_for_the_current_response_is_never_auto_saved(
 @pytest.mark.asyncio
 async def test_thread_model_tool_requires_runtime_context() -> None:
     """Tool calls should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadModelTools().thread_model_write("switch", "large"))
+    payload = json.loads(await ThreadModelTools().thread_model("switch", "large"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_model"
@@ -1590,7 +1590,7 @@ async def test_thread_model_tool_lists_configured_models_without_thread(tmp_path
     context = _make_tool_context(tmp_path, thread_id=None)
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_read("list"))
+        payload = json.loads(await ThreadModelTools().thread_model("list"))
 
     assert payload == {
         "action": "list",
@@ -1608,7 +1608,7 @@ async def test_thread_model_tool_requires_thread(tmp_path: Path) -> None:
     """Switching should fail clearly without an active thread."""
     context = _make_tool_context(tmp_path, thread_id=None)
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "large"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "large"))
 
     assert payload["status"] == "error"
     assert "thread" in payload["message"]
@@ -1621,9 +1621,9 @@ async def test_thread_model_tool_switch_get_and_reset(tmp_path: Path) -> None:
     tool = ThreadModelTools()
 
     with tool_runtime_context(context):
-        switch_payload = json.loads(await tool.thread_model_write("switch", "large"))
-        get_payload = json.loads(await tool.thread_model_read("get"))
-        reset_payload = json.loads(await tool.thread_model_write("reset"))
+        switch_payload = json.loads(await tool.thread_model("switch", "large"))
+        get_payload = json.loads(await tool.thread_model("get"))
+        reset_payload = json.loads(await tool.thread_model("reset"))
 
     assert switch_payload["status"] == "ok"
     assert switch_payload["model"] == "large"
@@ -1646,9 +1646,9 @@ async def test_thread_model_tool_reports_unavailable_storage(tmp_path: Path, act
 
     with tool_runtime_context(context):
         result = (
-            await tool.thread_model_write("switch", "large", when="after-toolcall")
+            await tool.thread_model("switch", "large", when="after-toolcall")
             if action == "switch"
-            else await tool.thread_model_write("reset")
+            else await tool.thread_model("reset")
         )
 
     assert isinstance(result, str)
@@ -1667,7 +1667,7 @@ async def test_thread_model_tool_can_switch_after_current_tool_call(tmp_path: Pa
     context = _make_tool_context(tmp_path)
 
     with tool_runtime_context(context):
-        outcome = await ThreadModelTools().thread_model_write("switch", "large", when="after-toolcall")
+        outcome = await ThreadModelTools().thread_model("switch", "large", when="after-toolcall")
 
     # The run stops after the call, so the turn continues the response on the new model.
     assert isinstance(outcome, ToolOutcome)
@@ -1689,7 +1689,7 @@ async def test_over_budget_switch_continues_this_response_on_the_fallback(tmp_pa
     context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
 
     with tool_runtime_context(context):
-        outcome = await ThreadModelTools().thread_model_write("switch", "large", when="after-toolcall")
+        outcome = await ThreadModelTools().thread_model("switch", "large", when="after-toolcall")
 
     assert isinstance(outcome, ToolOutcome)
     assert outcome.stop_after_call is True
@@ -1710,7 +1710,7 @@ async def test_over_budget_next_turn_switch_says_replies_use_the_fallback(tmp_pa
     context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "large"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "large"))
 
     assert payload["model"] == "large"
     assert "budget" in payload["note"]
@@ -1721,7 +1721,7 @@ async def test_over_budget_next_turn_switch_says_replies_use_the_fallback(tmp_pa
 async def test_thread_model_tool_rejects_unknown_switch_timing(tmp_path: Path) -> None:
     """Accepting an unknown timing value could persist a change with undefined execution semantics."""
     context = _make_tool_context(tmp_path)
-    entrypoint = toolkit_offers(ThreadModelTools(), "thread_model_write").entrypoint
+    entrypoint = toolkit_offers(ThreadModelTools(), "thread_model").entrypoint
 
     with tool_runtime_context(context), pytest.raises(ValidationError):
         await entrypoint(action="switch", model_name="large", when="later")
@@ -1735,7 +1735,7 @@ async def test_thread_model_tool_rejects_unknown_model(tmp_path: Path) -> None:
     context = _make_tool_context(tmp_path)
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "nonexistent"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "nonexistent"))
 
     assert payload["status"] == "error"
     assert payload["available_models"] == ["default", "large"]
@@ -1751,9 +1751,9 @@ async def test_thread_model_tool_rejects_a_model_removed_since_the_turn_started(
     tool = ThreadModelTools()
 
     with tool_runtime_context(context):
-        await tool.thread_model_write("switch", "default")
+        await tool.thread_model("switch", "default")
     with tool_runtime_context(replace(context, config_provider=lambda: current)):
-        payload = json.loads(await tool.thread_model_write("switch", "large"))
+        payload = json.loads(await tool.thread_model("switch", "large"))
 
     assert payload["status"] == "error"
     assert payload["available_models"] == ["default"]
@@ -1768,7 +1768,7 @@ async def test_a_next_turn_switch_reports_the_model_later_turns_will_run(tmp_pat
     current.models["large"].id = "larger-model"
 
     with tool_runtime_context(replace(context, config_provider=lambda: current)):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "large"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "large"))
 
     assert payload["status"] == "ok"
     assert payload["model_id"] == "larger-model"
@@ -1784,7 +1784,7 @@ async def test_a_next_turn_switch_measures_the_budget_as_later_turns_will(tmp_pa
     current.models["large"].pricing = ModelPricing(input=5, output=30)
 
     with tool_runtime_context(replace(context, config_provider=lambda: current)):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "large"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "large"))
 
     assert payload["model"] == "large"
     assert "`cheap`" in payload["note"]
@@ -1801,8 +1801,8 @@ async def test_thread_model_tool_switches_a_reasoning_level_and_rejects_an_unsup
     )
 
     with tool_runtime_context(context):
-        switched = json.loads(await ThreadModelTools().thread_model_write("switch", "sol@high"))
-        rejected = json.loads(await ThreadModelTools().thread_model_write("switch", "sol@xhigh"))
+        switched = json.loads(await ThreadModelTools().thread_model("switch", "sol@high"))
+        rejected = json.loads(await ThreadModelTools().thread_model("switch", "sol@xhigh"))
 
     assert switched["status"] == "ok"
     assert switched["model"] == "sol@high"
@@ -1829,7 +1829,7 @@ async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Pa
     )
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_read("get"))
+        payload = json.loads(await ThreadModelTools().thread_model("get"))
 
     assert payload["status"] == "ok"
     assert payload["overrides"] == {}
@@ -1870,7 +1870,7 @@ async def test_thread_model_tool_switch_leaves_entities_the_requester_cannot_add
     context = _restricted_tool_context(tmp_path, USER)
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadModelTools().thread_model_write("switch", "expensive"))
+        payload = json.loads(await ThreadModelTools().thread_model("switch", "expensive"))
 
     assert payload["status"] == "ok"
     assert resolved_thread_models(context.config, context.runtime_paths) == {
@@ -1888,11 +1888,11 @@ async def test_thread_model_tool_reports_and_resets_only_the_entities_each_overr
     tool = ThreadModelTools()
 
     with tool_runtime_context(other_context):
-        await tool.thread_model_write("switch", "expensive")
+        await tool.thread_model("switch", "expensive")
     with tool_runtime_context(context):
-        await tool.thread_model_write("switch", "cheap")
-        get_payload = json.loads(await tool.thread_model_read("get"))
-        reset_payload = json.loads(await tool.thread_model_write("reset"))
+        await tool.thread_model("switch", "cheap")
+        get_payload = json.loads(await tool.thread_model("get"))
+        reset_payload = json.loads(await tool.thread_model("reset"))
 
     assert get_payload["overrides"] == {"helper": "cheap", "restricted": "expensive"}
     assert reset_payload["cleared"] is True
@@ -2033,22 +2033,25 @@ async def test_thread_model_validation_errors_and_get_without_thread(tmp_path: P
     tool = ThreadModelTools()
 
     with tool_runtime_context(context):
-        list_ok = json.loads(await tool.thread_model_read("list"))
-        get_no_thread = json.loads(await tool.thread_model_read("get"))
-        bad_read = json.loads(await tool.thread_model_read("nope"))  # type: ignore[arg-type]
-        bad_write = json.loads(await tool.thread_model_write("nope"))  # type: ignore[arg-type]
-        missing_model = json.loads(await tool.thread_model_write("switch"))
-        blank_model = json.loads(await tool.thread_model_write("switch", model_name="  "))
-        reset_with_model = json.loads(await tool.thread_model_write("reset", model_name="large"))
-        reset_with_when = json.loads(await tool.thread_model_write("reset", when="next-turn"))
+        list_ok = json.loads(await tool.thread_model("list"))
+        get_no_thread = json.loads(await tool.thread_model("get"))
+        bad_action = json.loads(await tool.thread_model("nope"))  # type: ignore[arg-type]
+        list_with_model = json.loads(await tool.thread_model("list", model_name="large"))
+        get_with_when = json.loads(await tool.thread_model("get", when="next-turn"))
+        missing_model = json.loads(await tool.thread_model("switch"))
+        blank_model = json.loads(await tool.thread_model("switch", model_name="  "))
+        reset_with_model = json.loads(await tool.thread_model("reset", model_name="large"))
+        reset_with_when = json.loads(await tool.thread_model("reset", when="next-turn"))
 
     assert list_ok["status"] == "ok"
     assert get_no_thread["status"] == "error"
     assert "thread" in get_no_thread["message"]
-    assert bad_read["status"] == "error"
-    assert "Unsupported thread_model_read action" in bad_read["message"]
-    assert bad_write["status"] == "error"
-    assert "Unsupported thread_model_write action" in bad_write["message"]
+    assert bad_action["status"] == "error"
+    assert "Unsupported thread_model action" in bad_action["message"]
+    assert list_with_model["status"] == "error"
+    assert "'model_name'" in list_with_model["message"]
+    assert get_with_when["status"] == "error"
+    assert "'when'" in get_with_when["message"]
     assert missing_model["status"] == "error"
     assert "model_name is required" in missing_model["message"]
     assert blank_model["status"] == "error"

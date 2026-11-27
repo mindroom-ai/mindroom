@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,7 +69,8 @@ def test_thread_resolution_tool_registered_and_instantiates(tmp_path: Path) -> N
     metadata = builtin_tool_registry().entries["thread_resolution"]
 
     assert metadata.requires_room_context
-    assert metadata.function_names == ("reopen_thread", "resolve_thread")
+    assert metadata.function_names == ("thread_resolution",)
+    assert metadata.action_scoped_grants == ("thread_resolution",)
     assert isinstance(
         get_tool_by_name("thread_resolution", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ThreadResolutionTools,
@@ -79,10 +80,11 @@ def test_thread_resolution_tool_registered_and_instantiates(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_thread_resolution_requires_runtime_context() -> None:
     """Tool calls should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadResolutionTools().resolve_thread())
+    payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_resolution"
+    assert payload["action"] == "resolve"
     assert "context" in payload["message"]
 
 
@@ -92,9 +94,10 @@ async def test_thread_resolution_requires_active_thread(tmp_path: Path) -> None:
     context = _context(tmp_path, thread_id=None)
 
     with tool_runtime_context(context):
-        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload["status"] == "error"
+    assert payload["action"] == "resolve"
     assert "active thread" in payload["message"]
 
 
@@ -107,7 +110,7 @@ async def test_resolve_thread_sets_lifecycle_tag(tmp_path: Path) -> None:
         patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload == {
         "action": "resolve",
@@ -135,7 +138,7 @@ async def test_reopen_thread_removes_lifecycle_tag(tmp_path: Path) -> None:
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadResolutionTools().reopen_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("reopen"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "reopen"
@@ -173,7 +176,7 @@ async def test_thread_resolution_targets_explicit_thread(
         ),
     )
     tool = ThreadResolutionTools()
-    method = tool.reopen_thread if reopen else tool.resolve_thread
+    action: Literal["reopen", "resolve"] = "reopen" if reopen else "resolve"
     dependency = "remove_thread_tag" if reopen else "set_thread_tag"
     requester_kwarg = "requester_user_id" if reopen else "set_by"
 
@@ -181,7 +184,7 @@ async def test_thread_resolution_targets_explicit_thread(
         patch(f"mindroom.custom_tools.thread_resolution.{dependency}", new=AsyncMock()) as mock_write,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await method(thread_id=target_id))
+        payload = json.loads(await tool.thread_resolution(action, thread_id=target_id))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$other-root:localhost"
@@ -210,16 +213,17 @@ async def test_thread_resolution_rejects_unresolved_explicit_target(
     context.client.room_get_event = AsyncMock(return_value=RoomGetEventError("missing", status_code="M_NOT_FOUND"))
     context = replace(context, relations=make_relation_lookup(client=context.client))
     tool = ThreadResolutionTools()
-    method = tool.reopen_thread if reopen else tool.resolve_thread
+    action: Literal["reopen", "resolve"] = "reopen" if reopen else "resolve"
 
     with (
         patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await method(thread_id=target_id))
+        payload = json.loads(await tool.thread_resolution(action, thread_id=target_id))
 
     assert payload["status"] == "error"
+    assert payload["action"] == action
     assert payload["thread_id"] == target_id
     assert "canonical thread root" in payload["message"]
     mock_set.assert_not_awaited()
@@ -232,7 +236,7 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
     """Lookup failures must return a structured error without changing lifecycle state."""
     context = _context(tmp_path)
     tool = ThreadResolutionTools()
-    method = tool.reopen_thread if reopen else tool.resolve_thread
+    action: Literal["reopen", "resolve"] = "reopen" if reopen else "resolve"
 
     with (
         patch(
@@ -243,9 +247,10 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await method(thread_id="$other-root:localhost"))
+        payload = json.loads(await tool.thread_resolution(action, thread_id="$other-root:localhost"))
 
     assert payload["status"] == "error"
+    assert payload["action"] == action
     assert payload["thread_id"] == "$other-root:localhost"
     assert "canonical thread root" in payload["message"]
     mock_set.assert_not_awaited()
@@ -254,22 +259,20 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method_name", "dependency", "action"),
+    ("dependency", "action"),
     [
-        ("resolve_thread", "set_thread_tag", "resolve"),
-        ("reopen_thread", "remove_thread_tag", "reopen"),
+        ("set_thread_tag", "resolve"),
+        ("remove_thread_tag", "reopen"),
     ],
 )
 async def test_thread_resolution_surfaces_state_errors(
     tmp_path: Path,
-    method_name: str,
     dependency: str,
-    action: str,
+    action: Literal["resolve", "reopen"],
 ) -> None:
     """Low-level permission and state errors should remain structured."""
     context = _context(tmp_path)
     tool = ThreadResolutionTools()
-    method = tool.resolve_thread if method_name == "resolve_thread" else tool.reopen_thread
 
     with (
         patch(
@@ -278,7 +281,7 @@ async def test_thread_resolution_surfaces_state_errors(
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await method())
+        payload = json.loads(await tool.thread_resolution(action))
 
     assert payload["status"] == "error"
     assert payload["action"] == action
@@ -308,7 +311,7 @@ async def test_resolve_thread_removes_an_existing_snooze(tmp_path: Path, remove_
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=remove),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload["status"] == "ok"
     remove.assert_awaited_once_with(
@@ -341,7 +344,7 @@ async def test_resolve_thread_keeps_a_snooze_set_again_meanwhile(tmp_path: Path)
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadResolutionTools().resolve_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload["status"] == "ok"
     orchestrator.thread_snooze.unsnoozed.assert_not_called()
@@ -359,7 +362,7 @@ async def test_reopen_thread_reports_a_resolve_written_again_meanwhile(tmp_path:
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadResolutionTools().reopen_thread())
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("reopen"))
 
     assert payload["status"] == "ok"
     assert payload["resolved"] is True
@@ -378,7 +381,7 @@ async def test_resolve_thread_leaves_other_state_alone(tmp_path: Path) -> None:
         patch("mindroom.custom_tools.thread_resolution.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        await ThreadResolutionTools().resolve_thread()
+        await ThreadResolutionTools().thread_resolution("resolve")
 
     mock_remove.assert_not_awaited()
 
@@ -424,11 +427,15 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
         ) as mock_tag_set,
         tool_runtime_context(context),
     ):
-        resolved = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=standalone_id))
+        resolved = json.loads(await ThreadResolutionTools().thread_resolution("resolve", thread_id=standalone_id))
         tagged = json.loads(await ThreadTagsTools().thread_tags("tag", tag="ops", thread_id=standalone_id))
         moved = json.loads(await ThreadMoveTools().move_thread(room_id="!dest:localhost", thread_id=standalone_id))
-        rejected_state = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=state_event_id))
-        rejected_encrypted = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=encrypted_id))
+        rejected_state = json.loads(
+            await ThreadResolutionTools().thread_resolution("resolve", thread_id=state_event_id),
+        )
+        rejected_encrypted = json.loads(
+            await ThreadResolutionTools().thread_resolution("resolve", thread_id=encrypted_id),
+        )
 
     assert resolved["status"] == "ok"
     assert resolved["thread_id"] == standalone_id
@@ -442,3 +449,17 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
     assert "canonical thread root" in rejected_state["message"]
     assert rejected_encrypted["status"] == "error"
     assert "canonical thread root" in rejected_encrypted["message"]
+
+
+@pytest.mark.asyncio
+async def test_thread_resolution_rejects_unsupported_action(tmp_path: Path) -> None:
+    """Unsupported action returns a structured error payload."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        payload = json.loads(await ThreadResolutionTools().thread_resolution("bogus"))  # type: ignore[arg-type]
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "thread_resolution"
+    assert "action" not in payload
+    assert "Unsupported thread_resolution action" in payload["message"]

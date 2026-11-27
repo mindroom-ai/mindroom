@@ -219,7 +219,7 @@ def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
     A value that is not an object is still refused there, so a tool body never receives one.
     """
     thread_tags = toolkit_offers(ThreadTagsTools(), "thread_tags")
-    matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api")
+    matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api_write")
     make_request = toolkit_offers(custom_api_tools()(), "make_request")
     event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
     request = {

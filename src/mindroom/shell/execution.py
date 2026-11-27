@@ -24,12 +24,21 @@ import subprocess
 import sys
 import time
 import uuid
+import weakref
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.shell._process_target import (
+    ProcessScope,
+    command_processes_exist,
+    kill_command_processes,
+    make_scope_unit_name,
+    parse_probe_slice_cgroup_dir,
+    signal_command,
+)
 from mindroom.shell.background_scope import (
     BackgroundLogFile,
     BackgroundLogPolicy,
@@ -86,6 +95,14 @@ _PROGRESS_INTERVAL_SECONDS = 0.5
 _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 # Numbers every append to any output buffer, so a reader can tell which stream printed last.
 _APPEND_SEQUENCE = itertools.count(1)
+_PROCESS_SCOPES: weakref.WeakKeyDictionary[asyncio.subprocess.Process, ProcessScope] = weakref.WeakKeyDictionary()
+
+
+def _process_scope(process: asyncio.subprocess.Process) -> ProcessScope | None:
+    try:
+        return _PROCESS_SCOPES.get(process)
+    except TypeError:
+        return None
 
 
 class _OutputChunk(NamedTuple):
@@ -602,7 +619,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 )
 
             if kill_group_after_exit:
-                _kill_process_group(process.pid)
+                _kill_process_group(process.pid, scope=_process_scope(process))
             await _await_reader_tasks_with_grace(
                 stdout_reader,
                 stderr_reader,
@@ -612,7 +629,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
             if process.returncode is None:
                 await _terminate_process_group(process)
             if kill_group_after_exit:
-                _kill_process_group(process.pid)
+                _kill_process_group(process.pid, scope=_process_scope(process))
             await _cancel_pending_tasks(stdout_reader, stderr_reader)
             if capture is not None:
                 capture.close()
@@ -679,6 +696,9 @@ async def _start_command(
         env=launch.env,
         start_new_session=True,
     )
+    if launch.scope is not None:
+        with contextlib.suppress(TypeError):
+            _PROCESS_SCOPES[process] = launch.scope
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
@@ -1122,7 +1142,7 @@ async def _discard_unregistered_process(
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
 ) -> None:
-    _kill_process_group(process.pid)
+    _kill_process_group(process.pid, scope=_process_scope(process))
     await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
@@ -1174,10 +1194,9 @@ def kill_command(registry: dict[str, ProcessRecord], *, namespace: str, handle: 
 
 
 def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:
-    """Send SIGTERM, or SIGKILL with *force*, to a record's process group; report whether it was delivered."""
-    try:
-        os.killpg(record.pid, signal.SIGKILL if force else signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
+    """Send SIGTERM, or SIGKILL with *force*, to a record's command processes; report whether it was delivered."""
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    if not signal_command(record.pid, sig, scope=_process_scope(record.process)):
         return False
     if record.output_capture is not None:
         record.output_capture.incomplete = True
@@ -1240,7 +1259,7 @@ def _kill_record(
     if was_running:
         if stop_reason is not None and record._stop_reason is None:
             record._stop_reason = stop_reason
-        _kill_process_group(record.pid)
+        _kill_process_group(record.pid, scope=_process_scope(record.process))
         record.finished = True
         record.finished_at = time.monotonic()
         record.return_code = record.process.returncode
@@ -1427,12 +1446,15 @@ class _IdleLaunch(NamedTuple):
     argv: list[str]
     env: dict[str, str]
     uses_chrt: bool
+    scope: ProcessScope | None = None
 
 
 class _SystemdSliceLauncher(NamedTuple):
     prefix: tuple[str, ...]
+    slice_name: str
     env_bin: str
     bus_env: tuple[tuple[str, str | None], ...]
+    slice_cgroup_dir: Path | None = None
 
 
 @functools.cache
@@ -1520,8 +1542,15 @@ def _probe_systemd_slice_launcher(
         return None
     systemd_run = str(Path(systemd_run).absolute())  # commands run in other directories
     env_bin = str(Path(env_bin).absolute())
+    cat_bin = shutil.which("cat")
+    probe_payload = (
+        [str(Path(cat_bin).absolute()), "/proc/self/cgroup"] if cat_bin is not None else [systemd_run, "--version"]
+    )
+    probe_unit = make_scope_unit_name(probe=True)
     # --description hides raw argv from the systemd user journal;
-    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here).
+    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here);
+    # OOMPolicy=kill sets memory.oom.group=1 on each transient .scope so a slice-level MemoryMax OOM cleanly
+    # terminates the whole offending command scope instead of picking off single workers one at a time.
     prefix = (
         systemd_run,
         "--user",
@@ -1530,22 +1559,50 @@ def _probe_systemd_slice_launcher(
         f"--description={_SYSTEMD_SCOPE_DESCRIPTION}",
         "--expand-environment=no",
         f"--slice={slice_name}",
-        "--",
+        "--property=OOMPolicy=kill",
     )
     bus_env: tuple[tuple[str, str | None], ...] = (
         ("XDG_RUNTIME_DIR", runtime_dir),
         ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
     )
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
+    try:
         probe = subprocess.run(
-            [*prefix, env_bin, "-u", "MINDROOM_PROBE_UNSET", "--", "MINDROOM_PROBE_SET=1", systemd_run, "--version"],
+            [
+                *prefix,
+                f"--unit={probe_unit}",
+                "--",
+                env_bin,
+                "-u",
+                "MINDROOM_PROBE_UNSET",
+                "--",
+                "MINDROOM_PROBE_SET=1",
+                *probe_payload,
+            ],
             capture_output=True,
+            text=True,
+            errors="replace",
             timeout=5,
             check=False,
             env=_systemd_bus_env(runtime_dir, dbus_addr),
         )
-        if probe.returncode == 0:
-            return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
+    except subprocess.TimeoutExpired:
+        # Let transient probe timeouts escape lru_cache so the next call re-probes instead of caching None.
+        raise
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode == 0:
+        slice_cgroup_dir = (
+            parse_probe_slice_cgroup_dir(probe.stdout or "", probe_unit=probe_unit, slice_name=slice_name)
+            if cat_bin is not None
+            else None
+        )
+        return _SystemdSliceLauncher(
+            prefix=prefix,
+            slice_name=slice_name,
+            env_bin=env_bin,
+            bus_env=bus_env,
+            slice_cgroup_dir=slice_cgroup_dir,
+        )
     return None
 
 
@@ -1566,7 +1623,10 @@ def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
     if generation is None:
         _probe_systemd_slice_launcher.cache_clear()
         return None
-    return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
+    try:
+        return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:
@@ -1669,6 +1729,7 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
         spawn_argv = [ionice, "-c", "3", "--", *spawn_argv]
     if chrt is not None:
         spawn_argv = [chrt, "-i", "0", *spawn_argv]
+    scope: ProcessScope | None = None
     if systemd_launcher is not None:
         # systemd-run needs the verified backend user bus, while the payload must keep the caller's exact
         # values and omissions for those bus variables.
@@ -1687,8 +1748,14 @@ def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> 
                     unset_ops.extend(["-u", key])
         if unset_ops or set_ops:
             spawn_argv = [systemd_launcher.env_bin, *unset_ops, "--", *set_ops, *spawn_argv]
-        spawn_argv = [*systemd_launcher.prefix, *spawn_argv]
-    return _IdleLaunch(spawn_argv, spawn_env, uses_chrt=chrt is not None)
+        unit_name = make_scope_unit_name()
+        scope = ProcessScope(
+            unit_name=unit_name,
+            slice_name=systemd_launcher.slice_name,
+            slice_cgroup_dir=systemd_launcher.slice_cgroup_dir,
+        )
+        spawn_argv = [*systemd_launcher.prefix, f"--unit={unit_name}", "--", *spawn_argv]
+    return _IdleLaunch(spawn_argv, spawn_env, uses_chrt=chrt is not None, scope=scope)
 
 
 def _schedule_process_tree_idle(pid: int) -> None:
@@ -1710,18 +1777,9 @@ def _schedule_process_tree_idle(pid: int) -> None:
                     pending.extend(int(child) for child in (thread / "children").read_text().split())
 
 
-def _kill_process_group(pid: int) -> None:
-    """Kill every process still in the group led by *pid*."""
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pid, signal.SIGKILL)
-
-
-def _process_group_exists(pid: int) -> bool:
-    try:
-        os.killpg(pid, 0)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+def _kill_process_group(pid: int, *, scope: ProcessScope | None = None) -> None:
+    """Kill every process in the group led by *pid*, its Linux session, and its verified scope."""
+    kill_command_processes(pid, scope=scope)
 
 
 async def _terminate_process_group(
@@ -1730,32 +1788,32 @@ async def _terminate_process_group(
     grace_period: float = 0.5,
     whole_group: bool = False,
 ) -> bool:
-    """Stop a running command's process group: SIGTERM, then SIGKILL every member left after the grace.
+    """Stop a running command: SIGTERM, then SIGKILL every process left after the grace.
 
     Members that outlive the leader are killed too, so a child that ignores SIGTERM cannot survive the stop.
     A command whose leader already exited ended on its own, and its detached children keep running, unless
-    ``whole_group`` stops them too; return whether the group is then gone.
+    ``whole_group`` stops them too; return whether all command processes are then gone.
     """
     if process.returncode is not None and not whole_group:
         return False
 
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGTERM)
+    scope = _process_scope(process)
+    signal_command(process.pid, signal.SIGTERM, scope=scope)
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_period
     try:
-        while loop.time() < deadline and _process_group_exists(process.pid):  # noqa: ASYNC110 - a group has no exit event
+        while loop.time() < deadline and command_processes_exist(process.pid, scope=scope):  # noqa: ASYNC110 - a process tree has no exit event
             await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
     finally:
         # A stop cancelled during the grace still kills what ignored SIGTERM.
-        _kill_process_group(process.pid)
+        _kill_process_group(process.pid, scope=scope)
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=grace_period)
     deadline = loop.time() + grace_period
-    while whole_group and _process_group_exists(process.pid) and loop.time() < deadline:  # noqa: ASYNC110 - as above
+    while whole_group and command_processes_exist(process.pid, scope=scope) and loop.time() < deadline:  # noqa: ASYNC110 - as above
         await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
-    return not _process_group_exists(process.pid)
+    return not command_processes_exist(process.pid, scope=scope)
 
 
 async def _monitor_process(
@@ -1794,7 +1852,7 @@ async def _monitor_process(
                     capture.incomplete |= bool(pending)
             finally:
                 if (not natural_exit or log_file is None) and record._stop_reason != "scope_ended":
-                    _kill_process_group(process.pid)
+                    _kill_process_group(process.pid, scope=_process_scope(process))
             drain_timeout = _POST_EXIT_READER_GRACE_SECONDS if log_file is not None else 2.0
             await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)
             await _cancel_pending_tasks(stdout_reader, stderr_reader)

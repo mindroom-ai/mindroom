@@ -48,6 +48,7 @@ from mindroom.embeddings.errors import (
 from mindroom.embeddings.factory import create_configured_embedder
 from mindroom.embeddings.signatures import effective_knowledge_embedder_signature, effective_mem0_embedder_signature
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.chunking import KnowledgeChunk
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
 from mindroom.knowledge.collections import (
     CollectionSpace,
@@ -58,7 +59,6 @@ from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile, max_conc
 from mindroom.knowledge.index_metadata import load_publication, publication_path
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
 from mindroom.knowledge.manager import KnowledgeManager
-from mindroom.knowledge.readers import Document, MarkdownReader
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess
@@ -2568,13 +2568,13 @@ async def test_each_file_is_read_once_per_refresh(
     names = _write_corpus(docs_path, 5)
     config = _config(tmp_path, docs_path)
     reads: list[str | None] = []
-    original_read = MarkdownReader.read
+    original_read = knowledge_file_indexer.read_knowledge_file
 
-    def _record_read(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
+    def _record_read(file: Path, *, name: str | None = None, **kwargs: object) -> list[KnowledgeChunk]:
         reads.append(name)
-        return original_read(self, file, name=name)
+        return original_read(file, name=name, **kwargs)
 
-    monkeypatch.setattr(MarkdownReader, "read", _record_read)
+    monkeypatch.setattr(knowledge_file_indexer, "read_knowledge_file", _record_read)
 
     assert (await _manager(config).reindex_all()).indexed_count == len(names)
 
@@ -2592,15 +2592,15 @@ async def test_reader_failure_fails_its_file_instead_of_passing_as_vanished(
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
-    original_read = MarkdownReader.read
+    original_read = knowledge_file_indexer.read_knowledge_file
 
-    def _fail_one(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
+    def _fail_one(file: Path, *, name: str | None = None, **kwargs: object) -> list[KnowledgeChunk]:
         if name == "doc0001.md":
             message = "unparseable source"
             raise ValueError(message)
-        return original_read(self, file, name=name)
+        return original_read(file, name=name, **kwargs)
 
-    monkeypatch.setattr(MarkdownReader, "read", _fail_one)
+    monkeypatch.setattr(knowledge_file_indexer, "read_knowledge_file", _fail_one)
 
     outcome = await _manager(config).reindex_all()
 
@@ -2622,15 +2622,15 @@ async def test_an_empty_chunk_fails_only_its_own_file(
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
     embedder.failures[""] = [EmbedderRequestError("embedder request failed (HTTP 400)") for _ in range(10)]
-    original_read = MarkdownReader.read
+    original_read = knowledge_file_indexer.read_knowledge_file
 
-    def _add_empty_chunk(self: MarkdownReader, file: Path, name: str | None = None) -> list[Document]:
-        documents = original_read(self, file, name=name)
+    def _add_empty_chunk(file: Path, *, name: str | None = None, **kwargs: object) -> list[KnowledgeChunk]:
+        chunks = original_read(file, name=name, **kwargs)
         if name == "doc0001.md":
-            documents.append(Document(name=name, content=""))
-        return documents
+            chunks.append(KnowledgeChunk(text="", name=name, metadata={}))
+        return chunks
 
-    monkeypatch.setattr(MarkdownReader, "read", _add_empty_chunk)
+    monkeypatch.setattr(knowledge_file_indexer, "read_knowledge_file", _add_empty_chunk)
 
     outcome = await _manager(config).reindex_all()
 

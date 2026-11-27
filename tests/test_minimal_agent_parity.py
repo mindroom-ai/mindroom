@@ -53,6 +53,7 @@ from mindroom.response_turn import (
 )
 from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
@@ -185,14 +186,14 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
         hooks.append((call.function.name, "after"))
         return result
 
-    original = agents.get_tool_by_name
+    original = toolkit_builder.get_tool_by_name
 
     def build(name, *args, **kwargs):
         if name != "calculator":
             return original(name, *args, **kwargs)
         return Toolkit(name="calculator", tools=[sync, asynchronous, generator, async_generator])
 
-    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    monkeypatch.setattr(toolkit_builder, "get_tool_by_name", build)
     # The build's tool policy, which runs around every call the reply makes, natively or through Bash.
     monkeypatch.setattr(agents, "build_tool_hook_middleware", lambda *_args, **_kwargs: hook)
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
@@ -680,7 +681,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     h = response_harness
     effects = []
     decisions = []
-    original = agents.get_tool_by_name
+    original = toolkit_builder.get_tool_by_name
     h.runtime.config.agents["helper"].tools = ["shell", "calculator"]
     current_config = h.runtime.config
     function_allowed = True
@@ -722,7 +723,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
             ),
         )
 
-    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    monkeypatch.setattr(toolkit_builder, "get_tool_by_name", build)
     h.runtime = replace(
         h.runtime,
         config_provider=lambda: current_config,
@@ -924,7 +925,7 @@ async def test_model_switch_timing_actual_minimal_requests(response_harness, mon
     install_model_providers(monkeypatch, models)
     steps.extend(
         [
-            _bash_call("thread_model", "thread_model_write", {"action": "switch", "model_name": "other", "when": when}),
+            _bash_call("thread_model", "thread_model", {"action": "switch", "model_name": "other", "when": when}),
             "done",
         ],
     )

@@ -19,8 +19,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from mindroom.history.types import HistoryScope
+    from mindroom.tool_system.construction import ToolConstruction
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.toolkits import ToolkitFinishing
 
 _TOOL_MARK = "__mindroom_tool__"
 
@@ -194,6 +196,9 @@ class Toolkit:
     requires_connect: bool = False
     offer_background_after: bool = True
     offer_output_path: bool = True
+    # MindRoom-owned metadata set during toolkit configuration/construction; plugin subclasses should not redefine.
+    function_finishing: ToolkitFinishing | None = None
+    tool_construction: ToolConstruction | None = None
 
     def __init__(
         self,

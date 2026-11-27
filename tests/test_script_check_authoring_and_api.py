@@ -28,7 +28,12 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
 )
 from mindroom.custom_tools.desktop import DesktopTools
-from mindroom.custom_tools.triggers import _ACTION_ALLOWED_PARAMS, _WATCH_TURN_MUTATION_ERROR, TriggersTools
+from mindroom.custom_tools.triggers import (
+    _READ_ALLOWED_PARAMS,
+    _WATCH_TURN_MUTATION_ERROR,
+    _WRITE_ALLOWED_PARAMS,
+    TriggersTools,
+)
 from mindroom.delegation.state import SubagentPersona
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -229,8 +234,9 @@ def _make_ctx(
 
 
 async def _call(tool: TriggersTools, ctx: ToolRuntimeContext, **kwargs: object) -> dict[str, Any]:
+    fn = tool.triggers_read if kwargs.get("action") in _READ_ALLOWED_PARAMS else tool.triggers_write
     with tool_runtime_context(ctx):
-        return json.loads(await tool.triggers(**kwargs))  # type: ignore[arg-type]
+        return json.loads(await fn(**kwargs))  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -484,8 +490,8 @@ async def test_metadata_only_update_list_redaction_history_and_test(tmp_path: Pa
     bad_src = await _call(tool, ctx, action="update", trigger_id="sc_u", source=_SRC)
     bad_path = await _call(tool, ctx, action="update", trigger_id="sc_u", path="a.py")
     ok_upd = await _call(tool, ctx, action="update", trigger_id="sc_u", prompt="Updated", poll_interval_seconds=90)
-    assert (bad_src["status"], "Unsupported parameter" in bad_src["message"]) == ("error", True)
-    assert (bad_path["status"], "Unsupported parameter" in bad_path["message"]) == ("error", True)
+    assert (bad_src["status"], "cannot be used with action='update'" in bad_src["message"]) == ("error", True)
+    assert (bad_path["status"], "cannot be used with action='update'" in bad_path["message"]) == ("error", True)
     assert (ok_upd["status"], ok_upd["trigger"]["source"]["poll_interval_seconds"]) == ("ok", 90)
     cp_after = store.get_script_check_checkpoint("sc_u")
     assert cp_after is not None
@@ -534,9 +540,9 @@ async def test_metadata_only_update_list_redaction_history_and_test(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path: Path) -> None:
     """ApprovalAlias, grants, non-resumable passthrough, and voice responder (Astra #4) gate only watch_script."""
-    assert _NON_CODE_TRIGGER_ACTIONS | {"watch_script"} == set(_ACTION_ALLOWED_PARAMS)
+    assert _NON_CODE_TRIGGER_ACTIONS | {"watch_script"} == set(_WRITE_ALLOWED_PARAMS)
     registry = builtin_tool_registry()
-    triggers_alias = registry.entries["triggers"].approval_aliases["triggers"]
+    triggers_alias = registry.entries["triggers"].approval_aliases["triggers_write"]
     desktop_alias = registry.entries["desktop"].approval_aliases["run_desktop_shell"]
     assert (triggers_alias.allow_non_resumable_passthrough, desktop_alias.allow_non_resumable_passthrough) == (
         True,
@@ -548,10 +554,14 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
     assert (
         triggers_alias.judge({"action": "update", "trigger_id": "t1"}),
         triggers_alias.judge({"action": "list"}),
+        triggers_alias.judge({"action": "history"}),
+        triggers_alias.judge({"action": "test"}),
         triggers_alias.judge({"action": "bogus"}),
     ) == (
         [],
-        [],
+        None,
+        None,
+        None,
         None,
     )
 
@@ -560,9 +570,30 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
         rules=[ApprovalRuleConfig(match="script_write", action="require_approval")],
     )
     ctx, _ = _make_ctx(tmp_path, tool_approval=approval_cfg)
-    assert grant_operation(ctx.config, "triggers", {"action": "watch_script", "source": _SRC}) is None
-    assert grant_operation(ctx.config, "triggers", {"action": "list"}) is not None
-    assert grant_operation(ctx.config, "triggers", {"action": "update", "trigger_id": "t1"}) is not None
+    assert (
+        grant_operation(
+            ctx.config,
+            "triggers_write",
+            {"action": "watch_script", "source": _SRC},
+            tools=registry,
+            toolkit_name="triggers",
+        )
+        is None
+    )
+    assert (
+        grant_operation(ctx.config, "triggers_read", {"action": "list"}, tools=registry, toolkit_name="triggers")
+        is not None
+    )
+    assert (
+        grant_operation(
+            ctx.config,
+            "triggers_write",
+            {"action": "update", "trigger_id": "t1"},
+            tools=registry,
+            toolkit_name="triggers",
+        )
+        is not None
+    )
 
     toolkit = TriggersTools()
     offered = apply_tool_approval_capability(
@@ -574,12 +605,13 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
         resumable=False,
         approvals_as_jobs=False,
     )
-    assert [f.name for f in offered.functions] == ["triggers"]
+    by_name = {f.name: f for f in offered.functions}
+    assert list(by_name) == ["triggers_read", "triggers_write"]
     call_ctx = ToolCallContext(run_id="nonres-1", session_id="sess-1", user_id=_OWNER)
     with tool_runtime_context(ctx):
-        ok_list = await run_tool_call(offered.functions[0], {"action": "list"}, call_ctx, middleware=())
+        ok_list = await run_tool_call(by_name["triggers_read"], {"action": "list"}, call_ctx, middleware=())
         denied_ws = await run_tool_call(
-            offered.functions[0],
+            by_name["triggers_write"],
             {"action": "watch_script", "prompt": "p", "source": _SRC},
             call_ctx,
             middleware=(),
@@ -588,13 +620,16 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
     assert isinstance(denied_ws.value, ToolOutcome)
     assert (denied_ws.status, denied_ws.value.refused_by) == ("denied", "approval")
 
-    def _cfg_with(rule_match: str) -> Config:
+    def _cfg_with(*rule_matches: str) -> Config:
         return bind_runtime_paths(
             ctx.config.model_copy(
                 update={
                     "tool_approval": ToolApprovalConfig(
                         default="auto_approve",
-                        rules=[ApprovalRuleConfig(match=rule_match, action="require_approval")],
+                        rules=[
+                            ApprovalRuleConfig(match=rule_match, action="require_approval")
+                            for rule_match in rule_matches
+                        ],
                     ),
                 },
             ),
@@ -604,7 +639,7 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
     desk_offered = apply_tool_approval_capability(
         adapt_toolkit(DesktopTools(), key="desktop", registered="desktop"),
         DesktopTools(),
-        _cfg_with("desktop"),
+        _cfg_with("desktop", "desktop_read", "desktop_control"),
         tools=registry,
         registered_tool_name="desktop",
         resumable=False,
@@ -612,8 +647,8 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
     )
     assert desk_offered.functions == ()
 
-    # Astra #4: Voice responder allows triggers(list) and refuses triggers(watch_script) when script_write requires approval
-    def _voice_build(cfg: Config) -> AgentBuild:
+    # Astra #4: Voice responder allows triggers_read(list) and triggers_write(update) while refusing watch_script when script_write requires approval
+    def _voice_build(cfg: Config, *, read_gated: bool = False) -> AgentBuild:
         chat = create_agent(
             "coder",
             cfg,
@@ -626,16 +661,21 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
             eager_deferred_tools=True,
             inline_tools=True,
         )
-        assert chat.spec.functions["triggers"].gate is ToolGate.POLICY
+        assert chat.spec.functions["triggers_write"].gate is ToolGate.POLICY
+        assert chat.spec.functions["triggers_read"].gate is (ToolGate.POLICY if read_gated else None)
         return _refuse_text_chat_functions(chat, cfg, tools=registry)
 
     voice = _voice_build(ctx.config)
-    vfn, vmw = voice.spec.functions["triggers"], agent_tool_middleware(voice)
-    assert vfn.gate is None
+    vread, vwrite, vmw = (
+        voice.spec.functions["triggers_read"],
+        voice.spec.functions["triggers_write"],
+        agent_tool_middleware(voice),
+    )
+    assert vwrite.gate is None
     with tool_runtime_context(ctx):
-        v_list = await run_tool_call(vfn, {"action": "list"}, call_ctx, middleware=vmw)
+        v_list = await run_tool_call(vread, {"action": "list"}, call_ctx, middleware=vmw)
         v_ws = await run_tool_call(
-            vfn,
+            vwrite,
             {"action": "watch_script", "prompt": "Alert", "source": _SRC},
             call_ctx,
             middleware=vmw,
@@ -646,12 +686,12 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
         _TEXT_CHAT_REQUIRED_MESSAGE,
     )
 
-    # When triggers itself requires approval, voice responder refuses list too
-    cfg_trig = _cfg_with("triggers")
-    voice_trig = _voice_build(cfg_trig)
+    # When triggers_read and triggers_write themselves require approval, voice responder refuses list too
+    cfg_trig = _cfg_with("triggers_read", "triggers_write")
+    voice_trig = _voice_build(cfg_trig, read_gated=True)
     with tool_runtime_context(replace(ctx, config=cfg_trig)):
         refused = await run_tool_call(
-            voice_trig.spec.functions["triggers"],
+            voice_trig.spec.functions["triggers_read"],
             {"action": "list"},
             call_ctx,
             middleware=agent_tool_middleware(voice_trig),
@@ -661,9 +701,9 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
 
 @pytest.mark.asyncio
 async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_requires_approval(tmp_path: Path) -> None:
-    """Astra fresh P1 #1: workflow-only agents fail closed when workflow may require approval."""
+    """Astra fresh P1 #1: workflow-only agents fail closed when workflow_write may require approval."""
     tool = TriggersTools()
-    for idx, rule_match in enumerate(("workflow", "*workflow*")):
+    for idx, rule_match in enumerate(("workflow_write", "*workflow*")):
         approval_cfg = ToolApprovalConfig(
             default="auto_approve",
             rules=[ApprovalRuleConfig(match=rule_match, action="require_approval")],
@@ -671,7 +711,7 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
         ctx_wf, _ = _make_ctx(tmp_path / f"wf_{idx}", agent_name="planner", tool_approval=approval_cfg)
         err = await _call(tool, ctx_wf, action="watch_script", prompt="Alert", source=_SRC)
         assert err["status"] == "error"
-        assert "'workflow'" in err["message"]
+        assert "'workflow_write'" in err["message"]
         tick_failure = check_script_check_access(
             ctx_wf.config,
             ctx_wf.runtime_paths,
@@ -708,7 +748,7 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
         )
         reenable_err = await _call(tool, ctx_wf, action="set_enabled", trigger_id="sc_wf_reenable", enabled=True)
         assert reenable_err["status"] == "error"
-        assert "'workflow'" in reenable_err["message"]
+        assert "'workflow_write'" in reenable_err["message"]
 
         # An agent that ALSO has 'script' is judged by script_write and remains allowed.
         ctx_both, _ = _make_ctx(tmp_path / f"both_{idx}", agent_name="both", tool_approval=approval_cfg)
@@ -719,12 +759,12 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
     for idx, args_rule in enumerate(({"action": "start"}, {"action": "start", "source": "*"})):
         start_cfg = ToolApprovalConfig(
             default="auto_approve",
-            rules=[ApprovalRuleConfig(match="workflow", arguments=args_rule, action="require_approval")],
+            rules=[ApprovalRuleConfig(match="workflow_write", arguments=args_rule, action="require_approval")],
         )
         ctx_start, _ = _make_ctx(tmp_path / f"wf_start_{idx}", agent_name="planner", tool_approval=start_cfg)
         err_start = await _call(tool, ctx_start, action="watch_script", prompt="Alert", source=_SRC)
         assert err_start["status"] == "error"
-        assert "'workflow'" in err_start["message"]
+        assert "'workflow_write'" in err_start["message"]
 
     # Rules scoped to another agent, non-start workflow actions, or explicit action="start" auto-approval allow it.
     allowed_cfgs = (
@@ -732,21 +772,29 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
             "wf_other_agent",
             ToolApprovalConfig(
                 default="auto_approve",
-                rules=[ApprovalRuleConfig(match="workflow", agents="other_agent", action="require_approval")],
+                rules=[ApprovalRuleConfig(match="workflow_write", agents="other_agent", action="require_approval")],
             ),
         ),
         (
             "wf_cancel_only",
             ToolApprovalConfig(
                 default="auto_approve",
-                rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "cancel"}, action="require_approval")],
+                rules=[
+                    ApprovalRuleConfig(
+                        match="workflow_write",
+                        arguments={"action": "cancel"},
+                        action="require_approval",
+                    ),
+                ],
             ),
         ),
         (
             "wf_start_auto",
             ToolApprovalConfig(
                 default="require_approval",
-                rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "start"}, action="auto_approve")],
+                rules=[
+                    ApprovalRuleConfig(match="workflow_write", arguments={"action": "start"}, action="auto_approve"),
+                ],
             ),
         ),
         ("wf_ok", None),

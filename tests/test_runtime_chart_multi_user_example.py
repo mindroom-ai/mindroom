@@ -60,4 +60,7 @@ def test_multi_user_config_example_validates(tmp_path: Path) -> None:
     assert mind.agent.knowledge_graph is True
     assert mind.agent.skill_learning.enabled is True
     assert "update_awareness" not in mind.agent.tool_names
-    assert [rule.match for rule in config.tool_approval.rules] == ["resolve_thread", "matrix_user_write"]
+    assert [(rule.match, rule.arguments) for rule in config.tool_approval.rules] == [
+        ("thread_resolution", {"action": "resolve"}),
+        ("matrix_user_write", None),
+    ]

@@ -155,7 +155,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         {"tool": "thread_model", "action": "switch", "status": "ok", "model": "next", "when": "after-toolcall"},
     )
 
-    async def thread_model_write() -> str:
+    async def thread_model() -> str:
         if raises:
             msg = "switch rejected"
             raise ValueError(msg)
@@ -168,7 +168,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
     async def run_shell_command(args: str, tail: int = 100) -> str:
         effects.append(args)
         if control:
-            for function in ("thread_model_write", "mutate"):
+            for function in ("thread_model", "mutate"):
                 receipts.append(  # noqa: PERF401 - preserve sequential admission in this race
                     await owner.operation(
                         window=cli_window(),
@@ -182,12 +182,11 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
                 )
         return payload
 
-    control_adapted = adapt_toolkit(Toolkit(name="control", tools=[thread_model_write, mutate]))
+    control_adapted = adapt_toolkit(Toolkit(name="control", tools=[thread_model, mutate]))
     control_adapted = replace(
         control_adapted,
         functions=tuple(
-            replace(fn, stop_after_call=True) if fn.name == "thread_model_write" else fn
-            for fn in control_adapted.functions
+            replace(fn, stop_after_call=True) if fn.name == "thread_model" else fn for fn in control_adapted.functions
         ),
     )
     catalog = await _catalog(
@@ -235,7 +234,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
 async def test_a_later_attempt_never_reads_the_controls_of_an_earlier_run(tmp_path) -> None:
     """The response's owner outlives its attempts, so a control belongs only to the run whose catalog ran it."""
     owner = _owner(await _catalog(tmp_path, []))
-    control = ReportedCall("control-call", "thread_model_write", {}, result="switched")
+    control = ReportedCall("control-call", "thread_model", {}, result="switched")
     owner.control_calls.append(control)
     async with response_cli_lifetime() as lifetime:
         lifetime.register(owner, TurnToolRegistry())
@@ -589,7 +588,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
     reached = asyncio.Event()
     control_payload = '{"tool":"thread_model","action":"switch","status":"ok","model":"next","when":"after-toolcall"}'
 
-    async def thread_model_write() -> str:
+    async def thread_model() -> str:
         return control_payload
 
     with registered_report_tool() as report:
@@ -631,7 +630,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                         operation="tools.call",
                         call_id=uuid4(),
                         toolkit="control",
-                        function="thread_model_write",
+                        function="thread_model",
                     ),
                 )
                 await settled_receipt(owner, switched["call_id"])
@@ -648,7 +647,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             paths,
             [
                 _flagged("delegate", run_subagent, gate=ToolGate.DELEGATION),
-                _flagged("control", thread_model_write, stop_after_tool_call=True),
+                _flagged("control", thread_model, stop_after_tool_call=True),
             ],
             approval_handler=approve,
         )
@@ -1031,12 +1030,12 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
     release = asyncio.Event()
     materialized = []
 
-    async def thread_model_write() -> str:
+    async def thread_model() -> str:
         entered.set()
         await release.wait()
         return '{"tool":"thread_model","action":"switch","status":"ok","model":"next","when":"after-toolcall"}'
 
-    catalog = await _catalog(tmp_path, [_flagged("control", thread_model_write, stop_after_tool_call=True)])
+    catalog = await _catalog(tmp_path, [_flagged("control", thread_model, stop_after_tool_call=True)])
 
     async def late() -> str:
         return "must not run"
@@ -1054,7 +1053,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="control",
-                function="thread_model_write",
+                function="thread_model",
             ),
         )
         await entered.wait()

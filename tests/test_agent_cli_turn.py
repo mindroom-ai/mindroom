@@ -27,6 +27,7 @@ from mindroom.agent_cli.protocol import (
     ToolDescribeOperation,
     ToolListOperation,
     ToolSearchOperation,
+    parse_operation,
 )
 from mindroom.agent_cli.session import (
     CliAuthenticationError,
@@ -45,7 +46,7 @@ from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.authoring import Toolkit, current_call
+from mindroom.tool_system.authoring import Toolkit, current_call, passthrough_tool
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
@@ -2157,3 +2158,232 @@ async def test_minimal_bash_delivers_cli_media_on_nonzero_exit_and_drops_when_wi
     ex = ToolExecution(tool_call_id="bash-media", tool_name="bash", is_error=out.is_error, result=out.content)
     msg = tool_result_message(ex, media=out)
     assert [img.content for img in msg.images or ()] == ([] if withhold else [b"png-bash"])
+
+
+def _named_tool(name: str) -> Callable[[], str]:
+    def fn() -> str:
+        return name
+
+    fn.__name__ = name
+    return fn
+
+
+def _deferred_toolkit(name: str, tools: list[object], loaded: list[str] | None = None) -> DeferredAgentToolkit:
+    async def factory():
+        if loaded is not None:
+            loaded.append(name)
+        return adapt_toolkit(Toolkit(name=name, tools=tools))
+
+    return DeferredAgentToolkit(name, name, factory)
+
+
+@pytest.mark.asyncio
+async def test_describe_without_function_resolves_singletons_and_dedups_overflow(tmp_path: Path) -> None:
+    loaded: list[str] = []
+    props = {f"p_{i}": {"type": "string", "description": "value " * 60} for i in range(400)}
+    big_fn = passthrough_tool(name="huge", parameters={"type": "object", "properties": props})(lambda **_: "ok")
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("eager", _named_tool("solo")), adapt_toolkit(Toolkit(name="big", tools=[big_fn]))],
+    )
+    catalog.add_deferred(_deferred_toolkit("attachments", [_named_tool("attachment")], loaded))
+    catalog.add_deferred(_deferred_toolkit("workflow", [_named_tool("run_workflow")], loaded))
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    try:
+        async with owner._window("bash"):
+            for toolkit, expected in (
+                ("eager", ("eager", "solo")),
+                ("attachments", ("attachments", "attachment")),
+                ("dynamic_workflow", ("workflow", "run_workflow")),
+            ):
+                op = ToolDescribeOperation(operation="tools.describe", toolkit=toolkit)
+                described = await owner.operation(window="bash", operation=op)
+                assert (described["toolkit"], described["function"]) == expected
+
+            short = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="big"),
+            )
+            explicit = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="big", function="huge"),
+            )
+            assert (short["toolkit"], short["function"]) == ("big", "huge")
+            assert short["context"]["name"] == explicit["context"]["name"]
+            assert len(owner._schema_documents) == 1
+    finally:
+        await owner.close()
+    assert loaded == ["attachments", "workflow"]
+
+
+@pytest.mark.asyncio
+async def test_describe_without_function_rejects_ambiguous_missing_and_empty_toolkits(tmp_path: Path) -> None:
+    loaded: list[str] = []
+    catalog = await _catalog(
+        tmp_path,
+        [adapt_toolkit(Toolkit(name="multi", tools=[_named_tool("multi"), _named_tool("alpha")]))],
+    )
+    catalog.add_deferred(_deferred_toolkit("empty", [], loaded))
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    try:
+        async with owner._window("bash"):
+            for toolkit, pattern in (
+                ("multi", r"^Toolkit 'multi' has multiple functions: alpha, multi; specify TOOLKIT\.FUNCTION$"),
+                ("missing", r"^No toolkit 'missing'$"),
+                ("empty", r"^No toolkit 'empty'$"),
+                ("empty", r"^No toolkit 'empty'$"),
+            ):
+                with pytest.raises(CliOperationError, match=pattern):
+                    await owner.operation(
+                        window="bash",
+                        operation=ToolDescribeOperation(operation="tools.describe", toolkit=toolkit),
+                    )
+    finally:
+        await owner.close()
+    assert loaded == ["empty"]
+
+
+@pytest.mark.asyncio
+async def test_shorthand_call_and_explicit_retry_with_same_call_id_execute_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    def attachment(action: str) -> str:
+        calls.append(action)
+        return f"ran:{action}"
+
+    catalog = await _catalog(tmp_path, [])
+    catalog.add_deferred(_deferred_toolkit("attachments", [attachment]))
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    loop = asyncio.get_running_loop()
+
+    class LocalClient:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            coro = owner.operation(window="bash", operation=parse_operation(payload))
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=SETTLE_TIMEOUT_SECONDS)
+
+        def receipt(self, call_id: str) -> dict[str, object]:
+            return asyncio.run_coroutine_threadsafe(settled_receipt(owner, call_id), loop).result(
+                timeout=SETTLE_TIMEOUT_SECONDS,
+            )
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", LocalClient)
+    call_id = str(uuid4())
+    try:
+        async with owner._window("bash"):
+            assert (
+                await asyncio.to_thread(
+                    cli_main,
+                    ["tools", "call", "attachments", '{"action":"list"}', "--call-id", call_id],
+                )
+                == 0
+            )
+            first = json.loads(capsys.readouterr().out)
+            assert (
+                await asyncio.to_thread(
+                    cli_main,
+                    ["tools", "call", "attachments.attachment", '{"action":"list"}', "--call-id", call_id],
+                )
+                == 0
+            )
+            second = json.loads(capsys.readouterr().out)
+    finally:
+        await owner.close()
+
+    assert first == second
+    assert (first["toolkit"], first["function"], first["status"], first["outcome"]) == (
+        "attachments",
+        "attachment",
+        "completed",
+        "ran:list",
+    )
+    assert calls == ["list"]
+
+
+@pytest.mark.asyncio
+async def test_shorthand_describe_and_nonblocking_call_do_not_wait_on_running_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block() -> str:
+        started.set()
+        await release.wait()
+        return "unblocked"
+
+    def ping() -> str:
+        return "pong"
+
+    catalog = await _catalog(tmp_path, [_toolkit("slow", block), _toolkit("fast", ping)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    loop = asyncio.get_running_loop()
+
+    class LocalClient:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            coro = owner.operation(window="bash", operation=parse_operation(payload))
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=SETTLE_TIMEOUT_SECONDS)
+
+        def receipt(self, call_id: str) -> dict[str, object]:
+            pytest.fail(f"--timeout 0 must not poll receipt {call_id}")
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", LocalClient)
+    try:
+        async with owner._window("bash"):
+            try:
+                slow_receipt = await owner.operation(
+                    window="bash",
+                    operation=ToolCallOperation(
+                        operation="tools.call",
+                        call_id=uuid4(),
+                        toolkit="slow",
+                        function="block",
+                    ),
+                )
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    await started.wait()
+                    described = await owner.operation(
+                        window="bash",
+                        operation=ToolDescribeOperation(operation="tools.describe", toolkit="fast"),
+                    )
+                    assert (described["toolkit"], described["function"]) == ("fast", "ping")
+                    assert await asyncio.to_thread(cli_main, ["tools", "call", "fast", "--timeout", "0"]) == 3
+                    queued = json.loads(capsys.readouterr().out)
+                    assert (queued["toolkit"], queued["function"], queued["status"]) == ("fast", "ping", "queued")
+                    assert not release.is_set()
+
+                    release.set()
+                    slow_done = await settled_receipt(owner, slow_receipt["call_id"])
+                    fast_done = await settled_receipt(owner, queued["call_id"])
+            finally:
+                release.set()
+    finally:
+        await owner.close()
+
+    assert (slow_done["status"], slow_done["outcome"]) == ("completed", "unblocked")
+    assert (fast_done["status"], fast_done["outcome"]) == ("completed", "pong")

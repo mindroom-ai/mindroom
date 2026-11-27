@@ -247,7 +247,7 @@ Matrix sync callback
 | `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by settling runs whose attempts ended, resuming interrupted ones with their owner's live context, and pruning runs past the script retention |
 | `orchestration/script_checks.py` | Bridges scheduled `script_check` triggers onto `script_runs`: headless `ToolRuntimeContext` reconstruction, decoupled cold-launch timeout and process-exit observation (`observe_process_exit`), and tracked background worker retirement/pruning |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
-| `custom_tools/workflow.py` | `workflow` agent tool: reserve a workflow run and start it as its background job or wait for it inline, read, cancel or resume the requester's runs, continue a run's job after a restart, and resume a run for its requester's control event |
+| `custom_tools/workflow.py` | `workflow_read` and `workflow_write` agent tools: reserve a workflow run and start it as its background job or wait for it inline, read, cancel or resume the requester's runs, continue a run's job after a restart, and resume a run for its requester's control event |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
 | `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |
@@ -734,8 +734,8 @@ Matrix sync callback
 | `reactive_triggers/script_check_poller.py` | Bounded-concurrency `ScriptCheckPoller`, tick outcome/runner protocol, and backoff scheduling for due `script_check` reactive triggers |
 | `reactive_triggers/management.py` | Shared owner-checking, re-enable cursor/checkpoint refresh, enable/disable, and delete helpers across webhook and reactive trigger stores |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller (with opt-in `include_bots` internal-entity watching and target self-loop prevention), live `com.mindroom.thread.tags` observer, GitHub PR and `ScriptCheckPoller` cadence loops, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
-| `custom_tools/triggers.py` | Local-only unified `triggers(action=...)` toolkit (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
-| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
+| `custom_tools/triggers.py` | Local-only `triggers` toolkit split into `triggers_read(action=...)` (`list`, `history`, `test`) and `triggers_write(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `update`, `set_enabled`, `delete`, `rotate_key`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
+| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` on `triggers_write` for `watch_script`, and discovery metadata for the `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State
 

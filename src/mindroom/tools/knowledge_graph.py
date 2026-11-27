@@ -4,7 +4,6 @@ The toolkit (``mindroom.custom_tools.knowledge_graph.KnowledgeGraphTools``) read
 own graph, which it resolves from agent context in ``build_agent_toolkit()``, so it has no generic factory.
 """
 
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
@@ -31,7 +30,7 @@ register_builtin_tool_metadata(
         icon_color="text-teal-500",
         config_fields=[],
         dependencies=["graphiti-core"],
-        function_names=("knowledge_graph_read", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS),
-        action_scoped_grants=("knowledge_graph_read", "knowledge_graph_write"),
+        function_names=("knowledge_graph",),
+        action_scoped_grants=("knowledge_graph",),
     ),
 )

@@ -106,7 +106,7 @@ def _render(
     )
 
 
-def _tool(name: str, result: str, **args: object) -> ToolExecution:
+def _tool(name: str, result: str, /, **args: object) -> ToolExecution:
     return ToolExecution(tool_call_id=f"call-{name}", tool_name=name, tool_args=args, result=result)
 
 
@@ -290,8 +290,23 @@ def test_automation_thread_renders_nothing() -> None:
     [
         # Graph lookups and edits (both consolidated and pre-upgrade retired names) are never evidence.
         pytest.param(
-            [_tool("knowledge_graph_read", "Alice leads Atlas", action="search", query="Atlas")],
+            [_tool("knowledge_graph", "Alice leads Atlas", action="search", query="Atlas")],
             id="graph-read",
+        ),
+        pytest.param(
+            [
+                _tool(
+                    "knowledge_graph",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    action="delete_fact",
+                    fact_id="f1",
+                ),
+            ],
+            id="graph-write",
+        ),
+        pytest.param(
+            [_tool("knowledge_graph_read", "Alice leads Atlas", action="search", query="Atlas")],
+            id="retired-graph-read-v2",
         ),
         pytest.param(
             [
@@ -302,7 +317,7 @@ def test_automation_thread_renders_nothing() -> None:
                     fact_id="f1",
                 ),
             ],
-            id="graph-write",
+            id="retired-graph-write-v2",
         ),
         pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="retired-graph-read"),
         pytest.param(
@@ -317,7 +332,7 @@ def test_automation_thread_renders_nothing() -> None:
                     "Alice leads Atlas",
                     command="cd /work && "
                     + "echo setup; " * 60
-                    + "mindroom-agent tools call knowledge_graph.knowledge_graph_read --json '{}'",
+                    + "mindroom-agent tools call knowledge_graph.knowledge_graph --json '{}'",
                 ),
             ],
             id="shell-lookup",
@@ -412,6 +427,84 @@ def test_claude_agent_prose_exclusion_only_drops_send_and_legacy_claude_send() -
     assert is_evidence(_tool("claude_agent_write", "Interrupt sent to Claude session `s1`.", action="interrupt"))
     assert is_evidence(_tool("claude_agent_write", "Closed Claude session `s1`.", action="end"))
     assert is_evidence(_tool("claude_agent_read", "Claude session `s1` is active."))
+
+
+def test_knowledge_graph_evidence_keeps_unrelated_paths_and_urls_but_drops_wrapper_calls() -> None:
+    """Bare `knowledge_graph` in URLs/file paths stays evidence while wrapper invocations are dropped."""
+    assert is_evidence(_tool("read_url", "Project docs...", url="https://example.com/projects/knowledge_graph"))
+    assert is_evidence(_tool("read_file", "class KnowledgeGraphTools...", path="src/mindroom/tools/knowledge_graph.py"))
+    assert is_evidence(
+        _tool(
+            "bash",
+            "Project docs...",
+            command=(
+                'mindroom-agent tools call website.read_url \'{"url":"https://example.org/projects/knowledge_graph"}\''
+            ),
+        ),
+    )
+    assert is_evidence(
+        _tool(
+            "bash",
+            "class KnowledgeGraphTools...",
+            command='mindroom-agent tools call filesystem.read_file \'{"path":"src/mindroom/tools/knowledge_graph.py"}\'',
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "call_tool",
+            "Alice leads Atlas",
+            name="knowledge_graph",
+            arguments={"action": "search", "query": "Atlas"},
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command='mindroom-agent tools call knowledge_graph --json \'{"action": "search", "query": "Atlas"}\'',
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="mindroom-agent tools call knowledge_graph.knowledge_graph --json '{}'",
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="mindroom-agent tools call --agent foo knowledge_graph --json '{}'",
+        ),
+    )
+    assert not is_evidence(
+        _tool("run_script", "Alice leads Atlas", code='call_tool("knowledge_graph", {"action": "search"})'),
+    )
+    assert not is_evidence(
+        _tool("run_script", "Alice leads Atlas", code="call_tool('knowledge_graph', {'action': 'search'})"),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="cd ~/x\nmindroom-agent tools call knowledge_graph knowledge_graph '{}'",
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command='for q in a b; do\n\tmindroom-agent tools call knowledge_graph knowledge_graph "{}"\ndone',
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "run_script",
+            "Alice leads Atlas",
+            code='tool("knowledge_graph", "knowledge_graph", action="search", query="Atlas")',
+        ),
+    )
 
 
 class _Index:

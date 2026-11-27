@@ -16,7 +16,7 @@ from mindroom.turn_continuation import (
 def _model_switch_execution(when: str, *, model_name: str = "large") -> ToolExecution:
     return ToolExecution(
         tool_call_id="call-switch-model",
-        tool_name="thread_model_write",
+        tool_name="thread_model",
         tool_args={"model_name": model_name, "when": when},
         result=json.dumps(
             {
@@ -34,7 +34,7 @@ def _model_switch_execution(when: str, *, model_name: str = "large") -> ToolExec
 def _rejected_execution() -> ToolExecution:
     return ToolExecution(
         tool_call_id="call-rejected-switch",
-        tool_name="thread_model_write",
+        tool_name="thread_model",
         tool_args={"model_name": "missing", "when": "after-toolcall"},
         result=json.dumps(
             {

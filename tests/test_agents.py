@@ -25,7 +25,6 @@ from mindroom.agents import (
     _load_context_files,
     _render_tool_execution_environment,
     agent_build_can_overlap_file_memory,
-    build_agent_toolkit,
     create_agent,
 )
 from mindroom.config.agent import (
@@ -77,6 +76,7 @@ from mindroom.shared_directories.store import (
 )
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import get_toolkit_construction
@@ -88,6 +88,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -508,7 +509,7 @@ def test_agent_role_describes_local_tool_execution_environment(
     assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in _role(fs_agent)
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_agent_role_describes_mixed_dedicated_worker_routing(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -782,7 +783,7 @@ def test_tool_execution_environment_omits_workdir_without_tools(tmp_path: Path) 
     )
 
 
-@patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name", side_effect=ImportError("dependency missing"))
 def test_agent_role_omits_tool_that_failed_to_build(
     _mock_get_tool_by_name: MagicMock,  # noqa: PT019
 ) -> None:
@@ -1051,7 +1052,7 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     )
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1067,7 +1068,7 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     assert looked_up_tools == list(config.resolve_agent("summary").tools.tool_names)
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1088,7 +1089,7 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_builds_every_toolkit_from_the_caller_s_plugin_view(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1105,7 +1106,7 @@ def test_create_agent_builds_every_toolkit_from_the_caller_s_plugin_view(
     assert all(call.kwargs["tools"] is plugins.tools for call in mock_get_tool_by_name.call_args_list)
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -1129,7 +1130,7 @@ def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_continues_when_implied_tool_import_fails(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1189,7 +1190,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
     assert "matrix_message" in tool_names
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1253,7 +1254,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].tools = ["file", "calculator"]
     config.agents["general"].include_default_tools = False
-    build_agent_toolkit = agents_module.build_agent_toolkit
+    build_agent_toolkit = toolkit_builder.build_agent_toolkit
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "filesystem":
@@ -1261,7 +1262,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
             raise RuntimeError(msg)
         return build_agent_toolkit(tool_name, **kwargs)
 
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build):
+    with patch.object(toolkit_builder, "build_agent_toolkit", side_effect=build):
         agent = _create_agent_for_test("general", config=config)
 
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
@@ -1273,7 +1274,7 @@ def test_create_agent_skips_a_toolkit_whose_function_fails_adaptation(tmp_path: 
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].tools = ["file", "calculator"]
     config.agents["general"].include_default_tools = False
-    build_agent_toolkit = agents_module.build_agent_toolkit
+    build_agent_toolkit = toolkit_builder.build_agent_toolkit
 
     def ping(text: str, agent: object = None) -> str:
         del agent
@@ -1284,7 +1285,7 @@ def test_create_agent_skips_a_toolkit_whose_function_fails_adaptation(tmp_path: 
             return Toolkit(name="filesystem", tools=[ping])
         return build_agent_toolkit(tool_name, **kwargs)
 
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
+    with patch.object(toolkit_builder, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
         agent = _create_agent_for_test("general", config=config)
 
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
@@ -1293,7 +1294,7 @@ def test_create_agent_skips_a_toolkit_whose_function_fails_adaptation(tmp_path: 
     assert "'ping' takes agent" in warning["error"]
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -1316,7 +1317,7 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -2448,7 +2449,7 @@ def test_private_workspace_template_reconciles_missing_files_in_owned_partially_
     assert (workspace.root / "USER.md").read_text(encoding="utf-8") == "user\n"
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -2469,7 +2470,7 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
     assert runtime_overrides_by_tool["visualization"] is None
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_passes_authored_shell_runtime_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
@@ -2585,7 +2586,7 @@ def test_create_agent_rejects_bare_env_var_context_files() -> None:
         config.agents["general"].context_files = ["$MINDROOM_STORAGE_PATH/SOUL.md"]
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -2842,7 +2843,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             raise ValueError(msg)
         return _toolkit_named(tool_name)
 
-    monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.get_tool_by_name", _get_tool_by_name)
 
     agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
 
@@ -3054,7 +3055,7 @@ def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None
         )
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -3323,7 +3324,7 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
     assert agent_build_can_overlap_file_memory("mind", config, runtime_storage)
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_tools(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -3354,7 +3355,7 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
-@patch("mindroom.agents.get_tool_by_name")
+@patch("mindroom.tool_system.toolkit_builder.get_tool_by_name")
 def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
@@ -4068,7 +4069,7 @@ def test_tool_function_filter_prunes_resolved_functions(tmp_path: Path) -> None:
     toolkit.functions["safe"] = lambda: "safe"
     toolkit.functions["unsafe"] = lambda: "unsafe"
 
-    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+    with patch("mindroom.tool_system.toolkit_builder.build_agent_toolkit", return_value=toolkit):
         build = _create_agent_for_test("general", config, tool_function_filter=lambda function: function.name == "safe")
 
     assert set(_offered(build)) == {"safe"}
@@ -4201,7 +4202,7 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
     for paused in (gated(stop_after_tool_call=True), gated(connects=True)):
         assert paused.gate is ToolGate.POLICY
     # A model switch stops the run only when it applies to the current response, which a job could not continue.
-    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["thread_model_write"]
+    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["thread_model"]
     assert switch.gate is ToolGate.POLICY
     # An authored confirmation is the tool's own pause, never a job's approval.
     assert gated(requires_confirmation=True).gate is ToolGate.CONFIRM
@@ -4253,7 +4254,7 @@ def test_non_resumable_tool_surface_drops_an_empty_toolkit(tmp_path: Path) -> No
     toolkit = Toolkit(name="approval-test")
     toolkit.functions["dangerous"] = lambda: None
 
-    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+    with patch("mindroom.tool_system.toolkit_builder.build_agent_toolkit", return_value=toolkit):
         build = _create_agent_for_test("general", config, supports_native_tool_approval=False)
 
     assert _offered(build) == {}
@@ -4411,7 +4412,7 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
         built_tools.append(tool_name)
 
     with (
-        patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit),
+        patch("mindroom.tool_system.toolkit_builder.build_agent_toolkit", side_effect=fake_build_agent_toolkit),
         patch("mindroom.agents._load_agent_skills") as load_agent_skills,
     ):
         agent = create_agent(

@@ -64,8 +64,8 @@ _READ_AHEAD_CHUNK_BYTES = 8 * 1024 * 1024
 _NORMALIZE_ROWS = 1024
 #: The keyword index's tokenizer, also used to normalize query words the same way.
 _TOKENIZER = "porter unicode61 remove_diacritics 2"
-# Stored row keys that serve indexing and say nothing about the chunk; ``content_id``, ``content_hash``, and the empty
-# ``linked_to`` are the keys the rows Agno wrote carry.
+# Stored row keys that serve indexing and say nothing about the chunk. ``content_id``, ``content_hash``, and
+# ``linked_to`` are no longer written on new rows, but stay here for read compatibility with older collections.
 _INDEXING_KEYS = frozenset(
     {SOURCE_MTIME_NS_KEY, SOURCE_SIZE_KEY, SOURCE_DIGEST_KEY, "content_id", "content_hash", "linked_to"},
 )
@@ -561,8 +561,8 @@ def _reciprocal_rank_fusion(*rankings: Sequence[int]) -> list[int]:
 def _hits(connection: sqlite3.Connection, ranked: Sequence[tuple[int, float]], *, limit: int) -> list[SearchHit]:
     """Build hits for ranked ``(rowid, cosine distance)`` pairs, dropping a document's repeated chunks.
 
-    A hit shows its source, its reader keys, and its distance; the row keys that serve indexing, the source signature
-    and the content hash and id, and Agno's empty ``linked_to`` stay out of it.
+    A hit shows its source, its reader keys, and its distance; the row keys that serve indexing, the source signature,
+    and legacy ``content_hash``, ``content_id``, and ``linked_to`` keys from older collections stay out of it.
     """
     rows = {
         rowid: (document, metadata)

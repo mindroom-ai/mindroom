@@ -136,7 +136,9 @@ async def test_matrix_api_denies_unjoined_target_room(
     context = await _context(tmp_path)
 
     with tool_runtime_context(context):
-        payload = await MatrixApiTools().matrix_api(action=action, room_id=_TARGET_ROOM_ID, **kwargs)
+        tool = MatrixApiTools()
+        fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
+        payload = await fn(action=action, room_id=_TARGET_ROOM_ID, **kwargs)
 
     _assert_denied(payload, room_id=_TARGET_ROOM_ID)
     context.client.room_send.assert_not_awaited()

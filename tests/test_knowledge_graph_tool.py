@@ -26,6 +26,7 @@ from mindroom.knowledge_graph.store import (
 )
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -153,7 +154,7 @@ async def test_search_graph_reads_only_the_callers_graph(tmp_path: Path, store: 
     identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
     tools = KnowledgeGraphTools("mind", config, paths, identity)
 
-    text = await tools.knowledge_graph_read("search", "who leads Atlas")
+    text = await tools.knowledge_graph("search", "who leads Atlas")
 
     assert store.queries == [(graph_scope("mind", config, paths, identity).graph_name, "who leads Atlas", 10)]
     # Each fact shows when it held and what evidence supports it.
@@ -217,8 +218,8 @@ async def test_graph_entity_returns_summary_or_says_unknown(tmp_path: Path) -> N
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     tools = KnowledgeGraphTools("mind", _config(), paths, None)
 
-    assert "Alice leads Atlas." in await tools.knowledge_graph_read("entity", "Alice")
-    assert "No entity matches" in await tools.knowledge_graph_read("entity", "Nobody")
+    assert "Alice leads Atlas." in await tools.knowledge_graph("entity", "Alice")
+    assert "No entity matches" in await tools.knowledge_graph("entity", "Nobody")
 
 
 @pytest.mark.asyncio
@@ -228,8 +229,8 @@ async def test_graph_entity_shows_other_close_matches(tmp_path: Path) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     tools = KnowledgeGraphTools("mind", _config(), paths, None)
 
-    fuzzy = await tools.knowledge_graph_read("entity", "Dan")
-    exact = await tools.knowledge_graph_read("entity", "Alice")
+    fuzzy = await tools.knowledge_graph("entity", "Dan")
+    exact = await tools.knowledge_graph("entity", "Alice")
 
     assert fuzzy.endswith("\nOther close matches: Dana Whitfield, Dana's workspace")
     # Without ids a duplicate found under the name asked for cannot be looked up, so it is not offered.
@@ -244,7 +245,7 @@ async def test_unavailable_graph_returns_a_readable_error(tmp_path: Path, store:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     store.failure = ConnectionError("socket closed")
 
-    text = await KnowledgeGraphTools("mind", _config(), paths, None).knowledge_graph_read("search", "Atlas")
+    text = await KnowledgeGraphTools("mind", _config(), paths, None).knowledge_graph("search", "Atlas")
 
     assert text.startswith("The knowledge graph is unavailable")
     # The error can carry request data or internals; the log keeps it, the agent and its requester do not.
@@ -257,8 +258,8 @@ async def test_search_limit_is_clamped(tmp_path: Path, store: _Store) -> None:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     tools = KnowledgeGraphTools("mind", _config(), paths, None)
 
-    await tools.knowledge_graph_read("search", "a", limit=0)
-    await tools.knowledge_graph_read("search", "b", limit=500)
+    await tools.knowledge_graph("search", "a", limit=0)
+    await tools.knowledge_graph("search", "b", limit=500)
 
     assert [limit for _, _, limit in store.queries] == [1, 50]
 
@@ -287,14 +288,33 @@ def test_a_deferred_graph_tool_is_offered_only_once_it_attaches() -> None:
 
 
 def test_graph_edits_are_offered_only_when_allowed(tmp_path: Path) -> None:
-    """The edit functions exist only for an agent allowed to edit its graph."""
+    """Read-only agents only see read actions and fields; editing agents see all 6 actions and edit fields."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     reader = KnowledgeGraphTools("mind", _config(), paths, None)
     editor = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
-    assert set(reader.functions) == {"knowledge_graph_read"}
+    assert set(reader.functions) == {"knowledge_graph"}
     assert set(editor.functions) == set(builtin_tool_registry().entries["knowledge_graph"].function_names)
+
+    [reader_fn] = adapt_toolkit(reader).functions
+    [editor_fn] = adapt_toolkit(editor).functions
+    assert reader_fn.parameters["properties"]["action"]["enum"] == ["search", "entity"]
+    assert set(reader_fn.parameters["properties"]) == {"action", "query", "limit"}
+    assert "`delete_fact`" not in (reader_fn.description or "")
+    assert "`search`" in (reader_fn.description or "")
+    assert "`entity`" in (reader_fn.description or "")
+
+    assert editor_fn.parameters["properties"]["action"]["enum"] == [
+        "search",
+        "entity",
+        "update_summary",
+        "merge",
+        "delete_fact",
+        "delete_entity",
+    ]
+    assert {"fact_id", "entity_id", "duplicate_id", "into_id", "summary"} <= set(editor_fn.parameters["properties"])
+    assert "`delete_fact`" in (editor_fn.description or "")
 
 
 @pytest.mark.asyncio
@@ -304,9 +324,9 @@ async def test_an_editing_agent_sees_the_ids_it_edits_by(tmp_path: Path) -> None
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     tools = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
-    found = await tools.knowledge_graph_read("search", "who leads Atlas")
-    exact = await tools.knowledge_graph_read("entity", "Alice")
-    fuzzy = await tools.knowledge_graph_read("entity", "Dan")
+    found = await tools.knowledge_graph("search", "who leads Atlas")
+    exact = await tools.knowledge_graph("entity", "Alice")
+    fuzzy = await tools.knowledge_graph("entity", "Dan")
 
     assert f"- Alice leads Project Atlas\n  id: {FACT_ID}\n" in found
     assert exact.startswith("Alice (id alice-id): Alice leads Atlas.\n")
@@ -326,31 +346,28 @@ async def test_graph_edits_change_only_the_callers_graph(tmp_path: Path, store: 
     tools = KnowledgeGraphTools("mind", config, paths, identity)
 
     assert (
-        await tools.knowledge_graph_write("delete_fact", fact_id=FACT_ID)
-        == "Deleted the fact 'Alice leads Project Atlas'."
+        await tools.knowledge_graph("delete_fact", fact_id=FACT_ID) == "Deleted the fact 'Alice leads Project Atlas'."
     )
-    assert await tools.knowledge_graph_write("delete_fact", fact_id="nope") == "No fact in your graph has id 'nope'."
+    assert await tools.knowledge_graph("delete_fact", fact_id="nope") == "No fact in your graph has id 'nope'."
     assert (
-        await tools.knowledge_graph_write("delete_entity", entity_id="alice-id")
+        await tools.knowledge_graph("delete_entity", entity_id="alice-id")
         == "Deleted 'Alice' and every fact that touched it."
     )
+    assert await tools.knowledge_graph("delete_entity", entity_id="nope") == "No entity in your graph has id 'nope'."
     assert (
-        await tools.knowledge_graph_write("delete_entity", entity_id="nope") == "No entity in your graph has id 'nope'."
-    )
-    assert (
-        await tools.knowledge_graph_write("merge", duplicate_id="stray-alice-id", into_id="alice-id")
+        await tools.knowledge_graph("merge", duplicate_id="stray-alice-id", into_id="alice-id")
         == "Merged 'alice' into 'Alice', moving 2 facts."
     )
     assert (
-        await tools.knowledge_graph_write("merge", duplicate_id="nope", into_id="alice-id")
+        await tools.knowledge_graph("merge", duplicate_id="nope", into_id="alice-id")
         == "'nope' or 'alice-id' is not the id of an entity in your graph."
     )
     assert (
-        await tools.knowledge_graph_write("update_summary", entity_id="alice-id", summary="Alice leads Atlas.")
+        await tools.knowledge_graph("update_summary", entity_id="alice-id", summary="Alice leads Atlas.")
         == "Updated the summary of 'Alice'."
     )
     assert (
-        await tools.knowledge_graph_write("update_summary", entity_id="nope", summary="x")
+        await tools.knowledge_graph("update_summary", entity_id="nope", summary="x")
         == "No entity in your graph has id 'nope'."
     )
 
@@ -373,7 +390,7 @@ async def test_an_entity_is_not_merged_into_itself(tmp_path: Path, store: _Store
     tools = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
     assert (
-        await tools.knowledge_graph_write("merge", duplicate_id="alice-id", into_id="alice-id")
+        await tools.knowledge_graph("merge", duplicate_id="alice-id", into_id="alice-id")
         == "An entity cannot be merged into itself."
     )
     assert store.edits == []
@@ -385,7 +402,7 @@ async def test_a_failed_edit_returns_a_readable_error(tmp_path: Path, store: _St
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     store.failure = ConnectionError("socket closed")
 
-    text = await KnowledgeGraphTools("mind", _config(edits=True), paths, None).knowledge_graph_write(
+    text = await KnowledgeGraphTools("mind", _config(edits=True), paths, None).knowledge_graph(
         "delete_fact",
         fact_id=FACT_ID,
     )
@@ -400,24 +417,31 @@ async def test_knowledge_graph_validates_actions_parameters_and_empty_summary(tm
     reader = KnowledgeGraphTools("mind", _config(edits=False), paths, None)
     editor = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
-    assert (await reader.knowledge_graph_read("bogus", "Atlas")).startswith("Error: Unsupported action")  # type: ignore[arg-type]
-    assert (await reader.knowledge_graph_write("delete_fact", fact_id=FACT_ID)).startswith(
+    assert (await reader.knowledge_graph("bogus", "Atlas")).startswith("Error: Unsupported action")  # type: ignore[arg-type]
+    assert (await reader.knowledge_graph("delete_fact", fact_id=FACT_ID)).startswith(
         "Error: knowledge_graph_edits",
     )
-    assert (await editor.knowledge_graph_write("bogus")).startswith("Error: Unsupported action")  # type: ignore[arg-type]
-    assert "required" in await editor.knowledge_graph_write("update_summary", entity_id="alice-id")
-    assert "cannot be used" in await editor.knowledge_graph_write(
+    assert (await editor.knowledge_graph("bogus")).startswith("Error: Unsupported action")  # type: ignore[arg-type]
+    assert "required" in await reader.knowledge_graph("search")
+    assert "required" in await reader.knowledge_graph("search", query="   ")
+    assert "required" in await reader.knowledge_graph("entity")
+    assert "cannot be used" in await reader.knowledge_graph("entity", query="Alice", limit=5)
+    assert "cannot be used" in await editor.knowledge_graph("search", query="Atlas", fact_id=FACT_ID)
+    assert "cannot be used" in await editor.knowledge_graph("delete_fact", fact_id=FACT_ID, query="Atlas")
+    assert "cannot be used" in await editor.knowledge_graph("delete_fact", fact_id=FACT_ID, limit=5)
+    assert "required" in await editor.knowledge_graph("update_summary", entity_id="alice-id")
+    assert "cannot be used" in await editor.knowledge_graph(
         "update_summary",
         entity_id="alice-id",
         summary="x",
         fact_id=FACT_ID,
     )
-    assert "required" in await editor.knowledge_graph_write("merge", duplicate_id="stray-alice-id")
-    assert "cannot be used" in await editor.knowledge_graph_write("merge", duplicate_id="a", into_id="b", entity_id="c")
-    assert "required" in await editor.knowledge_graph_write("delete_fact")
-    assert "cannot be used" in await editor.knowledge_graph_write("delete_fact", fact_id=FACT_ID, summary="x")
-    assert "required" in await editor.knowledge_graph_write("delete_entity")
-    assert "cannot be used" in await editor.knowledge_graph_write(
+    assert "required" in await editor.knowledge_graph("merge", duplicate_id="stray-alice-id")
+    assert "cannot be used" in await editor.knowledge_graph("merge", duplicate_id="a", into_id="b", entity_id="c")
+    assert "required" in await editor.knowledge_graph("delete_fact")
+    assert "cannot be used" in await editor.knowledge_graph("delete_fact", fact_id=FACT_ID, summary="x")
+    assert "required" in await editor.knowledge_graph("delete_entity")
+    assert "cannot be used" in await editor.knowledge_graph(
         "delete_entity",
         entity_id="alice-id",
         fact_id=FACT_ID,
@@ -426,7 +450,7 @@ async def test_knowledge_graph_validates_actions_parameters_and_empty_summary(tm
 
     # Empty string summary is distinct from omitted summary=None and reaches the store.
     assert (
-        await editor.knowledge_graph_write("update_summary", entity_id="alice-id", summary="")
+        await editor.knowledge_graph("update_summary", entity_id="alice-id", summary="")
         == "Updated the summary of 'Alice'."
     )
     assert store.edits == [

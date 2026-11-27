@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import mindroom.agents as agents_module
 import mindroom.tools  # noqa: F401
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
@@ -63,7 +62,7 @@ from mindroom.script_runs.store import (
     ScriptRunStore,
     mint_script_capability,
 )
-from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system import sandbox_proxy, toolkit_builder
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.tool_function import ToolFunction, ToolGate, ToolValue
@@ -560,14 +559,14 @@ def _replace_calculator_toolkit(
     monkeypatch: pytest.MonkeyPatch,
     build_replacement: Callable[[], Toolkit],
 ) -> None:
-    original_build = agents_module.build_agent_toolkit
+    original_build = toolkit_builder.build_agent_toolkit
 
     def build_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "calculator":
             return build_replacement()
         return original_build(tool_name, **kwargs)
 
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build_toolkit)
 
 
 class _Calculator(Toolkit):
@@ -849,7 +848,7 @@ async def test_script_broker_builds_the_selected_live_toolkit_once(
 ) -> None:
     """Live authority resolution and execution must share one freshly built toolkit instance."""
     builds = 0
-    original_build = agents_module.build_agent_toolkit
+    original_build = toolkit_builder.build_agent_toolkit
 
     def counting_build(tool_name: str, **kwargs: object) -> Toolkit | None:
         nonlocal builds
@@ -857,7 +856,7 @@ async def test_script_broker_builds_the_selected_live_toolkit_once(
             builds += 1
         return original_build(tool_name, **kwargs)
 
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", counting_build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", counting_build)
     broker, token = _broker(tmp_path, events=[])
 
     receipt = await _call_through_gateway(broker, _request(call_id="single-build"), token)

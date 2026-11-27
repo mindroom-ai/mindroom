@@ -74,7 +74,7 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
     "save_scoped_credentials": "worker_target",
 }
 _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
-    ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
+    ("src/mindroom/tool_system/toolkit_builder.py", "build_agent_toolkit", "execution_identity"),
     ("src/mindroom/session_storage/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
     ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),

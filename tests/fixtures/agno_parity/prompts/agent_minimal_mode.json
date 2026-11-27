@@ -51,7 +51,7 @@
       },
       "messages": [
         {
-          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help; call a tool with `mindroom-agent tools call TOOLKIT.FUNCTION '<json>'`.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
+          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help; call a tool with `mindroom-agent tools call TOOLKIT[.FUNCTION] '<json>'`.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
           "role": "system"
         },
         {

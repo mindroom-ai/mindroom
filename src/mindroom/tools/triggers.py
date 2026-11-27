@@ -1,4 +1,4 @@
-"""Unified triggers tool configuration."""
+"""Triggers tool configuration."""
 
 from __future__ import annotations
 
@@ -20,13 +20,10 @@ _NON_CODE_TRIGGER_ACTIONS = frozenset(
         "watch_pr",
         "subscribe_event",
         "create",
-        "list",
         "update",
         "set_enabled",
         "delete",
         "rotate_key",
-        "history",
-        "test",
     },
 )
 
@@ -63,9 +60,10 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
     icon="Webhook",
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/external-triggers/",
-    function_names=("triggers",),
+    function_names=("triggers_read", "triggers_write"),
+    action_scoped_grants=("triggers_read", "triggers_write"),
     approval_aliases={
-        "triggers": ApprovalAlias(
+        "triggers_write": ApprovalAlias(
             judged_as="script_write",
             judge=_judge_triggers_script_check,
             allow_non_resumable_passthrough=True,
@@ -73,7 +71,7 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
     },
 )
 def triggers_tools() -> type[TriggersTools]:
-    """Return unified trigger management tools."""
+    """Return trigger inspection and management tools."""
     from mindroom.custom_tools.triggers import TriggersTools
 
     return TriggersTools

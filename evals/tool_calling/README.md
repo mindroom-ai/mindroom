@@ -21,7 +21,7 @@ Workspace-local tools (`run_shell_command`, `filesystem`, `skill`, `view_file`, 
 
 ## Usage
 
-MindRoom logs are routed to `stderr` at `WARNING` by default so `stdout` is a clean Markdown table; pass `-v`/`--verbose` for full MindRoom logs on `stderr`. On a fresh environment, pass `--extra browser` to `uv run` so the `browser_control` toolkit is available.
+MindRoom logs are routed to `stderr` at `WARNING` by default so `stdout` is a clean Markdown table; pass `-v`/`--verbose` for full MindRoom logs on `stderr`. On a fresh environment, pass `--extra browser` to `uv run` so the `browser` toolkit (`browser_read` + `browser_control`) is available.
 
 ```bash
 # Configured models from ~/.mindroom-chat/config.yaml:

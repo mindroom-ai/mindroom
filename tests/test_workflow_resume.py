@@ -614,7 +614,7 @@ def _left(stack: WorkflowStack) -> float | None:
     return stack.store.get_run(stack.run_id).runtime_seconds_left
 
 
-_OUT_OF_TIME = 'The run used its 1 hours of working time. workflow(action="resume", run_id=...) continues it.'
+_OUT_OF_TIME = 'The run used its 1 hours of working time. workflow_write(action="resume", run_id=...) continues it.'
 # The write of the watch that charges the first ten minutes of the run's hour.
 _CHARGED = {"runtime_seconds_left": 3000.0}
 
@@ -671,7 +671,10 @@ async def test_working_time_limit_interrupts_and_resume_continues(timed: Workflo
     run = await timed.engine.wait(timed.run_id)
 
     assert (run.state, run.runtime_seconds_left) == (WorkflowRunState.INTERRUPTED, 0)
-    assert run.error == 'The run used its 1 hours of working time. workflow(action="resume", run_id=...) continues it.'
+    assert (
+        run.error
+        == 'The run used its 1 hours of working time. workflow_write(action="resume", run_id=...) continues it.'
+    )
     assert timed.attempt.state is ScriptRunState.CANCELLED
 
     await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=2))

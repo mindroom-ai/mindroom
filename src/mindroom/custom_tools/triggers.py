@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -107,6 +108,7 @@ from mindroom.thread_tags import ThreadTagsError, normalize_tag_name
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, current_tool_call
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.tools.native_helpers import validate_action_params
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
@@ -119,6 +121,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -181,7 +184,12 @@ _TRIAGE_PARAMS: frozenset[str] = frozenset(
         "triage_threshold",
     },
 )
-_ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+_READ_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "list": frozenset({"include_disabled"}),
+    "history": frozenset({"trigger_id", "limit"}),
+    "test": frozenset({"trigger_id", "text", "actor", "kind", "sample_data"}),
+}
+_WRITE_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
     "watch_room": _COMMON_REACTIVE_PARAMS
     | _TRIAGE_PARAMS
     | frozenset({"room_id", "thread_id", "senders", "pattern", "include_bots"}),
@@ -225,19 +233,12 @@ _ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
             "max_body_bytes",
         },
     ),
-    "list": frozenset({"include_disabled"}),
     "update": frozenset({"trigger_id", *_UPDATABLE_FIELDS}),
     "set_enabled": frozenset({"trigger_id", "enabled"}),
     "delete": frozenset({"trigger_id"}),
     "rotate_key": frozenset({"trigger_id", "public_key", "key_id"}),
-    "history": frozenset({"trigger_id", "limit"}),
-    "test": frozenset({"trigger_id", "text", "actor", "kind", "sample_data"}),
-}
-_NON_NONE_PARAM_DEFAULTS: dict[str, object] = {
-    "include_disabled": True,
 }
 _DEFAULT_MAX_FIRES_PER_HOUR = 10
-_WATCH_TURN_READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "history", "test"})
 _WATCH_TURN_MUTATION_ERROR = "Ask me in a new message to change your triggers."
 
 
@@ -253,8 +254,16 @@ class TriggersTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name=self._TOOL_NAME,
-            tools=[self.triggers],
+            tools=[self.triggers_read, self.triggers_write],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit unused meta-schema fields on fast trigger queries and small write responses."""
+        if function.name == "triggers_read":
+            return replace(function, offer_background_after=False, offer_output_path=True)
+        if function.name == "triggers_write":
+            return replace(function, offer_background_after=False, offer_output_path=False)
+        return function
 
     @classmethod
     def _payload(cls, status: str, **fields: object) -> str:
@@ -838,7 +847,76 @@ class TriggersTools(Toolkit):
         self._notify_reactive_service(context)
         return created
 
-    async def triggers(  # noqa: D417
+    async def _dispatch(
+        self,
+        function_name: str,
+        action: str,
+        args: _TriggerParams,
+        *,
+        allowed_by_action: Mapping[str, frozenset[str]],
+        handlers: Mapping[str, Callable[[ToolRuntimeContext, _TriggerParams], Awaitable[str]]],
+        write: bool,
+    ) -> str:
+        try:
+            context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
+            handler = handlers.get(action)
+            if handler is None:
+                expected = ", ".join(allowed_by_action)
+                return self._payload(
+                    "error",
+                    message=f"Unsupported {function_name} action {action!r}. Expected one of: {expected}.",
+                )
+            if write and is_event_source_watch_turn(context.hook_source):
+                return self._payload("error", message=_WATCH_TURN_MUTATION_ERROR)
+            if (error := validate_action_params(function_name, action, allowed_by_action, args)) is not None:
+                return self._payload("error", message=error)
+            return await handler(context, args)
+        except OAuthConnectionRequired as exc:
+            return self._payload("error", **oauth_connection_required_payload(exc))
+        except _TOOL_ERRORS as exc:
+            return self._payload("error", message=str(exc))
+
+    async def triggers_read(
+        self,
+        action: Literal["list", "history", "test"],
+        trigger_id: str | None = None,
+        include_disabled: bool | None = None,
+        limit: int | None = None,
+        text: str | None = None,
+        actor: str | None = None,
+        kind: str | None = None,
+        sample_data: dict[str, Any] | None = None,
+    ) -> str:
+        """Inspect triggers, recent firing history, or dry-run a trigger.
+
+        Actions (only pass parameters for the chosen action):
+        - `list`: list triggers and authorized `event_sources` (optional `include_disabled`, default true).
+        - `history`: recent firings (optional `trigger_id`, `limit` 1..100 default 20).
+        - `test`: dry-run matching/triage for `trigger_id` with sample `text`, `actor`, `kind`, `sample_data`.
+        """
+        args: _TriggerParams = {
+            "trigger_id": trigger_id,
+            "include_disabled": include_disabled,
+            "limit": limit,
+            "text": text,
+            "actor": actor,
+            "kind": kind,
+            "sample_data": sample_data,
+        }
+        return await self._dispatch(
+            "triggers_read",
+            action,
+            args,
+            allowed_by_action=_READ_ALLOWED_PARAMS,
+            handlers={
+                "list": self._list_triggers,
+                "history": self._history,
+                "test": self._test_trigger,
+            },
+            write=False,
+        )
+
+    async def triggers_write(  # noqa: D417
         self,
         action: Literal[
             "watch_room",
@@ -847,13 +925,10 @@ class TriggersTools(Toolkit):
             "watch_script",
             "subscribe_event",
             "create",
-            "list",
             "update",
             "set_enabled",
             "delete",
             "rotate_key",
-            "history",
-            "test",
         ],
         trigger_id: str | None = None,
         prompt: str | None = None,
@@ -891,31 +966,23 @@ class TriggersTools(Toolkit):
         cooldown_seconds: int | None = None,
         expires_in_hours: float | None = None,
         enabled: bool | None = None,
-        include_disabled: bool = True,
         public_key: str | None = None,
         key_id: str | None = None,
         allowed_kinds: list[str] | None = None,
         replay_window_seconds: int | None = None,
         max_body_bytes: int | None = None,
-        limit: int | None = None,
-        text: str | None = None,
-        actor: str | None = None,
-        sample_data: dict[str, Any] | None = None,
     ) -> str:
-        """Manage reactive triggers (GitHub PRs, scheduled Python checks, room messages, thread tags, event sources, optional triage) and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
+        """Create, update, enable/disable, delete, or rotate reactive triggers and signed Ed25519 webhooks (`/api/triggers/{trigger_id}`).
 
         Actions (key params):
-        - watch_room (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
-        - watch_thread (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
-        - watch_pr (`repo` 'owner/repo', `number`): watch one open GitHub PR (`events`=['activity','ci','merge','close'] — Check Runs; `ignore_actors`, `include_bots`=False, `auto_disable_on_close`=True, `reopen_on_fire`=True, `expires_in_hours`=720, `poll_interval_seconds`).
-        - watch_script (`prompt`, `source` or `path`): scheduled Python `def check():` using `tool()`/`state` (`poll_interval_seconds` default 300; return `None` to stay silent or dict to wake; default `once`=False).
-        - subscribe_event (`source_id` from `list`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
-        - create (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
-        - list (optional `include_disabled`=True): list triggers and authorized `event_sources`.
-        - update (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).
-        - set_enabled (`trigger_id`; default `enabled`=False), delete (`trigger_id`), rotate_key (`trigger_id`, `public_key`, optional `key_id`).
-        - history (optional `trigger_id`, `limit` 1..100 default 20): recent firings.
-        - test (`trigger_id`): dry-run matching/triage with sample `text`, `actor`, `kind`, `sample_data`.
+        - `watch_room` (`prompt`): watch room messages (filters: `room_id`, `thread_id`, `senders`, case-insensitive regex `pattern`, `include_bots`=False never self; default `once`=False).
+        - `watch_thread` (`prompt`): watch thread tag change (`room_id`, `thread_id`, `tag`='resolved', `transition`='added'|'removed'; default `once`=True).
+        - `watch_pr` (`repo` 'owner/repo', `number`): watch one open GitHub PR (`events`=['activity','ci','merge','close'] — Check Runs; `ignore_actors`, `include_bots`=False, `auto_disable_on_close`=True, `reopen_on_fire`=True, `expires_in_hours`=720, `poll_interval_seconds`).
+        - `watch_script` (`prompt`, `source` or `path`): scheduled Python `def check():` using `tool()`/`state` (`poll_interval_seconds` default 300; return `None` to stay silent or dict to wake; default `once`=False).
+        - `subscribe_event` (`source_id` from `triggers_read(action="list")`, `kind`, `prompt`): subscribe to event source (`match` exact event.data filter with dot-paths; default `once`=True).
+        - `create` (`trigger_id`, `public_key`): direct Ed25519 webhook (raw base64/OpenSSH/PEM; optional `key_id`='default', `allowed_kinds`, `replay_window_seconds`, `max_body_bytes`).
+        - `update` (`trigger_id`): patch reactive rule (`''` clears `pattern`/`triage_instructions`; `[]` clears `senders`).
+        - `set_enabled` (`trigger_id`; default `enabled`=False), `delete` (`trigger_id`), `rotate_key` (`trigger_id`, `public_key`, optional `key_id`).
 
         Delivery & limits: `trigger_id` auto-generates on reactive create. `room_id`/`target_room_id`/`target_agent` default to current. Omitting `target_thread_id` defaults to the current thread in the current room (same-room `watch_room`: `'origin'`); pass `'room'` for the room timeline; `new_thread=True` opens a fresh thread (grouped by `thread_key`); `reopen_on_fire=True` clears `resolved` before delivery. Caps: `once`, `max_fires_per_hour` (default 10), `cooldown_seconds` (default 0), `expires_in_hours` (<= 8760).
         Triage: `triage_instructions` (tool-less criteria), `triage_provider` (`llm`|`typesafe`|`openai_decisions`), `triage_model` (required for `llm`), `triage_threshold` (0..1).
@@ -927,39 +994,25 @@ class TriggersTools(Toolkit):
 
         """
         args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
-        try:
-            context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
-            handlers: dict[str, Callable[[ToolRuntimeContext, _TriggerParams], Awaitable[str]]] = {
+        return await self._dispatch(
+            "triggers_write",
+            action,
+            args,
+            allowed_by_action=_WRITE_ALLOWED_PARAMS,
+            handlers={
                 "watch_room": self._watch_room,
                 "watch_thread": self._watch_thread,
                 "watch_pr": self._watch_pr,
                 "watch_script": self._watch_script,
                 "subscribe_event": self._subscribe_event,
                 "create": self._create_trigger,
-                "list": self._list_triggers,
                 "update": self._update_trigger,
                 "set_enabled": self._set_enabled,
                 "delete": self._delete_trigger,
                 "rotate_key": self._rotate_key,
-                "history": self._history,
-                "test": self._test_trigger,
-            }
-            handler = handlers.get(action)
-            if handler is None:
-                return self._payload("error", message=f"Unsupported triggers action: {action!r}")
-            if action not in _WATCH_TURN_READ_ONLY_ACTIONS and is_event_source_watch_turn(context.hook_source):
-                return self._payload("error", message=_WATCH_TURN_MUTATION_ERROR)
-            supplied = {key for key, value in args.items() if value is not _NON_NONE_PARAM_DEFAULTS.get(key)}
-            if unsupported := sorted(supplied - _ACTION_ALLOWED_PARAMS[action]):
-                return self._payload(
-                    "error",
-                    message=f"Unsupported parameter(s) for triggers(action={action!r}): {', '.join(unsupported)}",
-                )
-            return await handler(context, args)
-        except OAuthConnectionRequired as exc:
-            return self._payload("error", **oauth_connection_required_payload(exc))
-        except _TOOL_ERRORS as exc:
-            return self._payload("error", message=str(exc))
+            },
+            write=True,
+        )
 
     async def _watch_room(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_prompt = _require_non_empty_arg(args["prompt"], "prompt", "watch_room")
@@ -1317,7 +1370,7 @@ class TriggersTools(Toolkit):
         )
 
     async def _list_triggers(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
-        include_disabled = args["include_disabled"]
+        include_disabled = True if args["include_disabled"] is None else args["include_disabled"]
         owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
         is_admin = self._is_admin(context)
 

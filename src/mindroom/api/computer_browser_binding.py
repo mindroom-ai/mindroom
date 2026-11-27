@@ -100,7 +100,7 @@ def select_browser_provider(
             frozenset(browser_mcp_catalog()),
             encode_media_result,
         )
-    elif tool_name == "browser" and function_name == "browser_control":
+    elif tool_name == "browser" and function_name in {"browser_read", "browser_control"}:
 
         def encode_action_browser_result(result: object) -> object:
             if isinstance(result, ToolValue):
@@ -110,7 +110,7 @@ def select_browser_provider(
         expected_factory = browser_tools
         provider = _ComputerBrowserProvider(
             BrowserTools,
-            frozenset({"browser_control"}),
+            frozenset({"browser_read", "browser_control"}),
             encode_action_browser_result,
         )
     else:

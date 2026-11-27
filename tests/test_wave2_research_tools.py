@@ -28,7 +28,7 @@ from mindroom.tools.youtube import youtube_tools
         (wikipedia_tools, "wikipedia_tools", ["search_wikipedia"]),
         (arxiv_tools, "arxiv_tools", ["search_arxiv_and_return_articles", "read_arxiv_papers"]),
         (pubmed_tools, "pubmed", ["search_pubmed"]),
-        (hackernews_tools, "hackers_news", ["get_top_hackernews_stories", "get_user_details"]),
+        (hackernews_tools, "hackers_news", ["hackernews"]),
         (youtube_tools, "youtube_tools", ["youtube_video"]),
     ],
 )
@@ -103,37 +103,61 @@ def test_hackernews_stories_user_details_and_error_paths(monkeypatch: pytest.Mon
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = hackernews_tools()(timeout=15)
 
-        assert toolkit.get_top_hackernews_stories(num_stories=0) == "[]"
-        assert toolkit.get_top_hackernews_stories(num_stories=-2) == "[]"
+        assert toolkit.hackernews("top_stories", num_stories=0) == "[]"
+        assert toolkit.hackernews("top_stories", num_stories=-2) == "[]"
 
-        stories = json.loads(toolkit.get_top_hackernews_stories(num_stories=3))
+        stories = json.loads(toolkit.hackernews("top_stories", num_stories=3))
         assert stories == [
             {"id": 101, "title": "First", "by": "alice", "username": "alice"},
             {"id": 103, "title": "No Author", "username": "unknown"},
         ]
 
-        user = json.loads(toolkit.get_user_details("pg"))
+        user = json.loads(toolkit.hackernews("user", username="pg"))
         assert user == {"id": "pg", "karma": 157000, "about": "essays", "total_items_submitted": 3}
 
-        assert toolkit.get_user_details("missing") == "Error getting user details: user 'missing' not found"
-        assert toolkit.get_user_details("error_user").startswith("Error getting user details:")
-        assert toolkit.get_user_details("../topstories") == "Error getting user details: user '../topstories' not found"
+        assert toolkit.hackernews("user", username="missing") == "Error getting user details: user 'missing' not found"
+        assert toolkit.hackernews("user", username="error_user").startswith("Error getting user details:")
+        assert (
+            toolkit.hackernews("user", username="../topstories")
+            == "Error getting user details: user '../topstories' not found"
+        )
+        assert "required" in toolkit.hackernews("user")
+        assert "required" in toolkit.hackernews("user", username="   ")
+        assert "cannot be used" in toolkit.hackernews("top_stories", username="pg")
+        assert "cannot be used" in toolkit.hackernews("user", username="pg", num_stories=5)
 
         fail_topstories = True
-        assert toolkit.get_top_hackernews_stories(num_stories=1).startswith("Error fetching stories:")
+        assert toolkit.hackernews("top_stories", num_stories=1).startswith("Error fetching stories:")
 
     assert "/v0/user/..%2Ftopstories.json" in requested_paths
 
 
 def test_hackernews_enable_flags_and_all() -> None:
-    """HackerNewsTools honors individual enable flags and the all override."""
+    """HackerNewsTools narrows action/field schemas by toggle and honors the all override."""
     tool_class = hackernews_tools()
 
-    assert list(tool_class(enable_get_top_stories=False).functions) == ["get_user_details"]
-    assert list(tool_class(enable_get_user_details=False).functions) == ["get_top_hackernews_stories"]
-    assert list(tool_class(enable_get_top_stories=False, enable_get_user_details=False, all=True).functions) == [
-        "get_top_hackernews_stories",
-        "get_user_details",
+    only_user = tool_class(enable_get_top_stories=False)
+    assert list(only_user.functions) == ["hackernews"]
+    [user_fn] = adapt_toolkit(only_user).functions
+    assert user_fn.parameters["properties"]["action"]["enum"] == ["user"]
+    assert set(user_fn.parameters["properties"]) == {"action", "username"}
+    assert "`top_stories`" not in (user_fn.description or "")
+    assert "disabled" in only_user.hackernews("top_stories").lower()
+
+    only_stories = tool_class(enable_get_user_details=False)
+    assert list(only_stories.functions) == ["hackernews"]
+    [stories_fn] = adapt_toolkit(only_stories).functions
+    assert stories_fn.parameters["properties"]["action"]["enum"] == ["top_stories"]
+    assert set(stories_fn.parameters["properties"]) == {"action", "num_stories"}
+    assert "`user`" not in (stories_fn.description or "")
+    assert "disabled" in only_stories.hackernews("user", username="pg").lower()
+
+    assert list(tool_class(enable_get_top_stories=False, enable_get_user_details=False).functions) == []
+    all_enabled = tool_class(enable_get_top_stories=False, enable_get_user_details=False, all=True)
+    assert list(all_enabled.functions) == ["hackernews"]
+    assert adapt_toolkit(all_enabled).functions[0].parameters["properties"]["action"]["enum"] == [
+        "top_stories",
+        "user",
     ]
 
 

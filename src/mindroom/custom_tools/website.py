@@ -7,12 +7,12 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
-from mindroom.knowledge.chunking import Document, FixedSizeChunking
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url_sync
 from mindroom.tool_system.authoring import Toolkit, tool
@@ -156,7 +156,39 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
 # returned document carries.
 _MAX_DEPTH = 3
 _MAX_LINKS = 10
-_PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
+_PAGE_CHUNK_SIZE = 5000
+_REPEATED_WHITESPACE_RE = re.compile(r"([\n \t\r\f\v])\1+")
+
+
+@dataclass(frozen=True)
+class _PageChunk:
+    """One fixed-size chunk of a crawled web page."""
+
+    name: str
+    meta_data: dict[str, Any]
+    content: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-serializable dictionary representation of this page chunk."""
+        return {"name": self.name, "meta_data": self.meta_data, "content": self.content}
+
+
+def _chunk_page_content(content: str, *, chunk_size: int = _PAGE_CHUNK_SIZE) -> list[str]:
+    """Split extracted page text into fixed-size chunks aligned to whitespace when possible."""
+    cleaned = _REPEATED_WHITESPACE_RE.sub(r"\1", content)
+    content_length = len(cleaned)
+    chunks: list[str] = []
+    start = 0
+    while start < content_length:
+        end = min(start + chunk_size, content_length)
+        if end < content_length:
+            while end > start and cleaned[end] not in (" ", "\n", "\r", "\t"):
+                end -= 1
+            if end == start:
+                end = start + chunk_size
+        chunks.append(cleaned[start:end])
+        start = end
+    return chunks
 
 
 @dataclass
@@ -238,17 +270,19 @@ class _MindRoomWebsiteReader:
 
         return 0
 
-    def _documents_from_crawl(self, crawler_result: dict[str, str], *, url: str) -> list[Document]:
-        """Build one document per crawled page, named by the URL the crawl started from."""
-        documents: list[Document] = []
+    def _documents_from_crawl(self, crawler_result: dict[str, str], *, url: str) -> list[_PageChunk]:
+        """Build one chunk per fixed-size slice of each crawled page, named by the crawl start URL."""
+        chunks: list[_PageChunk] = []
         for crawled_url, crawled_content in crawler_result.items():
-            document = Document(
-                name=url,
-                meta_data={"url": str(crawled_url)},
-                content=crawled_content,
-            )
-            documents.extend(_PAGE_CHUNKING.chunk(document))
-        return documents
+            for chunk_number, chunk in enumerate(_chunk_page_content(crawled_content), start=1):
+                chunks.append(
+                    _PageChunk(
+                        name=url,
+                        meta_data={"url": str(crawled_url), "chunk": chunk_number, "chunk_size": len(chunk)},
+                        content=chunk,
+                    ),
+                )
+        return chunks
 
     def _record_response_content(
         self,
@@ -300,7 +334,7 @@ class _MindRoomWebsiteReader:
 
         return crawler_result
 
-    def read(self, url: str) -> list[Document]:
+    def read(self, url: str) -> list[_PageChunk]:
         """Read a website while logging only sanitized URL forms."""
         logger.debug(f"Reading: {_safe_url_for_log(url)}")
         try:
@@ -341,5 +375,5 @@ class WebsiteTools(Toolkit):
         website = _MindRoomWebsiteReader()
 
         logger.debug(f"Reading website: {_safe_url_for_log(url)}")
-        relevant_docs: list[Document] = website.read(url=url)
+        relevant_docs: list[_PageChunk] = website.read(url=url)
         return json.dumps([doc.to_dict() for doc in relevant_docs])

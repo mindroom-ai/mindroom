@@ -3,7 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -44,7 +44,11 @@ async def test_browser_outputs_reject_directory_swap(
     tool = BrowserTools(runtime)
     tool.bind_worker_display(":99", workspace)
 
+    swapped = False
+
     def swap() -> None:
+        nonlocal swapped
+        swapped = True
         output.rename(workspace / "old-browser")
         output.symlink_to(outside, target_is_directory=True)
 
@@ -63,9 +67,10 @@ async def test_browser_outputs_reject_directory_swap(
         return staged
 
     page = SimpleNamespace(screenshot=capture, pdf=capture)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab", SimpleNamespace(page=page))))
+    tab = SimpleNamespace(page=page)
     if action == "screenshot":
+        monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=object()))
+        monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab", tab)))
         operation = tool._screenshot(
             profile_name="mindroom",
             target_id=None,
@@ -75,6 +80,8 @@ async def test_browser_outputs_reject_directory_swap(
             image_type=None,
         )
     elif action == "pdf":
+        monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
+        monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab", tab)))
         operation = tool._pdf("mindroom", None)
     else:
         operation = tool._save_worker_download(
@@ -89,4 +96,5 @@ async def test_browser_outputs_reject_directory_swap(
         )
     with pytest.raises((OSError, ValueError)):
         await operation
+    assert swapped
     assert not list(outside.iterdir())

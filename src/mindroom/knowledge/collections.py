@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
+    from mindroom.knowledge.chunking import KnowledgeChunk
     from mindroom.knowledge.corpus_signature import FileSignature
     from mindroom.knowledge.vector_store import CollectionMeta
 
@@ -68,17 +69,6 @@ class CollectionSpace:
     def _owns(self, collection_name: str) -> bool:
         """Return whether this base provably owns ``collection_name``: its default name or its candidate prefix."""
         return collection_name == self._default_collection or collection_name.startswith(self._candidate_prefix)
-
-
-@dataclass(frozen=True)
-class KnowledgeChunk:
-    """One chunk a knowledge file reader produced, before it is embedded and stored."""
-
-    text: str
-    #: The source file's basename, which search results report as the document name.
-    name: str | None
-    #: What the reader and chunker recorded, such as ``chunk``, ``chunk_size``, ``page``, or ``row_number``.
-    metadata: Mapping[str, Any]
 
 
 def _collection_name_for_base(base_id: str, knowledge_path: Path) -> str:
@@ -158,21 +148,15 @@ def _row_metadata(
     chunk: KnowledgeChunk,
     *,
     source_metadata: Mapping[str, Any],
-    content_hash: str,
 ) -> dict[str, Any]:
-    """Return one chunk's stored metadata, with the keys and values rows have always carried.
+    """Return one chunk's stored metadata: the reader's non-null keys, the source signature, and its name.
 
-    New rows keep the set existing collections hold, the reader's own keys, the source signature, and ``linked_to``,
-    ``content_hash``, and ``content_id``, so a collection reads the same whichever release wrote its rows. Search hits
-    leave out the keys that serve indexing (``knowledge.vector_store``).
+    Search hits leave out the keys that serve indexing (``knowledge.vector_store``).
     """
     metadata: dict[str, Any] = {key: value for key, value in chunk.metadata.items() if value is not None}
     metadata.update(source_metadata)
-    metadata["linked_to"] = ""
     if chunk.name is not None:
         metadata["name"] = chunk.name
-    metadata["content_id"] = str(uuid.uuid5(uuid.NAMESPACE_DNS, content_hash))
-    metadata["content_hash"] = content_hash
     return metadata
 
 
@@ -203,7 +187,7 @@ def write_file_rows(
             StoredRow(
                 id=hashlib.md5(f"{content_hash}_{index}".encode()).hexdigest(),  # noqa: S324
                 document=chunk.text.replace("\x00", "\ufffd"),
-                metadata=_row_metadata(chunk, source_metadata=source_metadata, content_hash=content_hash),
+                metadata=_row_metadata(chunk, source_metadata=source_metadata),
                 embedding=vector,
             )
             for index, (chunk, vector) in enumerate(rows)

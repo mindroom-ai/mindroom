@@ -31,7 +31,7 @@ None of the actions touches the user's own computer or browser:
 
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
-| `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
+| `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_read`/`browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
 | `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False, inline=False, raw=False, width=None)` | Canvas panel, or the conversation with `inline=True` | A web page the agent wrote; it cannot open websites | The user's confirmed answer, as their next message |
 | `read_canvas_state(canvas_event_id)` | Nothing | A canvas shown with `share_state=True` | What the page last saved, as the user's Chat last shared it |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
@@ -48,7 +48,7 @@ A sent request returns `UI action request sent.`
 ## Show the worker browser
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
+The agent's first worker browser call in a conversation, `browser_read` or `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
 The agent calls `open_panel(panel="computer")` only to show the panel again in a later reply, for example when the user should log in or after they closed it.
 One reply shows the panel once.
 Opening the Computer panel does not navigate or take control:

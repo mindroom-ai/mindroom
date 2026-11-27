@@ -6,8 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mindroom.config.schema_hints import dashboard_hint
 
-# The knowledge_graph tool's functions that only an agent with knowledge_graph_edits gets.
-KNOWLEDGE_GRAPH_EDIT_FUNCTIONS = ("knowledge_graph_write",)
+# The knowledge_graph tool's read and edit actions; edit actions require knowledge_graph_edits.
+KNOWLEDGE_GRAPH_READ_ACTIONS = ("search", "entity")
+KNOWLEDGE_GRAPH_EDIT_ACTIONS = ("update_summary", "merge", "delete_fact", "delete_entity")
 # The source that labels a graph-enabled agent's graph facts among its knowledge-search results.
 KNOWLEDGE_GRAPH_SOURCE_ID = "knowledge_graph"
 

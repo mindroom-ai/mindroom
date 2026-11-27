@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
 from mindroom.agent_cli.client import AgentCliClient, AgentCliRefusedError, AgentCliUnavailableError
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json, read_json
@@ -59,7 +59,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     groups = parser.add_subparsers(dest="group", required=True)
     tools = groups.add_parser(
         "tools",
-        help="list, search QUERY, describe TOOLKIT FUNCTION, call TOOLKIT FUNCTION (or TOOLKIT.FUNCTION)",
+        help="list, search QUERY, describe TOOLKIT [FUNCTION], call TOOLKIT [FUNCTION] (or TOOLKIT.FUNCTION)",
     ).add_subparsers(dest="action", required=True)
     listing = tools.add_parser("list")
     listing.add_argument("--cursor")
@@ -183,17 +183,18 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
 
 
 def _select_tool(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Accept TOOLKIT.FUNCTION and, for calls, a trailing JSON object in place of --json."""
+    """Accept TOOLKIT, TOOLKIT FUNCTION, or TOOLKIT.FUNCTION and, for calls, trailing JSON."""
     call = args.action == "call"
-    if call and args.json_argument is None and args.function is not None and args.function.lstrip().startswith("{"):
+    if call and args.function is not None and args.function.lstrip().startswith("{"):
+        if args.json_argument is not None:
+            parser.error("give tool arguments once: a JSON argument or one of --json, --json-file, --json-stdin")
         args.function, args.json_argument = None, args.function
-    if args.function is None:
+    if not args.toolkit:
+        parser.error(f"tools {args.action} needs TOOLKIT, TOOLKIT FUNCTION, or TOOLKIT.FUNCTION")
+    if args.function is None and "." in args.toolkit:
         toolkit, _, function = args.toolkit.rpartition(".")
         if not toolkit or not function:
-            parser.error(
-                f"tools {args.action} needs TOOLKIT FUNCTION or TOOLKIT.FUNCTION; "
-                f"find function names with: mindroom-agent tools search {args.toolkit}",
-            )
+            parser.error(f"tools {args.action} needs TOOLKIT, TOOLKIT FUNCTION, or TOOLKIT.FUNCTION")
         args.toolkit, args.function = toolkit, function
     if call and args.json_argument is not None:
         if args.json is not None or args.json_file is not None or args.json_stdin:
@@ -659,6 +660,9 @@ def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
     if (args.group, args.action) != ("tools", "call") or args.call_id is not None or args.timeout is not None:
         msg = "Inside a background script, mindroom-agent offers only `tools call`, which waits for the result, without --call-id or --timeout"
         raise ValueError(msg)
+    if args.function is None:
+        msg = "Inside a background script, `tools call` requires TOOLKIT FUNCTION or TOOLKIT.FUNCTION"
+        raise ValueError(msg)
     receipt: dict[str, object] = {"toolkit": args.toolkit, "function": args.function}
     try:
         outcome = MindRoomTools().call(args.toolkit, args.function, **read_call_arguments(args))
@@ -670,6 +674,46 @@ def _script_tool_call(args: argparse.Namespace) -> dict[str, object]:
     except RuntimeError as exc:
         raise AgentCliUnavailableError(str(exc)) from exc
     return receipt | {"status": "completed", "outcome": outcome}
+
+
+def _resolve_single_function(client: AgentCliClient, toolkit: str) -> tuple[str, str]:
+    """Resolve one single-function toolkit via ``tools.describe`` before claiming a call ID."""
+    described = client.operation({"operation": "tools.describe", "toolkit": toolkit})
+    resolved_toolkit = described.get("toolkit")
+    resolved_function = described.get("function")
+    if (
+        not isinstance(resolved_toolkit, str)
+        or not resolved_toolkit
+        or not isinstance(resolved_function, str)
+        or not resolved_function
+    ):
+        msg = "Agent CLI returned an invalid tool descriptor"
+        raise AgentCliUnavailableError(msg)
+    return resolved_toolkit, resolved_function
+
+
+def _submit_tool_call(
+    args: argparse.Namespace,
+    payload: dict[str, object],
+    remember_call_id: Callable[[str], None],
+) -> dict[str, object]:
+    """Validate arguments, resolve single-function toolkits, submit ``tools.call``, and wait."""
+    arguments = read_call_arguments(args)
+    call_id = str(args.call_id or uuid4())
+    # Explicit calls retain their call ID if authority setup fails; shorthand waits until describe succeeds.
+    if args.function is not None:
+        remember_call_id(call_id)
+    client = AgentCliClient()
+    if args.function is None:
+        payload["toolkit"], payload["function"] = _resolve_single_function(client, args.toolkit)
+        remember_call_id(call_id)
+    payload.update(call_id=call_id, arguments=arguments)
+    result = client.operation(payload)
+    # The call is admitted; if polling fails, print its submission receipt so `calls wait` can resume.
+    with suppress(AgentCliUnavailableError):
+        timeout = _CALL_TIMEOUT_SECONDS if args.timeout is None else args.timeout
+        result = _wait(client, call_id, result, timeout)
+    return result
 
 
 def _parsed_or_exit_code(argv: list[str] | None) -> argparse.Namespace | int:
@@ -686,6 +730,11 @@ def _parsed_or_exit_code(argv: list[str] | None) -> argparse.Namespace | int:
 def main(argv: list[str] | None = None) -> int:
     """Print one bounded JSON envelope and return the documented exit code."""
     call_id: str | None = None
+
+    def remember_call_id(claimed: str) -> None:
+        nonlocal call_id
+        call_id = claimed
+
     try:
         args = _parsed_or_exit_code(argv)
         if isinstance(args, int):
@@ -710,15 +759,9 @@ def main(argv: list[str] | None = None) -> int:
             }
             payload["operation"] = f"{args.group}.{args.action}"
             if args.action == "call":
-                call_id = str(args.call_id or uuid4())
-                payload.update(call_id=call_id, arguments=read_call_arguments(args))
-            client = AgentCliClient()
-            result = client.operation(payload)
-            if args.action == "call" and call_id is not None:
-                # The call is admitted; if polling fails, print its submission receipt so `calls wait` can resume.
-                with suppress(AgentCliUnavailableError):
-                    timeout = _CALL_TIMEOUT_SECONDS if args.timeout is None else args.timeout
-                    result = _wait(client, call_id, result, timeout)
+                result = _submit_tool_call(args, payload, remember_call_id)
+            else:
+                result = AgentCliClient().operation(payload)
         print(canonical_json(result))
         return _exit_code(result)
     except (AgentCliUnavailableError, ValueError, OSError) as exc:

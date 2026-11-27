@@ -77,7 +77,7 @@ class ProbeTools(Toolkit):
     """Tools an agent-path reply calls: a shell that answers or keeps running, a save that keeps running, and more.
 
     A call that keeps running sets ``running`` and waits to be cancelled, so a test can stop the turn mid-call.
-    ``thread_model_write`` answers as the thread-model tool does, and as that tool does, a switch for the current
+    ``thread_model`` answers as the thread-model tool does, and as that tool does, a switch for the current
     response stops the run after it.
     """
 
@@ -92,7 +92,7 @@ class ProbeTools(Toolkit):
                 self.read_file,
                 self.inspect,
                 self.dangerous,
-                self.thread_model_write,
+                self.thread_model,
             ],
         )
 
@@ -149,7 +149,7 @@ class ProbeTools(Toolkit):
         """
         return f"did {value}"
 
-    async def thread_model_write(
+    async def thread_model(
         self,
         action: str = "switch",
         model_name: str | None = None,

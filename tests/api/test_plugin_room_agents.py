@@ -62,7 +62,7 @@ READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file"),
     "script": ("script_write",),
-    "workflow": ("workflow",),
+    "workflow": ("workflow_write",),
     "claude_agent": ("claude_agent_write",),
     "docker": ("docker_container", "docker_resource"),
 }
@@ -623,14 +623,26 @@ async def test_retired_stored_claude_agent_filters_fail_closed_and_block_workspa
 
 
 @pytest.mark.parametrize(
-    ("toolkit_name", "stored", "replacement"),
+    ("toolkit_name", "stored", "replacement", "expected_guidance"),
     [
-        ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
-        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
-        ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
-        ("attachments", {"exclude_tools": ["register_attachment"]}, "attachment"),
-        ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers"),
-        ("slack", {"exclude_tools": ["slack_watch"]}, "triggers"),
+        ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write", None),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model", None),
+        ("thread_snooze", {"exclude_tools": ["snooze_thread"]}, "thread_snooze", None),
+        ("thread_resolution", {"exclude_tools": ["resolve_thread"]}, "thread_resolution", None),
+        ("serper", {"exclude_tools": ["scrape_webpage"]}, "serper", "`enable_*` settings"),
+        ("hackernews", {"exclude_tools": ["get_top_hackernews_stories"]}, "hackernews", "`enable_*` settings"),
+        (
+            "google_bigquery",
+            {"exclude_tools": ["list_tables"]},
+            "google_bigquery_inspect",
+            "`list_tables`/`describe_table` settings",
+        ),
+        ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats", None),
+        ("attachments", {"exclude_tools": ["register_attachment"]}, "attachment", None),
+        ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers_write", None),
+        ("triggers", {"exclude_tools": ["triggers"]}, "`triggers_read`, `triggers_write`", None),
+        ("slack", {"exclude_tools": ["slack_watch"]}, "triggers_write", None),
+        ("matrix_api", {"exclude_tools": ["matrix_api"]}, "`matrix_api_read`, `matrix_api_write`", None),
     ],
 )
 def test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits(
@@ -638,18 +650,43 @@ def test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits(
     toolkit_name: str,
     stored: dict[str, object],
     replacement: str,
+    expected_guidance: str | None,
 ) -> None:
     """Stored dashboard settings naming retired consolidated functions fail closed in resolve_tool_settings."""
     paths = test_runtime_paths(tmp_path)
     manager = get_runtime_credentials_manager(paths)
     manager.save_credentials(toolkit_name, {"_source": "ui", **stored})
 
-    with pytest.raises(ToolConfigOverrideError, match=rf"{toolkit_name}: stored setting exclude_tools:.*{replacement}"):
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=rf"{toolkit_name}: stored setting exclude_tools:.*{replacement}",
+    ) as exc_info:
         get_tool_by_name(
             toolkit_name,
             paths,
             tools=builtin_tool_registry(),
             credentials_manager=manager,
+            worker_target=None,
+        )
+    if expected_guidance is not None:
+        message = str(exc_info.value)
+        assert expected_guidance in message
+        assert "tool_approval.rules" in message
+        assert "no per-action allowlist filter" not in message
+
+
+def test_retired_desktop_override_filter_fails_closed(tmp_path: Path) -> None:
+    """Authored desktop function filters naming retired `desktop` fail closed and name the split functions."""
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"desktop\.exclude_tools: desktop.*`desktop_read`, `desktop_control`.*`run_desktop_shell`",
+    ):
+        get_tool_by_name(
+            "desktop",
+            paths,
+            tools=builtin_tool_registry(),
+            tool_config_overrides={"exclude_tools": ["desktop"]},
             worker_target=None,
         )
 

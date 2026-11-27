@@ -54,7 +54,7 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
 
 async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
     """Start a run as its job and return the handle, once its first attempt runs."""
-    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, **arguments))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=SCRIPT, **arguments))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: _run(stack).state is WorkflowRunState.RUNNING)
     return handle
@@ -82,14 +82,14 @@ async def test_resume_call_delivered_again_after_its_run_ended_returns_that_repo
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id, "rerun": ["n1"]}
-    call = asyncio.create_task(stack.call("workflow", action="resume", **resume))
+    call = asyncio.create_task(stack.call("workflow_write", action="resume", **resume))
     await stack.until(lambda: _run(stack).attempt == 2)
     assert await stack.result("@0", "tool", _A) == "appended"
     await stack.finish_attempt(result="the second report")
     assert await call == "the second report"
     ended = stack.status(stack.run_id)
 
-    assert await stack.call("workflow", action="resume", **resume) == "the second report"
+    assert await stack.call("workflow_write", action="resume", **resume) == "the second report"
 
     assert stack.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 2)
@@ -109,13 +109,13 @@ async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_it
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id, "rerun": ["n1"]}
-    call = asyncio.create_task(stack.call("workflow", action="resume", **resume))
+    call = asyncio.create_task(stack.call("workflow_write", action="resume", **resume))
     await stack.until(lambda: _run(stack).attempt == 2)
     assert await stack.result("@0", "tool", _A) == "appended"
     await stack.finish_attempt(result="the second report")
     assert await call == "the second report"
     later = asyncio.create_task(
-        stack.call("workflow", action="resume", depth=1, call_id="a-later-resume", run_id=stack.run_id),
+        stack.call("workflow_write", action="resume", depth=1, call_id="a-later-resume", run_id=stack.run_id),
     )
     await stack.until(lambda: _run(stack).attempt == 3)
     assert (await stack.submit("@0", "tool", _A)).cached
@@ -123,12 +123,12 @@ async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_it
     assert await later == "the third report"
     ended = stack.status(stack.run_id)
 
-    assert await stack.call("workflow", action="resume", **resume) == "the second report"
+    assert await stack.call("workflow_write", action="resume", **resume) == "the second report"
 
     assert stack.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 3)
     last = asyncio.create_task(
-        stack.call("workflow", action="resume", depth=1, call_id="the-last-resume", run_id=stack.run_id),
+        stack.call("workflow_write", action="resume", depth=1, call_id="the-last-resume", run_id=stack.run_id),
     )
     await stack.until(lambda: _run(stack).attempt == 4)
     # Only the call the run was last taken from keeps its report: a run does not grow with each resume of it.
@@ -151,7 +151,7 @@ async def test_owner_that_a_store_upgrade_left_unrecorded_is_remembered_when_the
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id, "rerun": ["n1"]}
-    call = asyncio.create_task(stack.call("workflow", action="resume", **resume))
+    call = asyncio.create_task(stack.call("workflow_write", action="resume", **resume))
     await stack.until(lambda: _run(stack).attempt == 2)
     assert await stack.result("@0", "tool", _A) == "appended"
     await stack.finish_attempt(result="the second report")
@@ -159,14 +159,14 @@ async def test_owner_that_a_store_upgrade_left_unrecorded_is_remembered_when_the
     # What the upgrade of a store without `claims` leaves: the run's owner, and no record of who took it.
     set_run(stack.store, stack.run_id, claims={})
     later = asyncio.create_task(
-        stack.call("workflow", action="resume", depth=1, call_id="a-later-resume", run_id=stack.run_id),
+        stack.call("workflow_write", action="resume", depth=1, call_id="a-later-resume", run_id=stack.run_id),
     )
     await stack.until(lambda: _run(stack).attempt == 3)
     assert (await stack.submit("@0", "tool", _A)).cached
     await stack.finish_attempt(result="the third report")
     assert await later == "the third report"
 
-    assert await asyncio.wait_for(stack.call("workflow", action="resume", **resume), 5) == "the second report"
+    assert await asyncio.wait_for(stack.call("workflow_write", action="resume", **resume), 5) == "the second report"
 
     assert (stack.counting_tool.lines, len(stack.scripts.launched), _run(stack).attempt) == (["a", "a"], 3, 3)
 
@@ -205,16 +205,16 @@ async def test_start_call_delivered_again_after_a_job_took_its_run_neither_stops
 ) -> None:
     """The call that started a run owns it no more once a resume took it: it is told so, and its leaving ends nothing."""
     start = {"depth": 1, "call_id": "one-start", "source": SCRIPT}
-    call = asyncio.create_task(stack.call("workflow", action="start", **start))
+    call = asyncio.create_task(stack.call("workflow_write", action="start", **start))
     await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
     stack.run_id = stack.store.list_runs()[0].run_id
     await stack.finish_attempt(result="the first report")
     assert await call == "the first report"
-    handle = json.loads(await stack.call("workflow", action="resume", run_id=stack.run_id))
+    handle = json.loads(await stack.call("workflow_write", action="resume", run_id=stack.run_id))
     await stack.until(lambda: _run(stack).attempt == 2)
 
     with pytest.raises(CallFailed, match=_TAKEN.format(stack.run_id)):
-        await stack.call("workflow", action="start", **start)
+        await stack.call("workflow_write", action="start", **start)
 
     run = _run(stack)
     assert (run.state, run.job_id, stack.attempt.state) == (
@@ -250,7 +250,7 @@ async def test_pass_deletes_no_intent_whose_start_is_being_admitted_again(
     await stack.restart(kill=True)
     monkeypatch.setattr(ToolJobStore, "accept", held)
 
-    again = asyncio.create_task(stack.call("workflow", action="start", **start))
+    again = asyncio.create_task(stack.call("workflow_write", action="start", **start))
     await asyncio.wait_for(at_accept.wait(), SETTLE_TIMEOUT_SECONDS)
     assert await stack.maintain() == []
     accepted.set()
@@ -287,7 +287,7 @@ async def test_pass_that_judged_a_run_before_a_job_took_it_starts_no_attempt_for
     await asyncio.wait_for(judged.wait(), SETTLE_TIMEOUT_SECONDS)
     # Another look ends the run, and a resume's job takes it; its operation has not launched yet.
     await settle(_run(stack))
-    handle = json.loads(await stack.call("workflow", action="resume", run_id=stack.run_id))
+    handle = json.loads(await stack.call("workflow_write", action="resume", run_id=stack.run_id))
     await stack.until(lambda: _run(stack).state is WorkflowRunState.STARTING)
     resumed.set()
 
@@ -394,7 +394,7 @@ async def test_stop_of_a_resume_that_never_took_its_run_is_no_report_of_that_run
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
-    handle = json.loads(await stack.call("workflow", action="resume", run_id=stack.run_id))
+    handle = json.loads(await stack.call("workflow_write", action="resume", run_id=stack.run_id))
 
     await stack.jobs.cancel(handle["job_id"], owner=stack.context.execution_identity, depth=0)
     await wait_for_status(stack.jobs, handle["job_id"], "cancelled")
@@ -410,10 +410,10 @@ async def test_resume_call_delivered_again_while_its_run_still_runs_waits_for_th
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     resume = {"depth": 1, "call_id": "one-resume", "run_id": stack.run_id}
-    calls = [asyncio.create_task(stack.call("workflow", action="resume", **resume))]
+    calls = [asyncio.create_task(stack.call("workflow_write", action="resume", **resume))]
     await stack.until(lambda: _run(stack).attempt == 2)
 
-    calls.append(asyncio.create_task(stack.call("workflow", action="resume", **resume)))
+    calls.append(asyncio.create_task(stack.call("workflow_write", action="resume", **resume)))
     await asyncio.sleep(0.1)
     await stack.finish_attempt(result="the second report")
 

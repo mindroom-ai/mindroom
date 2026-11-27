@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 import mindroom.api.sandbox_runner as sandbox_runner_module
-from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.plugin_api import write_agent_file
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.agent_tool_helpers import call_entrypoint, toolkit_offers
 from tests.api.sandbox_runner_support import execute_call

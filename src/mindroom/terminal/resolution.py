@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.agents import build_agent_toolkit
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.terminal.client import WorkerTerminals
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -38,7 +38,7 @@ def agent_terminals(
     entry = next((entry for entry in agent_tools.candidates() if entry.name == "shell"), None)
     if entry is None:
         return None
-    shell = build_agent_toolkit(
+    shell = toolkit_builder.build_agent_toolkit(
         "shell",
         agent_tools=agent_tools,
         placement=placement,
