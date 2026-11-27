@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
 _ResolvedSendAttachment = AttachmentRecord | RuntimeEncryptedMediaAttachment
 _WORKER_ATTACHMENT_USAGE = (
-    "Not in your workspace. Copy it there with get_attachment(attachment_id, mindroom_output_path=...) "
+    'Not in your workspace. Copy it there with attachment(action="get", attachment_id=..., mindroom_output_path=...) '
     "before filesystem, python, or shell tools use it."
 )
 
@@ -264,7 +264,7 @@ def _view_attachment(  # noqa: PLR0911
             files=(File(content=payload, mime_type=mime_type, filename=filename, format=media_format),),
         )
     return media_error(
-        "This file type cannot be sent as model media. Use get_attachment without view to inspect or save it.",
+        'This file type cannot be sent as model media. Use attachment(action="get", attachment_id=...) without view to inspect or save it.',
         metadata=metadata,
     )
 
@@ -341,6 +341,84 @@ def resolve_send_attachment(
     if isinstance(record, str):
         return record
     return record, newly_registered
+
+
+def _resolve_inline_image_source(
+    context: ToolRuntimeContext,
+    *,
+    attachment_id: str | None,
+    path: str | None,
+    workspace_root: Path | None,
+    file_access: FileAccess,
+) -> _ResolvedSendAttachment | str:
+    """Resolve an inline image source strictly as either a context attachment ID or a local file path."""
+    if attachment_id is not None:
+        runtime_media = get_tool_runtime_media_attachment(context, attachment_id)
+        if runtime_media is not None:
+            return runtime_media
+        return resolve_context_attachment_record(context, attachment_id)
+    assert path is not None
+    return _register_attachment_file_path(
+        context,
+        path,
+        workspace_root=workspace_root,
+        file_access=file_access,
+    )
+
+
+_ALLOWED_ATTACHMENT_PARAMS: dict[str, frozenset[str]] = {
+    "list": frozenset({"attachment_id"}),
+    "get": frozenset({"attachment_id", "view", "mindroom_output_path"}),
+    "register": frozenset({"path"}),
+    "inline_image": frozenset({"attachment_id", "path", "alt"}),
+}
+
+
+def _validate_inline_image_args(attachment_id: str | None, path: str | None) -> str | None:
+    if attachment_id is not None and path is not None:
+        return "Pass either attachment_id or path for action='inline_image', not both."
+    if attachment_id is not None:
+        return None if attachment_id.strip() else "attachment_id must be a non-empty string."
+    if path is not None:
+        return None if path.strip() else "path must be a non-empty string."
+    return "action='inline_image' requires either attachment_id or path."
+
+
+def _validate_attachment_params(  # noqa: PLR0911
+    action: str,
+    *,
+    attachment_id: str | None,
+    path: str | None,
+    view: bool,
+    alt: str | None,
+    mindroom_output_path: str | None,
+) -> str | None:
+    """Validate required and allowed parameters for ``action`` before any side effects."""
+    allowed = _ALLOWED_ATTACHMENT_PARAMS.get(action)
+    if allowed is None:
+        return f"Unsupported attachment action {action!r}. Expected one of: list, get, register, inline_image."
+    provided = (
+        ("attachment_id", attachment_id is not None),
+        ("path", path is not None),
+        ("view", view),
+        ("alt", alt is not None),
+        ("mindroom_output_path", mindroom_output_path is not None),
+    )
+    unexpected = [name for name, is_set in provided if is_set and name not in allowed]
+    if unexpected:
+        names = ", ".join(f"'{name}'" for name in unexpected)
+        return f"Parameter(s) {names} cannot be used with action={action!r}."
+    if action == "get":
+        if attachment_id is None or not attachment_id.strip():
+            return "attachment_id must be a non-empty string."
+        if view and mindroom_output_path is not None:
+            return "view cannot be combined with mindroom_output_path."
+    elif action == "register":
+        if path is None or not path.strip():
+            return "path must be a non-empty string."
+    elif action == "inline_image":
+        return _validate_inline_image_args(attachment_id, path)
+    return None
 
 
 def _too_large_detail(outcome: object) -> str | None:
@@ -433,10 +511,7 @@ class AttachmentTools(Toolkit):
         super().__init__(
             name="attachments",
             tools=[
-                self.list_attachments,
-                self.get_attachment,
-                self.register_attachment,
-                self.inline_image,
+                self.attachment,
                 self.view_file,
             ],
         )
@@ -463,7 +538,7 @@ class AttachmentTools(Toolkit):
     async def view_file(self, path: str) -> ToolValue:
         """View an image in your own model context without posting or invoking another model.
 
-        To view an attachment ID, use get_attachment with view instead.
+        To view an attachment ID, use attachment(action="get", attachment_id=..., view=True) instead.
         PNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.
         Large images are resized to 2048 pixels; animation uses its first frame, with disclosure.
         The source path and a reusable attachment handle are retained when available.
@@ -492,25 +567,84 @@ class AttachmentTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Offer ``get_attachment``'s output path as every tool offers one, and describe its attachment ID."""
-        if function.name != "get_attachment":
+        """Offer ``attachment``'s output path with ``action="get"``-specific guidance."""
+        if function.name != "attachment":
             return function
         parameters = with_optional_output_path(function.parameters)
-        parameters["properties"]["attachment_id"] = {
-            **parameters["properties"]["attachment_id"],
-            "description": "Context-scoped attachment ID returned by list_attachments.",
+        parameters["properties"]["mindroom_output_path"] = {
+            **parameters["properties"]["mindroom_output_path"],
+            "description": (
+                "Save attachment bytes to a workspace-relative file instead of returning metadata "
+                '(only for action="get"; cannot be combined with view=True).'
+            ),
         }
         return replace(function, parameters=parameters)
 
-    async def list_attachments(self, target: str | None = None) -> str:
-        """List attachment metadata for current tool context."""
+    async def attachment(
+        self,
+        action: Literal["list", "get", "register", "inline_image"],
+        attachment_id: str | None = None,
+        path: str | None = None,
+        view: bool = False,
+        alt: str | None = None,
+        mindroom_output_path: str | None = None,
+    ) -> str | ToolValue:
+        """List, inspect, save, view, register, or inline-embed conversation attachments.
+
+        - `list`: list attachments in the current context (optional `attachment_id` to filter to one).
+        - `get`: inspect metadata for `attachment_id`, save bytes to `mindroom_output_path`, or pass `view=True` to
+          send image, audio, video, or document content (up to 20 MiB) to the model (`view` and
+          `mindroom_output_path` cannot be combined).
+        - `register`: register a local file at `path` into the current context and return its `attachment_id`.
+        - `inline_image`: upload an image by `attachment_id` or `path` (pass exactly one; optional `alt`) and return
+          embeddable `markdown` for a reply or `matrix_message`. When refused, send it with
+          `matrix_message(attachments=[...])` instead. Never link an image to a placeholder or made-up address.
+
+        Args:
+            action: Operation to perform (`list`, `get`, `register`, or `inline_image`).
+            attachment_id: Context-scoped attachment ID (`list` filter, `get`, or `inline_image`).
+            path: Workspace or accessible local file path (`register` or `inline_image`).
+            view: Send image, audio, video, or document content (up to 20 MiB) to the model (`get` only; incompatible with `mindroom_output_path`).
+            alt: Optional alt text for the returned markdown image (`inline_image` only).
+            mindroom_output_path: Save attachment bytes to a workspace-relative file (`get` only; incompatible with `view=True`).
+
+        """
+        if param_error := _validate_attachment_params(
+            action,
+            attachment_id=attachment_id,
+            path=path,
+            view=view,
+            alt=alt,
+            mindroom_output_path=mindroom_output_path,
+        ):
+            return _attachment_tool_payload("error", message=param_error)
         context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
+        if action == "list":
+            return self._list_attachments(context, attachment_id)
+        if action == "get":
+            assert attachment_id is not None
+            return await self._get_attachment(
+                context,
+                attachment_id.strip(),
+                mindroom_output_path=mindroom_output_path,
+                view=view,
+            )
+        if action == "register":
+            assert path is not None
+            return self._register_attachment(context, path.strip())
+        return await self._inline_image(
+            context,
+            attachment_id=attachment_id.strip() if attachment_id is not None else None,
+            path=path.strip() if path is not None else None,
+            alt=alt,
+        )
 
+    def _list_attachments(self, context: ToolRuntimeContext, target: str | None) -> str:
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             target,
@@ -518,7 +652,6 @@ class AttachmentTools(Toolkit):
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
-
         return _attachment_tool_payload(
             "ok",
             attachment_ids=requested_attachment_ids,
@@ -526,36 +659,14 @@ class AttachmentTools(Toolkit):
             missing_attachment_ids=missing_attachment_ids,
         )
 
-    async def get_attachment(  # noqa: PLR0911
+    async def _get_attachment(
         self,
-        attachment_id: str,
-        mindroom_output_path: str | None = None,
-        view: bool = False,
+        context: ToolRuntimeContext,
+        requested_attachment_id: str,
+        *,
+        mindroom_output_path: str | None,
+        view: bool,
     ) -> str | ToolValue:
-        """Inspect metadata, save a file, or send attachment content to the model.
-
-        Args:
-            attachment_id: Context-scoped ID from list_attachments or register_attachment.
-            mindroom_output_path: Save bytes to a workspace-relative file instead of returning metadata.
-            view: Send image, audio, video, or document content (including PDF) to the model; up to 20 MiB.
-                Images use the same preparation, limits, and replay behavior as view_file.
-                Requires a model that supports the media type. If inline media is unavailable, use
-                get_attachment without view to get metadata or save the file, then use other available tools.
-                Cannot be combined with mindroom_output_path.
-
-        """
-        context = get_tool_runtime_context()
-        if context is None:
-            return _attachment_tool_payload(
-                "error",
-                message="Tool runtime context is unavailable in this runtime path.",
-            )
-        requested_attachment_id = attachment_id.strip()
-        if not requested_attachment_id:
-            return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
-        if view and mindroom_output_path is not None:
-            return _attachment_tool_payload("error", message="view cannot be combined with mindroom_output_path.")
-
         _, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
@@ -706,30 +817,15 @@ class AttachmentTools(Toolkit):
             ),
         )
 
-    async def register_attachment(self, file_path: str) -> str:
-        """Register a local file as a context attachment ID.
-
-        Paths resolve from the agent workspace and must stay inside it.
-        """
-        context = get_tool_runtime_context()
-        if context is None:
-            return _attachment_tool_payload(
-                "error",
-                message="Tool runtime context is unavailable in this runtime path.",
-            )
-        file_path = file_path.strip()
-        if not file_path:
-            return _attachment_tool_payload("error", message="file_path must be a non-empty string.")
-
+    def _register_attachment(self, context: ToolRuntimeContext, requested_path: str) -> str:
         attachment_record = _register_attachment_file_path(
             context,
-            file_path,
+            requested_path,
             workspace_root=self._tool_output_workspace_root,
             file_access=self._file_access,
         )
         if isinstance(attachment_record, str):
             return _attachment_tool_payload("error", message=attachment_record)
-
         return _attachment_tool_payload(
             "ok",
             attachment_id=attachment_record.attachment_id,
@@ -750,19 +846,14 @@ class AttachmentTools(Toolkit):
         register_inline_media(room_id, record.url, record.encrypted_file_content())
         return record.url, record.filename
 
-    async def inline_image(self, reference: str, alt: str | None = None) -> str:  # noqa: C901, PLR0911
-        """Upload an image so it can appear inline in a reply.
-
-        Paste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.
-        When this refuses, send the file with ``matrix_message(attachments=[...])`` instead.
-        Never link an image to a placeholder or made-up address.
-        """
-        context = get_tool_runtime_context()
-        if context is None:
-            return _attachment_tool_payload(
-                "error",
-                message="Tool runtime context is unavailable in this runtime path.",
-            )
+    async def _inline_image(  # noqa: C901, PLR0911
+        self,
+        context: ToolRuntimeContext,
+        *,
+        attachment_id: str | None,
+        path: str | None,
+        alt: str | None,
+    ) -> str:
         room_encrypted = await resolve_room_encryption_outcome(
             context.client,
             context.room_id,
@@ -774,15 +865,16 @@ class AttachmentTools(Toolkit):
                 message="Inline images cannot be sent to this room right now. Send the image as an attachment with matrix_message instead.",
             )
         resolved = await asyncio.to_thread(
-            resolve_send_attachment,
+            _resolve_inline_image_source,
             context,
-            reference.strip(),
+            attachment_id=attachment_id,
+            path=path,
             workspace_root=self._tool_output_workspace_root,
             file_access=self._file_access,
         )
         if isinstance(resolved, str):
             return _attachment_tool_payload("error", message=resolved)
-        record, _ = resolved
+        record = resolved
         if not record.mime_type or not record.mime_type.startswith("image/"):
             return _attachment_tool_payload(
                 "error",

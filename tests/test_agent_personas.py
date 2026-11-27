@@ -818,7 +818,7 @@ def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
     """A toolkit a deferred tool brings in, which a persona names, is present from the child's first request."""
     runtime = _runtime(tmp_path, tools=[{"matrix_message": {"defer": True}}])
     build = _child(runtime, ["attachments"])
-    assert "list_attachments" in _function_names(build)
+    assert "attachment" in _function_names(build)
 
 
 @pytest.mark.asyncio

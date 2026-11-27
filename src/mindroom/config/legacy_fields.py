@@ -360,7 +360,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
 #   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), and skills previously exposed individual per-operation function names that could appear in
+#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
 #   tool_approval.rules[].match globs.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625 / unreleased); replacement: unreleased;
 #   consolidated into action-dispatched and risk-scoped functions.
@@ -871,6 +871,12 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "get_skill_instructions": "skill",
         "get_skill_reference": "skill",
         "get_skill_script": "skill",
+    },
+    "attachments": {
+        "list_attachments": "attachment",
+        "get_attachment": "attachment",
+        "register_attachment": "attachment",
+        "inline_image": "attachment",
     },
 }
 

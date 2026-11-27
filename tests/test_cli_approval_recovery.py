@@ -1520,7 +1520,7 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     """
     runtime = _helper_runtime(tmp_path, tools=["shell", {"matrix_message": {"defer": deferred}}])
     runtime.config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="list_attachments", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="attachment", action="require_approval")],
     )
     registry = TurnToolRegistry()
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
@@ -1535,8 +1535,8 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
                 operation="tools.call",
                 call_id=uuid4(),
                 toolkit="attachments",
-                function="list_attachments",
-                arguments={},
+                function="attachment",
+                arguments={"action": "list"},
             ),
         )
         await settled_receipt(owner, queued["call_id"])
@@ -1568,8 +1568,8 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     assert paused.cli_call is not None
     # The call is shown under the toolkit the model called; its approval names the tool that brings it in.
     assert [entry.toolkit_name for entry in paused.tool_trace] == ["attachments"]
-    assert paused.toolkit_owners == {("helper", "list_attachments"): "matrix_message"}
-    assert (paused.cli_call["toolkit"], paused.cli_call["function"]) == ("matrix_message", "list_attachments")
+    assert paused.toolkit_owners == {("helper", "attachment"): "matrix_message"}
+    assert (paused.cli_call["toolkit"], paused.cli_call["function"]) == ("matrix_message", "attachment")
     [waiting] = paused.requirements
     continuation = approval_continuation(
         approval_id="implied-approval",
@@ -1604,6 +1604,6 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
 
     assert result.response_text == "Listed"
     [follow_up] = response.await_args.args[0].transient_enrichment_items
-    assert "Exact saved tool attachments.list_attachments decision/result:" in follow_up.text
+    assert "Exact saved tool attachments.attachment decision/result:" in follow_up.text
     assert [entry.toolkit_name for entry in response.await_args.args[1].tool_trace] == ["attachments"]
     assert '"status": "ok"' in follow_up.text

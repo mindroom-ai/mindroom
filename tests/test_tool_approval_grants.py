@@ -999,6 +999,7 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         ("zoom", "zoom_manage", ("schedule_meeting", "delete_meeting")),
         ("x", "x_read", ("search_posts", "get_home_timeline")),
         ("x", "x_write", ("create_post", "reply_to_post", "send_dm")),
+        ("attachments", "attachment", ("list", "get", "register", "inline_image")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
@@ -1197,6 +1198,10 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("zoom", "delete_meeting", "zoom_manage"),
         ("x", "search_posts", "x_read"),
         ("x", "send_dm", "x_write"),
+        ("attachments", "list_attachments", "attachment"),
+        ("attachments", "get_attachment", "attachment"),
+        ("attachments", "register_attachment", "attachment"),
+        ("attachments", "inline_image", "attachment"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(

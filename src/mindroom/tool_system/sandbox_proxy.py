@@ -601,7 +601,7 @@ def save_attachment_to_worker(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
-            function_name="get_attachment",
+            function_name="attachment",
             worker_target=worker_target,
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,

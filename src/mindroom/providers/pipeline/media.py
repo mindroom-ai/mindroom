@@ -57,13 +57,11 @@ logger = get_logger(__name__)
 
 FALLBACK_MARKER = "[Inline media unavailable for this model]"
 ANSWERED_AUDIO_MARKER = "[Earlier inline audio omitted]"
-_ANSWERED_AUDIO_PROMPT = (
-    "Already sent in an earlier request; call get_attachment(attachment_id, view=True) to hear it again if needed."
-)
+_ANSWERED_AUDIO_PROMPT = 'Already sent in an earlier request; call attachment(action="get", attachment_id=..., view=True) to hear it again if needed.'
 _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
-# The ids of stored attachments, which ``get_attachment`` takes, so the note names them beside their labels.
+# The ids of stored attachments, which ``attachment(action="get", ...)`` takes, so the note names them beside their labels.
 _ATTACHMENT_ID_PREFIX = "att_"
 _IMAGES: frozenset[MediaKind] = frozenset({"image"})
 # A retried media-free request must not repeat a failure the media cannot have caused.
@@ -99,7 +97,7 @@ def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
 
 
 def _label(kind: MediaKind, item: _Media) -> str:
-    """Return how the note names a removed item: its file name, else its kind, with the id ``get_attachment`` takes."""
+    """Return how the note names a removed item: its file name, else its kind, with the id ``attachment(action="get", ...)`` takes."""
     name = item.filename or item.name if isinstance(item, File) else None
     label = (name and rendered_label(name)) or kind
     return f"{label} ({item.id})" if item.id.startswith(_ATTACHMENT_ID_PREFIX) else label
@@ -168,7 +166,7 @@ def _kept[T: (Image, Audio, Video, File)](
 
 
 def _mark_view_unsupported(content: str | list[Any] | None) -> str | list[Any] | None:
-    """Turn one ready ``get_attachment(view=True)`` receipt into an explicit unsupported result."""
+    """Turn one ready ``attachment(action="get", ..., view=True)`` receipt into an explicit unsupported result."""
     if not isinstance(content, str):
         return content
     try:

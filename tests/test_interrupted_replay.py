@@ -240,7 +240,7 @@ def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_ra
         completed_tools=(
             ToolTraceEntry(
                 type="tool_call_completed",
-                tool_name="get_attachment",
+                tool_name="attachment",
                 args_preview="attachment_id=abc, mindroom_output_path=scratch/voice.m4a",
                 result_preview='{"attachment": {"id": "abc"}}',
             ),
@@ -256,7 +256,7 @@ def test_interrupted_replay_content_retains_safe_matrix_tool_previews_without_ra
     assert "[interrupted]" not in content
     assert content.startswith("Text emitted before interruption")
     assert "turn stopped before completion" in content
-    assert "get_attachment" in content
+    assert "attachment" in content
     assert "attachment_id=abc, mindroom_output_path=scratch/voice.m4a" in content
     assert r'output preview "{\"attachment\": {\"id\": \"abc\"}}"' in content
 

@@ -116,7 +116,7 @@ async def test_unsupported_documents_become_text_notes_while_pdf_stays_inline(tm
     assert len(notes) == len(_UNSUPPORTED_FILES)
     for note, mime_type in zip(notes, _UNSUPPORTED_FILES.values(), strict=True):
         assert mime_type in note
-        assert "get_attachment without view" in note
+        assert 'attachment(action="get", ...) without view' in note
 
 
 @pytest.mark.asyncio
@@ -260,7 +260,7 @@ async def test_inline_media_past_the_request_size_budget_becomes_a_text_note(
     assert base64.b64decode(document["source"]["data"]) == _PDF
     [note] = _notes(blocks)
     assert "size limit" in note
-    assert "get_attachment without view" in note
+    assert 'attachment(action="get", ...) without view' in note
 
 
 @pytest.mark.asyncio
@@ -345,7 +345,7 @@ async def test_image_over_the_per_image_limit_becomes_a_text_note_on_bedrock_and
         assert base64.b64decode(image["source"]["data"]) == _PNG
         [note] = _notes(bodies[route])
         assert "per-image limit" in note
-        assert "get_attachment without view" in note
+        assert 'attachment(action="get", ...) without view' in note
 
 
 @pytest.mark.asyncio

@@ -127,7 +127,7 @@ async def test_a_shell_a_preset_brings_in_calls_the_preset_s_tools_through_mindr
     runtime.config.agents["helper"].tools = ["openclaw_compat"]
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    command = _call_and_wait("00000000-0000-4000-8000-000000000002", "attachments", "list_attachments", {})
+    command = _call_and_wait("00000000-0000-4000-8000-000000000002", "attachments", "attachment", {"action": "list"})
     provider.steps = [[("run_shell_command", {"args": command})], "done"]
 
     assert "done" in await _respond(runtime)

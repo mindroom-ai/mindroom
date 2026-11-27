@@ -153,7 +153,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
     ("toolkit", "function"),
     [
         ("approved_egress", "request_network_access"),
-        ("attachments", "list_attachments"),
+        ("attachments", "attachment"),
         ("callback_manager", "mint_callback"),
         ("claude_agent", "claude_send"),
         ("dynamic_workflow", "list_workflow_runs"),

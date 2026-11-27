@@ -1224,7 +1224,7 @@ class TestAgentBot(AgentBotTestBase):
             fork_parent_scopes=scopes,
         )
         with tool_runtime_context(tool_ctx):
-            viewed = await AttachmentTools().get_attachment(in_cut_audio.attachment_id, view=True)
+            viewed = await AttachmentTools().attachment("get", attachment_id=in_cut_audio.attachment_id, view=True)
         assert isinstance(viewed, ToolValue)
         assert len(viewed.audios) == 1
         assert viewed.audios[0].content == b"ID3 in-cut audio"
