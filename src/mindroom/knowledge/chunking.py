@@ -1,273 +1,214 @@
-"""MindRoom-owned document model and chunking strategies for knowledge indexing."""
+"""Native chunk data model and stateless chunking functions for knowledge indexing."""
 
 from __future__ import annotations
 
 import re
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal
+
+from mindroom.knowledge.memory_entries import split_memory_entries
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
 
 
-def _legacy_clean_text(text: str) -> str:
-    """Collapse each whitespace run, line breaks included, to one space, as every indexed chunk has so far.
+@dataclass(frozen=True)
+class KnowledgeChunk:
+    """One chunk produced for knowledge indexing, before it is embedded and stored."""
 
-    Default chunkers keep line breaks, which would change the text and id of every chunk a refresh rewrites.
-    """
+    text: str
+    #: The source file's basename, which search results report as the document name.
+    name: str | None = None
+    #: What the reader and chunker recorded, such as ``chunk``, ``chunk_size``, ``page``, or ``row_number``.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+def collapse_whitespace(text: str) -> str:
+    """Collapse each whitespace run, line breaks included, to one space."""
     return re.sub(r"\s+", " ", text)
 
 
-@dataclass
-class Document:
-    """One extracted or chunked document."""
-
-    content: str
-    name: str | None = None
-    meta_data: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-serializable dictionary representation of this document."""
-        result: dict[str, Any] = {}
-        if self.name is not None:
-            result["name"] = self.name
-        if self.meta_data is not None:
-            result["meta_data"] = self.meta_data
-        result["content"] = self.content
-        return result
+def _validate_fixed_params(chunk_size: int, overlap: int, min_chunk_fill_ratio: float | None) -> None:
+    if chunk_size <= 0:
+        msg = f"Invalid parameters: chunk_size ({chunk_size}) must be positive."
+        raise ValueError(msg)
+    if overlap < 0 or overlap >= chunk_size:
+        msg = f"Invalid parameters: overlap ({overlap}) must be in [0, {chunk_size})."
+        raise ValueError(msg)
+    if min_chunk_fill_ratio is not None and not 0 < min_chunk_fill_ratio <= 1:
+        msg = "min_chunk_fill_ratio must be in the range (0, 1]"
+        raise ValueError(msg)
 
 
-class ChunkingStrategy(ABC):
-    """Base class for splitting a ``Document`` into chunks."""
-
-    @abstractmethod
-    def chunk(self, document: Document) -> list[Document]:
-        """Split ``document`` into chunk documents."""
-
-    def clean_text(self, text: str) -> str:
-        """Collapse repeated runs of each whitespace character while preserving line breaks."""
-        for pattern, replacement in (
-            (r"\n+", "\n"),
-            (r" +", " "),
-            (r"\t+", "\t"),
-            (r"\r+", "\r"),
-            (r"\f+", "\f"),
-            (r"\v+", "\v"),
-        ):
-            text = re.sub(pattern, replacement, text)
-        return text
+def _numbered_chunk(text: str, number: int, name: str | None, metadata: Mapping[str, Any]) -> KnowledgeChunk:
+    return KnowledgeChunk(text=text, name=name, metadata={**metadata, "chunk": number, "chunk_size": len(text)})
 
 
-class FixedSizeChunking(ChunkingStrategy):
-    """Split text into fixed-size character chunks with optional overlap."""
+def chunk_fixed(
+    text: str,
+    *,
+    name: str | None = None,
+    metadata: Mapping[str, Any] = _EMPTY_METADATA,
+    chunk_size: int = 5000,
+    overlap: int = 0,
+    min_chunk_fill_ratio: float | None = 0.5,
+) -> list[KnowledgeChunk]:
+    """Split text into fixed-size character chunks aligned to whitespace when possible."""
+    _validate_fixed_params(chunk_size, overlap, min_chunk_fill_ratio)
+    content = collapse_whitespace(text)
+    content_length = len(content)
+    min_chunk_size = max(1, int(chunk_size * min_chunk_fill_ratio)) if min_chunk_fill_ratio is not None else 0
+    chunks: list[KnowledgeChunk] = []
+    start = 0
 
-    def __init__(self, chunk_size: int = 5000, overlap: int = 0) -> None:
-        if overlap >= chunk_size:
-            msg = f"Invalid parameters: overlap ({overlap}) must be less than chunk size ({chunk_size})."
-            raise ValueError(msg)
-        self.chunk_size = chunk_size
-        self.overlap = overlap
+    while start < content_length:
+        raw_end = min(start + chunk_size, content_length)
+        end = raw_end
+        if raw_end < content_length:
+            while end > start and content[end] not in (" ", "\n", "\r", "\t"):
+                end -= 1
+            if end == start or (min_chunk_fill_ratio is not None and (end - start) < min_chunk_size):
+                end = raw_end
 
-    def chunk(self, document: Document) -> list[Document]:
-        """Split ``document`` into fixed-size chunks aligned to whitespace when possible."""
-        content = self.clean_text(document.content)
-        content_length = len(content)
-        chunked: list[Document] = []
-        chunk_number = 1
-        start = 0
+        chunks.append(_numbered_chunk(content[start:end], len(chunks) + 1, name, metadata))
+        if end >= content_length:
+            break
 
-        while start < content_length:
-            end = min(start + self.chunk_size, content_length)
-            if end < content_length:
-                while end > start and content[end] not in (" ", "\n", "\r", "\t"):
-                    end -= 1
-            if end == start:
-                end = start + self.chunk_size
+        if min_chunk_fill_ratio is None:
+            start = max(start + 1, end - overlap)
+        else:
+            next_start = end - overlap
+            start = end if next_start <= start else next_start
 
-            chunk = content[start:end]
-            meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(chunk)}
-            chunked.append(Document(name=document.name, meta_data=meta_data, content=chunk))
-            chunk_number += 1
-            if end >= content_length:
-                break
-            start = max(start + 1, end - self.overlap)
-
-        return chunked
+    return chunks
 
 
-class DocumentChunking(ChunkingStrategy):
+def _accumulate_sentences(
+    para: str,
+    chunks: list[KnowledgeChunk],
+    name: str | None,
+    metadata: Mapping[str, Any],
+    chunk_size: int,
+) -> tuple[list[str], int]:
+    current: list[str] = []
+    current_size = 0
+    for raw_sentence in _SENTENCE_SPLIT_RE.split(para):
+        sentence = raw_sentence.strip()
+        if not sentence:
+            continue
+        sentence_size = len(sentence)
+        if current_size + sentence_size <= chunk_size:
+            current.append(sentence)
+            current_size += sentence_size
+        else:
+            if current:
+                chunks.append(_numbered_chunk(" ".join(current), len(chunks) + 1, name, metadata))
+            current = [sentence]
+            current_size = sentence_size
+    return current, current_size
+
+
+def chunk_paragraphs(
+    text: str,
+    *,
+    name: str | None = None,
+    metadata: Mapping[str, Any] = _EMPTY_METADATA,
+    chunk_size: int = 5000,
+) -> list[KnowledgeChunk]:
     """Split text on paragraph boundaries, falling back to sentences for oversized paragraphs."""
+    if chunk_size <= 0:
+        msg = f"Invalid parameters: chunk_size ({chunk_size}) must be positive."
+        raise ValueError(msg)
+    if len(text) <= chunk_size:
+        return [KnowledgeChunk(text=text, name=name, metadata=dict(metadata))]
 
-    def __init__(self, chunk_size: int = 5000) -> None:
-        self.chunk_size = chunk_size
+    chunks: list[KnowledgeChunk] = []
+    current: list[str] = []
+    current_size = 0
 
-    def _make_chunk(self, document: Document, chunk_number: int, content: str) -> Document:
-        meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(content)}
-        return Document(name=document.name, meta_data=meta_data, content=content)
+    for raw_para in text.split("\n\n"):
+        para = collapse_whitespace(raw_para).strip()
+        if not para:
+            continue
+        para_size = len(para)
+        if para_size > chunk_size:
+            if current:
+                chunks.append(_numbered_chunk("\n\n".join(current), len(chunks) + 1, name, metadata))
+            current, current_size = _accumulate_sentences(para, chunks, name, metadata, chunk_size)
+        elif current_size + para_size <= chunk_size:
+            current.append(para)
+            current_size += para_size
+        else:
+            if current:
+                chunks.append(_numbered_chunk("\n\n".join(current), len(chunks) + 1, name, metadata))
+            current = [para]
+            current_size = para_size
 
-    def _accumulate_sentences(
-        self,
-        document: Document,
-        para: str,
-        chunks: list[Document],
-    ) -> tuple[list[str], int]:
-        current: list[str] = []
-        current_size = 0
-        for raw_sentence in _SENTENCE_SPLIT_RE.split(para):
-            sentence = raw_sentence.strip()
-            if not sentence:
-                continue
-            sentence_size = len(sentence)
-            if current_size + sentence_size <= self.chunk_size:
-                current.append(sentence)
-                current_size += sentence_size
-            else:
-                if current:
-                    chunks.append(self._make_chunk(document, len(chunks) + 1, " ".join(current)))
-                current = [sentence]
-                current_size = sentence_size
-        return current, current_size
-
-    def chunk(self, document: Document) -> list[Document]:
-        """Split ``document`` by paragraphs, falling back to sentences for oversized paragraphs."""
-        if len(document.content) <= self.chunk_size:
-            return [document]
-
-        chunks: list[Document] = []
-        current: list[str] = []
-        current_size = 0
-
-        for raw_para in document.content.split("\n\n"):
-            para = self.clean_text(raw_para).strip()
-            if not para:
-                continue
-            para_size = len(para)
-            if para_size > self.chunk_size:
-                if current:
-                    chunks.append(self._make_chunk(document, len(chunks) + 1, "\n\n".join(current)))
-                current, current_size = self._accumulate_sentences(document, para, chunks)
-            elif current_size + para_size <= self.chunk_size:
-                current.append(para)
-                current_size += para_size
-            else:
-                if current:
-                    chunks.append(self._make_chunk(document, len(chunks) + 1, "\n\n".join(current)))
-                current = [para]
-                current_size = para_size
-
-        if current:
-            chunks.append(self._make_chunk(document, len(chunks) + 1, "\n\n".join(current)))
-        return chunks
+    if current:
+        chunks.append(_numbered_chunk("\n\n".join(current), len(chunks) + 1, name, metadata))
+    return chunks
 
 
-class RowChunking(ChunkingStrategy):
+def chunk_rows(
+    text: str,
+    *,
+    name: str | None = None,
+    metadata: Mapping[str, Any] = _EMPTY_METADATA,
+) -> list[KnowledgeChunk]:
     """Split line-delimited tabular text into one chunk per non-empty row."""
-
-    def chunk(self, document: Document) -> list[Document]:
-        """Split ``document`` into one chunk per non-empty line, keeping logical 1-based row numbers."""
-        if not document.content:
-            return []
-
-        chunks: list[Document] = []
-        for row_number, row in enumerate(document.content.splitlines(), start=1):
-            chunk_content = " ".join(row.split())
-            if not chunk_content:
-                continue
-            chunks.append(
-                Document(
-                    name=document.name,
-                    meta_data={**document.meta_data, "row_number": row_number},
-                    content=chunk_content,
-                ),
-            )
-        return chunks
+    if not text:
+        return []
+    return [
+        KnowledgeChunk(text=chunk_content, name=name, metadata={**metadata, "row_number": row_number})
+        for row_number, row in enumerate(text.splitlines(), start=1)
+        if (chunk_content := " ".join(row.split()))
+    ]
 
 
-class SafeFixedSizeChunking(FixedSizeChunking):
-    """Avoid pathological micro-chunks when whitespace is far from the boundary."""
-
-    def __init__(
-        self,
-        chunk_size: int = 5000,
-        overlap: int = 0,
-        *,
-        min_chunk_fill_ratio: float = 0.5,
-    ) -> None:
-        super().__init__(chunk_size=chunk_size, overlap=overlap)
-        if not 0 < min_chunk_fill_ratio <= 1:
-            msg = "min_chunk_fill_ratio must be in the range (0, 1]"
-            raise ValueError(msg)
-        self.min_chunk_fill_ratio = min_chunk_fill_ratio
-
-    def clean_text(self, text: str) -> str:
-        """Clean text as every indexed chunk has been cleaned (``_legacy_clean_text``)."""
-        return _legacy_clean_text(text)
-
-    def _min_chunk_size(self) -> int:
-        """Return the shortest chunk a whitespace-aligned split may produce."""
-        return max(1, int(self.chunk_size * self.min_chunk_fill_ratio))
-
-    def chunk(self, document: Document) -> list[Document]:
-        """Split one document while avoiding tiny boundary fragments."""
-        content = self.clean_text(document.content)
-        content_length = len(content)
-        chunked_documents: list[Document] = []
-        chunk_number = 1
-        min_chunk_size = self._min_chunk_size()
-        start = 0
-
-        while start < content_length:
-            raw_end = min(start + self.chunk_size, content_length)
-            end = raw_end
-
-            if raw_end < content_length:
-                while end > start and content[end] not in (" ", "\n", "\r", "\t"):
-                    end -= 1
-
-                # Prefer a hard split over tiny overlap-driven fragments when the
-                # nearest whitespace is too far from the target boundary.
-                if end == start or (end - start) < min_chunk_size:
-                    end = raw_end
-
-            chunk = content[start:end]
-            meta_data = {**document.meta_data, "chunk": chunk_number, "chunk_size": len(chunk)}
-            chunked_documents.append(Document(name=document.name, meta_data=meta_data, content=chunk))
-
-            if end >= content_length:
-                break
-
-            next_start = end - self.overlap
-            if next_start <= start:
-                next_start = end
-            start = next_start
-            chunk_number += 1
-
-        return chunked_documents
+def chunk_memory_entries(
+    text: str,
+    *,
+    name: str | None = None,
+    metadata: Mapping[str, Any] = _EMPTY_METADATA,
+    chunk_size: int = 5000,
+    overlap: int = 0,
+) -> list[KnowledgeChunk]:
+    """Split a memory file into one chunk per entry, falling back to fixed-size chunking when empty."""
+    _validate_fixed_params(chunk_size, overlap, 0.5)
+    entries = split_memory_entries(text, chunk_size)
+    if not entries:
+        return chunk_fixed(text, name=name, metadata=metadata, chunk_size=chunk_size, overlap=overlap)
+    return [
+        _numbered_chunk(collapse_whitespace(entry), number, name, metadata)
+        for number, entry in enumerate(entries, start=1)
+    ]
 
 
-class LegacyFixedSizeChunking(FixedSizeChunking):
-    """Fixed-size chunking for JSON files, cleaning text as every indexed chunk has been."""
-
-    def clean_text(self, text: str) -> str:
-        """Clean the document with ``_legacy_clean_text``."""
-        return _legacy_clean_text(text)
-
-
-class LegacyDocumentChunking(DocumentChunking):
-    """Paragraph chunking for PDF, DOCX, and PPTX files, cleaning paragraphs as every indexed chunk has been."""
-
-    def clean_text(self, text: str) -> str:
-        """Clean one paragraph with ``_legacy_clean_text``."""
-        return _legacy_clean_text(text)
+def chunk_text(
+    text: str,
+    *,
+    name: str | None = None,
+    metadata: Mapping[str, Any] = _EMPTY_METADATA,
+    chunk_size: int = 5000,
+    overlap: int = 0,
+    strategy: Literal["fixed", "memory_entries"] = "fixed",
+) -> list[KnowledgeChunk]:
+    """Chunk plain text using the configured fixed-size or memory-entry strategy."""
+    if strategy == "memory_entries":
+        return chunk_memory_entries(text, name=name, metadata=metadata, chunk_size=chunk_size, overlap=overlap)
+    return chunk_fixed(text, name=name, metadata=metadata, chunk_size=chunk_size, overlap=overlap)
 
 
 __all__ = [
-    "ChunkingStrategy",
-    "Document",
-    "DocumentChunking",
-    "FixedSizeChunking",
-    "LegacyDocumentChunking",
-    "LegacyFixedSizeChunking",
-    "RowChunking",
-    "SafeFixedSizeChunking",
+    "KnowledgeChunk",
+    "chunk_fixed",
+    "chunk_memory_entries",
+    "chunk_paragraphs",
+    "chunk_rows",
+    "chunk_text",
+    "collapse_whitespace",
 ]

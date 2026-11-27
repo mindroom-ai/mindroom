@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.memory import MemorySearchConfig
 from mindroom.constants import runtime_paths_with_storage_root
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import collapse_whitespace
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.memory_entries import MEMORY_ENTRIES_STRATEGY_ID, split_memory_entries
@@ -148,8 +148,6 @@ _UNCAPPED = sys.maxsize
 # The stock overlay's fixed chunk size, before entry chunks.
 _STOCK_CHUNK_SIZE = 5000
 _READY_MARKER = "ready"
-# Collapses whitespace the way the indexer's chunker does.
-_CLEANER = SafeFixedSizeChunking()
 _logger = logging.getLogger(__name__)
 
 
@@ -377,11 +375,11 @@ class _HitTimes:
         if source not in self._files:
             text = self._corpus.get(source, b"").decode("utf-8", errors="replace")
             relative = PurePosixPath(source).relative_to("memory")
-            flat = _CLEANER.clean_text(text)
+            flat = collapse_whitespace(text)
             spans: list[tuple[int, int, _Written]] = []
             cursor = 0
             for entry, written in _written_entries(text, relative, self._first_added):
-                piece = _CLEANER.clean_text(entry).strip()
+                piece = collapse_whitespace(entry).strip()
                 start = flat.find(piece, cursor)
                 if start == -1:
                     continue

@@ -14,7 +14,6 @@ import json
 import os
 import re
 import sqlite3
-import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -55,7 +54,7 @@ EMBEDDERS_PATH = GOLDEN_DIR / "embedders.json"
 ROWS_PATH = GOLDEN_DIR / "rows.json"
 SEARCH_PATH = GOLDEN_DIR / "search.json"
 _HEX32 = re.compile(r"[0-9a-f]{32}")
-_HEX64 = re.compile(r"[0-9a-f]{64}")
+LEGACY_ROW_METADATA_KEYS = frozenset({"content_hash", "content_id", "linked_to"})
 _QUERY_EMBEDDING_ERROR = "embedder request failed (HTTP 503)"
 # Each cosine distance is computed in float32 and summed in an order the CPU's vector width decides, so its last bits
 # can differ between machines: an x86_64 run returned 0.604523241519928 where an aarch64 run returned
@@ -209,10 +208,7 @@ def _normalized_rows(database: Path) -> list[dict[str, Any]]:
     for row_id, document, metadata, embedding in rows:
         assert _HEX32.fullmatch(row_id), row_id
         stored = json.loads(metadata)
-        assert _HEX64.fullmatch(str(stored["content_hash"])), stored
-        assert stored["content_id"] == str(uuid.uuid5(uuid.NAMESPACE_DNS, str(stored["content_hash"])))
-        stored["content_hash"] = "<sha256>"
-        stored["content_id"] = "<uuid5>"
+        assert LEGACY_ROW_METADATA_KEYS.isdisjoint(stored), stored
         assert isinstance(stored["source_mtime_ns"], int), stored
         stored["source_mtime_ns"] = "<stamp>"
         normalized.append(
