@@ -67,7 +67,7 @@ def parse_probe_slice_cgroup_dir(
     return cgroup_root / rel.parent.relative_to("/")
 
 
-def parse_proc_stat(raw: str) -> tuple[str, int, int] | None:
+def _parse_proc_stat(raw: str) -> tuple[str, int, int] | None:
     """Parse ``(state, pgid, sid)`` from one Linux ``/proc/<pid>/stat`` line, or ``None`` if malformed."""
     if ")" not in raw:
         return None
@@ -91,7 +91,7 @@ def _is_safe_unit_name(name: str, *, prefix: str, suffix: str) -> bool:
     )
 
 
-def resolve_scope_cgroup_dir(
+def _resolve_scope_cgroup_dir(
     scope: ProcessScope | None,
     *,
     cgroup_root: Path = _CGROUP_ROOT,
@@ -151,13 +151,13 @@ def _safe_leader_pid(leader_pid: int) -> bool:
 
 def _read_proc_stat(pid: int, *, proc_root: Path = _PROC_ROOT) -> tuple[str, int, int] | None:
     try:
-        parsed = parse_proc_stat((proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace"))
+        parsed = _parse_proc_stat((proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return None
     return None if parsed is None or parsed[0] in _DEAD_PROC_STATES else parsed
 
 
-def scan_session_members(leader_pid: int, *, proc_root: Path = _PROC_ROOT) -> list[tuple[int, int]]:
+def _scan_session_members(leader_pid: int, *, proc_root: Path = _PROC_ROOT) -> list[tuple[int, int]]:
     """Return live ``(pid, pgid)`` pairs in Linux POSIX session *leader_pid*, excluding self and zombies."""
     if not _safe_leader_pid(leader_pid):
         return []
@@ -271,9 +271,9 @@ def command_processes_exist(leader_pid: int, *, scope: ProcessScope | None = Non
         return True
     if sys.platform != "linux":
         return False
-    if scan_session_members(leader_pid):
+    if _scan_session_members(leader_pid):
         return True
-    scope_dir = resolve_scope_cgroup_dir(scope)
+    scope_dir = _resolve_scope_cgroup_dir(scope)
     return scope_dir is not None and _scope_is_populated(scope_dir)
 
 
@@ -306,8 +306,8 @@ def signal_command(leader_pid: int, sig: signal.Signals, *, scope: ProcessScope 
     if sys.platform != "linux":
         return delivered
     signaled_pgids = {leader_pid}
-    delivered |= _signal_extra_pgids(scan_session_members(leader_pid), sig, signaled_pgids)
-    scope_dir = resolve_scope_cgroup_dir(scope)
+    delivered |= _signal_extra_pgids(_scan_session_members(leader_pid), sig, signaled_pgids)
+    scope_dir = _resolve_scope_cgroup_dir(scope)
     if scope_dir is None:
         return delivered
     return _signal_scope_extras(
@@ -323,7 +323,7 @@ def kill_command_processes(leader_pid: int, *, scope: ProcessScope | None = None
     """Force-kill a command's process group, Linux session members, and verified systemd scope."""
     if not _safe_leader_pid(leader_pid):
         return
-    if sys.platform == "linux" and (scope_dir := resolve_scope_cgroup_dir(scope)) is not None:
+    if sys.platform == "linux" and (scope_dir := _resolve_scope_cgroup_dir(scope)) is not None:
         _kill_scope_cgroup(scope_dir)
     _send_signal(os.killpg, leader_pid, signal.SIGKILL)
     if sys.platform != "linux":
@@ -331,7 +331,7 @@ def kill_command_processes(leader_pid: int, *, scope: ProcessScope | None = None
     self_pid = os.getpid()
     signaled_pgids = {leader_pid}
     for attempt in range(2):
-        members = scan_session_members(leader_pid)
+        members = _scan_session_members(leader_pid)
         if not members:
             break
         _signal_extra_pgids(members, signal.SIGKILL, signaled_pgids)

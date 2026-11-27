@@ -20,9 +20,9 @@ import pytest
 
 from mindroom.shell._process_target import (
     ProcessScope,
-    parse_proc_stat,
-    resolve_scope_cgroup_dir,
-    scan_session_members,
+    _parse_proc_stat,
+    _resolve_scope_cgroup_dir,
+    _scan_session_members,
 )
 from mindroom.shell.execution import (
     ProcessRecord,
@@ -1139,10 +1139,10 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
 
 def test_proc_stat_parsing_and_session_scan_filters_zombies_and_guards_self(tmp_path: Path) -> None:
     """/proc/<pid>/stat parsing handles spaces/parens in comm, skips zombies/dead, and refuses unsafe leader PIDs."""
-    assert parse_proc_stat("123 (foo (bar) ) baz) S 1 456 789 0") == ("S", 456, 789)
-    assert parse_proc_stat("123 (zombie) Z 1 456 789 0") == ("Z", 456, 789)
+    assert _parse_proc_stat("123 (foo (bar) ) baz) S 1 456 789 0") == ("S", 456, 789)
+    assert _parse_proc_stat("123 (zombie) Z 1 456 789 0") == ("Z", 456, 789)
     for bad in ("", "no-paren", "1 (x) S 1", "1 (x) S 1 nope 789"):
-        assert parse_proc_stat(bad) is None
+        assert _parse_proc_stat(bad) is None
 
     leader_pid = 900_001
     fake_entries = {
@@ -1158,12 +1158,12 @@ def test_proc_stat_parsing_and_session_scan_filters_zombies_and_guards_self(tmp_
         entry.mkdir()
         (entry / "stat").write_text(content, encoding="utf-8")
 
-    assert scan_session_members(leader_pid, proc_root=tmp_path) == [(900_002, 900_002)]
+    assert _scan_session_members(leader_pid, proc_root=tmp_path) == [(900_002, 900_002)]
     unsafe_leaders = [0, 1, os.getpid(), os.getpgrp()]
     if sys.platform == "linux":
         unsafe_leaders.append(os.getsid(0))
     for unsafe in unsafe_leaders:
-        assert scan_session_members(unsafe, proc_root=tmp_path) == []
+        assert _scan_session_members(unsafe, proc_root=tmp_path) == []
 
 
 def test_resolve_scope_cgroup_dir_enforces_safety_invariants(tmp_path: Path) -> None:
@@ -1177,13 +1177,13 @@ def test_resolve_scope_cgroup_dir_enforces_safety_invariants(tmp_path: Path) -> 
     self_cg.write_text("0::/user.slice/mindroom.service\n", encoding="utf-8")
 
     valid = ProcessScope(unit_name=scope_name, slice_name="app.slice", slice_cgroup_dir=slice_dir)
-    assert resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) == scope_dir.resolve()
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) == scope_dir.resolve()
 
     # Own cgroup and ancestor of own cgroup are rejected.
     self_cg.write_text(f"0::/user.slice/app.slice/{scope_name}\n", encoding="utf-8")
-    assert resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
     self_cg.write_text(f"0::/user.slice/app.slice/{scope_name}/nested.service\n", encoding="utf-8")
-    assert resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
     self_cg.write_text("0::/user.slice/mindroom.service\n", encoding="utf-8")
 
     # Wrong unit name, wrong slice name, traversal, and missing slice dir are rejected.
@@ -1198,27 +1198,27 @@ def test_resolve_scope_cgroup_dir_enforces_safety_invariants(tmp_path: Path) -> 
         "mindroom-shell-a b.scope",
     ):
         bad = ProcessScope(unit_name=bad_unit, slice_name="app.slice", slice_cgroup_dir=slice_dir)
-        assert resolve_scope_cgroup_dir(bad, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+        assert _resolve_scope_cgroup_dir(bad, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
     wrong_slice = ProcessScope(unit_name=scope_name, slice_name="other.slice", slice_cgroup_dir=slice_dir)
-    assert resolve_scope_cgroup_dir(wrong_slice, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(wrong_slice, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
     outside = ProcessScope(unit_name=scope_name, slice_name="app.slice", slice_cgroup_dir=tmp_path / "outside")
-    assert resolve_scope_cgroup_dir(outside, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(outside, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
 
     # Symlink leaf and symlink intermediate directory are rejected.
     sym_name = "mindroom-shell-fedcba9876543210.scope"
     (slice_dir / sym_name).symlink_to(scope_dir)
     sym_leaf = ProcessScope(unit_name=sym_name, slice_name="app.slice", slice_cgroup_dir=slice_dir)
-    assert resolve_scope_cgroup_dir(sym_leaf, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(sym_leaf, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
 
     sym_slice = cg_root / "user.slice" / "linked.slice"
     sym_slice.symlink_to(slice_dir)
     sym_parent = ProcessScope(unit_name=scope_name, slice_name="linked.slice", slice_cgroup_dir=sym_slice)
-    assert resolve_scope_cgroup_dir(sym_parent, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(sym_parent, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
 
     # Unreadable or non-v2 /proc/self/cgroup fails closed.
     self_cg.write_text("1:name=systemd:/user.slice\n", encoding="utf-8")
-    assert resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
-    assert resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=tmp_path / "missing") is None
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=tmp_path / "missing") is None
 
 
 def _timeout_child_argv(info_file: Path, *, ignore_term: bool) -> list[str]:
