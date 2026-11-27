@@ -674,8 +674,7 @@ class ScopedOAuthClientMixin:
     def _authenticate(self) -> None:
         """Authenticate with supplied credentials, the wrapped tool's auth, valid cached credentials, or stored OAuth.
 
-        Not named ``_auth``: Agno's Google toolkits store their ``AuthConfig`` on
-        ``self._auth``, and an instance attribute would shadow a mixin method.
+        Not named ``_auth`` to avoid colliding with ``self._auth`` instance attributes on subclasses.
         """
         if self._provided_credentials is not None:
             self.creds = self._provided_credentials

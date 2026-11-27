@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-from agno.tools import Toolkit
-
 from mindroom import agents
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
@@ -56,6 +54,8 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import UnansweredCallTools
@@ -655,9 +655,11 @@ class MetadataProbeTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(name="report", tools=[self.write_report])
 
-    async def write_report(self, run_context: RunContext) -> str:
+    async def write_report(self) -> str:
         """Write the report."""
-        type(self).seen.append(dict(run_context.metadata or {}))
+        call = current_tool_call()
+        assert call is not None
+        type(self).seen.append(dict(call.context.metadata or {}))
         return "report written"
 
 

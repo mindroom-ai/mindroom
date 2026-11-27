@@ -24,9 +24,9 @@ from mindroom.terminal.client import TerminalDetachedError, TerminalStream, Work
 from mindroom.terminal.lines import TerminalLine
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.sandbox_proxy import worker_call
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
+from mindroom.tool_system.toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.terminal.conftest import RUNNER_TOKEN, agent_toolkit, primary_paths, serve_runner
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 pytestmark = pytest.mark.asyncio
 
@@ -42,18 +42,18 @@ pytestmark = pytest.mark.asyncio
 _REFUSED_TOKEN_HEADERS = ({}, {"x-mindroom-sandbox-token": "runner-tökén"})
 
 
-def _shell(paths: RuntimePaths) -> AnyToolkit:
+def _shell(paths: RuntimePaths) -> Toolkit:
     """Build the agent's worker-routed shell toolkit as a reply to ``IDENTITY`` builds it."""
     return agent_toolkit("shell", Config(agents={"code": AgentConfig(display_name="Code", tools=["shell"])}), paths)
 
 
-def _terminals(toolkit: AnyToolkit) -> WorkerTerminals:
+def _terminals(toolkit: Toolkit) -> WorkerTerminals:
     stand_ins = toolkit_worker_stand_ins(toolkit)
     assert stand_ins is not None
     return WorkerTerminals(stand_ins)
 
 
-async def _run_shell_command(toolkit: AnyToolkit, command: str) -> str:
+async def _run_shell_command(toolkit: Toolkit, command: str) -> str:
     function = toolkit_function(toolkit, "run_shell_command")
     assert function is not None
     result = await function.entrypoint(command, tail=1000)

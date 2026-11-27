@@ -62,7 +62,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_backg
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import register_background_runtime, workflow_job_admission, workflow_job_standing
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity

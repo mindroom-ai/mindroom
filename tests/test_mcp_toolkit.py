@@ -6,7 +6,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.tools.function import ToolResult
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
@@ -15,7 +14,8 @@ from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.agno_toolkits import toolkit_function
+from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -52,11 +52,11 @@ class _DummyManager:
         authorization: AuthorizationConfig | None = None,
         include_tools: list[str] | None = None,
         exclude_tools: list[str] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         """Record the call and return a fixed tool result."""
         del authorization, include_tools, exclude_tools
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
-        return ToolResult(content="ok")
+        return ToolValue(content="ok")
 
 
 class _OAuthRequiredManager:
@@ -95,7 +95,7 @@ class _OAuthRequiredManager:
         del credentials_manager, worker_target, authorization
         raise self._connection_required()
 
-    async def call_tool(self, *_args: object, **_kwargs: object) -> ToolResult:
+    async def call_tool(self, *_args: object, **_kwargs: object) -> ToolValue:
         """Force bridge calls to emit the same OAuth-required payload as discovery."""
         raise self._connection_required()
 
@@ -142,7 +142,7 @@ class _RequesterAwareManager:
         authorization: AuthorizationConfig | None = None,
         include_tools: list[str] | None = None,
         exclude_tools: list[str] | None = None,
-    ) -> ToolResult:
+    ) -> ToolValue:
         """Record the requester-scoped MCP call and return a fixed result."""
         del authorization
         included = tuple(include_tools or ())
@@ -158,7 +158,7 @@ class _RequesterAwareManager:
         if remote_tool_name not in available_tools:
             raise MCPToolUnavailableError(server_id, remote_tool_name, available_tools)
         self.calls.append((server_id, remote_tool_name, arguments, credentials_manager, worker_target, timeout_seconds))
-        return ToolResult(content="ok")
+        return ToolValue(content="ok")
 
     def cached_request_catalog(
         self,
@@ -521,7 +521,7 @@ class _FailingManager(_DummyManager):
         super().__init__()
         self.input_schema = input_schema
 
-    async def call_tool(self, server_id: str, *_args: object, **_kwargs: object) -> ToolResult:
+    async def call_tool(self, server_id: str, *_args: object, **_kwargs: object) -> ToolValue:
         """Fail every call the way a server that hides the cause fails it, with the schema the call was sent against."""
         raise MCPToolCallError(server_id, _GENERIC_FAILURE, input_schema=self.input_schema)
 

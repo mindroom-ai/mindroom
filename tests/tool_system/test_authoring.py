@@ -13,15 +13,6 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
-from mindroom.tool_system.agno_toolkits import (
-    Function,
-    adapt_toolkit,
-    configure_toolkit_functions,
-    requires_connect,
-    toolkit_function,
-    toolkit_function_names,
-)
-from mindroom.tool_system.agno_toolkits import Toolkit as AgnoToolkit
 from mindroom.tool_system.authoring import (
     CurrentCall,
     Toolkit,
@@ -41,8 +32,14 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.toolkits import (
+    adapt_toolkit,
+    configure_toolkit_functions,
+    requires_connect,
+    toolkit_function,
+    toolkit_function_names,
+)
 from tests.conftest import preserved_builtin_tools
-from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -282,15 +279,8 @@ def test_two_functions_under_one_name_raise() -> None:
         GreeterTools(tools=[farewell])
 
 
-def test_an_owned_toolkit_adapts_without_agnos_entrypoint_processing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Schemas come from the owned generator, descriptions from ``@tool`` or the docstring, and nothing is injected."""
-
-    def refuse(*_args: object, **_kwargs: object) -> None:
-        msg = "An owned toolkit must not reach Agno's entrypoint processing"
-        raise AssertionError(msg)
-
-    monkeypatch.setattr(Function, "process_entrypoint", refuse)
-
+def test_an_owned_toolkit_adapts_with_derived_schemas_and_descriptions() -> None:
+    """Schemas come from the schema generator and descriptions come from ``@tool`` or the docstring."""
     adapted = adapt_toolkit(GreeterTools(tools=[shout]), key="greeter")
     functions = _by_name(adapted.functions)
 
@@ -308,7 +298,6 @@ def test_an_owned_toolkit_adapts_without_agnos_entrypoint_processing(monkeypatch
         },
         "required": ["name"],
     }
-    assert all(function.injected_params == {} for function in adapted.functions)
     assert {function.toolkit for function in adapted.functions} == {"greeter"}
 
 
@@ -375,7 +364,6 @@ async def test_an_owned_functions_media_named_parameter_is_the_models() -> None:
 
     outcome = await execute_tool_call(attach, {"files": ["a.txt", "b.txt"]}, _CONTEXT, middleware=())
 
-    assert attach.injected_params == {}
     assert attach.parameters["required"] == ["files"]
     assert outcome.content == "a.txt,b.txt"
 
@@ -419,20 +407,10 @@ async def test_current_call_names_the_call_a_function_runs_for() -> None:
 
 
 def test_toolkit_functions_returns_one_callable_per_name() -> None:
-    """Each function a run offers, by name; of an Agno toolkit, its async variant where it has one."""
-
-    def lookup() -> str:
-        return "sync"
-
-    async def alookup() -> str:
-        return "async"
-
+    """Each function a run offers is returned by name, wrapped for validation."""
     owned = GreeterTools(tools=[shout])
-    agno = AgnoToolkit(name="dual", tools=[lookup])
-    agno.async_functions["lookup"] = Function(name="lookup", entrypoint=alookup)
 
     owned_functions = toolkit_functions(owned)
-    agno_functions = toolkit_functions(agno)
 
     # The callables validate their arguments, so each wraps the function it calls.
     assert {name: inspect.unwrap(function) for name, function in owned_functions.items()} == {
@@ -440,41 +418,6 @@ def test_toolkit_functions_returns_one_callable_per_name() -> None:
         "shout": shout,
         "greet": owned.greet,
     }
-    assert {name: inspect.unwrap(function) for name, function in agno_functions.items()} == {"lookup": alookup}
-
-
-def test_an_owned_toolkit_adapts_to_what_its_agno_authored_twin_adapts_to() -> None:
-    """The same methods give the same functions, flags, and instructions whichever authoring API declares them."""
-
-    class OwnedTwinTools(Toolkit):
-        name = "twin"
-        instructions = "Count and shout words."
-
-        @tool
-        def count_words(self, text: str, limit: int | None = None) -> str:
-            """Count the words of a text.
-
-            Args:
-                text: The text.
-                limit: The most words to count.
-
-            """
-            return str(len(text.split()[:limit]))
-
-        @tool
-        async def shout_text(self, text: str) -> str:
-            """Shout a text.
-
-            Args:
-                text: The text.
-
-            """
-            return text.upper()
-
-    owned = OwnedTwinTools()
-    agno = AgnoToolkit(name="twin", tools=[owned.count_words, owned.shout_text], instructions="Count and shout words.")
-
-    assert support.golden_entry(adapt_toolkit(owned)) == support.golden_entry(adapt_toolkit(agno))
 
 
 class _CountShoutTools(Toolkit):
@@ -505,62 +448,47 @@ class _CountShoutTools(Toolkit):
         return text.upper()
 
 
-class _AgnoCountShoutTools(AgnoToolkit):
-    """The Agno-authored twin of ``_CountShoutTools``."""
-
-    def __init__(self) -> None:
-        owned = _CountShoutTools()
-        super().__init__(name="twin", tools=[owned.count_words, owned.shout_text], instructions=owned.instructions)
-
-
 @pytest.fixture
 def registered_twins(tmp_path: Path) -> Iterator[RuntimePaths]:
-    """Register the owned toolkit and its Agno twin as tools, and return the runtime that builds them."""
+    """Register ``_CountShoutTools`` as a tool and return the runtime that builds it."""
     with preserved_builtin_tools():
-        for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
-            register_tool_with_metadata(
-                name=tool_name,
-                file_access=ToolFileAccess.NONE,
-                display_name=tool_name,
-                description="Test-only toolkit for owned authoring.",
-                category=ToolCategory.DEVELOPMENT,
-            )(lambda toolkit_class=toolkit_class: toolkit_class)
+        register_tool_with_metadata(
+            name="owned_twin",
+            file_access=ToolFileAccess.NONE,
+            display_name="owned_twin",
+            description="Test-only toolkit for native authoring.",
+            category=ToolCategory.DEVELOPMENT,
+        )(lambda: _CountShoutTools)
         yield resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
 
 
-def test_a_registered_owned_toolkit_builds_with_output_files_as_its_agno_twin(
+def test_a_registered_owned_toolkit_builds_with_output_files(
     registered_twins: RuntimePaths,
     tmp_path: Path,
 ) -> None:
-    """``get_tool_by_name`` builds an owned toolkit with output files, and it adapts to its Agno twin's functions."""
-    owned, agno = (
-        adapt_toolkit(
-            get_tool_by_name(
-                tool_name,
-                registered_twins,
-                tool_output_workspace_root=tmp_path,
-                worker_target=None,
-                tools=builtin_tool_registry(),
-            ),
-        )
-        for tool_name in ("owned_twin", "agno_twin")
+    """``get_tool_by_name`` builds a toolkit with output files."""
+    owned = adapt_toolkit(
+        get_tool_by_name(
+            "owned_twin",
+            registered_twins,
+            tool_output_workspace_root=tmp_path,
+            worker_target=None,
+            tools=builtin_tool_registry(),
+        ),
     )
 
-    assert support.golden_entry(owned) == support.golden_entry(agno)
     shout = _by_name(owned.functions)["shout_text"]
     assert shout.parameters["properties"]["text"] == {"type": "string", "description": "The text."}
     assert OUTPUT_PATH_ARGUMENT in shout.parameters["properties"]
     assert shout.strict is False
 
 
-@pytest.mark.parametrize("tool_name", ["owned_twin", "agno_twin"])
 def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
     registered_twins: RuntimePaths,
-    tool_name: str,
 ) -> None:
     """An include filter offers only the functions it names, while the toolkit keeps every function it built."""
     toolkit = get_tool_by_name(
-        tool_name,
+        "owned_twin",
         registered_twins,
         tool_config_overrides={"include_tools": ["shout_text"]},
         worker_target=None,
@@ -573,7 +501,7 @@ def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
     assert list(toolkit_functions(toolkit)) == ["shout_text"]
     with pytest.raises(ValueError, match="Included tool"):
         get_tool_by_name(
-            tool_name,
+            "owned_twin",
             registered_twins,
             tool_config_overrides={"include_tools": ["missing"]},
             worker_target=None,
@@ -722,14 +650,8 @@ def test_an_authored_schema_requires_the_arguments_without_a_default_and_admits_
     }
 
 
-def _connecting(toolkit_class: type[AgnoToolkit] = AgnoToolkit) -> AgnoToolkit:
-    toolkit = toolkit_class(name="db")
-    toolkit._requires_connect = True
-    return toolkit
-
-
-class _NativeConnectingTools(Toolkit):
-    """A native authoring toolkit that opts into run-scoped connect/close lifecycle."""
+class _ConnectingTools(Toolkit):
+    """A toolkit that opts into run-scoped connect/close lifecycle."""
 
     requires_connect = True
 
@@ -738,14 +660,13 @@ class _NativeConnectingTools(Toolkit):
 
 
 def test_toolkits_hold_a_connection_only_when_requires_connect_is_true() -> None:
-    """Plain native and Agno toolkits never connect; either connects when it sets requires_connect."""
+    """Plain toolkits never connect; a toolkit connects when it sets requires_connect."""
     assert not requires_connect(GreeterTools())
-    assert not requires_connect(AgnoToolkit(name="plain"))
-    assert requires_connect(_connecting())
-    assert requires_connect(_NativeConnectingTools())
+    assert not requires_connect(Toolkit(name="plain"))
+    assert requires_connect(_ConnectingTools())
 
 
-class _PlacingToolkit(AgnoToolkit):
+class _PlacingToolkit(_ConnectingTools):
     """Keeps every call of its functions on the primary, as the browser keeps its desktop calls."""
 
     def runs_on_primary(self, function_name: str, arguments: dict[str, object]) -> bool:  # noqa: ARG002
@@ -758,9 +679,9 @@ def test_a_toolkit_routed_to_a_worker_connects_only_where_some_of_its_calls_run(
     def to_worker(_name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
         return entrypoint
 
-    assert not requires_connect(configure_toolkit_functions(_connecting(), to_worker=to_worker))
-    assert requires_connect(configure_toolkit_functions(_connecting(), offered=()))
-    assert requires_connect(configure_toolkit_functions(_connecting(_PlacingToolkit), to_worker=to_worker))
+    assert not requires_connect(configure_toolkit_functions(_ConnectingTools(), to_worker=to_worker))
+    assert requires_connect(configure_toolkit_functions(_ConnectingTools(), offered=()))
+    assert requires_connect(configure_toolkit_functions(_PlacingToolkit(), to_worker=to_worker))
 
 
 def test_meta_schema_opt_out_flags_inherit_and_override_in_order() -> None:
@@ -818,11 +739,9 @@ def test_meta_schema_opt_out_flags_inherit_and_override_in_order() -> None:
 
     plain = _by_name(adapt_toolkit(_DefaultTools()).functions)["plain"]
     assert (plain.offer_background_after, plain.offer_output_path) == (True, True)
-    agno_tk = AgnoToolkit(name="external")
 
     def ext() -> str:
         return "ok"
 
-    agno_tk.register(ext)
-    external = _by_name(adapt_toolkit(agno_tk).functions)["ext"]
+    external = _by_name(adapt_toolkit(Toolkit(name="external", tools=[ext])).functions)["ext"]
     assert (external.offer_background_after, external.offer_output_path) == (True, True)

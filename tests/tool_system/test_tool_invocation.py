@@ -12,17 +12,10 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.agent import Agent  # noqa: TC002 - pydantic resolves the annotations at wrap time.
-from agno.media import File as AgnoFile
-from agno.media import Image as AgnoImage
-from agno.media import Video as AgnoVideo
-from agno.run import RunContext
-from agno.tools import Toolkit
-from agno.tools.function import Function, ToolResult
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import (
     CallResult,
     ToolArgumentError,
@@ -42,7 +35,7 @@ from mindroom.tool_system.tool_hooks import (
     run_sync_tool_entrypoint,
     track_sync_tool_completion,
 )
-from tests.agent_tool_helpers import offered_agno_function
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_system import agno_parity_support as support
 
@@ -84,189 +77,67 @@ async def test_argument_case_matches_golden(case_id: str, probe_functions: dict[
 
 
 @pytest.mark.asyncio
-async def test_run_context_is_built_from_the_call_context() -> None:
-    """A ``run_context`` parameter receives Agno's RunContext with the owned run's identity, metadata, and state."""
-    seen: list[RunContext] = []
+async def test_current_call_exposes_session_state_and_identity() -> None:
+    """A native tool reads the call's identity and mutable session state through ``current_call()``."""
+    seen: list[tuple[str, str | None]] = []
 
-    def tool(run_context: RunContext, note: str) -> str:
-        seen.append(run_context)
-        run_context.session_state["note"] = note
+    def tool(note: str) -> str:
+        call = current_call()
+        assert call is not None
+        seen.append((call.session_id, call.call_id))
+        call.session_state["note"] = note
         return "ok"
 
     state: dict[str, Any] = {"existing": 1}
     [function] = _functions(tool).values()
 
-    outcome = await _run(function, '{"note": "hi"}', session_state=state, metadata={"room": "!r"})
+    outcome = await _run(function, '{"note": "hi"}', call_id="c1", session_state=state)
 
     assert outcome == ToolOutcome(content="ok")
-    [run_context] = seen
-    assert isinstance(run_context, RunContext)
-    assert (run_context.run_id, run_context.session_id, run_context.user_id) == (
-        "run-1",
-        "session-1",
-        "@user:localhost",
-    )
-    assert run_context.metadata == {"room": "!r"}
-    assert run_context.session_state is state
+    assert seen == [("session-1", "c1")]
     assert state == {"existing": 1, "note": "hi"}
 
 
 @pytest.mark.asyncio
-async def test_agent_and_team_parameters_share_the_toolkits_own_state_stand_in() -> None:
-    """``agent`` and ``team`` get an owned stand-in whose ``session_state`` belongs to the adapted toolkit.
+async def test_reserved_framework_arguments_are_dropped_during_parse_and_execution() -> None:
+    """Spoofed reserved framework parameter names are dropped during parsing, direct execution, and middleware rewrites."""
+    seen_args: list[dict[str, Any]] = []
 
-    The toolkit's functions share it across calls, as DaytonaTools keeps its sandbox and working directory there,
-    and it is never the run's stored session state; a toolkit adapted again starts empty, as Agno's per-reply agent
-    did.
-    """
-
-    def change_directory(agent: object, team: object, directory: str) -> str:
-        assert team.session_state is agent.session_state
-        agent.session_state["working_directory"] = directory
-        return directory
-
-    def working_directory(agent: object) -> str:
-        return str(agent.session_state.get("working_directory", "/home/daytona"))
-
-    state: dict[str, Any] = {}
-    functions = _functions(change_directory, working_directory)
-
-    await _run(
-        functions["change_directory"],
-        '{"directory": "/srv", "agent": "spoof", "team": "spoof"}',
-        session_state=state,
-    )
-    outcome = await _run(functions["working_directory"], "{}", session_state={})
-
-    assert outcome.content == "/srv"
-    assert state == {}
-    readapted = _functions(change_directory, working_directory)
-    assert (await _run(readapted["working_directory"], "{}")).content == "/home/daytona"
-
-
-@pytest.mark.asyncio
-async def test_identity_typed_parameters_are_injected_by_annotation() -> None:
-    """A parameter annotated with Agno's identity types is hidden from the model and bound at call time."""
-    seen: dict[str, object] = {}
-
-    def tool(query: str, owner: Agent | None = None, ctx: RunContext | None = None) -> str:
-        seen.update(owner=owner, ctx=ctx)
+    def tool(query: str, **extra: object) -> str:
+        seen_args.append({"query": query, **extra})
         return query
-
-    [function] = _functions(tool).values()
-
-    assert list(function.parameters["properties"]) == ["query"]
-    parsed = parse_tool_arguments('{"query": "q", "owner": "spoof", "ctx": {"run_id": "spoof"}}', function)
-    assert parsed == {"query": "q"}
-    outcome = await execute_tool_call(function, parsed, _context(), middleware=())
-    assert outcome.content == "q"
-    assert isinstance(seen["owner"], ToolCallActor)
-    assert isinstance(seen["ctx"], RunContext)
-    assert seen["ctx"].run_id == "run-1"
-
-
-@pytest.mark.asyncio
-async def test_arguments_that_skip_parsing_cannot_replace_injected_objects() -> None:
-    """Stored arguments of a resumed call reach the leaf unparsed; a spoofed identity still loses to the injection."""
-    seen: dict[str, object] = {}
-
-    def tool(query: str, run_context: RunContext, owner: Agent | None = None, ctx: RunContext | None = None) -> str:
-        seen.update(run_context=run_context, owner=owner, ctx=ctx)
-        return query
-
-    [function] = _functions(tool).values()
-    spoof = {"run_id": "spoof", "session_id": "spoof", "user_id": "@evil:localhost"}
-    arguments = {"query": "q", "run_context": spoof, "ctx": spoof, "owner": "spoof", "_agno_run_context": spoof}
-
-    outcome = await execute_tool_call(function, arguments, _context(), middleware=())
-
-    assert outcome == ToolOutcome(content="q")
-    run_context, ctx = seen["run_context"], seen["ctx"]
-    assert isinstance(run_context, RunContext)
-    assert isinstance(ctx, RunContext)
-    assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
-    assert (ctx.run_id, ctx.user_id) == ("run-1", "@user:localhost")
-    assert isinstance(seen["owner"], ToolCallActor)
-
-
-@pytest.mark.asyncio
-async def test_a_schema_may_give_the_model_a_media_name_but_never_an_identity_name() -> None:
-    """A wrapper's schema may expose its wrapped tool's own ``files``; a declared ``agent`` still gets the stand-in."""
-    seen: dict[str, object] = {}
-
-    def tool(query: str, agent: object = None, files: list[str] | None = None) -> str:
-        seen.update(agent=agent, files=files)
-        return query
-
-    schema = {
-        "type": "object",
-        "properties": {"query": {"type": "string"}, "agent": {"type": "string"}, "files": {"type": "array"}},
-        "required": ["query"],
-    }
-    function = offered_agno_function(
-        Function(name="tool", entrypoint=tool, parameters=schema, skip_entrypoint_processing=True),
-    )
-
-    outcome = await _run(function, '{"query": "q", "agent": "spoof", "files": ["notes.txt"]}')
-
-    assert outcome == ToolOutcome(content="q")
-    assert isinstance(seen["agent"], ToolCallActor)
-    assert seen["files"] == ["notes.txt"]
-
-
-@pytest.mark.asyncio
-async def test_middleware_rewrites_cannot_replace_injected_objects() -> None:
-    """A middleware that writes a framework-injected name into the arguments does not reach the entrypoint with it."""
-    seen: list[RunContext] = []
-
-    def tool(run_context: RunContext, text: str) -> str:
-        seen.append(run_context)
-        return text
 
     async def rewrite(call: ToolCall, call_next: ToolNext) -> object:
-        spoof = {"run_id": "spoof", "session_id": "spoof", "user_id": "@evil:localhost"}
-        return await call_next({**call.arguments, "run_context": spoof})
+        return await call_next({**call.arguments, "run_context": "spoof", "agent": "spoof"})
 
     [function] = _functions(tool).values()
+    parsed = parse_tool_arguments('{"query": "q", "agent": "spoof", "team": "spoof", "run_context": "spoof"}', function)
+    assert parsed == {"query": "q"}
 
-    outcome = await execute_tool_call(function, {"text": "t"}, _context(), middleware=[rewrite])
+    outcome = await execute_tool_call(
+        function,
+        {"query": "q", "agent": "spoof", "_agno_run_context": "spoof"},
+        _context(),
+        middleware=[rewrite],
+    )
 
-    assert outcome == ToolOutcome(content="t")
-    [run_context] = seen
-    assert (run_context.run_id, run_context.user_id) == ("run-1", "@user:localhost")
+    assert outcome == ToolOutcome(content="q")
+    assert seen_args == [{"query": "q"}]
 
 
 @pytest.mark.asyncio
-async def test_result_media_comes_back_owned() -> None:
-    """``ToolResult`` media reaches the outcome as owned media, as the attachments and fal tools return it."""
+async def test_tool_value_media_reaches_outcome_middleware_and_client_result() -> None:
+    """``ToolValue`` media reaches middleware, runners, and outcomes unchanged."""
     clip = b"\x00\x00\x00\x18ftypmp42"
-
-    def tool() -> ToolResult:
-        return ToolResult(
-            content="made",
-            images=[AgnoImage(url="https://example.invalid/out.png", id="out", alt_text="out")],
-            videos=[AgnoVideo(content=clip, mime_type="video/mp4", format="mp4", id="clip")],
-            files=[AgnoFile(content=b"data", mime_type="text/plain", filename="out.txt")],
-        )
-
-    [function] = _functions(tool).values()
-
-    outcome = await _run(function, "{}")
-
-    assert outcome.content == "made"
-    assert outcome.images == (Image(id="out", url="https://example.invalid/out.png", alt_text="out"),)
-    assert outcome.videos == (Video(id="clip", content=clip, mime_type="video/mp4", format="mp4"),)
-    [file] = outcome.files
-    assert (file.content, file.mime_type, file.filename) == (b"data", "text/plain", "out.txt")
-
-
-@pytest.mark.asyncio
-async def test_a_vendor_tool_result_reaches_middleware_and_runners_as_its_tool_value() -> None:
-    """A vendor tool's ``ToolResult`` is read once, at the entrypoint, so the middleware and runners see a ``ToolValue``."""
     seen: list[object] = []
 
-    def tool() -> ToolResult:
-        return ToolResult(content="made", images=[AgnoImage(url="https://example.invalid/out.png", id="out")])
+    def tool() -> ToolValue:
+        return ToolValue(
+            content="made",
+            images=(Image(url="https://example.invalid/out.png", id="out", alt_text="out"),),
+            videos=(Video(content=clip, mime_type="video/mp4", format="mp4", id="clip"),),
+            files=(File(content=b"data", mime_type="text/plain", filename="out.txt"),),
+        )
 
     async def observe(call: ToolCall, call_next: ToolNext) -> object:
         seen.append(await call_next(call.arguments))
@@ -274,31 +145,23 @@ async def test_a_vendor_tool_result_reaches_middleware_and_runners_as_its_tool_v
 
     [function] = _functions(tool).values()
 
+    outcome = await _run(function, "{}")
     returned = (await run_tool_call(function, {}, _context(), middleware=[observe])).value
 
-    expected = ToolValue(content="made", images=(Image(id="out", url="https://example.invalid/out.png"),))
-    assert returned == expected
-    assert seen == [expected]
+    assert outcome.content == "made"
+    assert outcome.images == (Image(id="out", url="https://example.invalid/out.png", alt_text="out"),)
+    assert outcome.videos == (Video(id="clip", content=clip, mime_type="video/mp4", format="mp4"),)
+    [file] = outcome.files
+    assert (file.content, file.mime_type, file.filename) == (b"data", "text/plain", "out.txt")
+    assert seen == [returned]
     assert client_tool_result(returned) == {
         "content": "made",
-        "attachments": [{"kind": "image", "mime_type": None, "url": "https://example.invalid/out.png"}],
+        "attachments": [
+            {"kind": "image", "mime_type": None, "url": "https://example.invalid/out.png"},
+            {"kind": "video", "mime_type": "video/mp4"},
+            {"kind": "file", "mime_type": "text/plain"},
+        ],
     }
-
-
-@pytest.mark.asyncio
-async def test_without_media_the_media_parameters_receive_none() -> None:
-    """A declared media parameter receives None, as Agno passed it for a run without media."""
-    received: list[object] = ["unset"]
-
-    def tool(videos: list[object] | None, audios: list[object] | None) -> str:
-        received[:] = [videos, audios]
-        return "ok"
-
-    [function] = _functions(tool).values()
-
-    await _run(function, "{}")
-
-    assert received == [None, None]
 
 
 @pytest.mark.asyncio
@@ -359,7 +222,7 @@ async def test_generators_are_drained_into_text_and_media() -> None:
         try:
             for index in range(count):
                 yield f"{index},"
-            yield ToolResult(content="end", images=[AgnoImage(url="https://example.invalid/a.png", id="a")])
+            yield ToolValue(content="end", images=(Image(url="https://example.invalid/a.png", id="a"),))
         finally:
             closed.append("sync")
 
@@ -367,7 +230,7 @@ async def test_generators_are_drained_into_text_and_media() -> None:
         try:
             for index in range(count):
                 yield index
-            yield ToolResult(content="!", files=[])
+            yield ToolValue(content="!", files=())
         finally:
             closed.append("async")
 
@@ -391,7 +254,7 @@ async def test_a_stream_of_tool_values_joins_their_text_and_media() -> None:
     def stream() -> Iterator[object]:
         yield ToolValue(content="a", images=(picture,))
         yield "b"
-        yield ToolResult(content="c", images=[AgnoImage(url="https://example.invalid/q.png", id="q")])
+        yield ToolValue(content="c", images=(Image(url="https://example.invalid/q.png", id="q"),))
         yield ToolValue(content="d", audios=(clip,))
 
     [function] = _functions(stream).values()
@@ -521,7 +384,7 @@ async def test_raised_exceptions_become_error_outcomes_and_cancellation_propagat
         return "switched"
 
     functions = _functions(fails, times_out, cancels, stops)
-    stopping = adapt_toolkit(Toolkit(name="control", tools=[stops], stop_after_tool_call_tools=["stops"])).functions[0]
+    stopping = replace(functions["stops"], stop_after_call=True)
 
     assert await _run(functions["fails"], "{}") == ToolOutcome(content="boom", is_error=True)
     assert await _run(functions["times_out"], "{}") == ToolOutcome(content="TimeoutError", is_error=True)
@@ -639,7 +502,7 @@ def test_only_answered_calls_succeed(status: str, succeeded: bool) -> None:
         (ToolOutcome(content="fine"), "ok"),
         (_OAUTH_PAYLOAD, "connection_required"),
         (json.dumps(_OAUTH_PAYLOAD), "connection_required"),
-        (ToolResult(content=json.dumps(_OAUTH_PAYLOAD)), "connection_required"),
+        (ToolValue(content=json.dumps(_OAUTH_PAYLOAD)), "connection_required"),
         ({**_OAUTH_PAYLOAD, "oauth_connection_required": "yes"}, "ok"),
         ("not json", "ok"),
     ],
@@ -666,8 +529,7 @@ async def test_a_call_that_ran_is_read_from_what_its_tool_answered(answer: objec
 
     result = await run_tool_call(function, {}, _context(), middleware=())
 
-    expected = ToolValue(content=answer.content) if isinstance(answer, ToolResult) else answer
-    assert result == CallResult(status, expected)
+    assert result == CallResult(status, answer)
     assert result.error is None
     if status == "failed":
         assert result.failure_text == "The account is locked."

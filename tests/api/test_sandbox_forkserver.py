@@ -80,8 +80,8 @@ sys.exit(serve_template(sys.argv[1], _run_payload))
 '''
 
 
-def test_runtime_template_preloads_schema_types_without_starting_threads() -> None:
-    """Fork children must inherit expensive schema imports, not live background threads."""
+def test_runtime_template_preloads_tool_modules_without_starting_threads() -> None:
+    """Fork children must inherit preloaded tool imports, not live background threads."""
     completed = subprocess.run(
         [
             sys.executable,
@@ -91,15 +91,14 @@ import json
 import sys
 import threading
 from mindroom.api import sandbox_runner
-from agno.utils.schema import identity_injected_types
 
 def ready(socket_path, handler):
     before = set(sys.modules)
-    identity_injected_types()
     print(json.dumps({
-        "new_modules": sorted(set(sys.modules) - before),
         "preloaded_modules": sorted(
-            name for name in ("mindroom.tool_system.plugins", "mindroom.mcp.registry") if name in before
+            name
+            for name in ("mindroom.tool_system.plugins", "mindroom.mcp.registry", "mindroom.tools")
+            if name in before
         ),
         "threads": threading.active_count(),
     }))
@@ -117,8 +116,7 @@ sandbox_runner._run_forkserver_template()
     )
     result = json.loads(completed.stdout)
     assert result == {
-        "new_modules": [],
-        "preloaded_modules": ["mindroom.mcp.registry", "mindroom.tool_system.plugins"],
+        "preloaded_modules": ["mindroom.mcp.registry", "mindroom.tool_system.plugins", "mindroom.tools"],
         "threads": 1,
     }
 

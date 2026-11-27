@@ -18,7 +18,6 @@ from urllib.parse import parse_qs, urlsplit
 import jwt
 import pytest
 import yaml
-from agno.tools import Toolkit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from structlog.contextvars import merge_contextvars
@@ -33,6 +32,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
 from mindroom.mcp_gateway import tools as gateway_tools
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import commit_tool_change, trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
@@ -452,7 +452,7 @@ def _native_dispatch_builder(
     class AccountToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[async_account if async_body else account])
-            self._requires_connect = True
+            self.requires_connect = True
 
         def connect(self) -> None:
             pause("connect")

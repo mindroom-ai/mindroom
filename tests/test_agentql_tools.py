@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 
 _CUSTOM_QUERY = "{ title links[] { href label } metadata { count enabled missing } }"
@@ -181,7 +181,7 @@ def _tool(
     requester: str = "@alice:example.org",
     query: str = _CUSTOM_QUERY,
     process_env: dict[str, str] | None = None,
-) -> AnyToolkit:
+) -> Toolkit:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",

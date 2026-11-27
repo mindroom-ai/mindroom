@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.tools import Toolkit
 
 import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
@@ -23,10 +22,11 @@ from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_tool_helpers import detached_policy
 from tests.chat_ui_contract_fixture import make_chat_ui_context
 from tests.conftest import bind_runtime_paths, install_model_providers

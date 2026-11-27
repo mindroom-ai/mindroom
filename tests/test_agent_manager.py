@@ -16,9 +16,9 @@ from mindroom.attachments.storage import register_local_attachment
 from mindroom.config.personal_agents import read_personal_agent_roster_file
 from mindroom.custom_tools.agent_manager import AgentManagerTools
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.test_generated_agents import CO_OWNER, OWNER, STRANGER, _config, _created, _load, _register

@@ -15,12 +15,12 @@ from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.llm.media import Image
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 from tests.agent_tool_helpers import toolkit_offers

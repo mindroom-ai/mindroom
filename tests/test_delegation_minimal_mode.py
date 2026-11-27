@@ -37,8 +37,8 @@ from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_jobs.runtime import JobSpec
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call

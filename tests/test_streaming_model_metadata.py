@@ -57,7 +57,7 @@ from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, Not
 from mindroom.reply_scope import SpanHandle
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.streaming import send_streaming_response
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import FailedReply
 from mindroom.turn_model import resolve_turn_model
 from mindroom.turn_policy import ResponseAction

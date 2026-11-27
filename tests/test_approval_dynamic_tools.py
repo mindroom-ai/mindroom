@@ -7,7 +7,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools.function import ToolResult
 
 from mindroom import agents
 from mindroom.ai import ai_response
@@ -21,6 +20,7 @@ from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, publish_test_plugins
 from tests.delegation_helpers import approval_calls_for, approval_executor, resume
@@ -93,10 +93,10 @@ class _ScopedCatalogTransport:
         remote_tool_name: str,
         arguments: dict[str, object],
         **_kwargs: object,
-    ) -> ToolResult:
+    ) -> ToolValue:
         """Record exact-once remote execution without contacting a server."""
         self.executed.append((server_id, remote_tool_name, arguments))
-        return ToolResult(content="Synthetic record")
+        return ToolValue(content="Synthetic record")
 
 
 @pytest.mark.asyncio
@@ -202,7 +202,7 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_site", ["constructor", "get_async_functions"])
+@pytest.mark.parametrize("failure_site", ["constructor", "offered_function"])
 @pytest.mark.parametrize("error_type", ["RuntimeError", "KeyError"])
 async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
     tmp_path: Path,
@@ -222,13 +222,16 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
         if failure_site == "constructor"
         else (
             "    def __init__(self):\n"
-            "        super().__init__(name='unavailable', tools=[])\n"
+            "        super().__init__(name='unavailable', tools=[self.ping])\n"
             "\n"
-            "    def get_async_functions(self):\n"
+            "    def ping(self) -> str:\n"
+            "        return 'pong'\n"
+            "\n"
+            "    def offered_function(self, function):\n"
         )
     )
     (plugin_path / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from pathlib import Path\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"

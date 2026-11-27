@@ -33,11 +33,11 @@ from mindroom.shell.background_scope import shell_background_scope
 from mindroom.shell.execution import shell_call_timeout, shell_job_wait_seconds
 from mindroom.tool_jobs.control import JobControl, current_job_id, job_control_context
 from mindroom.tool_jobs.execution import _default_wait, project_definitions
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.progress import structured_tool_result, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolSpec
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools.desktop import desktop_tools
 from tests.desktop_helpers import ALICE

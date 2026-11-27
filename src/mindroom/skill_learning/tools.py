@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.skills import SkillsToolkit
 
-# A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
+# A plain alias: tool_schema unwraps Literal directly when building the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
 # The tool calls of one reply run concurrently, and chat, a review, and archival may change one library at once,
 # while each change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they

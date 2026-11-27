@@ -6,7 +6,6 @@ for tools that need settings, offline replacements for SDK clients that contact 
 a hidden host environment that refuses network connections.
 The parity tests compare what they build with the goldens through `golden_entry` and `argument_outcome`, and
 `tests.agno_parity.regenerate_goldens` rewrites the goldens through the same two functions.
-`agno_derivation` is Agno's schema derivation, which the owned generator's proof compares with.
 """
 
 from __future__ import annotations
@@ -22,10 +21,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import httpx
-from agno.tools import Toolkit
-from agno.tools import function as agno_function
-from agno.tools.function import Function
-from agno.utils import json_schema
 from packaging.version import Version
 
 from mindroom.agents import build_agent_toolkit
@@ -33,7 +28,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.dependencies import check_deps_installed, optional_dependency_environment
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.invocation import (
@@ -45,11 +40,12 @@ from mindroom.tool_system.invocation import (
 )
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from tests.agno_parity import tool_argument_probes as probes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Iterator, Mapping
 
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
@@ -290,36 +286,6 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
     normalized = normalize_version(entry)
     assert isinstance(normalized, dict)
     return normalized
-
-
-def agno_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[str, Any]]:
-    """Return the description and parameter schema Agno's entrypoint processing derives for ``entrypoint``.
-
-    Values annotated ``Any`` or ``object`` take any JSON value, as the owned generator renders them and as
-    https://github.com/agno-agi/agno/pull/10423 proposes; Agno 3.0.9 renders an object that admits only ``{}``.
-    """
-    agno_schema = json_schema.get_json_schema_for_arg
-
-    def unconstrained_any(type_hint: object) -> dict[str, Any] | None:
-        return {} if type_hint is Any or type_hint is object else agno_schema(type_hint)
-
-    function = Function(name="derived", entrypoint=entrypoint)
-    # Agno caches each callable's derivation, so forget it around the patch: a cached schema would skip the patch,
-    # and the patched one would reach later unpatched derivations.
-    _forget_agno_derivation(entrypoint)
-    try:
-        with patch.object(json_schema, "get_json_schema_for_arg", unconstrained_any):
-            function.process_entrypoint(strict=False)
-    finally:
-        _forget_agno_derivation(entrypoint)
-    return function.description, function.parameters
-
-
-def _forget_agno_derivation(entrypoint: Callable[..., Any]) -> None:
-    """Drop Agno's cached schema derivations of ``entrypoint``."""
-    agno_function._cached_entrypoint_schema.cache_clear()
-    if (cache := agno_function._get_lifetime_cache(entrypoint)) is not None:
-        cache.clear()
 
 
 def probe_functions() -> dict[str, ToolFunction]:

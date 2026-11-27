@@ -1,12 +1,4 @@
-"""The owned schema generator renders each annotation as Agno did, and owned coercion gives a body what Agno's gave.
-
-The generator derives every tool's schema, MindRoom's own and the Agno toolkits', which the tool goldens pin. The
-annotation-kind cases run each kind of annotation and docstring a tool may use through both generators, and the two
-outputs must serialize to the same bytes, so a plugin's Agno toolkit is offered what Agno offered; every argument golden
-whose probe takes no framework object runs through owned toolkit functions. Values annotated ``Any`` or ``object`` are
-where the two differ on purpose: the owned generator leaves them unconstrained, and the comparison renders them as
-Agno's open fix does (``support.agno_derivation``).
-"""
+"""The native schema generator renders every annotation kind and docstring style deterministically."""
 
 # The annotation-kind probes exist for their signatures, which no body reads.
 # ruff: noqa: ARG001, ARG002
@@ -26,6 +18,7 @@ from typing import (  # noqa: UP035 - The bare typing aliases are annotation-kin
     Literal,
     Optional,
     Union,
+    get_origin,
 )
 
 import pytest
@@ -33,10 +26,10 @@ from pydantic import BaseModel
 
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.pandas import pandas_tools
 from tests.agent_tool_helpers import toolkit_offers
@@ -54,9 +47,36 @@ def owned_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[s
     return tool_description(entrypoint), tool_parameters(entrypoint)
 
 
-def assert_same_bytes(owned: object, agno: object) -> None:
+_PIPED_UNION_IS_TYPING_UNION = get_origin(int | None) is Union
+
+
+def _piped_optional(schema: dict[str, Any], *, description: str | None = None) -> dict[str, Any]:
+    """Return the schema ``_parameter_schema`` emits for top-level ``X | None`` on this Python version.
+
+    Python 3.14 unified ``types.UnionType`` with ``typing.Union``, so top-level ``X | None`` drops ``null`` like
+    ``Optional[X]`` on 3.14 while keeping ``anyOf`` on 3.13.
+    """
+    result = dict(schema) if _PIPED_UNION_IS_TYPING_UNION else {"anyOf": [schema, {"type": "null"}]}
+    if description is not None:
+        result["description"] = description
+    return result
+
+
+def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties) if required is None else required,
+    }
+
+
+def _string_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": value}
+
+
+def assert_same_bytes(owned: object, expected: object) -> None:
     """Compare serialized bytes, key order included, because providers receive schemas serialized."""
-    assert json.dumps(owned, indent=2) == json.dumps(agno, indent=2)
+    assert json.dumps(owned, indent=2) == json.dumps(expected, indent=2)
 
 
 class Color(Enum):
@@ -194,12 +214,12 @@ def test_values_annotated_any_or_object_take_any_json_value() -> None:
     ) -> str:
         return ""
 
-    mapping = {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}}
+    mapping = _string_mapping({})
     assert tool_parameters(open_values)["properties"] == {
         "anything": {},
         "thing": {},
         "mapping": mapping,
-        "objects": {"anyOf": [mapping, {"type": "null"}]},
+        "objects": _piped_optional(mapping),
         "rows": {"type": "array", "items": {"type": "array", "items": {}}},
     }
 
@@ -331,13 +351,203 @@ ANNOTATION_KINDS = (
 )
 
 
+_INNER_MODEL_SCHEMA: dict[str, Any] = {
+    "description": "A model nested in another.",
+    "properties": {
+        "key": {"title": "Key", "type": "string"},
+        "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+    },
+    "required": ["key"],
+    "title": "Inner",
+    "type": "object",
+}
+
+_EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
+    "scalars": (
+        "Take scalars.",
+        _object_schema(
+            {
+                "count": {"type": "integer", "description": "A whole number."},
+                "ratio": {"type": "number", "description": "A decimal number."},
+                "enabled": {"type": "boolean", "description": "A flag."},
+                "label": {"type": "string", "description": "Free text."},
+            },
+        ),
+    ),
+    "optionals": (
+        "Take optional values and defaults.",
+        _object_schema(
+            {
+                "typed": {"type": "string", "description": "Optional text."},
+                "union": {"type": "integer", "description": "Optional number."},
+                "piped": _piped_optional({"type": "integer"}, description="Optional number with a pipe."),
+                "choice": {"type": "string", "enum": ["a", "b"], "description": "An optional choice."},
+                "flag": {"type": "boolean", "description": "A defaulted flag."},
+            },
+            required=[],
+        ),
+    ),
+    "literals": (
+        "Take constrained choices.",
+        _object_schema(
+            {
+                "words": {"type": "string", "enum": ["fast", "slow"]},
+                "numbers": {"type": "integer", "enum": [1, 2]},
+                "flags": {"type": "boolean", "enum": [True]},
+                "mixed": {"enum": ["a", 1]},
+            },
+        ),
+    ),
+    "enums": (
+        "Take enumerations.",
+        _object_schema(
+            {"color": {"type": "string", "enum": ["red", "green"]}, "level": {"type": "string", "enum": [1, 2]}},
+            required=["color"],
+        ),
+    ),
+    "collections": (
+        "Take sequences.",
+        _object_schema(
+            {
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "pairs": {"type": "array", "items": {"type": "integer"}},
+                "unique": {"type": "array", "items": {"type": "string"}},
+                "frozen": {"type": "array", "items": {"type": "integer"}},
+                "bare": {"type": "array"},
+                "legacy": {"type": "array", "items": {"type": "string"}},
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "number"},
+                                {"type": "boolean"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+                "either": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+            },
+        ),
+    ),
+    "mappings": (
+        "Take mappings.",
+        _object_schema(
+            {
+                "bare": {"type": "object", "additionalProperties": True},
+                "legacy": _string_mapping({"type": "string"}),
+                "typed": _string_mapping({"type": "integer"}),
+                "anything": _string_mapping({}),
+                "objects": _string_mapping({}),
+                "unions": _string_mapping(
+                    {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}]},
+                ),
+                "nested": _piped_optional(_string_mapping({"type": "array", "items": {"type": "string"}})),
+            },
+            required=["bare", "legacy", "typed", "anything", "objects", "unions"],
+        ),
+    ),
+    "models": (
+        "Take structured values.",
+        _object_schema(
+            {
+                "outer": {
+                    "description": "A model holding nested models.",
+                    "properties": {
+                        "name": {"title": "Name", "type": "string"},
+                        "inner": _INNER_MODEL_SCHEMA,
+                        "extras": {"default": [], "items": _INNER_MODEL_SCHEMA, "title": "Extras", "type": "array"},
+                        "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Note"},
+                        "maybe": {"anyOf": [_INNER_MODEL_SCHEMA, {"type": "null"}], "default": None},
+                    },
+                    "required": ["name", "inner"],
+                    "title": "Outer",
+                    "type": "object",
+                },
+                "tree": {
+                    "description": "A model nested in itself.",
+                    "properties": {
+                        "label": {"title": "Label", "type": "string"},
+                        "children": {
+                            "default": [],
+                            "items": {"type": "object", "description": "A nested TreeNode object of this same shape."},
+                            "title": "Children",
+                            "type": "array",
+                        },
+                    },
+                    "required": ["label"],
+                    "title": "TreeNode",
+                    "type": "object",
+                },
+                "many": _piped_optional({"type": "array", "items": _INNER_MODEL_SCHEMA}),
+            },
+            required=["outer", "tree"],
+        ),
+    ),
+    "untyped": ("Take values of any type.", _object_schema({"value": {}, "anything": {}, "thing": {}})),
+    "no_docstring": ("", _object_schema({"value": {"type": "string"}})),
+    "google_style": (
+        "Search for something.\nA longer body that explains\nover two lines.",
+        _object_schema(
+            {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "How many results."},
+            },
+            required=["query"],
+        ),
+    ),
+    "numpy_style": (
+        "Search for something.",
+        _object_schema(
+            {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "(int) How many results."},
+            },
+            required=["query"],
+        ),
+    ),
+    "rest_style": (
+        "Search for something.",
+        _object_schema(
+            {
+                "query": {"type": "string", "description": "(str) The query."},
+                "limit": {"type": "integer", "description": "How many results."},
+            },
+            required=["query"],
+        ),
+    ),
+    "undocumented_parameter": (
+        "Search for something.",
+        _object_schema(
+            {"query": {"type": "string"}, "limit": {"type": "integer", "description": "How many results."}},
+            required=["query"],
+        ),
+    ),
+    "asynchronous": (
+        "Search asynchronously.",
+        _object_schema({"query": {"type": "string", "description": "The query."}}),
+    ),
+    "keyword_only": (
+        "Take keyword-only parameters.",
+        _object_schema(
+            {"query": {"type": "string"}, "limit": {"type": "integer"}, "required": {"type": "boolean"}},
+            required=["query", "required"],
+        ),
+    ),
+}
+
+
 @pytest.mark.parametrize("entrypoint", ANNOTATION_KINDS, ids=lambda entrypoint: entrypoint.__name__)
-def test_each_annotation_kind_derives_agnos_schema(entrypoint: Callable[..., Any]) -> None:
-    """Each kind of annotation, default, and docstring style derives the bytes Agno derives."""
-    assert_same_bytes(owned_derivation(entrypoint), support.agno_derivation(entrypoint))
+def test_each_annotation_kind_derives_expected_schema(entrypoint: Callable[..., Any]) -> None:
+    """Each kind of annotation, default, and docstring style derives its pinned schema bytes."""
+    assert_same_bytes(owned_derivation(entrypoint), _EXPECTED_ANNOTATION_SCHEMAS[entrypoint.__name__])
 
 
-def test_a_bound_method_derives_agnos_schema() -> None:
+def test_a_bound_method_derives_expected_schema() -> None:
     """A method's ``self`` is bound, so only its own parameters reach the schema."""
 
     class Holder:
@@ -351,7 +561,20 @@ def test_a_bound_method_derives_agnos_schema() -> None:
             """
             return query
 
-    assert_same_bytes(owned_derivation(Holder().method), support.agno_derivation(Holder().method))
+    assert_same_bytes(
+        owned_derivation(Holder().method),
+        (
+            "Search.",
+            {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The query."},
+                    "limit": {"type": "integer", "description": "How many."},
+                },
+                "required": ["query"],
+            },
+        ),
+    )
 
 
 def test_variadic_parameters_stay_out_of_the_schema() -> None:
@@ -419,12 +642,12 @@ def test_an_annotation_that_does_not_resolve_raises() -> None:
 
 
 def owned_probe_functions() -> dict[str, Any]:
-    """Adapt the argument probes that take no framework object as one owned toolkit, keyed by function name."""
-    toolkit = Toolkit(name="probes", tools=[probe for probe in probes.PROBES if probe is not probes.probe_agent])
+    """Adapt the argument probes as one toolkit, keyed by function name."""
+    toolkit = Toolkit(name="probes", tools=list(probes.PROBES))
     return {function.name: function for function in adapt_toolkit(toolkit).functions}
 
 
-_OWNED_CASES = sorted(case_id for case_id, case in ARGUMENTS.items() if case["function"] != "probe_agent")
+_OWNED_CASES = sorted(ARGUMENTS)
 
 
 @pytest.mark.asyncio

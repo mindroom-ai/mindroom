@@ -9,7 +9,7 @@ what those tests expect, and an unchanged golden is reproduced byte for byte:
 - `providers/`: each golden's input is sent through the owned adapter and the production pipeline stages, answered
   with its canned reply, and the request and parsed reply are rewritten (`tests/providers/golden_support.py`).
 - `prompts/`: each scenario of `tests/agno_parity/prompt_scenarios.py` runs again against the recording provider.
-- `tools/`: every registered tool is built as `tests/tool_system/test_agno_toolkits.py` builds it, and every case
+- `tools/`: every registered tool is built as `tests/tool_system/test_toolkits.py` builds it, and every case
   already in `arguments.json` runs as `tests/tool_system/test_tool_invocation.py` runs it; a new argument case needs
   only its `function` and `raw_arguments` before a run fills in the rest.
 - `knowledge/`: every embedder call and every search runs again (`tests/agno_parity/knowledge_goldens.py`);
@@ -38,8 +38,8 @@ from unittest.mock import patch
 import pytest
 import structlog
 
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests import ai_run_golden_helpers as ai_run
 from tests.agno_parity import knowledge_goldens as knowledge
 from tests.agno_parity import openai_compat_golden, prompt_scenarios

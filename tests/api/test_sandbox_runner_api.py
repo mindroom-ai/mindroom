@@ -27,8 +27,6 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
@@ -68,6 +66,7 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -2028,7 +2027,7 @@ def test_subprocess_plugin_receives_full_config_and_explicit_refresh(
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
@@ -3280,7 +3279,7 @@ def _write_snapshot_only_plugin(tmp_path: Path) -> dict[str, object]:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
@@ -4163,7 +4162,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_override_valida
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginTool(Toolkit):\n"
@@ -4233,7 +4232,7 @@ def test_sandbox_runner_execute_refreshes_plugin_metadata_before_tool_init_overr
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class DemoPluginInitTool(Toolkit):\n"
@@ -4810,7 +4809,11 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     _write_general_agent_config(Path(os.environ["MINDROOM_CONFIG_PATH"]))
     _set_sandbox_token(monkeypatch)
     captured_kwargs: dict[str, object] = {}
-    toolkit = Toolkit(name="homeassistant", tools=[Function(name="ping", entrypoint=lambda: {"ok": True})])
+
+    def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    toolkit = Toolkit(name="homeassistant", tools=[ping])
 
     def fake_get_tool_by_name(tool_name: str, **kwargs: object) -> Toolkit:
         assert tool_name == "homeassistant"

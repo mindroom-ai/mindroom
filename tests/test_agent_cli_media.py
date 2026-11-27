@@ -10,9 +10,6 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from agno.media import Audio, File, Image
-from agno.tools.function import Function, ToolResult
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.bash import minimal_bash_toolkit
@@ -29,13 +26,16 @@ from mindroom.ai import _process_stream_events, _StreamingAttemptState
 from mindroom.attachments.media import resolve_scoped_attachments
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import Message
 from mindroom.response_turn import collect_streamed_response_content
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.conftest import live_turn_tools_for_test
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.minimal_agent_fixtures import cli_window
@@ -46,7 +46,7 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
 
     hooks = []
 
-    async def produce() -> ToolResult:
+    async def produce() -> ToolValue:
         return result
 
     async def hook(call, call_next):
@@ -162,11 +162,11 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
 
 @pytest.mark.asyncio
 async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path) -> None:
-    generated = ToolResult(
+    generated = ToolValue(
         content="generated",
-        images=[Image(content=b"image", mime_type="image/png")],
-        audios=[Audio(content=b"audio", mime_type="audio/wav", format="wav")],
-        files=[File(content=b"document", mime_type="application/pdf", filename="result.pdf")],
+        images=(Image(content=b"image", mime_type="image/png"),),
+        audios=(Audio(content=b"audio", mime_type="audio/wav", format="wav"),),
+        files=(File(content=b"document", mime_type="application/pdf", filename="result.pdf"),),
     )
     owner, messages, receipt = await _run(tmp_path, generated)
     try:
@@ -207,7 +207,7 @@ async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path
 @pytest.mark.asyncio
 async def test_bash_receipt_references_url_media_by_url_without_an_attachment(tmp_path) -> None:
     """A medium the tool gave by URL is referenced by that URL; nothing is saved or registered for it."""
-    linked = ToolResult(content="linked", images=[Image(url="https://example.test/linked.png", mime_type="image/png")])
+    linked = ToolValue(content="linked", images=(Image(url="https://example.test/linked.png", mime_type="image/png"),))
     owner, _messages, receipt = await _run(tmp_path, linked)
     try:
         assert receipt["status"] == "completed"
@@ -227,9 +227,9 @@ async def test_completed_large_media_result_uses_workspace_artifact(tmp_path, fa
     policy = ToolOutputFilePolicy(root, max_bytes=8 if failure else 1000000, auto_save_threshold_bytes=1000000)
     owner, messages, receipt = await _run(
         tmp_path,
-        ToolResult(
+        ToolValue(
             content=content,
-            images=[Image(url="https://example.test/generated.png", mime_type="image/png")],
+            images=(Image(url="https://example.test/generated.png", mime_type="image/png"),),
         ),
         policy=policy,
     )
@@ -285,12 +285,7 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         return "unused"
 
     properties = {f"property_{index}": {"type": "string", "description": "value " * 60} for index in range(400)}
-    function = Function(
-        name="huge",
-        entrypoint=huge,
-        skip_entrypoint_processing=True,
-        parameters={"type": "object", "properties": properties},
-    )
+    function = passthrough_tool(name="huge", parameters={"type": "object", "properties": properties})(huge)
     catalog = await _catalog(tmp_path, [adapt_toolkit(Toolkit(name="big", tools=[function]))])
 
     async def authorize(key, arguments):
@@ -335,9 +330,9 @@ async def test_projection_exception_keeps_completed_status_and_media(tmp_path, m
     monkeypatch.setattr(turn, "project_cli_result", fail_projection)
     owner, messages, receipt = await _run(
         tmp_path,
-        ToolResult(
+        ToolValue(
             content="completed effect",
-            images=[Image(url="https://example.test/output.png")],
+            images=(Image(url="https://example.test/output.png"),),
         ),
     )
     try:

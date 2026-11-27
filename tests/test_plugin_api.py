@@ -72,6 +72,7 @@ _EXPORTS = [
     "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
+    "Audio",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
@@ -84,6 +85,7 @@ _EXPORTS = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "File",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
@@ -92,6 +94,7 @@ _EXPORTS = [
     "HookContext",
     "HookMatrixAdmin",
     "HookMessageSender",
+    "Image",
     "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
@@ -139,6 +142,7 @@ _EXPORTS = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "Video",
     "WorkerService",
     "WorkerServiceError",
     "WorkerServiceState",
@@ -210,6 +214,7 @@ _SIGNATURES = {
         "state_dir)"
     ),
     "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, requester_scoped, client_config_service)",
+    "Audio": "(*, id, url, filepath, content, format, mime_type, duration, sample_rate, channels, transcript, expires_at, metadata)",
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
@@ -232,6 +237,7 @@ _SIGNATURES = {
     ),
     "Done": "(notice, resolve, on_loop)",
     "EnrichmentItem": "(key, text, cache_policy, persist, minimal_required)",
+    "File": "(*, id, url, filepath, content, mime_type, file_type, filename, size, format, name, metadata)",
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "GoogleWorkspaceConfig": "(*, name, display_name, client_config_service, allowed_hosted_domains, services)",
@@ -241,6 +247,7 @@ _SIGNATURES = {
         "agent_message_snapshot_reader, runtime_started_at)"
     ),
     "HookContext": f"({_HOOK}, *, {_HOOK_HELPERS})",
+    "Image": "(*, id, url, filepath, content, format, mime_type, detail, original_prompt, revised_prompt, alt_text, metadata)",
     "ManagedEntity": "(name, kind, display_name, tool_names)",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
@@ -319,6 +326,7 @@ _SIGNATURES = {
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
+    "Video": "(*, id, url, filepath, content, format, mime_type, duration, width, height, fps, eta, original_prompt, revised_prompt, metadata)",
     "WorkerService": "(name, module, idle_timeout_seconds)",
     "WorkerServiceState": "(state, port, exit_code)",
     "TurnOrigin": (
@@ -618,7 +626,7 @@ _MANIFEST = {
 }
 
 # What docs/plugins.md has plugins and their tests import from other modules, which `mindroom.plugin_api` cannot re-export without
-# loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
+# loading FastAPI or heavier runtime dependencies, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "AgentWorkspace",
     "ClientUser",
@@ -683,7 +691,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 36), "64a9afe1ceb9b97efc102cfe4eb6def66dbddd4b5c86ccb84656b4f64c7870d7")
+_PINNED_VERSION = ((1, 37), "861010646d1d6fe5caeceda69a8bf2a948c82d2b115276566b8656c4abb27f72")
 
 
 def _is_enum(obj: object) -> bool:

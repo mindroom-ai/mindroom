@@ -13,13 +13,13 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
     close_connected_toolkit,
     toolkit_call_lifetime,
 )
+from mindroom.tool_system.toolkits import configure_toolkit_functions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.tool_function import ToolValue
 
 _CLEANUPS = RetainedToolkitCleanups(failure_event="mcp_gateway_tool_cleanup_failed", adopt=retain_execution_task)
@@ -50,7 +50,7 @@ async def drain_gateway_tool_cleanup() -> None:
     await _CLEANUPS.drain()
 
 
-async def _close_once_built(building: asyncio.Task[AnyToolkit]) -> None:
+async def _close_once_built(building: asyncio.Task[Toolkit]) -> None:
     """Close the toolkit a cancelled call was building, once its construction returns."""
     try:
         toolkit = await building
@@ -59,7 +59,7 @@ async def _close_once_built(building: asyncio.Task[AnyToolkit]) -> None:
     await close_connected_toolkit(toolkit, executor=_TOOL_EXECUTOR)
 
 
-def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> AnyToolkit:
+def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
@@ -120,7 +120,7 @@ async def _build_selected(
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     require_current_access: Callable[[], None] | None,
-) -> AnyToolkit:
+) -> Toolkit:
     server_id = context.plugins.tools.mcp_server_id(entry.name)
     if server_id is not None:
         if manager is None:
@@ -162,7 +162,7 @@ async def run_toolkit_operation[T](
     context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
-    operation: Callable[[AnyToolkit], Awaitable[T]],
+    operation: Callable[[Toolkit], Awaitable[T]],
     require_current_access: Callable[[], None] | None = None,
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""

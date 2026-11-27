@@ -11,7 +11,6 @@ import pytest
 from mindroom.custom_tools.atlassian import AtlassianTools
 from mindroom.custom_tools.atlassian_spaces import AtlassianSpaces, UnconfinableQueryError
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import (
     ToolConfigOverrideError,
     get_tool_by_name,
@@ -19,6 +18,7 @@ from mindroom.tool_system.metadata import (
 )
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.atlassian_test_support import (
     SITE_URL,
     FakeGateway,
@@ -35,7 +35,7 @@ from tests.atlassian_test_support import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 TOKEN = "alice-access-token"  # noqa: S105
 CONTENT_SEARCH = gateway_url("confluence", "/wiki/rest/api/content/search")
@@ -46,7 +46,7 @@ def _connected(
     monkeypatch: pytest.MonkeyPatch,
     stored: dict[str, object] | None = None,
     **options: object,
-) -> tuple[AnyToolkit, FakeGateway]:
+) -> tuple[Toolkit, FakeGateway]:
     """Build the agent's toolkit through the catalog, from ``stored`` settings and an agent tool entry's ``options``."""
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
@@ -69,7 +69,7 @@ def _connected(
     return tool, gateway
 
 
-async def _call(tool: AnyToolkit, function_name: str, **kwargs: object) -> dict[str, Any]:
+async def _call(tool: Toolkit, function_name: str, **kwargs: object) -> dict[str, Any]:
     return json.loads(await tool.functions[function_name](**kwargs))
 
 

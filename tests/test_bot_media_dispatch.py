@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
-from agno.media import Image
 
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.coalescing.batch import CoalescingKey, PreparedTurn, RequesterCoalescingOwner
@@ -36,6 +35,7 @@ from mindroom.inbound_turn_normalizer import (
     _VoiceNormalizationResult,
 )
 from mindroom.ingress_validation import IngressValidator
+from mindroom.llm.media import Image
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.teams.formation import TeamResolution

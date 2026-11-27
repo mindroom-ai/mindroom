@@ -27,6 +27,7 @@ from mindroom.teams import delegate_tools
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
@@ -53,8 +54,6 @@ from tests.teams.squad import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.spec import RunContext
     from mindroom.llm.runs import AnyRunRecord
@@ -489,14 +488,11 @@ async def test_a_resume_refuses_an_approved_leader_call_the_team_no_longer_offer
     assert leader.requests == []
 
 
-def calling_run(run_context: AgnoRunContext) -> str:
-    """Return the id of the run that makes the call.
-
-    Args:
-        run_context: The run's context, which the loop injects.
-
-    """
-    return run_context.run_id
+def calling_run() -> str:
+    """Return the id of the run that makes the call."""
+    call = current_tool_call()
+    assert call is not None
+    return call.context.run_id
 
 
 async def test_a_resumed_leader_s_calls_run_under_the_paused_team_run_s_id() -> None:

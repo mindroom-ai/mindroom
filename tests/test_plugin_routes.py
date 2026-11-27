@@ -129,7 +129,7 @@ async def stream(websocket: WebSocket) -> None:
 
 
 TOOLS = """
-from agno.tools import Toolkit
+from mindroom.plugin_api import Toolkit
 
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata

@@ -23,7 +23,7 @@ from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted
 from mindroom.providers.registry import build_model_provider
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.workflow_live.kill_after_write import Deployment, LiveError, add_send_options, say, until
 

@@ -10,15 +10,15 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from agno.tools.toolkit import Toolkit
 from fastapi import FastAPI
 
 from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.conftest import live_turn_tools_for_test
 from tests.test_agent_tool_calls import _catalog
 

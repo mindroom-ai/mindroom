@@ -83,7 +83,6 @@ from mindroom.shell.execution import (
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.timing import elapsed_ms_between, elapsed_ms_since
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
-from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.catalog import (
     ToolConfigOverrideError,
     ToolInitOverrideError,
@@ -111,6 +110,7 @@ from mindroom.tool_system.progress import report_tool_progress, structured_tool_
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
+from mindroom.tool_system.toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 from mindroom.tool_system.worker_proxy_client import EXECUTE_KEEPALIVE_SECONDS
 from mindroom.tool_system.worker_routing import (
@@ -159,7 +159,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.shell.execution import ProcessRecord
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.worker_computer.protocol import BrowserSession
     from mindroom.workers.backends.local import LocalWorkerStatePaths
 
@@ -1061,7 +1061,7 @@ async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], k
 
 
 async def _run_toolkit_entrypoint(
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     entrypoint: Callable[..., object],
     args: list[Any],
     kwargs: dict[str, Any],
@@ -1104,7 +1104,7 @@ def _resolve_entrypoint(
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     sandbox: bool = False,
-) -> tuple[AnyToolkit, Callable[..., object]]:
+) -> tuple[Toolkit, Callable[..., object]]:
     """Build one tool's entrypoint from ``tools``, the registry its caller composed for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
@@ -1985,13 +1985,9 @@ def _run_forkserver_template() -> int:
     socket_path = sys.argv[sys.argv.index(sandbox_forkserver.TEMPLATE_ARG) + 1]
     # Pre-warm the full tool import graph once so fork children skip it; this
     # belongs to template startup, not to importing this module.
-    # Agno resolves its agent and team types while building tool schemas. Import them in the
-    # single-threaded template, not afresh in every isolated request child.
     from mindroom.mcp import registry as mcp_registry  # noqa: PLC0415
     from mindroom.tool_system import plugins as tool_system_plugins  # noqa: PLC0415
-    from mindroom.tool_system.agno_toolkits import warm_agno_tool_imports  # noqa: PLC0415
 
-    warm_agno_tool_imports()
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
@@ -2253,7 +2249,7 @@ async def _execute_worker_browser(
         browser_toolkit = provider.validate_toolkit(toolkit)
 
         async def invoke(
-            retained_toolkit: AnyToolkit,
+            retained_toolkit: Toolkit,
             entrypoint: Callable[..., object],
             args: list[object],
             kwargs: dict[str, object],

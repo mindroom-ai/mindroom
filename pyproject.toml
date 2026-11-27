@@ -15,7 +15,6 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno==3.2.1",
   "aiohttp>=3.13.3",
   "anthropic>=2.11,<3",
   "anyio>=4.10",
@@ -488,7 +487,6 @@ zendesk = [
   "requests",
 ]
 zep = [
-  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
   "zep-cloud>=3.3,<4",
 ]
 zoom = [

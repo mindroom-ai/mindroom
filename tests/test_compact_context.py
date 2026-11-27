@@ -32,9 +32,9 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.tool_jobs.execution import _detached, approval_can_run_as_job, wait_mode
 from mindroom.tool_jobs.execution_authority import JobCall, JobTool
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
