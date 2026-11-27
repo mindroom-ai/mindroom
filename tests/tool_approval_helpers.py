@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.declarations import ApprovalAlias
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.conftest import register_test_tool
 
 if TYPE_CHECKING:
@@ -21,12 +21,12 @@ if TYPE_CHECKING:
     import pytest
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 
 def gated_functions(
-    toolkit: AnyToolkit,
+    toolkit: Toolkit,
     config: Config,
     *,
     registered_tool_name: str | None = None,

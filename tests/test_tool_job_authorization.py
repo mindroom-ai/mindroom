@@ -23,11 +23,12 @@ from mindroom.tool_jobs.authorization import (
 )
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import Function, Toolkit, toolkit_function_names
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import replace_test_tool_factory
 from tests.tool_job_helpers import toolkit_job_tools
@@ -166,8 +167,10 @@ def test_constructor_identity_is_a_digest_with_separate_function_filters() -> No
 
 
 def _calculator_authority(config: Config) -> dict[str, object]:
-    toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+    def add() -> None:
+        return None
+
+    toolkit = Toolkit(name="calculator", tools=[add])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
@@ -477,8 +480,11 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
         agents={"lead": AgentConfig(display_name="Lead", tools=[ToolConfigEntry(name="calculator", defer=True)])},
     )
     owner = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
-    toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+
+    def add() -> None:
+        return None
+
+    toolkit = Toolkit(name="calculator", tools=[add])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),

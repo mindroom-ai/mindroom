@@ -22,9 +22,9 @@ from mindroom.shared_directories.paths import (
     describe_agent_shared_directories,
 )
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key
 from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount, plan_shared_directory_mounts
 from tests.authorization_helpers import make_test_tool_runtime_context

@@ -30,7 +30,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
@@ -445,7 +445,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
 class _ConnectedTools(Toolkit):
     """A toolkit the SDK connects for one run, like Postgres."""
 
-    _requires_connect = True
+    requires_connect = True
 
     def __init__(self) -> None:
         super().__init__(name="connected", tools=[self.query])

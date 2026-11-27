@@ -27,12 +27,12 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_turn import AttemptResolved, CompletedAttempt
 from mindroom.tool_jobs.resources import ExecutionResourceReference, current_execution_resources, execution_resources
 from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     pinned_worker_kind,

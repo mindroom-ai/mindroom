@@ -8,8 +8,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.media import Image as AgnoImage
-from agno.tools.function import ToolResult
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
@@ -38,6 +36,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
+from mindroom.llm.media import Image
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
     CUT_OFF_TEXT_KEY,
@@ -55,11 +54,12 @@ from mindroom.llm.request_identity import (
 )
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_loop.helpers import (
     add,
     boom,
@@ -255,7 +255,7 @@ async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_reques
     """The later call finishes first and is announced first; the next request still reads both in call order."""
     later_finished = asyncio.Event()
 
-    async def first(label: str) -> ToolResult:
+    async def first(label: str) -> ToolValue:
         """Answer once the later call has finished.
 
         Args:
@@ -263,9 +263,9 @@ async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_reques
 
         """
         await asyncio.wait_for(later_finished.wait(), timeout=5)
-        return ToolResult(content=f"first {label}", images=[AgnoImage(content=b"first", format="png")])
+        return ToolValue(content=f"first {label}", images=(Image(content=b"first", format="png"),))
 
-    async def second(label: str) -> ToolResult:
+    async def second(label: str) -> ToolValue:
         """Answer at once.
 
         Args:
@@ -273,7 +273,7 @@ async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_reques
 
         """
         later_finished.set()
-        return ToolResult(content=f"second {label}", images=[AgnoImage(content=b"second", format="png")])
+        return ToolValue(content=f"second {label}", images=(Image(content=b"second", format="png"),))
 
     model = ScriptedModel(
         [
@@ -971,14 +971,14 @@ async def test_after_batch_stop_leaves_a_paused_batch_paused_with_its_requiremen
 
 
 async def test_tool_media_reach_the_model_on_a_follow_up_user_message() -> None:
-    def picture(label: str) -> ToolResult:
+    def picture(label: str) -> ToolValue:
         """Return a picture.
 
         Args:
             label: Its label.
 
         """
-        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=b"png", format="png")])
+        return ToolValue(content=f"picture {label}", images=(Image(content=b"png", format="png"),))
 
     model = ScriptedModel([calls(tool_call("picture", "c1", label="a"), metrics=usage(1, 1)), answer("I see it.")])
     messages = _prompt()

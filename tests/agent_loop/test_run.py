@@ -32,10 +32,11 @@ from mindroom.llm.provider import ModelIdentity, TextDelta, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import current_call
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.llm.agno_dict_helpers import stored_requirement, with_requirements
@@ -45,8 +46,6 @@ from tests.session_storage.layout_4 import store_rows, upgrade_from_layout
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from agno.run import RunContext as AgnoRunContext
 
     from mindroom.agent_loop.model_loop import LoopState
     from mindroom.agent_loop.tools import PlannedCall
@@ -171,28 +170,24 @@ async def test_a_completed_run_is_stored_once_before_it_is_announced() -> None:
     assert "requirements" not in stored
 
 
-def remember(note: str, run_context: AgnoRunContext) -> str:
+def remember(note: str) -> str:
     """Keep a note in the run's session state.
 
     Args:
         note: What to keep.
-        run_context: The run's context, which the loop injects.
 
     """
-    assert run_context.session_state is not None
-    run_context.session_state["note"] = note
+    call = current_call()
+    assert call is not None
+    call.session_state["note"] = note
     return "kept"
 
 
-def recall(run_context: AgnoRunContext) -> str:
-    """Return the note the run's session state keeps.
-
-    Args:
-        run_context: The run's context, which the loop injects.
-
-    """
-    assert run_context.session_state is not None
-    return str(run_context.session_state.get("note"))
+def recall() -> str:
+    """Return the note the run's session state keeps."""
+    call = current_call()
+    assert call is not None
+    return str(call.session_state.get("note"))
 
 
 @pytest.mark.asyncio

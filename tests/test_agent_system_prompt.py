@@ -24,10 +24,10 @@ from mindroom.prompts import (
     SKILLS_TOOL_USAGE_PROMPT,
     WORKSPACE_SKILL_AUTHORING_PROMPT,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.fakes.scripted_model import ScriptedModel

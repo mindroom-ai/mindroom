@@ -39,10 +39,10 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.reactive_triggers.triage import TriageOutcome
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.plugins import candidate_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools import triggers_tools
 from mindroom.tools.triggers import triggers_tools as module_triggers_tools
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -1701,7 +1701,7 @@ def test_retired_trigger_approval_rule_fails_even_when_another_toolkit_offers_sa
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"

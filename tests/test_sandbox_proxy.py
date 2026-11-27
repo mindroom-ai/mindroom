@@ -29,8 +29,6 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 
@@ -63,13 +61,7 @@ from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope, shell_background_scope
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import (
-    adapt_toolkit,
-    configure_toolkit_functions,
-    toolkit_function,
-)
-from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
-from mindroom.tool_system.authoring import tool, toolkit_functions
+from mindroom.tool_system.authoring import Toolkit, tool, toolkit_functions
 from mindroom.tool_system.declarations import (
     SupportsPrimaryCallPlacement,
     ToolCategory,
@@ -103,6 +95,11 @@ from mindroom.tool_system.tool_hooks import (
     owned_sync_tool_completion,
     run_sync_tool_entrypoint,
     track_sync_tool_completion,
+)
+from mindroom.tool_system.toolkits import (
+    adapt_toolkit,
+    configure_toolkit_functions,
+    toolkit_function,
 )
 from mindroom.tool_system.worker_proxy_client import (
     WorkerProxyClientConfig,
@@ -160,7 +157,6 @@ from tests.test_attachments_tool import _tool_context
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Mapping
 
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.models import WorkerLaunchConfig
 
@@ -169,7 +165,7 @@ _TEST_AUTH_TOKEN = "test-token"  # noqa: S105
 _ENV_RUNTIME_STORAGE_ROOT: Path | None = None
 
 
-def _offered_entrypoint(tool: AnyToolkit, name: str) -> Callable[..., Any]:
+def _offered_entrypoint(tool: Toolkit, name: str) -> Callable[..., Any]:
     """Return the entrypoint an agent's run calls for ``name``: sent to the worker when routed, else validated here."""
     function = toolkit_function(tool, name)
     assert function is not None
@@ -1076,7 +1072,7 @@ async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_a
     captured: dict[str, Any] = {}
     tool_name = "test_proxy_owned_tool"
 
-    class _OwnedTools(OwnedToolkit):
+    class _OwnedTools(Toolkit):
         name = tool_name
 
         @tool
@@ -1137,51 +1133,6 @@ async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_a
     assert outcome.content == "sandbox-result"
     assert captured["json"]["kwargs"] == {"word": "ab", "times": "2"}
     assert entrypoint(word="ab", times="2") == "abab"
-
-
-@pytest.mark.usefixtures("restored_builtin_tools")
-@pytest.mark.asyncio
-async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: Path) -> None:
-    """A toolkit that registers a sync and an async function of one name runs its async one, as the primary offers it."""
-    tool_name = "test_runner_one_function_per_name"
-
-    class _DualToolkit(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name=tool_name, tools=[self.lookup])
-            self.async_functions["lookup"] = Function(name="lookup", entrypoint=self.alookup)
-
-        def lookup(self) -> str:
-            return "sync"
-
-        async def alookup(self) -> str:
-            return "async"
-
-    @register_tool_with_metadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="One Function Per Name",
-        description="Test-only toolkit registering both variants of one function.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def _dual_factory() -> type[_DualToolkit]:
-        return _DualToolkit
-
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={},
-    )
-    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
-        runtime_paths=runtime_paths,
-        config=Config(agents={}, models={}),
-        tool_name=tool_name,
-        function_name="lookup",
-        tools=builtin_tool_registry(),
-    )
-    [offered] = adapt_toolkit(toolkit).functions
-
-    assert await offered.entrypoint() == "async"
-    assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
 
 
 def _routed_ping_toolkit(
@@ -3017,7 +2968,7 @@ def test_primary_built_provider_tool_ignores_worker_written_settings(
     manager.for_worker(target.worker_key).save_credentials(tool_name, {"api_key": "worker-planted"})
     captured: dict[str, object] = {}
 
-    class _FakeProviderTools(OwnedToolkit):
+    class _FakeProviderTools(Toolkit):
         def __init__(self, *, api_key: str | None = None, **_: object) -> None:
             captured["api_key"] = api_key
             super().__init__(name=tool_name)
@@ -3250,7 +3201,7 @@ def test_get_tool_by_name_builds_google_bigquery_from_scoped_credentials(
     )
     captured: dict[str, object] = {}
 
-    class _FakeGoogleBigQueryTools(OwnedToolkit):
+    class _FakeGoogleBigQueryTools(Toolkit):
         def __init__(
             self,
             *,
@@ -3303,7 +3254,7 @@ def test_primary_built_tool_ignores_worker_written_settings(monkeypatch: pytest.
     )
     captured: dict[str, object] = {}
 
-    class _FakePostgresTools(OwnedToolkit):
+    class _FakePostgresTools(Toolkit):
         def __init__(self, *, host: str, **_: object) -> None:
             captured["host"] = host
             super().__init__(name="postgres")

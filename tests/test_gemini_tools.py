@@ -67,7 +67,6 @@ def test_generate_image_offers_the_model_its_prompt(monkeypatch) -> None:  # noq
     assert function.description == "Generate an image through the Gemini content-generation API."
     assert set(function.parameters["properties"]) == {"prompt"}
     assert function.parameters["required"] == ["prompt"]
-    assert function.injected_params == {}
 
 
 def test_generate_image_keeps_the_gemini_api_on_v1beta(monkeypatch) -> None:  # noqa: ANN001

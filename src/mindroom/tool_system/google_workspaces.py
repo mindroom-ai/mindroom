@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.oauth.providers import OAuthProvider
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.declarations import ToolMetadata
 
 _GoogleService = Literal["gmail", "google_calendar", "google_drive", "google_docs", "google_sheets", "google_tasks"]
@@ -101,9 +101,9 @@ def _workspace_tool_factory(
         assert metadata.factory is not None
         base_class = metadata.factory()
 
-        def initialize(toolkit: AnyToolkit, **kwargs: Any) -> None:  # noqa: ANN401
-            # Deferred: the toolkit adapter loads Agno, which plugin code importing this module must not load.
-            from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
+        def initialize(toolkit: Toolkit, **kwargs: Any) -> None:  # noqa: ANN401
+            # Deferred to keep plugin imports free of schema-generation dependencies at import time.
+            from mindroom.tool_system.toolkits import (  # noqa: PLC0415
                 rename_toolkit_functions,
                 toolkit_function_names,
             )

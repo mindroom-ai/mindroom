@@ -1,4 +1,4 @@
-"""Test that ConfigField definitions match actual tool parameters from agno."""
+"""Test that ConfigField definitions match actual tool parameters."""
 
 import inspect
 import json
@@ -10,8 +10,6 @@ from types import UnionType
 from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 # Import tools to ensure they're registered, and the tool hook bridge, which installs the
 # tool-argument repair as it does for every agent MindRoom builds.
@@ -22,15 +20,15 @@ from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.agno_toolkits import adapt_callable
-from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.metadata import get_tool_by_name, validate_authored_tool_entry_overrides
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
-from tests.agent_tool_helpers import blocking_entrypoint, offered_agno_function
+from tests.agent_tool_helpers import blocking_entrypoint
 
 _BUILTINS = builtin_tool_registry()
 
@@ -377,7 +375,7 @@ def test_registered_tool_contract(tool_name: str) -> None:
 
     assert isinstance(tool_class, type)
     if metadata.status != ToolStatus.REQUIRES_CONFIG:
-        assert issubclass(tool_class, (Toolkit, OwnedToolkit))
+        assert issubclass(tool_class, Toolkit)
 
     init_signature = inspect.signature(tool_class.__init__)
     verify_managed_init_args(tool_name, init_signature)
@@ -403,9 +401,7 @@ def _derived_without_an_instance(tool_class: type, function_name: str) -> ToolFu
     """Return a function as its toolkit offers it, derived from the class through its kind of toolkit's adapter."""
     # Bound as an instance binds it, to a stand-in no derivation reads, so a method's schema leaves out ``self``.
     entrypoint = inspect.getattr_static(tool_class, function_name).__get__(object(), tool_class)
-    if issubclass(tool_class, OwnedToolkit):
-        return adapt_callable(entrypoint)
-    return offered_agno_function(Function(name=function_name, entrypoint=entrypoint))
+    return adapt_callable(entrypoint)
 
 
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
@@ -482,7 +478,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         init_signature: Constructor signature shared with managed-input validation
 
     """
-    # Get the actual parameters from agno
+    # Get the actual parameters from the tool class
     resolved_type_hints = get_type_hints(
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__

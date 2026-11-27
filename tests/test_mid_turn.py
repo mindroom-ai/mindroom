@@ -9,8 +9,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
-from agno.media import Image as AgnoImage
-from agno.tools.function import ToolResult
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -36,6 +34,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.judgment.state import MAX_REQUEST_BYTES, JudgmentMessage
 from mindroom.judgment.typesafe import _PINNED_MODEL
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.message_target import MessageTarget
@@ -61,6 +60,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.turn_origin import SenderKind, TurnIntent
 from tests.agent_loop.helpers import collect, context, external, gated, spec, toolkit
 from tests.conftest import install_model_providers, make_visible_message, request_envelope, test_runtime_paths
@@ -874,11 +874,11 @@ async def test_batch_with_paused_delegation_follows_the_judgment(*, interrupt: b
     state = _Conversation()
     judgments: list[JudgmentRequest] = []
 
-    def work() -> ToolResult:
+    def work() -> ToolValue:
         """Do the work."""
         state.add_waiting_human_message("$new", text="Thanks")
-        images = [AgnoImage(content=b"image", mime_type="image/png")] if media else None
-        return ToolResult(content="Completed action", images=images)
+        images = (Image(content=b"image", mime_type="image/png"),) if media else ()
+        return ToolValue(content="Completed action", images=images)
 
     def delegate() -> str:
         """Hand the subtask to a child."""

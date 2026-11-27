@@ -59,7 +59,6 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
-from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -67,6 +66,7 @@ from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
+from mindroom.tool_system.toolkits import requires_connect
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import ToolJobRuntime
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.invocation import CallResult, ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -109,7 +109,7 @@ class _JobCallError(Exception):
 
 
 def assembled_job_tools(
-    sources: Iterable[tuple[AnyToolkit, ToolFunction]],
+    sources: Iterable[tuple[Toolkit, ToolFunction]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
@@ -129,7 +129,7 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
     return BACKGROUND_AFTER in parameters.get("properties", {})
 
 
-def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool:
+def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
     """Whether a function of ``toolkit`` without a gate of its own can ask a rule's approval as its call's job."""
     return not (
         # A toolkit that prepares its calls' jobs is asked only once the call has its approval, as any call is.

@@ -40,10 +40,11 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -543,12 +544,12 @@ async def test_wait_output_redirect_preserves_concurrent_sync_sibling_session_st
     original_read = consumption_module.read_result_payload
     original_finalize = job_module.finalize_tool_output_file
 
-    def sync_sibling(run_context: RunContext) -> str:
+    def sync_sibling() -> str:
         sibling_started.set()
         assert finalize_entered.wait(timeout=5)
-        run_context.session_state["sibling_only"] = "from-sync-thread"
+        current_call().session_state["sibling_only"] = "from-sync-thread"
         if has_delta:
-            run_context.session_state["raced"] = "from-sync-thread"
+            current_call().session_state["raced"] = "from-sync-thread"
         sibling_wrote.set()
         return "sibling-ok"
 
@@ -624,12 +625,12 @@ async def test_collect_output_redirect_coalesces_chained_deltas_and_preserves_sy
     original_read = consumption_module.read_result_payload
     original_finalize = job_module.finalize_tool_output_file
 
-    def sync_sibling(run_context: RunContext) -> str:
+    def sync_sibling() -> str:
         sibling_started.set()
         assert finalize_entered.wait(timeout=5)
-        run_context.session_state["sibling_only"] = "from-sync-thread"
+        current_call().session_state["sibling_only"] = "from-sync-thread"
         # Writing the intermediate value must not match the second job's delta against the original baseline.
-        run_context.session_state["raced_chain"] = 2
+        current_call().session_state["raced_chain"] = 2
         sibling_wrote.set()
         return "sibling-ok"
 

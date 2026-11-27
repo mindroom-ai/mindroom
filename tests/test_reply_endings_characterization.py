@@ -67,7 +67,7 @@ from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import tool_markers_in_text
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord

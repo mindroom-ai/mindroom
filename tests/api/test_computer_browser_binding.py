@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-from agno.tools.toolkit import Toolkit
 from fastapi import HTTPException
 
 from mindroom.api.computer_browser_binding import _ComputerBrowserProvider, select_browser_provider
@@ -12,6 +11,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.llm.media import Image
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tools.browser import browser_tools

@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-from agno.media import Image as AgnoImage
-from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.tools import (
@@ -33,11 +31,13 @@ from mindroom.agent_loop.tools import (
     toolkit_instructions,
 )
 from mindroom.llm.events import ToolProgress
+from mindroom.llm.media import Image
 from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT
 from mindroom.llm.runs import FailingTool, RunRecord, ToolExecution
 from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
+from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import ScriptedModel, raw_tool_call, tool_call
 
@@ -422,9 +422,9 @@ async def test_a_success_without_text_is_stored_saying_so() -> None:
         """Return nothing."""
         return ""
 
-    def picture() -> ToolResult:
+    def picture() -> ToolValue:
         """Return only a picture."""
-        return ToolResult(content="", images=[AgnoImage(content=b"a", format="png")])
+        return ToolValue(content="", images=(Image(content=b"a", format="png"),))
 
     functions = spec(ScriptedModel([]), toolkit(quiet, picture, boom)).functions
     results = await _dispatch(_planned(functions, tool_call("quiet", "c1"), tool_call("picture", "c2")))
@@ -895,14 +895,14 @@ async def test_dispatch_skips_paused_calls_and_passes_the_call_id_through_middle
 
 @pytest.mark.asyncio
 async def test_media_results_move_onto_one_follow_up_user_message() -> None:
-    def picture(label: str) -> ToolResult:
+    def picture(label: str) -> ToolValue:
         """Return a picture.
 
         Args:
             label: Its label.
 
         """
-        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=label.encode(), format="png")])
+        return ToolValue(content=f"picture {label}", images=(Image(content=label.encode(), format="png"),))
 
     functions = spec(ScriptedModel([]), toolkit(picture, echo)).functions
     batch = plan_tool_batch(

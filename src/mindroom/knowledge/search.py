@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Protocol
 
 from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.toolkits import adapt_callable
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

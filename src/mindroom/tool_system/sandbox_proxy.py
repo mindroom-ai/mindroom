@@ -864,24 +864,8 @@ def _authored_arguments(kwargs: dict[str, object]) -> dict[str, object]:
 def _worker_call_arguments(
     args: tuple[object, ...],
     kwargs: dict[str, object],
-    *,
-    entrypoint: Callable[..., object],
-    inert_agent: bool,
 ) -> tuple[list[object], dict[str, object]]:
-    """Serialize one call's arguments for the worker as the call sent them, keeping its shape.
-
-    A function declared to leave its injected ``agent`` unused receives None there, since the primary's run state
-    stays on the primary.
-    """
-    if inert_agent:
-        bound = inspect.signature(entrypoint).bind(*args, **_authored_arguments(kwargs))
-        if "agent" in bound.arguments:
-            if "agent" in kwargs:
-                kwargs = {**kwargs, "agent": None}
-            else:
-                output_path = {name: value for name, value in kwargs.items() if name == OUTPUT_PATH_ARGUMENT}
-                bound.arguments["agent"] = None
-                args, kwargs = bound.args, {**bound.kwargs, **output_path}
+    """Serialize one call's arguments for the worker as the call sent them, keeping its shape."""
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
@@ -1059,21 +1043,14 @@ def _call_proxy_sync(
     function_name: str,
     args: tuple[object, ...],
     kwargs: dict[str, object],
-    function_entrypoint: Callable[..., object],
     cancellation: WorkerCallCancellation | None = None,
     named: NamedWorkerCall | None = None,
 ) -> object:
     runtime_paths = stand_ins.runtime_paths
     tool_name = stand_ins.tool_name
-    metadata = stand_ins.tools.get(tool_name)
     # A call for a worker that fails before it is sent never started, which a caller that stores results reads.
     report_tool_metadata(not_started=True)
-    wire_args, wire_kwargs = _worker_call_arguments(
-        args,
-        kwargs,
-        entrypoint=function_entrypoint,
-        inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
-    )
+    wire_args, wire_kwargs = _worker_call_arguments(args, kwargs)
     proxy_config = sandbox_proxy_config(runtime_paths)
     # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
     pump = get_worker_progress_pump()
@@ -1278,7 +1255,6 @@ class WorkerStandIns:
                     function_name=function_name,
                     args=args,
                     kwargs=dict(kwargs),
-                    function_entrypoint=local,
                     cancellation=cancellation,
                     # Read here, in the call's own context, which names the reply that owns the worker.
                     named=_named_worker_call(self, local, args, kwargs),

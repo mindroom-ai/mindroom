@@ -42,13 +42,13 @@ from mindroom.thread_models import (
     resolve_thread_model_override,
     set_thread_model_override,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.turn_record import TurnRecord
 from tests.agent_tool_helpers import toolkit_offers

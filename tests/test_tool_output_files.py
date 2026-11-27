@@ -6,15 +6,12 @@ from __future__ import annotations
 import functools
 import os
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import pytest
-from agno.media import Image
-from agno.tools import Toolkit
-from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
@@ -29,10 +26,9 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.llm.media import Image
 from mindroom.providers.openai.responses_wire import _tool_dicts
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
-from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
-from mindroom.tool_system.authoring import tool
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import (
@@ -44,13 +40,12 @@ from mindroom.tool_system.output_files import (
     with_optional_output_path,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome, ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit, configure_toolkit_functions
 from tests.agent_tool_helpers import detached_policy
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
-
-    from mindroom.tool_system.tool_function import ToolFunction
 
 
 def _policy(tmp_path: Path, *, max_bytes: int = 1024 * 1024) -> ToolOutputFilePolicy:
@@ -62,10 +57,19 @@ def _first_function(toolkit: Toolkit) -> ToolFunction:
     return adapt_toolkit(toolkit).functions[0]
 
 
-def _with_output_files(function: Function, policy: ToolOutputFilePolicy | None) -> ToolFunction:
+def _with_output_files(
+    function: Callable[..., Any],
+    policy: ToolOutputFilePolicy | None,
+    *,
+    strict: bool = False,
+) -> ToolFunction:
     """Return ``function``, registered alone in a toolkit offering output files by ``policy``, as a run offers it."""
-    toolkit = Toolkit(name="functions")
-    toolkit.functions[function.name] = function
+
+    class _SingleFunctionToolkit(Toolkit):
+        def offered_function(self, function: ToolFunction) -> ToolFunction:
+            return replace(function, strict=True) if strict else function
+
+    toolkit = _SingleFunctionToolkit(name="functions", tools=[function])
     return _first_function(configure_toolkit_functions(toolkit, output_files=policy))
 
 
@@ -189,10 +193,21 @@ def _plugin(*callbacks: object) -> object:
 
 
 class _EchoToolkit(Toolkit):
-    def __init__(self, seen: list[object] | None = None, result: object = "RAW") -> None:
+    def __init__(
+        self,
+        seen: list[object] | None = None,
+        result: object = "RAW",
+        *,
+        strict: bool = False,
+        extra_tools: tuple[Callable[..., Any], ...] = (),
+    ) -> None:
         self.seen = seen if seen is not None else []
         self.result = result
-        super().__init__(name="echo", tools=[self.echo])
+        self._strict = strict
+        super().__init__(name="echo", tools=[self.echo, *extra_tools])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        return replace(function, strict=True) if self._strict else function
 
     def echo(self, text: str) -> object:
         self.seen.append(text)
@@ -285,7 +300,7 @@ def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: 
         """
         return f"{greeting} {name}"
 
-    adapted = _with_output_files(Function(name="greet", entrypoint=greet), _policy(tmp_path))
+    adapted = _with_output_files(greet, _policy(tmp_path))
 
     assert adapted.description == "Greet someone."
     assert adapted.parameters["properties"]["name"]["description"] == "Who to greet."
@@ -295,8 +310,7 @@ def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: 
 
 def test_a_strict_function_keeps_its_strict_schema_and_takes_no_output_path(tmp_path: Path) -> None:
     """A strict schema would require the output path, so a strict function keeps its author's contract instead."""
-    toolkit = _EchoToolkit()
-    toolkit.functions["echo"].strict = True
+    toolkit = _EchoToolkit(strict=True)
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     function = _first_function(toolkit)
@@ -314,7 +328,7 @@ def test_output_path_joins_the_schema_of_a_function_with_a_keyword_catch_all(tmp
     def tagged(name: str, **kwargs: object) -> str:
         return f"{name}{kwargs}"
 
-    adapted = _with_output_files(Function(name="tagged", entrypoint=tagged), _policy(tmp_path))
+    adapted = _with_output_files(tagged, _policy(tmp_path))
 
     assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT]
     _assert_output_path_schema_is_optional(adapted.parameters)
@@ -324,8 +338,7 @@ def test_a_function_taking_the_output_path_itself_keeps_its_own_while_its_siblin
     def own(text: str, mindroom_output_path: str = "own") -> str:
         return f"{text}:{mindroom_output_path}"
 
-    toolkit = _EchoToolkit()
-    toolkit.register(own)
+    toolkit = _EchoToolkit(extra_tools=(own,))
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     echo, own_function = adapt_toolkit(toolkit).functions
@@ -339,17 +352,15 @@ def test_schema_handles_strict_or_additional_properties_false_function(tmp_path:
     def strict_tool(text: str) -> str:
         return text
 
-    function = Function(
+    function = passthrough_tool(
         name="strict_tool",
-        entrypoint=strict_tool,
         parameters={
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
             "additionalProperties": False,
         },
-        skip_entrypoint_processing=True,
-    )
+    )(strict_tool)
     adapted = _with_output_files(function, _policy(tmp_path))
 
     assert adapted.parameters["additionalProperties"] is False
@@ -360,16 +371,14 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
     def decorated_style_tool(**kwargs: object) -> object:
         return kwargs["text"]
 
-    function = Function(
+    function = passthrough_tool(
         name="decorated_style_tool",
-        entrypoint=decorated_style_tool,
         parameters={
             "type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"],
         },
-        skip_entrypoint_processing=True,
-    )
+    )(decorated_style_tool)
     adapted = _with_output_files(function, _policy(tmp_path))
 
     result = _execute(adapted, {"text": "saved", OUTPUT_PATH_ARGUMENT: "out.txt"})
@@ -383,14 +392,11 @@ def test_a_strict_skip_entrypoint_processing_function_keeps_its_schema_without_a
     def decorated_style_tool(**kwargs: object) -> object:
         return kwargs["text"]
 
-    function = Function(
+    function = passthrough_tool(
         name="decorated_style_tool",
-        entrypoint=decorated_style_tool,
         parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-        skip_entrypoint_processing=True,
-        strict=True,
-    )
-    adapted = _with_output_files(function, _policy(tmp_path))
+    )(decorated_style_tool)
+    adapted = _with_output_files(function, _policy(tmp_path), strict=True)
 
     assert adapted.strict is True
     assert adapted.parameters["properties"] == {"text": {"type": "string"}}
@@ -435,7 +441,7 @@ def test_function_with_existing_mindroom_output_path_is_skipped_with_debug(tmp_p
         return mindroom_output_path
 
     with capture_logs() as logs:
-        function = _with_output_files(Function(name="existing", entrypoint=existing), _policy(tmp_path))
+        function = _with_output_files(existing, _policy(tmp_path))
 
     assert logs == [
         {
@@ -461,7 +467,7 @@ def test_a_function_whose_authored_schema_takes_the_output_path_keeps_its_own(tm
         "required": [],
     }
     adapted = _with_output_files(
-        Function(name="passthrough", entrypoint=passthrough, parameters=schema, skip_entrypoint_processing=True),
+        passthrough_tool(name="passthrough", parameters=schema)(passthrough),
         _policy(tmp_path),
     )
 
@@ -478,7 +484,7 @@ def test_a_function_whose_entrypoint_takes_the_output_path_keeps_its_authored_sc
 
     schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
     adapted = _with_output_files(
-        Function(name="own", entrypoint=own, parameters=schema, skip_entrypoint_processing=True),
+        passthrough_tool(name="own", parameters=schema)(own),
         _policy(tmp_path),
     )
 
@@ -494,15 +500,14 @@ def test_an_authored_schema_takes_the_output_path_last_even_beside_a_keyword_cat
         return f"{name}{kwargs}"
 
     adapted = _with_output_files(
-        Function(
+        passthrough_tool(
             name="tagged",
-            entrypoint=tagged,
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string"}, "kwargs": {"type": "object"}},
                 "required": ["name"],
             },
-        ),
+        )(tagged),
         _policy(tmp_path),
     )
 
@@ -561,7 +566,7 @@ def test_dataclass_or_pydantic_result_normalized_to_json(tmp_path: Path) -> None
 
 
 def test_text_only_toolresult_written_as_text(tmp_path: Path) -> None:
-    toolkit = _EchoToolkit(result=ToolResult(content="mcp text"))
+    toolkit = _EchoToolkit(result=ToolValue(content="mcp text"))
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"})
@@ -571,7 +576,7 @@ def test_text_only_toolresult_written_as_text(tmp_path: Path) -> None:
 
 
 def test_media_toolresult_is_rejected_without_writing(tmp_path: Path) -> None:
-    toolkit = _EchoToolkit(result=ToolResult(content="hidden", images=[Image(url="https://example.test/image.png")]))
+    toolkit = _EchoToolkit(result=ToolValue(content="hidden", images=(Image(url="https://example.test/image.png"),)))
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "media.txt"})
@@ -953,7 +958,7 @@ def test_tool_trace_contains_path_and_receipt_but_not_raw_large_marker(tmp_path:
 
 def test_mcp_style_tool_result_large_marker_saved_but_absent_from_returned_result(tmp_path: Path) -> None:
     marker = "ISSUE200_MCP_MARKER"
-    toolkit = _EchoToolkit(result=ToolResult(content=marker * 20))
+    toolkit = _EchoToolkit(result=ToolValue(content=marker * 20))
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"})
@@ -1145,7 +1150,7 @@ def test_workdir_output_path_schema_keeps_description_without_default() -> None:
 def test_offer_output_path_false_hides_schema_while_preserving_auto_save(tmp_path: Path) -> None:
     """Opting out of schema projection keeps >50 KiB auto-save and stray output-path handling active."""
 
-    class _OptOutTools(OwnedToolkit):
+    class _OptOutTools(Toolkit):
         offer_output_path = False
 
         @tool

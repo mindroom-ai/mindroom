@@ -7,7 +7,7 @@ the completion-ownership helpers, generators drained, and a raised exception tur
 reads.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
-Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
+Whatever arguments reach the leaf, values sent for framework-reserved parameter names are dropped.
 ``current_tool_call()`` names the call being run to the middleware and the entrypoint below it, so a tool that needs
 its own call id reads it there instead of taking it as a parameter.
 ``run_tool_call`` is the same execution for runners outside the loop: it returns a ``CallResult`` that says what the
@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
-from mindroom.tool_system.agno_toolkits import StreamCollector, framework_arguments, model_arguments, read_tool_value
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
@@ -38,6 +37,7 @@ from mindroom.tool_system.output_files import (
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_model_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
+from mindroom.tool_system.toolkits import StreamCollector, model_arguments, read_tool_value
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -77,7 +77,7 @@ class ToolCallContext:
 
     ``session_state`` is shared with the tool, which may mutate it in place; the caller persists it afterwards.
     ``call_id`` is the provider's id of the tool call being run, when the call came from a model.
-    ``history_scope`` is the run's stored conversation when it is a team's, as ``RunContext`` names it.
+    ``history_scope`` is the run's stored conversation when it is a team's.
     ``model_name`` is the configured model the run resolved, which ``run_tool_call`` binds as the tool runtime
     context's ``active_model_name`` around the call's middleware; None leaves that as the surrounding context names it.
     A team member's call carries the leader's model; its innermost step (``teams.members``) shows the tool the member's.
@@ -176,7 +176,7 @@ def _argument_value(name: str, value: object, parameters: Mapping[str, Any]) -> 
     exactly one of its choices, or when it takes free text and the word is a boolean or the parameter is required
     and does not admit null. An optional string, and a choice parameter for words that are not its choices, read
     none and null as left out, because models send those to leave an optional parameter out. A parameter that is
-    not required is optional even when its schema omits null: Agno leaves null out of the schema of ``Optional[X]``
+    not required is optional even when its schema omits null: tool schemas leave null out of ``Optional[X]``
     and of a plain default, and of ``X | None`` from Python 3.14.
     """
     if not isinstance(value, str) or (word := value.strip().lower()) not in _LITERAL_WORDS:
@@ -271,7 +271,7 @@ def parse_tool_arguments(
     non-object is an error the model reads.
     Top-level strings none, null, true, and false read as ``_argument_value`` decides; a paused call stores the
     result and resumes with it, so a resumed call receives the same values.
-    Values the model sent for parameters the framework supplies are dropped.
+    Values the model sent for framework-reserved parameter names are dropped.
     """
     if not raw_arguments:
         return {}
@@ -299,11 +299,10 @@ async def run_tool_call(
 ) -> CallResult:
     """Run one tool call through ``middleware``, then the function's own, to its entrypoint; return what it came to.
 
-    A vendor tool's Agno ``ToolResult`` comes back, and reaches the middleware, as its ``ToolValue``, and a stream as
-    its drained value. Runners outside the model loop answer their callers from the result; one that hands the tool's
-    value to a client reads it through ``client_tool_result``. An exception the call raises becomes a failed result;
-    cancellation propagates.
-    Values for framework-injected parameters are dropped before middleware sees the arguments, so a resumed call
+    A tool's ``ToolValue`` reaches the middleware as it is, and a stream as its drained value. Runners outside the
+    model loop answer their callers from the result; one that hands the tool's value to a client reads it through
+    ``client_tool_result``. An exception the call raises becomes a failed result; cancellation propagates.
+    Values for framework-reserved parameter names are dropped before middleware sees the arguments, so a resumed call
     running from its stored arguments is as clean as a freshly parsed one.
     """
     call = ToolCall(function=function, arguments=model_arguments(arguments or {}, function), context=context)
@@ -393,7 +392,7 @@ def tool_outcome(
 
 async def _run_chain(call: ToolCall, middleware: Sequence[ToolMiddleware]) -> object:
     async def leaf(arguments: dict[str, Any]) -> object:
-        return await _run_entrypoint(call.function, arguments, call.context)
+        return await _run_entrypoint(call.function, arguments)
 
     call_next: ToolNext = leaf
     for step in reversed((*middleware, *call.function.middleware)):
@@ -408,16 +407,12 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
     return run
 
 
-async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
-    """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
-
-    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``.
-    """
+async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any]) -> object:
+    """Call the entrypoint with the model's arguments; drain and close an iterator it returns."""
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
-    # rewrites them, so values for injected names are dropped here as well.
-    # A media name the schema declares belongs to the model, so that value replaces the framework's.
-    kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
+    # rewrites them, so values for reserved names are dropped here as well.
+    kwargs = model_arguments(arguments, function)
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:

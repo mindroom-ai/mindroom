@@ -1,13 +1,8 @@
 """Derive a tool function's model-facing description and parameter schema from its signature and docstring.
 
-Every function whose schema its signature gives is derived here, a MindRoom toolkit's and an Agno toolkit's alike.
-``tool_description`` and ``tool_parameters`` render each kind of annotation as Agno 3.0.9's entrypoint processing does,
-byte for byte (``tests/tool_system/test_tool_schema.py`` compares them), except that a value annotated ``Any`` or
-``object`` takes any JSON value, where Agno renders an object that admits only ``{}``, and that ``*args`` and
-``**kwargs``, which no named argument fills, stay out of the schema, where Agno requires a property for each.
-``validated_entrypoint`` validates a call's arguments against the annotations, coercing what pydantic can. The module
-imports no Agno code.
-Every other parameter belongs to the model, except those the caller names as the framework's to fill.
+``tool_description`` and ``tool_parameters`` derive a function's model-facing description and JSON schema from its
+docstring and annotations, leaving ``Any`` and ``object`` unconstrained and keeping ``*args`` and ``**kwargs`` out of
+the schema. ``validated_entrypoint`` validates a call's arguments against the annotations, coercing what pydantic can.
 """
 
 from __future__ import annotations
@@ -162,8 +157,8 @@ def _parameter_schema(hint: object) -> dict[str, Any]:
 def _schema(hint: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - One branch per kind of annotation.
     """Return the JSON schema of one annotation; a bare ``typing.List`` or ``typing.Dict`` holds strings.
 
-    ``Any`` and ``object`` take any JSON value; any other class without a JSON type renders, as Agno renders it, as an
-    object that admits no property.
+    ``Any`` and ``object`` take any JSON value; any other class without a JSON type renders as an object that admits no
+    property.
     """
     if hint is Any or hint is object:
         return {}

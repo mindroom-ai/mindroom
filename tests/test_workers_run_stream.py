@@ -39,8 +39,8 @@ from mindroom.config.main import Config
 from mindroom.script_runs.launch_contract import RUN_ID_ENV
 from mindroom.shell import execution
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.workers.runtime import reset_primary_worker_manager
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.minimal_agent_fixtures import capture_bash_batch

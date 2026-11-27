@@ -18,13 +18,13 @@ from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.conftest import make_config_reload_lifecycle, publish_test_plugins, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -43,11 +43,11 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_jobs.execution import JobActor
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-type _ShellRuntime = tuple[JobActor, ToolJobRuntime, ToolExecutionIdentity, AnyToolkit]
+type _ShellRuntime = tuple[JobActor, ToolJobRuntime, ToolExecutionIdentity, Toolkit]
 
 
 @pytest_asyncio.fixture(params=["shell", "openclaw_compat"], ids=["shell", "preset"])
@@ -220,7 +220,7 @@ async def test_registered_plugin_exclusion_is_pinned_for_every_function(  # noqa
     (plugin / "tools.py").write_text(
         dedent("""\
         from pathlib import Path
-        from agno.tools import Toolkit
+        from mindroom.plugin_api import Toolkit
         from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
         from mindroom.tool_system.registration import register_tool_with_metadata
 

@@ -41,7 +41,6 @@ from mindroom.shell.execution import (
 )
 from mindroom.shell.output_capture import CapturedShellStream, ShellOutputDestination
 from mindroom.tool_jobs.control import JobControl, job_control_context
-from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import (
@@ -55,6 +54,7 @@ from mindroom.tool_system.progress import shown_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.tools.shell import (
     _shell_subprocess_env,
     _workspace_home_contract_env_from_process_env,
@@ -64,7 +64,7 @@ from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 
@@ -82,7 +82,7 @@ def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = 
     )
 
 
-def _get_toolkit(tmp_path: Path) -> AnyToolkit:
+def _get_toolkit(tmp_path: Path) -> Toolkit:
     runtime_paths = _make_runtime_paths(tmp_path)
     return get_tool_by_name(
         "shell",
@@ -93,7 +93,7 @@ def _get_toolkit(tmp_path: Path) -> AnyToolkit:
     )
 
 
-def _shell_for_config(tmp_path: Path, defaults: dict[str, object]) -> AnyToolkit:
+def _shell_for_config(tmp_path: Path, defaults: dict[str, object]) -> Toolkit:
     """Build the shell for a config with these ``defaults``, placed where the sandbox settings place it."""
     runtime_paths = _make_runtime_paths(tmp_path)
     config = Config.validate_with_runtime({"defaults": defaults}, runtime_paths)
@@ -200,7 +200,7 @@ async def _stop_recorded_child(pid: int, stop_file: Path) -> None:
     raise AssertionError(message)
 
 
-def _get_run_shell_command_function(tool: AnyToolkit) -> ToolFunction:
+def _get_run_shell_command_function(tool: Toolkit) -> ToolFunction:
     function = toolkit_function(tool, "run_shell_command")
     assert function is not None
     return function
