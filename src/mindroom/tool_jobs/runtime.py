@@ -1783,7 +1783,7 @@ class ToolJobRuntime:
                     entry.task.cancel()
                     tasks.append(entry.task)
         await asyncio.gather(*tasks, return_exceptions=True)
-        for entry in self._entries.values():
+        for entry in tuple(self._entries.values()):
             if entry.saved and entry.job.status in TERMINAL_STATUSES:
                 continue
             # A job cancelled before the shutdown ends cancelled, as its cleanup was told.
