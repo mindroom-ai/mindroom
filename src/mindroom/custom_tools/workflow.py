@@ -658,7 +658,7 @@ async def _handle_workflow_control(
     agent_name: str,
     engine: Callable[[], WorkflowEngine],
 ) -> bool:
-    """Resume the run a person's control event names, as `workflow(action="resume")` does, and return whether it did.
+    """Resume the run a person's control event names, as `workflow_write(action="resume")` does, and return whether it did.
 
     Every bot in the room gets the event. Only `{run, action: "resume"}` from the run's requester, in the run's room
     and thread, to the run's agent does anything: the run is checked as the tool's resume is and gets a new job, named

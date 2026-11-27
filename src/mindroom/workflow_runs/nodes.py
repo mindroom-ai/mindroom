@@ -701,7 +701,7 @@ async def _run_tool_node(
     call: Callable[[], Awaitable[Outcome]],
 ) -> None:
     """Run one tool call and settle its node."""
-    # A `workflow(action="start", ...)` this call makes starts a run inside this one, under this node.
+    # A `workflow_write(action="start", ...)` this call makes starts a run inside this one, under this node.
     CALLING_NODE.set((node.run_id, node.key, node.generation))
     try:
         outcome = await call()

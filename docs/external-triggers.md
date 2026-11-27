@@ -233,7 +233,7 @@ def check():
 
 #### Common use cases
 
-Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers(action="watch_script", ...)`:
+Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers_write(action="watch_script", ...)`:
 
 - **Email watching + cheap triage (`gmail`):** *"Whenever I get an unread email from my accountant or about an invoice, summarize it and draft a reply."* The check polls `tool("gmail", "gmail_read", action="search_emails", query=...)`, tracks `seen_ids` in `state` so idle ticks cost zero LLM tokens, and optionally attaches `triage_instructions` + a cheap `triage_model` to filter out noise before waking the main agent. Write tools configured to require approval under `tool_approval` (such as `gmail_send`) stay blocked inside the background tick, while the woken turn can still ask you to approve sending a reply.
 - **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.

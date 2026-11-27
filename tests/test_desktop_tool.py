@@ -1802,7 +1802,7 @@ async def test_desktop_split_boundaries_and_fail_closed_migration(
         "agents": {"assistant": {"display_name": "Assistant", "role": "Help", "tools": ["calculator"]}},
     }
     # Under default self_service pairing, bare match: desktop fails closed.
-    with pytest.raises(Exception, match=r"desktop is now desktop_read"):
+    with pytest.raises(Exception, match=r"desktop was split into desktop_read and desktop_control.*run_desktop_shell"):
         Config.validate_with_runtime(
             {**base, "tool_approval": {"rules": [{"match": "desktop", "action": "require_approval"}]}},
             runtime_paths,

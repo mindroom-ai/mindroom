@@ -248,8 +248,8 @@ async def test_host_snapshot_defaults_unset_or_non_positive_limits(
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     page = SimpleNamespace(evaluate=AsyncMock(return_value=[]), title=AsyncMock(return_value="Page"), url="about:blank")
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
     await tool.browser_read(action="snapshot", **arguments)
 
@@ -285,8 +285,8 @@ async def test_host_snapshot_payload_by_format(
         url="https://example.com/",
     )
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
     payload = json.loads(await tool.browser_read(action="snapshot", snapshotFormat=snapshot_format, mode="efficient"))
 
@@ -2881,8 +2881,8 @@ async def test_screenshot_selector_uses_locator_screenshot(
     page: Any = SimpleNamespace(locator=locator, screenshot=page_screenshot)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#timeline"})
 
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
     payload, image_bytes = await tool._screenshot(
         profile_name="mindroom",
@@ -2916,8 +2916,8 @@ async def test_host_screenshot_returns_inline_image_and_retains_saved_path(
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
     tab = _BrowserTabState(target_id="tab-1", page=page)
     read_saved_bytes = Path.read_bytes
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
     monkeypatch.setattr(Path, "read_bytes", MagicMock(side_effect=AssertionError("screenshot path was reread")))
 
     result = await tool.browser_read(action="screenshot")
@@ -2948,8 +2948,8 @@ async def test_host_screenshot_save_only_returns_existing_metadata(
 
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
     result = await tool.browser_read(action="screenshot", saveOnly=True)
 
@@ -4382,3 +4382,161 @@ def test_browser_split_approval_rule_fails_closed_while_include_tools_remains_va
         TEST_RUNTIME_PATHS,
     )
     assert len(explicit.tool_approval.rules) == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_read_never_launches_chromium_or_activates_tabs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """browser_read console/snapshot/screenshot never start Playwright, open tabs, or switch active tabs."""
+    from mindroom.custom_tools.browser import _BrowserProfileState  # noqa: PLC0415
+
+    tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
+    ensure_profile = AsyncMock(side_effect=AssertionError("browser_read must not launch Chromium"))
+    monkeypatch.setattr(tool, "_ensure_profile", ensure_profile)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.async_playwright",
+        MagicMock(side_effect=AssertionError("browser_read must not start Playwright")),
+    )
+
+    # 1. Stopped profile: console returns empty entries; snapshot/screenshot fail clearly without starting Chromium.
+    stopped_console = json.loads(await tool.browser_read(action="console"))
+    assert stopped_console["status"] == "ok"
+    assert stopped_console["entries"] == []
+
+    for action in ("snapshot", "screenshot"):
+        with pytest.raises(ValueError, match=r'not running.*browser_control\(action="open"\)'):
+            await tool.browser_read(action=action)
+    ensure_profile.assert_not_awaited()
+
+    # 2. Running profile with zero open tabs: snapshot/screenshot fail clearly without calling context.new_page().
+    new_page = AsyncMock(side_effect=AssertionError("browser_read must not open a new page"))
+    empty_state = _BrowserProfileState(
+        playwright=cast("Any", object()),
+        context=cast("Any", SimpleNamespace(new_page=new_page)),
+        launch_settings=tool._launch_settings("mindroom"),
+        tabs={},
+        active_target_id=None,
+    )
+    try:
+        tool._session.profiles["mindroom"] = empty_state
+        for action in ("snapshot", "screenshot"):
+            with pytest.raises(ValueError, match=r'No open tab.*browser_control\(action="open"\)'):
+                await tool.browser_read(action=action)
+        new_page.assert_not_awaited()
+
+        # 3. Running profile with tab-a active and tab-b inactive: reading tab-b preserves active_target_id and focus.
+        bring_to_front_a = AsyncMock()
+        bring_to_front_b = AsyncMock()
+        page_a: Any = SimpleNamespace(
+            is_closed=lambda: False,
+            bring_to_front=bring_to_front_a,
+            title=AsyncMock(return_value="Tab A"),
+            url="https://a.example/",
+            evaluate=AsyncMock(return_value=[]),
+            screenshot=AsyncMock(return_value=PNG_BYTES),
+        )
+        page_b: Any = SimpleNamespace(
+            is_closed=lambda: False,
+            bring_to_front=bring_to_front_b,
+            title=AsyncMock(return_value="Tab B"),
+            url="https://b.example/",
+            evaluate=AsyncMock(
+                return_value=[{"selector": "#btn", "role": "button", "name": "Submit", "tag": "button", "type": ""}],
+            ),
+            screenshot=AsyncMock(return_value=PNG_BYTES),
+        )
+        tab_a = _BrowserTabState(target_id="tab-a", page=page_a, console=[{"level": "log", "text": "from-a"}])
+        tab_b = _BrowserTabState(target_id="tab-b", page=page_b, console=[{"level": "error", "text": "from-b"}])
+        running_state = _BrowserProfileState(
+            playwright=cast("Any", object()),
+            context=cast("Any", SimpleNamespace(new_page=new_page)),
+            launch_settings=tool._launch_settings("mindroom"),
+            tabs={"tab-a": tab_a, "tab-b": tab_b},
+            active_target_id="tab-a",
+        )
+        tool._session.profiles["mindroom"] = running_state
+
+        console_b = json.loads(await tool.browser_read(action="console", targetId="tab-b"))
+        assert console_b["entries"] == [{"level": "error", "text": "from-b"}]
+        snap_b = json.loads(await tool.browser_read(action="snapshot", targetId="tab-b"))
+        assert snap_b["targetId"] == "tab-b"
+        assert snap_b["title"] == "Tab B"
+        shot_b = json.loads(await tool.browser_read(action="screenshot", targetId="tab-b", saveOnly=True))
+        assert shot_b["targetId"] == "tab-b"
+
+        assert running_state.active_target_id == "tab-a"
+        bring_to_front_a.assert_not_awaited()
+        bring_to_front_b.assert_not_awaited()
+        new_page.assert_not_awaited()
+
+        # 4. Changed launch settings refuse reads without restarting Chromium.
+        different_tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path, allow_private_networks=True)
+        for action in ("console", "snapshot", "screenshot"):
+            with pytest.raises(
+                RuntimeError,
+                match=r'different launch or egress settings.*browser_control\(action="start"\)',
+            ):
+                await different_tool.browser_read(action=action)
+    finally:
+        tool._session.profiles.pop("mindroom", None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "should_fail"),
+    [
+        ({"exclude_tools": ["browser_control"]}, True),
+        ({"include_tools": ["browser_control"]}, False),
+        ({"include_tools": ["browser_read"]}, False),
+        ({"exclude_tools": ["browser_read"]}, False),
+        ({"exclude_tools": ["browser_control", "browser_read"]}, False),
+        ({"include_tools": ["browser_read"], "exclude_tools": ["browser_control"]}, False),
+    ],
+)
+def test_browser_exclude_browser_control_alone_fails_closed(
+    tmp_path: Path,
+    overrides: dict[str, list[str]],
+    should_fail: bool,
+) -> None:
+    """Excluding browser_control without browser_read fails closed in authored overrides and stored settings."""
+    from mindroom.config.main import Config, ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name  # noqa: PLC0415
+    from tests.conftest import test_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    config_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{"browser": overrides}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("browser", {"_source": "ui", **overrides})
+
+    if should_fail:
+        pattern = r"exclude_tools: browser_control.*browser_read.*\['browser_control', 'browser_read'\].*include_tools: \['browser_read'\]"
+        with pytest.raises(ConfigRuntimeValidationError, match=pattern):
+            Config.validate_with_runtime(config_data, runtime_paths)
+        with pytest.raises(ToolConfigOverrideError, match=pattern):
+            get_tool_by_name(
+                "browser",
+                runtime_paths,
+                tools=builtin_tool_registry(),
+                credentials_manager=manager,
+                worker_target=None,
+            )
+    else:
+        Config.validate_with_runtime(config_data, runtime_paths)
+        get_tool_by_name(
+            "browser",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=None,
+        )

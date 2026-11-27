@@ -1696,7 +1696,7 @@ def _load_trigger_approval_rules(tmp_path: Path, *rules: str | tuple[str, str]) 
         ("disable_trigger", "disable_trigger is now triggers_write"),
         ("delete_trigger", "delete_trigger is now triggers_write"),
         ("rotate_trigger_key", "rotate_trigger_key is now triggers_write"),
-        ("triggers", "triggers is now triggers_read"),
+        ("triggers", "triggers was split into triggers_read and triggers_write"),
         ("watch_*", "watch_room is now triggers_write"),
         ("*_trigger", "create_trigger is now triggers_write"),
         ("*_trigger*", "create_trigger is now triggers_write"),

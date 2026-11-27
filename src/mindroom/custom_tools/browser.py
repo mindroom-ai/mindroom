@@ -1423,11 +1423,24 @@ class BrowserTools(Toolkit):
             self._remove_tab(state, target_id)
         return payload_tabs
 
-    async def _host_tabs_payload(self, profile_name: str) -> dict[str, Any]:
+    async def _running_profile(self, profile_name: str, *, action_label: str) -> _BrowserProfileState | None:
         session = self._session
         async with session.lock:
             state = session.profiles.get(profile_name)
         if state is None or state.cleanup_required:
+            return None
+        launch_settings = self._launch_settings(profile_name)
+        if state.launch_settings != launch_settings:
+            msg = (
+                f"Browser profile {profile_name!r} is running with different launch or egress settings. "
+                f'Restart it with browser_control(action="start") before {action_label}.'
+            )
+            raise RuntimeError(msg)
+        return state
+
+    async def _host_tabs_payload(self, profile_name: str) -> dict[str, Any]:
+        state = await self._running_profile(profile_name, action_label="listing tabs")
+        if state is None:
             return {
                 "action": "tabs",
                 "activeTargetId": None,
@@ -1436,13 +1449,6 @@ class BrowserTools(Toolkit):
                 "status": "ok",
                 "tabs": [],
             }
-        launch_settings = self._launch_settings(profile_name)
-        if state.launch_settings != launch_settings:
-            msg = (
-                f"Browser profile {profile_name!r} is running with different launch or egress settings. "
-                'Restart it with browser_control(action="start") before listing tabs.'
-            )
-            raise RuntimeError(msg)
         return await self._tabs_payload(profile_name, state)
 
     async def _tabs_payload(self, profile_name: str, state: _BrowserProfileState) -> dict[str, Any]:
@@ -1521,9 +1527,11 @@ class BrowserTools(Toolkit):
         }
 
     async def _console(self, profile_name: str, target_id: str | None, level: str | None) -> dict[str, Any]:
-        state = await self._ensure_profile(profile_name)
-        if target_id is not None:
-            _, tab = await self._resolve_tab(state, target_id)
+        state = await self._running_profile(profile_name, action_label="reading console entries")
+        if state is None:
+            entries: list[dict[str, Any]] = []
+        elif target_id is not None:
+            _, tab = self._resolve_read_tab(state, target_id, profile_name=profile_name)
             entries = tab.console
         else:
             entries = [entry for tab in state.tabs.values() for entry in tab.console]
@@ -1642,8 +1650,14 @@ class BrowserTools(Toolkit):
         element: str | None,
         image_type: str | None,
     ) -> tuple[dict[str, Any], bytes]:
-        state = await self._ensure_profile(profile_name)
-        resolved_target_id, tab = await self._resolve_tab(state, target_id)
+        state = await self._running_profile(profile_name, action_label="taking a screenshot")
+        if state is None:
+            msg = (
+                f"Browser profile {profile_name!r} is not running. "
+                'Open a page with browser_control(action="open") or browser_control(action="start") first.'
+            )
+            raise ValueError(msg)
+        resolved_target_id, tab = self._resolve_read_tab(state, target_id, profile_name=profile_name)
         resolved_type = "jpeg" if image_type == "jpeg" else "png"
         output_path = self._next_output_path("jpg" if resolved_type == "jpeg" else "png")
         selector = self._resolve_selector(tab, element or ref)
@@ -1681,8 +1695,14 @@ class BrowserTools(Toolkit):
         depth: int | None,
         selector: str | None,
     ) -> dict[str, Any]:
-        state = await self._ensure_profile(profile_name)
-        resolved_target_id, tab = await self._resolve_tab(state, target_id)
+        state = await self._running_profile(profile_name, action_label="taking a snapshot")
+        if state is None:
+            msg = (
+                f"Browser profile {profile_name!r} is not running. "
+                'Open a page with browser_control(action="open") or browser_control(action="start") first.'
+            )
+            raise ValueError(msg)
+        resolved_target_id, tab = self._resolve_read_tab(state, target_id, profile_name=profile_name)
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
         resolved_limit = limit if limit is not None and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
@@ -1721,7 +1741,6 @@ class BrowserTools(Toolkit):
                 },
             )
 
-        state.active_target_id = resolved_target_id
         title = await tab.page.title()
         payload: dict[str, Any] = {
             "action": "snapshot",
@@ -2068,6 +2087,27 @@ class BrowserTools(Toolkit):
                     for target_id in tuple(state.tabs):
                         self._remove_tab(state, target_id)
         del profiles[profile_name]
+
+    @staticmethod
+    def _resolve_read_tab(
+        state: _BrowserProfileState,
+        target_id: str | None,
+        *,
+        profile_name: str,
+    ) -> tuple[str, _BrowserTabState]:
+        tab = state.tabs.get(target_id or state.active_target_id or "")
+        if tab is None or tab.page.is_closed():
+            if target_id is not None:
+                msg = f"tab not found: {target_id}"
+                raise ValueError(msg)
+            tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        if tab is None:
+            msg = (
+                f"No open tab in browser profile {profile_name!r}. "
+                'Open a page with browser_control(action="open") or browser_control(action="start") first.'
+            )
+            raise ValueError(msg)
+        return tab.target_id, tab
 
     async def _resolve_tab(
         self,

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 
 if TYPE_CHECKING:
@@ -81,16 +82,22 @@ _TOOLKIT_DISPATCH_SCOPED_ARGS: dict[tuple[str, str], str] = {
 }
 
 
+def _candidate_toolkits(config: Config, toolkit_name: str) -> list[str]:
+    return config.expand_tool_names([canonical_tool_name(toolkit_name)])
+
+
 def _toolkit_dispatch_scope(
+    config: Config,
     tool_name: str,
     *,
     tools: ToolRegistry | None,
     toolkit_name: str | None,
 ) -> tuple[str, str] | None:
     if toolkit_name is not None:
-        dispatch_arg = _TOOLKIT_DISPATCH_SCOPED_ARGS.get((toolkit_name, tool_name))
-        if dispatch_arg is not None and (tools is None or toolkit_name in tools.entries):
-            return toolkit_name, dispatch_arg
+        for candidate in _candidate_toolkits(config, toolkit_name):
+            dispatch_arg = _TOOLKIT_DISPATCH_SCOPED_ARGS.get((candidate, tool_name))
+            if dispatch_arg is not None and (tools is None or candidate in tools.entries):
+                return candidate, dispatch_arg
         return None
     if tools is None:
         return None
@@ -101,6 +108,7 @@ def _toolkit_dispatch_scope(
 
 
 def _action_scoped_tool(
+    config: Config,
     tool_name: str,
     *,
     tools: ToolRegistry | None,
@@ -110,17 +118,24 @@ def _action_scoped_tool(
         return tool_name, "action"
     if (
         toolkit_name is not None
-        and (dispatch_scope := _toolkit_dispatch_scope(tool_name, tools=tools, toolkit_name=toolkit_name)) is not None
+        and (dispatch_scope := _toolkit_dispatch_scope(config, tool_name, tools=tools, toolkit_name=toolkit_name))
+        is not None
     ):
         return dispatch_scope
     if tools is None:
         return None
     if toolkit_name is not None:
-        metadata = tools.entries.get(toolkit_name)
-        return (toolkit_name, "action") if metadata is not None and tool_name in metadata.action_scoped_grants else None
+        return next(
+            (
+                (candidate, "action")
+                for candidate in _candidate_toolkits(config, toolkit_name)
+                if (metadata := tools.entries.get(candidate)) is not None and tool_name in metadata.action_scoped_grants
+            ),
+            None,
+        )
     if any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values()):
         return tool_name, "action"
-    return _toolkit_dispatch_scope(tool_name, tools=tools, toolkit_name=None)
+    return _toolkit_dispatch_scope(config, tool_name, tools=tools, toolkit_name=None)
 
 
 def grant_operation(
@@ -139,7 +154,7 @@ def grant_operation(
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
-    if (action_scope := _action_scoped_tool(tool_name, tools=tools, toolkit_name=toolkit_name)) is not None:
+    if (action_scope := _action_scoped_tool(config, tool_name, tools=tools, toolkit_name=toolkit_name)) is not None:
         scope_owner, dispatch_arg = action_scope
         dispatch_value = arguments.get(dispatch_arg)
         if not isinstance(dispatch_value, str) or not dispatch_value.strip():

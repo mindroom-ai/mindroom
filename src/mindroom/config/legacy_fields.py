@@ -469,6 +469,40 @@ def _is_broad_glob_for_old(rule: _ApprovalRule, *, old: str, broad_probe: str) -
     return any(fnmatchcase(old, pattern) and fnmatchcase(broad_probe, pattern) for pattern in rule.match_patterns())
 
 
+def _split_approval_suffix(old: str) -> str:
+    if old == "desktop":
+        return " (and retain a desktop rule or add a run_desktop_shell rule if gating desktop shell commands)"
+    return ""
+
+
+def _retired_script_approval_error(
+    rule: _ApprovalRule,
+    *,
+    script_index: int,
+    old: str,
+    new: str,
+    split_from_active: bool,
+    all_replacements: tuple[str, ...] | None,
+) -> str:
+    prefix = f"tool_approval.rules[{script_index}].match {rule.match!r} runs approval script {rule.script!r}"
+    if split_from_active:
+        return (
+            f"{prefix} for {old}; read actions from {old} moved to {new}; "
+            f"update the script for {new} and add an explicit match: {new} rule."
+        )
+    if all_replacements and len(all_replacements) > 1:
+        joined = " and ".join(all_replacements)
+        suffix = _split_approval_suffix(old)
+        return (
+            f"{prefix} for retired tool {old}; {old} was split into {joined}; "
+            f"update the script and add explicit rules for {joined}{suffix}."
+        )
+    return (
+        f"{prefix} for retired tool {old}; {old} is now {new}; "
+        f"update the script for {new} and add an explicit match: {new} rule."
+    )
+
+
 def _retired_approval_pair_error_for_agent(
     rules: Sequence[_ApprovalRule],
     *,
@@ -480,6 +514,7 @@ def _retired_approval_pair_error_for_agent(
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
     split_from_active: bool = False,
+    all_replacements: tuple[str, ...] | None = None,
 ) -> str | None:
     old_indices = _agent_rule_indices(rules, old, agent)
     new_indices = _agent_rule_indices(rules, new, agent)
@@ -511,15 +546,13 @@ def _retired_approval_pair_error_for_agent(
         )
         is not None
     ):
-        subject = (
-            f"{old}; read actions from {old} moved to {new}"
-            if split_from_active
-            else f"retired tool {old}; {old} is now {new}"
-        )
-        return (
-            f"tool_approval.rules[{script_index}].match {rules[script_index].match!r} runs approval script "
-            f"{rules[script_index].script!r} for {subject}; "
-            f"update the script for {new} and add an explicit match: {new} rule."
+        return _retired_script_approval_error(
+            rules[script_index],
+            script_index=script_index,
+            old=old,
+            new=new,
+            split_from_active=split_from_active,
+            all_replacements=all_replacements,
         )
     old_chain = _effective_approval_chain(
         rules,
@@ -568,6 +601,7 @@ def _retired_approval_pair_error_for_agent(
         new=new,
         default=default,
         split_from_active=split_from_active,
+        all_replacements=all_replacements,
     )
 
 
@@ -580,21 +614,32 @@ def _retired_approval_mismatch_error(
     new: str,
     default: str,
     split_from_active: bool,
+    all_replacements: tuple[str, ...] | None = None,
 ) -> str | None:
-    fix = f"add explicit approval rules for {new}." if split_from_active else f"rewrite the rules for {new}."
+    is_multi_split = not split_from_active and bool(all_replacements) and len(all_replacements) > 1
+    joined = " and ".join(all_replacements) if all_replacements and is_multi_split else new
+    suffix = _split_approval_suffix(old) if is_multi_split else ""
+    fix = f"add explicit approval rules for {new}." if split_from_active else f"rewrite the rules for {joined}{suffix}."
     if rem_old:
         report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
-        reason = f"read actions from {old} moved to {new}" if split_from_active else f"{old} is now {new}"
-        return (
-            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; "
-            f"{reason}, which now gets a different approval decision; {fix}"
-        )
+        if split_from_active:
+            reason = f"read actions from {old} moved to {new}, which now gets a different approval decision"
+        elif is_multi_split:
+            reason = f"{old} was split into {joined} ({new} now gets a different approval decision)"
+        else:
+            reason = f"{old} is now {new}, which now gets a different approval decision"
+        return f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; {reason}; {fix}"
     if rem_new:
         report_index = next(
             (index for index in rem_new if new not in rules[index].match_patterns()),
             rem_new[0],
         )
-        previous = f"read actions from {old}" if split_from_active else old
+        if split_from_active:
+            previous = f"read actions from {old}"
+        elif is_multi_split:
+            previous = f"{old} (now split into {joined})"
+        else:
+            previous = old
         return (
             f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
             f"changing tool_approval.default {default!r} that previously decided {previous}; {fix}"
@@ -612,9 +657,11 @@ def _first_retired_approval_error(
     broad_probe: str | None = None,
     agent_names: Collection[str] = (),
     split_from_active: bool = False,
+    split_replacements: Mapping[str, tuple[str, ...]] | None = None,
 ) -> str | None:
     probes = _probe_agents(rules, agent_names)
     for old, new in pairs:
+        all_replacements = split_replacements.get(old) if split_replacements is not None else None
         for agent in probes:
             if (
                 error := _retired_approval_pair_error_for_agent(
@@ -627,6 +674,7 @@ def _first_retired_approval_error(
                     reject_wildcard_scripts=reject_wildcard_scripts,
                     broad_probe=broad_probe,
                     split_from_active=split_from_active,
+                    all_replacements=all_replacements,
                 )
             ) is not None:
                 return error
@@ -735,6 +783,7 @@ def retired_consolidated_approval_error(
             else reject_wildcard_scripts
         ),
         agent_names=agent_names,
+        split_replacements=split_renames,
     )
 
 
@@ -882,6 +931,27 @@ def _retired_split_filter_guidance(tool_name: str, key: str, old: str, replaceme
     )
 
 
+def _tool_filter_names(settings: Mapping[str, object], key: str) -> set[str]:
+    value = settings.get(key)
+    raw = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    if not isinstance(raw, list):
+        return set()
+    return {name.strip() for name in raw if isinstance(name, str) and name.strip()}
+
+
+def _retired_browser_filter(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    excluded = _tool_filter_names(settings, "exclude_tools")
+    included = _tool_filter_names(settings, "include_tools")
+    if "browser_control" in excluded and "browser_read" not in excluded and "browser_read" not in included:
+        return (
+            "exclude_tools: browser_control",
+            "read-only browser actions moved to `browser_read`, so excluding `browser_control` alone no longer "
+            "disables `browser_read`; exclude both `['browser_control', 'browser_read']` to disable all browser "
+            "actions, or use `include_tools: ['browser_read']` for read-only browser access",
+        )
+    return None
+
+
 _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str, str, str], str]], ...]] = {
     "filesystem": ((_RETIRED_FILE_FUNCTIONS, lambda key, _old, new: f"use `filesystem: {{{key}: [{new}]}}`"),),
     "triggers": (
@@ -946,6 +1016,17 @@ _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str,
 }
 
 
+def _retired_custom_tool_setting(tool_name: str, settings: Mapping[str, object]) -> tuple[str, str] | None:
+    if tool_name == "filesystem":
+        return next(
+            ((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings),
+            None,
+        )
+    if tool_name == "browser":
+        return _retired_browser_filter(settings)
+    return None
+
+
 def retired_stored_tool_setting(
     tool_name: str,
     settings: Mapping[str, object],
@@ -958,17 +1039,6 @@ def retired_stored_tool_setting(
         for renames, guidance_for in filters:
             if (retired := _retired_function_filter(settings, renames, guidance_for=guidance_for)) is not None:
                 return retired
-        if (
-            tool_name == "filesystem"
-            and (
-                retired := next(
-                    ((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings),
-                    None,
-                )
-            )
-            is not None
-        ):
-            return retired
     elif (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
         retired := _retired_function_filter(
             settings,
@@ -980,6 +1050,8 @@ def retired_stored_tool_setting(
             ),
         )
     ) is not None:
+        return retired
+    if (retired := _retired_custom_tool_setting(tool_name, settings)) is not None:
         return retired
     if (split_renames := RETIRED_SPLIT_FUNCTIONS.get(tool_name)) is not None and (
         retired := _retired_split_function_filter(

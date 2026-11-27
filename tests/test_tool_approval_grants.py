@@ -5071,12 +5071,37 @@ def test_triggers_write_watch_script_cannot_receive_timed_grant() -> None:
 @pytest.mark.parametrize(
     ("tools", "old_match", "expected_pattern", "desktop_pairing"),
     [
-        (["triggers"], "triggers", r"triggers is now triggers_read", "explicit_only"),
-        (["desktop"], "desktop", r"desktop is now desktop_read", "explicit_only"),
-        ([], "desktop", r"desktop is now desktop_read", "self_service"),
+        (
+            ["triggers"],
+            "triggers",
+            r"triggers was split into triggers_read and triggers_write.*rewrite the rules for triggers_read and triggers_write\.",
+            "explicit_only",
+        ),
+        (
+            ["desktop"],
+            "desktop",
+            r"desktop was split into desktop_read and desktop_control.*rewrite the rules for desktop_read and desktop_control.*run_desktop_shell",
+            "explicit_only",
+        ),
+        (
+            [],
+            "desktop",
+            r"desktop was split into desktop_read and desktop_control.*rewrite the rules for desktop_read and desktop_control.*run_desktop_shell",
+            "self_service",
+        ),
         (["browser"], "browser_control", r"read actions from browser_control moved to browser_read", "explicit_only"),
-        (["workflow"], "workflow", r"workflow is now workflow_read", "explicit_only"),
-        (["matrix_api"], "matrix_api", r"matrix_api is now matrix_api_read", "explicit_only"),
+        (
+            ["workflow"],
+            "workflow",
+            r"workflow was split into workflow_read and workflow_write.*rewrite the rules for workflow_read and workflow_write\.",
+            "explicit_only",
+        ),
+        (
+            ["matrix_api"],
+            "matrix_api",
+            r"matrix_api was split into matrix_api_read and matrix_api_write.*rewrite the rules for matrix_api_read and matrix_api_write\.",
+            "explicit_only",
+        ),
     ],
 )
 def test_mega_tool_split_approval_rules_fail_closed(
@@ -5086,7 +5111,7 @@ def test_mega_tool_split_approval_rules_fail_closed(
     expected_pattern: str,
     desktop_pairing: str,
 ) -> None:
-    """Rules matching pre-split mega-tool function names fail closed unless the split replacements are also covered."""
+    """Rules matching pre-split mega-tool function names fail closed and name all split replacements."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
@@ -5101,3 +5126,127 @@ def test_mega_tool_split_approval_rules_fail_closed(
     }
     with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
         Config.validate_with_runtime(data, runtime_paths)
+
+
+def test_desktop_partial_and_script_split_approval_errors_name_all_replacements(tmp_path: Path) -> None:
+    """Partial desktop migration and approval scripts still name both split functions and run_desktop_shell."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "gate.py"
+    script_path.write_text("def check(tool_name, arguments, agent_name):\n    return True\n", encoding="utf-8")
+
+    # Covering desktop_read alone still rejects desktop_control and names all replacements.
+    partial_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+        "agents": {"a": {"display_name": "A", "tools": ["desktop"], "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "desktop", "action": "require_approval"},
+                {"match": "desktop_read", "action": "require_approval"},
+            ],
+        },
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"desktop was split into desktop_read and desktop_control \(desktop_control now gets a different approval decision\).*run_desktop_shell",
+    ):
+        Config.validate_with_runtime(partial_data, runtime_paths)
+
+    # Wildcard/exact approval script on retired `desktop` also names both replacements and run_desktop_shell.
+    script_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+        "agents": {"a": {"display_name": "A", "tools": ["desktop"], "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [{"match": "desktop*", "script": str(script_path)}],
+        },
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"desktop was split into desktop_read and desktop_control; update the script and add explicit rules for desktop_read and desktop_control.*run_desktop_shell",
+    ):
+        Config.validate_with_runtime(script_data, runtime_paths)
+
+
+def test_preset_and_alias_toolkits_preserve_action_scoped_grant_operations() -> None:
+    """Tools resolved via presets like openclaw_compat or toolkit aliases keep distinct action-scoped grant keys."""
+    config = Config()
+    registry = builtin_tool_registry()
+
+    open_preset = grant_operation(
+        config,
+        "browser_control",
+        {"action": "open"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    close_preset = grant_operation(
+        config,
+        "browser_control",
+        {"action": "close"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    open_direct = grant_operation(
+        config,
+        "browser_control",
+        {"action": "open"},
+        tools=registry,
+        toolkit_name="browser",
+    )
+    assert open_preset is not None
+    assert close_preset is not None
+    assert open_direct is not None
+    assert open_preset == open_direct
+    assert open_preset.mcp_server_id == "browser"
+    assert open_preset.mcp_tool_name == "open"
+    assert close_preset.mcp_server_id == "browser"
+    assert close_preset.mcp_tool_name == "close"
+    assert open_preset.key != close_preset.key
+
+    tabs_preset = grant_operation(
+        config,
+        "browser_read",
+        {"action": "tabs"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    shot_preset = grant_operation(
+        config,
+        "browser_read",
+        {"action": "screenshot"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    assert tabs_preset is not None
+    assert shot_preset is not None
+    assert tabs_preset.mcp_server_id == "browser"
+    assert tabs_preset.mcp_tool_name == "tabs"
+    assert shot_preset.mcp_tool_name == "screenshot"
+    assert tabs_preset.key != shot_preset.key
+
+    # Toolkit aliases also keep their canonical action-scoped grant owner and watch_script block.
+    delete_alias = grant_operation(
+        config,
+        "triggers_write",
+        {"action": "delete"},
+        tools=registry,
+        toolkit_name="external_trigger_manager",
+    )
+    assert delete_alias is not None
+    assert delete_alias.mcp_server_id == "triggers"
+    assert delete_alias.mcp_tool_name == "delete"
+    assert (
+        grant_operation(
+            config,
+            "triggers_write",
+            {"action": "watch_script"},
+            tools=registry,
+            toolkit_name="external_trigger_manager",
+        )
+        is None
+    )

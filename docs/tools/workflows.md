@@ -48,8 +48,8 @@ background_tool_jobs:
 
 A run is a background job, so `workflow_write(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
-An operator [`tool_approval`](../tool-approval.md) rule for `workflow` asks before anything starts, as for any other call (timed grants are scoped per `action`).
-A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+An operator [`tool_approval`](../tool-approval.md) rule for `workflow_write` asks before anything starts, as for any other call (timed grants are scoped per `action`).
+A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow_write` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
 A restart of MindRoom while the run is unfinished is the exception: the continued job delivers the report to the conversation, and the `tool:after_call` hooks of the call that started it do not run.
 Do not rely on an after-call hook running exactly once for a workflow call.
 
@@ -373,9 +373,9 @@ That call waits for the new run and returns its report to the agent.
 A script can start agents and runs through `tool()` as well.
 
 - `tool("delegate", "run_subagent", task=..., agent_name=..., system_prompt=...)` is the same as `agent()`: the run shows an agent call, with a job of its own, and the call returns the agent's answer.
-- `tool("workflow", "workflow", action="start", source=...)` starts a run inside the script's run and returns its report.
+- `tool("workflow", "workflow_write", action="start", source=...)` starts a run inside the script's run and returns its report.
   Its agents are as deep as the script's own.
-- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `workflow` applies.
+- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `workflow_write` applies.
   While the call waits for an approval it shows `waiting`, nothing is started before the decision, and a denial raises `ToolError` with kind `denied`.
 - `tool("delegate", "continue_subagent", ...)` is refused with `A workflow script cannot call delegate.continue_subagent yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).`
 
