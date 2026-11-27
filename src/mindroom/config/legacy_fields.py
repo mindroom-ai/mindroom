@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
     SINGLE_VERB_RENAMED_TARGETS,
+    STRICT_WILDCARD_SCRIPT_RENAMES,
     STRICT_WILDCARD_SCRIPT_TOOLKITS,
 )
 
@@ -488,6 +489,7 @@ def _format_retired_approval_error(
     old: str,
     news: Sequence[str],
     default: str,
+    kept_news: Sequence[str] = (),
 ) -> str:
     joined = ", ".join(news)
     target = news[0] if len(news) == 1 else f"[{joined}]"
@@ -504,6 +506,16 @@ def _format_retired_approval_error(
         )
     if kind == "rem_old":
         verb = "gets" if len(news) == 1 else "get"
+        if kept_news:
+            kept_joined = ", ".join(kept_news)
+            kept_patterns = [pattern for pattern in rules[index].match_patterns() if pattern != old]
+            combined_match = json.dumps([*kept_patterns, *news])
+            return (
+                f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; "
+                f"{old} is now {joined} (while still matching {kept_joined}), which now {verb} a different "
+                f"approval decision; keep the existing pattern and add {joined} "
+                f"(for example match: {combined_match}) so {kept_joined} stays covered."
+            )
         return (
             f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; "
             f"{old} is now {joined}, which now {verb} a different approval decision; "
@@ -753,12 +765,18 @@ def retired_consolidated_approval_error(
     """
     targets_by_old: dict[str, dict[str, bool]] = {}
     for toolkit_name, renames, reject_wildcard_scripts in toolkit_checks:
-        reject_wildcards = (
+        toolkit_strict = (
             toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
             if reject_wildcard_scripts is None
             else reject_wildcard_scripts
         )
+        strict_old_names = (
+            STRICT_WILDCARD_SCRIPT_RENAMES.get(toolkit_name, frozenset())
+            if reject_wildcard_scripts is None
+            else frozenset()
+        )
         for old, new in renames.items():
+            reject_wildcards = toolkit_strict or old in strict_old_names
             targets = targets_by_old.setdefault(old, {})
             targets[new] = targets.get(new, False) or reject_wildcards
 
@@ -783,13 +801,20 @@ def retired_consolidated_approval_error(
                     failing_news.append(new)
                     break
         if first_failure is not None:
+            kind, index = first_failure
+            kept_news = (
+                [new for new in targets if new not in failing_news and rules[index].matches_tool(new)]
+                if kind == "rem_old"
+                else []
+            )
             return _format_retired_approval_error(
-                first_failure[0],
-                first_failure[1],
+                kind,
+                index,
                 rules=rules,
                 old=old,
                 news=failing_news,
                 default=default,
+                kept_news=kept_news,
             )
     return None
 

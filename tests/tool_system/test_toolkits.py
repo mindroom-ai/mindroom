@@ -79,7 +79,6 @@ _WIRE_FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _CORE_BARE_FUNCTION_TOOLKITS = frozenset(
     {
         "approved_egress",
-        "atlassian",
         "attachments",
         "browser_mcp",
         "calculator",
@@ -90,7 +89,6 @@ _CORE_BARE_FUNCTION_TOOLKITS = frozenset(
         "desktop",
         "dynamic_tools",
         "egress_credentials",
-        "email",
         "file_generation",
         "filesystem",
         "oauth_connections",
@@ -107,10 +105,12 @@ _CORE_BARE_FUNCTION_TOOLKITS = frozenset(
         "visualization",
     },
 )
-_PREFIX_EXCEPTIONS: dict[str, str] = {
-    "baidusearch": "baidu_",
-    "financial_datasets_api": "financial_datasets_",
-    "googlesearch": "google_",
+_PREFIX_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "atlassian": ("jira_", "confluence_"),
+    "baidusearch": ("baidu_",),
+    "email": ("smtp_",),
+    "financial_datasets_api": ("financial_datasets_",),
+    "googlesearch": ("google_",),
 }
 
 
@@ -156,23 +156,26 @@ def test_catalog_function_names_follow_toolkit_scoping_rules() -> None:
     assert set(_PREFIX_EXCEPTIONS).issubset(schema_toolkits)
     assert _CORE_BARE_FUNCTION_TOOLKITS.isdisjoint(_PREFIX_EXCEPTIONS)
 
-    violations: list[tuple[str, str, str, str]] = []
+    violations: list[tuple[str, str, str, tuple[str, ...]]] = []
     bare_toolkits_in_use: set[str] = set()
-    prefix_exceptions_in_use: set[str] = set()
+    prefix_exceptions_in_use: set[tuple[str, str]] = set()
     for catalog_name, toolkit_name, function_name in _catalog_functions():
         is_default_scoped = function_name == toolkit_name or function_name.startswith(f"{toolkit_name}_")
         if toolkit_name in _CORE_BARE_FUNCTION_TOOLKITS:
             if not is_default_scoped:
                 bare_toolkits_in_use.add(toolkit_name)
             continue
-        expected_prefix = _PREFIX_EXCEPTIONS.get(toolkit_name, f"{toolkit_name}_")
-        if function_name != toolkit_name and not function_name.startswith(expected_prefix):
-            violations.append((catalog_name, toolkit_name, function_name, expected_prefix))
+        expected_prefixes = _PREFIX_EXCEPTIONS.get(toolkit_name, (f"{toolkit_name}_",))
+        if function_name != toolkit_name and not function_name.startswith(expected_prefixes):
+            violations.append((catalog_name, toolkit_name, function_name, expected_prefixes))
         elif toolkit_name in _PREFIX_EXCEPTIONS and not is_default_scoped:
-            prefix_exceptions_in_use.add(toolkit_name)
+            for prefix in expected_prefixes:
+                if function_name.startswith(prefix):
+                    prefix_exceptions_in_use.add((toolkit_name, prefix))
     assert violations == []
     assert _CORE_BARE_FUNCTION_TOOLKITS - bare_toolkits_in_use == set()
-    assert set(_PREFIX_EXCEPTIONS) - prefix_exceptions_in_use == set()
+    expected_exception_pairs = {(tk, prefix) for tk, prefixes in _PREFIX_EXCEPTIONS.items() for prefix in prefixes}
+    assert expected_exception_pairs - prefix_exceptions_in_use == set()
 
 
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))

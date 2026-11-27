@@ -5055,17 +5055,18 @@ def test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped(t
     )
     assert loaded_website.tool_approval.rules[0].match == "website_read_url"
 
+    # Unchanged older consolidated renames on postgres (e.g. show_tables -> postgres_inspect) do NOT retroactively
+    # fail catch-all "*" approval scripts once the newly normalized functions have explicit rules.
     loaded_postgres = _validate(
         ["postgres"],
         [
-            {"match": "postgres_inspect", "action": "auto_approve"},
             {"match": "postgres_run_query", "action": "require_approval"},
             {"match": "postgres_export_table_to_path", "action": "require_approval"},
             {"match": "skill", "script": "check.py"},
             {"match": "*", "script": "check.py"},
         ],
     )
-    assert loaded_postgres.tool_approval.rules[1].match == "postgres_run_query"
+    assert loaded_postgres.tool_approval.rules[0].match == "postgres_run_query"
 
     # 4. Single-verb filter guidance replaces in place without claiming an action parameter.
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
@@ -5154,3 +5155,23 @@ def test_shared_retired_bare_name_reports_all_enabled_replacements(tmp_path: Pat
     assert "jina_read_url" in wildcard_message
     assert "website_read_url" in wildcard_message
     assert "[jina_read_url, website_read_url]" in wildcard_message
+
+    # Glob rule matching one enabled replacement (google_bigquery_run_sql_query) while missing another (sql_run_query)
+    # instructs the operator to keep the existing glob and add the uncovered replacement instead of replacing it.
+    sql_and_bq_agents = {
+        "sql_agent": {"display_name": "SQL", "tools": ["sql"], "include_default_tools": False},
+        "bq_agent": {"display_name": "BQ", "tools": ["google_bigquery"], "include_default_tools": False},
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as glob_exc_info:
+        _validate(sql_and_bq_agents, [{"match": "*sql_query", "action": "require_approval"}])
+    glob_message = str(glob_exc_info.value)
+    assert "sql_run_query" in glob_message
+    assert "google_bigquery_run_sql_query" in glob_message
+    assert "keep the existing pattern" in glob_message
+    assert '["*sql_query", "sql_run_query"]' in glob_message
+
+    loaded_glob = _validate(
+        sql_and_bq_agents,
+        [{"match": ["*sql_query", "sql_run_query"], "action": "require_approval"}],
+    )
+    assert loaded_glob.tool_approval.rules[0].match == ["*sql_query", "sql_run_query"]

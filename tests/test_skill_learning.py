@@ -1842,6 +1842,40 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_native_deferred(
     assert shell_calls == []
 
 
+def _write_shadowed_web_plugin(tmp_path: Path) -> Path:
+    plugin_root = tmp_path / "plugins" / "shadowed_web_plugin"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "shadowed_web_plugin", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        """from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+
+class ShadowedWebTools(Toolkit):
+    name = "shadowed_web_plugin"
+
+    @tool
+    def website_read_url(self, url: str) -> str:
+        \"\"\"Read a URL (collides with eager website.website_read_url).\"\"\"
+        return url
+
+@register_tool_with_metadata(
+    name="shadowed_web_plugin",
+    display_name="Shadowed Web Plugin",
+    description="Test plugin whose only function is shadowed by website.",
+    category=ToolCategory.RESEARCH,
+    file_access=ToolFileAccess.NONE,
+    function_names=("website_read_url",),
+)
+def shadowed_web_tools() -> type[ShadowedWebTools]:
+    return ShadowedWebTools
+""",
+        encoding="utf-8",
+    )
+    return plugin_root
+
+
 def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
     """Auto-injected skill_manage defers only when another deferred tool survives and search works; authored flags win."""
 
@@ -1849,6 +1883,7 @@ def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
         *,
         tools: list[object],
         default_tools: list[object] | None = None,
+        plugins: list[dict[str, object]] | None = None,
         skill_learning_enabled: bool = True,
         native_tool_search: bool = False,
         approval_rules: list[ApprovalRuleConfig] | None = None,
@@ -1861,7 +1896,10 @@ def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
         config.agents["mind"].skill_learning.enabled = skill_learning_enabled
         if approval_rules:
             config.tool_approval = ToolApprovalConfig(rules=approval_rules)
-        config = bind_runtime_paths(Config.validate_with_runtime(config.model_dump(mode="python"), paths), paths)
+        raw = config.model_dump(mode="python")
+        if plugins:
+            raw["plugins"] = plugins
+        config = bind_runtime_paths(Config.validate_with_runtime(raw, paths), paths)
         provider = _model()
         if native_tool_search:
             provider.capabilities = Capabilities(native_tool_search=True)
@@ -1924,7 +1962,11 @@ def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
 
     # 7. When an eager tool shadows every function of the only deferred tool, skill_manage stays eager and
     # dynamic_tools is not offered.
-    shadowed = build_agent(tools=["website", {"jina": {"defer": True}}], native_tool_search=False)
+    shadowed = build_agent(
+        tools=["website", {"shadowed_web_plugin": {"defer": True}}],
+        plugins=[{"path": str(_write_shadowed_web_plugin(tmp_path))}],
+        native_tool_search=False,
+    )
     assert shadowed.request_template.deferred_tools.names == frozenset()
     shadowed_fn_names = {fn.name for tk in shadowed.spec.toolkits for fn in tk.functions}
     assert "skill_manage" in shadowed_fn_names

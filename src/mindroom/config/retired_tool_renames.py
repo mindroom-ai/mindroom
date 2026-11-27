@@ -1096,7 +1096,11 @@ STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
         "google_bigquery",
         "usage_stats",
     },
-) | frozenset(_NORMALIZED_INTEGRATION_RENAMES)
+)
+
+STRICT_WILDCARD_SCRIPT_RENAMES: dict[str, frozenset[str]] = {
+    toolkit: frozenset(renames) for toolkit, renames in _NORMALIZED_INTEGRATION_RENAMES.items()
+}
 
 SINGLE_VERB_RENAMED_TARGETS: frozenset[str] = frozenset(
     {

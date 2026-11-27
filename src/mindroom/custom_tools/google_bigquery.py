@@ -253,7 +253,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             detail = _REST_REQUEST_PREFIX.sub("", str(exc.message), count=1)[:_MAX_ERROR_DETAIL]
             return json.dumps({"error": f"{_SERVICE_NAME} request failed (HTTP {exc.code}): {detail}"})
         except GoogleAPIError as exc:
-            return self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
+            return self._google_cloud_error_result(_SERVICE_NAME, "google_bigquery_run_sql_query", exc)
         truncated = len(records) > self.max_rows
         return json.dumps(
             {"columns": columns, "rows": records[: self.max_rows], "truncated": truncated},
