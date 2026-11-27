@@ -14,13 +14,13 @@ from typing import TYPE_CHECKING
 import nio
 import pytest
 
-from mindroom import agents
 from mindroom.api import config_lifecycle
 from mindroom.api.connection_agents import SHARED_CREDENTIALS_GATEWAY_MESSAGE
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.tool_aliases import TOOL_ALIASES
+from mindroom.tool_system import toolkit_builder
 from tests.access_schema_support import OBSERVER_USER_ID, membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
@@ -128,7 +128,7 @@ def test_membership_revocation_during_preparation_stops_tool_body(
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         _native_dispatch_builder(monkeypatch, "hook", async_body, paused, release, events),
     )
@@ -470,7 +470,7 @@ def test_removing_the_opt_in_during_preparation_stops_the_tool_body(
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
     build = _native_dispatch_builder(monkeypatch, "hook", False, paused, release, events, agent="shared")
-    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
             _call,
@@ -643,7 +643,7 @@ def test_deselection_during_preparation_stops_provider_body(
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         _native_dispatch_builder(monkeypatch, phase, async_body, paused, release, events),
     )

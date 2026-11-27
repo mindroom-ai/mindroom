@@ -13,7 +13,6 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from structlog.testing import capture_logs
 
-from mindroom import agents
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import google_scholar
 from mindroom.custom_tools.google_drive import GoogleDriveTools
@@ -21,7 +20,7 @@ from mindroom.custom_tools.google_scholar import GoogleScholarTools
 from mindroom.mcp_gateway import server
 from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
-from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system import sandbox_proxy, toolkit_builder
 from mindroom.tool_system.authoring import Toolkit, toolkit_functions
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.toolkits import configure_toolkit_functions
@@ -96,7 +95,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
             assert close_release.wait(5)
             closed.set()
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: BlockingToolkit())
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: BlockingToolkit())
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
         if _arguments.get("query") == "probe":
@@ -154,7 +153,7 @@ async def test_blocking_tool_bodies_leave_the_default_executor_free(
         return "done"
 
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -205,7 +204,7 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
 
     monkeypatch.setattr(gateway, target, block)
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -270,7 +269,7 @@ async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exi
         return _routed(Toolkit(name="calculator", tools=[work]), context)
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
-    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build)
 
     async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
         if arguments.get("query") == "probe":
@@ -335,7 +334,7 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -419,7 +418,7 @@ async def test_a_cancelled_call_with_two_nested_worker_calls_keeps_capacity_unti
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -482,7 +481,7 @@ async def test_a_failed_call_is_answered_at_once_and_keeps_capacity_while_a_nest
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -537,7 +536,7 @@ async def test_a_nested_worker_call_still_queued_when_its_call_ends_never_runs(
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", proxy)
     monkeypatch.setattr(gateway_toolkits, "_TOOL_EXECUTOR", ThreadPoolExecutor(max_workers=1))
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[work]),
     )
@@ -573,7 +572,7 @@ async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_r
         return []
 
     monkeypatch.setattr(google_scholar, "_search_publications", search)
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: GoogleScholarTools())
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: GoogleScholarTools())
 
     async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
         if arguments.get("query") == "probe":
@@ -620,7 +619,7 @@ async def test_cancelled_google_drive_call_keeps_capacity_until_its_body_returns
         worker_target=None,
     )
     monkeypatch.setattr(tool, "_write_scope_upgrade_result", blocking_scope_check)
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: tool)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: tool)
 
     async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
         if arguments.get("query") == "probe":
@@ -677,7 +676,7 @@ async def test_repeated_cancel_preserves_async_cleanup_and_other_server_capacity
                 cleanup_cancelled = True
                 raise
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: AsyncToolkit())
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: AsyncToolkit())
 
     async def dispatch(_request: Request, _name: str, _arguments: dict[str, object]) -> dict[str, object]:
         return await gateway.invoke_tool(context, toolkit="calculator", function="work", arguments={})
@@ -734,7 +733,7 @@ async def test_cancelled_native_cleanup_failure_is_safely_logged_and_releases_ca
             await close_release.wait()
             raise RuntimeError(provider_detail)
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: FailingCloseToolkit())
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: FailingCloseToolkit())
 
     async def dispatch(_request: Request, _name: str, arguments: dict[str, object]) -> dict[str, object]:
         if arguments.get("query") == "probe":
