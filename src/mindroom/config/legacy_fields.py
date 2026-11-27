@@ -409,6 +409,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "apply_template": "todo",
         "list_templates": "todo",
     },
+    "workflow": {
+        "start_workflow": "workflow",
+        "get_workflow": "workflow",
+        "cancel_workflow": "workflow",
+        "resume_workflow": "workflow",
+        "list_workflow_runs": "workflow",
+        "save_workflow": "workflow",
+    },
+    "thread_tags": {
+        "tag_thread": "thread_tags",
+        "untag_thread": "thread_tags",
+        "list_thread_tags": "thread_tags",
+    },
     "gmail": {
         "get_latest_emails": "gmail_read",
         "get_emails_from_user": "gmail_read",
@@ -1085,19 +1098,19 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
-#   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
-# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
+#   unified function is `workflow`.
+# Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
 #   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
-#   differs from its replacement's effective decision.
+#   differs from `workflow`'s effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
-    "run_workflow": ("start_workflow", "resume_workflow"),
-    "create_workflow": ("save_workflow",),
-    "update_workflow": ("save_workflow",),
-    "get_workflow_run": ("get_workflow",),
-    "list_workflows": ("list_workflow_runs",),
+    "run_workflow": ("workflow",),
+    "create_workflow": ("workflow",),
+    "update_workflow": ("workflow",),
+    "get_workflow_run": ("workflow",),
+    "list_workflows": ("workflow",),
 }
 
 

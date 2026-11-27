@@ -50,7 +50,9 @@ async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
     """The harness with the `workflow` toolkit, the real job runtime, and one run started as a job."""
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         await stack.open_jobs()
-        handle = json.loads(await stack.call("start_workflow", source=_SCRIPT, title="Count the invented things"))
+        handle = json.loads(
+            await stack.call("workflow", action="start", source=_SCRIPT, title="Count the invented things"),
+        )
         stack.run_id = handle["run_id"]
         await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
         yield stack
@@ -152,7 +154,7 @@ def _standing(stack: WorkflowStack) -> tuple[str, int, int, int]:
 
 @pytest.mark.asyncio
 async def test_resume_control_from_the_requester_in_the_runs_thread_resumes(stack: WorkflowStack) -> None:
-    """The requester's Resume takes the run as `resume_workflow` does: a new job, and saved calls are reused."""
+    """The requester's Resume takes the run as `workflow(action="resume", ...)` does: a new job, and saved calls are reused."""
     first = await _fail(stack)
 
     assert await _control(stack) is True

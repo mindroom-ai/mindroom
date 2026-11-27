@@ -102,7 +102,7 @@ def _other_requester(stack: WorkflowStack) -> ToolRuntimeContext:
 
 async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
     """Start a run as its job and return the handle, once its first attempt runs."""
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, **arguments))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, **arguments))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     return handle
@@ -110,7 +110,7 @@ async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
 
 async def _inline(stack: WorkflowStack, runs: int = 1, **options: object) -> asyncio.Task[str]:
     """Start a run as a delegated child's call, which waits for it; return the waiting call once the run runs."""
-    call = asyncio.create_task(stack.call("start_workflow", depth=1, source=SCRIPT, **options))
+    call = asyncio.create_task(stack.call("workflow", action="start", depth=1, source=SCRIPT, **options))
     await stack.until(
         lambda: [run.state for run in stack.store.list_runs()].count(WorkflowRunState.RUNNING) == runs,
     )
@@ -128,7 +128,7 @@ def _job_id(stack: WorkflowStack, call_id: str) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-async def _refused(stack: WorkflowStack, name: str, **options: object) -> str:
+async def _refused(stack: WorkflowStack, name: str, /, **options: object) -> str:
     """Return the sentence a refused call fails with."""
     with pytest.raises(CallFailed) as refusal:
         await stack.call(name, **options)
@@ -173,7 +173,7 @@ async def test_refused_admission_starts_no_process_and_reserves_no_run(stack: Wo
     stack.refuse_admission()
 
     with pytest.raises(CallFailed, match="not available"):
-        await stack.call("start_workflow", source=SCRIPT)
+        await stack.call("workflow", action="start", source=SCRIPT)
 
     assert stack.scripts.launched == []
     assert stack.store.list_runs() == []
@@ -185,7 +185,7 @@ async def test_a_call_cancelled_before_its_job_is_admitted_starts_nothing_and_fr
 ) -> None:
     """A call cancelled while its job waits for the runtime has no job, so its intent goes at once; a retry starts anew."""
     async with stack.jobs._lock:
-        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        first = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await _waits_for_admission(stack)
         first.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -204,7 +204,7 @@ async def test_a_call_cancelled_while_it_reserves_its_run_takes_the_intent_back(
     writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
     writer.execute("BEGIN IMMEDIATE")
     try:
-        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        call = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT))
         await asyncio.sleep(0.1)
         call.cancel()
     finally:
@@ -225,12 +225,12 @@ async def test_a_redelivery_cancelled_while_it_finds_its_run_takes_nothing_from_
 ) -> None:
     """A cancelled call takes back only an intent it wrote itself, never the run an earlier delivery was admitted with."""
     stack.scripts.hold_launch = asyncio.Event()
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
     await stack.until(lambda: stack.scripts.launched)
     writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
     writer.execute("BEGIN IMMEDIATE")
     try:
-        again = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        again = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await asyncio.sleep(0.1)
         again.cancel()
     finally:
@@ -273,7 +273,7 @@ async def test_a_refused_retry_takes_back_an_intent_that_no_job_owns(stack: Work
     stack.refuse_admission()
 
     with pytest.raises(CallFailed, match="not available"):
-        await stack.call("start_workflow", source=SCRIPT, call_id="call-1")
+        await stack.call("workflow", action="start", source=SCRIPT, call_id="call-1")
 
     assert leftover.run_id
     assert stack.store.list_runs() == []
@@ -283,12 +283,12 @@ async def test_a_refused_retry_takes_back_an_intent_that_no_job_owns(stack: Work
 async def test_a_refused_redelivery_takes_nothing_from_the_job_that_was_admitted(stack: WorkflowStack) -> None:
     """A delivery refused while the call's job exists leaves that job's intent, which its launch is about to use."""
     stack.scripts.hold_launch = asyncio.Event()
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
     await stack.until(lambda: stack.scripts.launched)
     stack.refuse_admission()
 
     with pytest.raises(CallFailed):
-        await stack.call("start_workflow", source=SCRIPT, call_id="call-1")
+        await stack.call("workflow", action="start", source=SCRIPT, call_id="call-1")
 
     assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.STARTING
     stack.admission = "allowed"
@@ -314,10 +314,10 @@ async def test_a_refused_start_cancelled_while_it_takes_its_intent_back_finishes
 
     monkeypatch.setattr(stack.store, "delete_intent", held)
     stack.scripts.hold_launch = asyncio.Event()
-    first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    first = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
     await stack.until(deleting.is_set)
     first.cancel()
-    second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    second = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
     await asyncio.sleep(0.2)
     release.set()
     with pytest.raises(asyncio.CancelledError):
@@ -335,9 +335,9 @@ async def test_a_refused_start_cancelled_while_it_takes_its_intent_back_finishes
 async def test_a_cancelled_delivery_takes_no_run_from_the_delivery_admitted_beside_it(stack: WorkflowStack) -> None:
     """Two deliveries of one call wait for admission and the first is cancelled: the other gets one run, one attempt."""
     async with stack.jobs._lock:
-        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        first = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await _waits_for_admission(stack)
-        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        second = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await asyncio.sleep(0.05)
         first.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -358,9 +358,9 @@ async def test_a_refused_delivery_takes_back_only_its_own_intent(stack: Workflow
     grants = iter(["denied"])
     stack.jobs._grant = lambda _job: next(grants, "allowed")
     async with stack.jobs._lock:
-        first = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        first = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await _waits_for_admission(stack)
-        second = asyncio.create_task(stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+        second = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
         await asyncio.sleep(0.05)
     with pytest.raises(CallFailed, match="not available"):
         await first
@@ -377,7 +377,7 @@ async def test_zero_wait_handle_names_the_run_before_the_first_attempt_exists(st
     """The handle holds the run's ID while the script's process is still starting."""
     stack.scripts.hold_launch = asyncio.Event()
 
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     run = stack.store.get_run(handle["run_id"])
 
     assert (run.state, run.attempt, run.script_run_id) == (WorkflowRunState.STARTING, 0, None)
@@ -391,7 +391,7 @@ async def test_zero_wait_handle_names_the_run_before_the_first_attempt_exists(st
 async def test_redelivered_call_reattaches_and_launches_once(stack: WorkflowStack) -> None:
     """The same call delivered twice is one job and one run with one process."""
     first = await _started(stack, call_id="call-1")
-    second = json.loads(await stack.call("start_workflow", source=SCRIPT, call_id="call-1"))
+    second = json.loads(await stack.call("workflow", action="start", source=SCRIPT, call_id="call-1"))
 
     assert first["run_id"] == second["run_id"]
     assert first["job_id"] == second["job_id"]
@@ -402,7 +402,7 @@ async def test_redelivered_call_reattaches_and_launches_once(stack: WorkflowStac
 @pytest.mark.asyncio
 async def test_require_approval_rule_launches_only_after_the_user_approves(tmp_path: Path) -> None:
     """An operator's approval rule gates the call like any other: no intent and no process before the approval."""
-    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=("start_workflow",)) as stack:
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=("workflow",)) as stack:
         await stack.open_jobs()
         context = stack.context
         toolkit = WorkflowTools(context.config)
@@ -420,11 +420,11 @@ async def test_require_approval_rule_launches_only_after_the_user_approves(tmp_p
         session_id = context.execution_identity.session_id or "session"
         async with execution_resources():
             with tool_runtime_context(context):
-                model = ScriptedModel([calls(tool_call("start_workflow", "call-1", source=SCRIPT))])
+                model = ScriptedModel([calls(tool_call("workflow", "call-1", action="start", source=SCRIPT))])
                 paused = await run_job_turn(actor, model, session_id=session_id)
 
                 # The reply pauses for the approval, so the toolkit's job hook has not been asked yet.
-                assert tools["start_workflow"].function.gate is ToolGate.POLICY
+                assert tools["workflow"].function.gate is ToolGate.POLICY
                 assert paused.status is RunStatus.paused
                 assert stack.scripts.launched == []
                 assert stack.store.list_runs() == []
@@ -452,10 +452,10 @@ async def test_a_plugin_hook_that_declines_the_start_leaves_no_intent_job_or_pro
         seen.append((ctx.tool_name, ctx.arguments["source"]))
         ctx.decline("workflows are paused")
 
-    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline), source=SCRIPT)
+    refusal = await _refused(stack, "workflow", action="start", context=_with_hooks(stack, decline), source=SCRIPT)
 
     assert "Reason: workflows are paused" in refusal
-    assert seen == [("start_workflow", SCRIPT)]
+    assert seen == [("workflow", SCRIPT)]
     assert stack.store.list_runs() == []
     assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
     assert stack.scripts.launched == []
@@ -477,10 +477,16 @@ async def test_an_environment_hook_that_declines_the_start_leaves_no_intent_job_
     async def after(ctx: ToolAfterCallContext) -> None:
         seen.append(ctx.blocked)
 
-    refusal = await _refused(stack, "start_workflow", context=_with_hooks(stack, decline, after), source=SCRIPT)
+    refusal = await _refused(
+        stack,
+        "workflow",
+        action="start",
+        context=_with_hooks(stack, decline, after),
+        source=SCRIPT,
+    )
 
     assert "Reason: no token for workflows" in refusal
-    assert seen == [("start_workflow", "workflow"), True]
+    assert seen == [("workflow", "workflow"), True]
     assert stack.store.list_runs() == []
     assert await stack.jobs.list_jobs(owner=stack.context.execution_identity, depth=0) == []
     assert stack.scripts.launched == []
@@ -499,13 +505,15 @@ async def test_plugin_hooks_see_a_start_that_runs_once_before_it_and_once_with_i
     async def after(ctx: ToolAfterCallContext) -> None:
         seen.append((ctx.tool_name, ctx.result, ctx.blocked))
 
-    handle = json.loads(await stack.call("start_workflow", context=_with_hooks(stack, before, after), source=SCRIPT))
+    handle = json.loads(
+        await stack.call("workflow", action="start", context=_with_hooks(stack, before, after), source=SCRIPT),
+    )
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     await stack.finish_attempt(result="the report")
     await _ended_job(stack, handle["job_id"])
 
-    assert seen == [("start_workflow", []), ("start_workflow", "the report", False)]
+    assert seen == [("workflow", []), ("workflow", "the report", False)]
 
 
 @pytest.mark.asyncio
@@ -536,7 +544,7 @@ async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_ot
         token = lifecycle._CHILD_RUN.set(lifecycle.ChildRunObservation(child, None))  # type: ignore[arg-type]
         try:
             call = asyncio.create_task(
-                stack.call("start_workflow", context=replace(stack.context, persona=persona), source=SCRIPT),
+                stack.call("workflow", action="start", context=replace(stack.context, persona=persona), source=SCRIPT),
             )
             await stack.until(lambda: [run.state for run in stack.store.list_runs()] == [WorkflowRunState.RUNNING])
         finally:
@@ -553,7 +561,7 @@ async def test_a_narrowed_childs_run_calls_the_tools_its_persona_keeps_and_no_ot
         assert stack.counting_tool.calls == 1
         await stack.finish_attempt(result="the report")
         # The refused call is a failure the run completed in spite of, which the report's first line names.
-        failed = '1 call failed (n2); get_workflow(run_id, nodes="failed") shows them.'
+        failed = '1 call failed (n2); workflow(action="get", run_id=..., nodes="failed") shows them.'
         assert await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS) == f"{failed}\n\nthe report"
         await stack.engine.close()
 
@@ -584,7 +592,7 @@ async def test_a_repeated_inline_call_waits_for_the_run_the_first_one_started(st
 
     assert await asyncio.wait_for(first, SETTLE_TIMEOUT_SECONDS) == "the report"
     assert await asyncio.wait_for(second, SETTLE_TIMEOUT_SECONDS) == "the report"
-    assert await stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT) == "the report"
+    assert await stack.call("workflow", action="start", depth=1, call_id="call-1", source=SCRIPT) == "the report"
     assert len(stack.scripts.launched) == 1
 
 
@@ -596,7 +604,7 @@ async def test_a_repeated_inline_call_with_another_script_is_refused_and_tells_n
     first = await _inline(stack, call_id="call-1")
     [run] = stack.store.list_runs()
 
-    other = await _refused(stack, "start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n")
+    other = await _refused(stack, "workflow", action="start", depth=1, call_id="call-1", source=SCRIPT + "# changed\n")
 
     assert other == "This call already started a workflow run with another owner, script or arguments."
     assert len(stack.scripts.launched) == 1
@@ -653,7 +661,7 @@ async def test_a_refused_retry_that_outlives_the_last_inline_caller_leaves_no_ru
 
     stack.scripts.resolve_source = held
     retry = asyncio.create_task(
-        stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT + "# changed\n"),
+        stack.call("workflow", action="start", depth=1, call_id="call-1", source=SCRIPT + "# changed\n"),
     )
     await asyncio.sleep(0.05)
     first.cancel()
@@ -689,8 +697,8 @@ async def test_a_call_cancelled_while_the_run_launches_leaves_the_run_to_the_oth
 ) -> None:
     """Calls count as waiting from before the launch, so one of two cancelled during it does not stop the run."""
     stack.scripts.hold_launch = asyncio.Event()
-    first = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
-    second = asyncio.create_task(stack.call("start_workflow", depth=1, call_id="call-1", source=SCRIPT))
+    first = asyncio.create_task(stack.call("workflow", action="start", depth=1, call_id="call-1", source=SCRIPT))
+    second = asyncio.create_task(stack.call("workflow", action="start", depth=1, call_id="call-1", source=SCRIPT))
     await stack.until(lambda: stack.scripts.launched)
     await asyncio.sleep(0.05)
 
@@ -713,7 +721,7 @@ async def test_an_inline_call_cancelled_while_it_reserves_its_run_frees_the_run_
     writer = sqlite3.connect(stack.store.database_path, isolation_level=None)
     writer.execute("BEGIN IMMEDIATE")
     try:
-        call = asyncio.create_task(stack.call("start_workflow", depth=1, source=SCRIPT))
+        call = asyncio.create_task(stack.call("workflow", action="start", depth=1, source=SCRIPT))
         await asyncio.sleep(0.1)
         call.cancel()
     finally:
@@ -733,14 +741,14 @@ async def test_background_jobs_off_is_refused_in_one_sentence(tmp_path: Path) ->
     refusal = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
     with workflow_stack(tmp_path, extra_tools=("workflow",)) as stack:
         stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(enabled=False)
-        assert await _refused(stack, "start_workflow", source=SCRIPT) == refusal
+        assert await _refused(stack, "workflow", action="start", source=SCRIPT) == refusal
 
         stack.context.config.background_tool_jobs = BackgroundToolJobsConfig(
             enabled=True,
             exclude_toolkits=["workflow"],
         )
         await stack.open_jobs()
-        assert await _refused(stack, "start_workflow", source=SCRIPT) == refusal
+        assert await _refused(stack, "workflow", action="start", source=SCRIPT) == refusal
 
         assert stack.store.list_runs() == []
         assert stack.scripts.launched == []
@@ -754,10 +762,10 @@ async def test_another_requesters_run_id_reads_as_unknown(stack: WorkflowStack) 
     bob = _other_requester(stack)
     unknown = _UNKNOWN.format(handle["run_id"])
 
-    assert await _refused(stack, "get_workflow", context=bob, run_id=handle["run_id"]) == unknown
-    assert await _refused(stack, "cancel_workflow", context=bob, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "workflow", action="get", context=bob, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "workflow", action="cancel", context=bob, run_id=handle["run_id"]) == unknown
     missing = "wf-" + "0" * 32
-    assert await _refused(stack, "get_workflow", run_id=missing) == _UNKNOWN.format(missing)
+    assert await _refused(stack, "workflow", action="get", run_id=missing) == _UNKNOWN.format(missing)
     assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
 
 
@@ -768,8 +776,8 @@ async def test_another_agents_run_id_reads_as_unknown(stack: WorkflowStack) -> N
     other_agent = replace(stack.context, agent_name="reviewer")
     unknown = _UNKNOWN.format(handle["run_id"])
 
-    assert await _refused(stack, "get_workflow", context=other_agent, run_id=handle["run_id"]) == unknown
-    assert await _refused(stack, "cancel_workflow", context=other_agent, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "workflow", action="get", context=other_agent, run_id=handle["run_id"]) == unknown
+    assert await _refused(stack, "workflow", action="cancel", context=other_agent, run_id=handle["run_id"]) == unknown
     assert stack.store.get_run(handle["run_id"]).state is WorkflowRunState.RUNNING
 
 
@@ -815,9 +823,9 @@ async def test_start_needs_exactly_one_source(stack: WorkflowStack) -> None:
     """Neither or both of `source` and `path` start nothing."""
     one = "Give exactly one of source, path, or name."
 
-    assert await _refused(stack, "start_workflow") == one
-    assert await _refused(stack, "start_workflow", source=SCRIPT, path="count.py") == one
-    assert await _refused(stack, "start_workflow", depth=1, source=SCRIPT, path="count.py") == one
+    assert await _refused(stack, "workflow", action="start") == one
+    assert await _refused(stack, "workflow", action="start", source=SCRIPT, path="count.py") == one
+    assert await _refused(stack, "workflow", action="start", depth=1, source=SCRIPT, path="count.py") == one
     assert stack.store.list_runs() == []
 
 
@@ -827,8 +835,8 @@ async def test_path_reads_a_workspace_file_and_nothing_outside_the_workspace(sta
     workspace = stack.context.agent_workspace_root(create=True)
     (workspace / "count.py").write_text(SCRIPT, encoding="utf-8")
 
-    handle = json.loads(await stack.call("start_workflow", path="count.py"))
-    outside = await _refused(stack, "start_workflow", path="../count.py")
+    handle = json.loads(await stack.call("workflow", action="start", path="count.py"))
+    outside = await _refused(stack, "workflow", action="start", path="../count.py")
 
     assert stack.store.get_run(handle["run_id"]).source == SCRIPT
     assert "within the workspace" in outside
@@ -840,7 +848,7 @@ async def test_start_is_refused_where_the_operator_lets_no_code_run(stack: Workf
     """Without a worker and without the operator's switch for shell on this machine, no run is reserved."""
     stack.context.config.defaults.allow_shell_without_worker = False
 
-    refusal = await _refused(stack, "start_workflow", source=SCRIPT)
+    refusal = await _refused(stack, "workflow", action="start", source=SCRIPT)
 
     assert refusal.startswith("Workflows run code. Route this agent to a worker")
     assert stack.store.list_runs() == []
@@ -893,7 +901,7 @@ async def test_a_stop_of_the_reply_that_started_the_run_does_not_reach_its_job(
 async def test_a_job_cancelled_while_its_attempt_launches_leaves_no_running_attempt(stack: WorkflowStack) -> None:
     """A launch in progress is finished, not dropped, so the cancel finds the attempt and stops it."""
     stack.scripts.hold_launch = asyncio.Event()
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     await stack.until(lambda: len(stack.scripts.launched) == 1)
     owner = stack.context.execution_identity
 
@@ -910,7 +918,7 @@ async def test_cancel_workflow_ends_the_run_and_its_job(stack: WorkflowStack) ->
     """The agent's own cancel ends the run, and the run's job ends cancelled with it."""
     handle = await _started(stack)
 
-    answer_text = json.loads(await stack.call("cancel_workflow", run_id=handle["run_id"]))
+    answer_text = json.loads(await stack.call("workflow", action="cancel", run_id=handle["run_id"]))
     job = await _ended_job(stack, handle["job_id"])
 
     assert answer_text == {"run_id": handle["run_id"], "status": "cancelled"}
@@ -938,7 +946,7 @@ async def test_a_shutdown_while_the_first_attempt_starts_leaves_the_run_starting
     This stack's job runtime continues no job, so the job ends here; `test_workflow_recovery.py` continues it.
     """
     stack.scripts.hold_launch = asyncio.Event()
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     await stack.until(lambda: stack.scripts.launched)
 
     await stack.engine.close()
@@ -967,7 +975,7 @@ async def test_a_start_after_the_engine_stopped_launches_nothing_and_stays_admit
 
     monkeypatch.setattr(stack.engine, "launch", seen)
 
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     await answered.wait()
     await stack.jobs.quiesce()
     job = await _ended_job(stack, handle["job_id"])
@@ -1025,8 +1033,8 @@ async def test_a_turn_whose_tools_a_filter_narrows_starts_and_resumes_no_run(sta
     filtered = replace(stack.context, tool_function_filter=lambda function: function.name != "append")
     refusal = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 
-    assert await _refused(stack, "start_workflow", context=filtered, source=SCRIPT) == refusal
-    assert await _refused(stack, "resume_workflow", context=filtered, run_id=first["run_id"]) == refusal
+    assert await _refused(stack, "workflow", action="start", context=filtered, source=SCRIPT) == refusal
+    assert await _refused(stack, "workflow", action="resume", context=filtered, run_id=first["run_id"]) == refusal
     assert [run.run_id for run in stack.store.list_runs()] == [first["run_id"]]
 
 
@@ -1044,7 +1052,7 @@ async def test_a_narrowed_copys_resume_leaves_the_run_what_both_keep(
     assert stack.store.get_run(stack.run_id).persona is None
     narrowed = replace(stack.context, persona=_persona(("workflow", "counter.text")))
 
-    handle = json.loads(await stack.call("resume_workflow", context=narrowed, run_id=first["run_id"], **edit))
+    handle = json.loads(await stack.call("workflow", action="resume", context=narrowed, run_id=first["run_id"], **edit))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     persona = stack.store.get_run(stack.run_id).persona
@@ -1058,7 +1066,7 @@ async def test_a_narrowed_copys_resume_leaves_the_run_what_both_keep(
     # The owner resumes it again with every tool: a resume never widens.
     await stack.end_attempt(ScriptRunState.FAILED, output="KeyError: 'tide'")
     assert (await _ended_job(stack, handle["job_id"])).status == "failed"
-    await stack.call("resume_workflow", run_id=first["run_id"])
+    await stack.call("workflow", action="resume", run_id=first["run_id"])
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 3)
     assert stack.store.get_run(stack.run_id).persona == persona
 
@@ -1069,7 +1077,7 @@ async def test_resume_registers_a_new_job_when_the_old_one_ended(stack: Workflow
     first = await _failed(stack, title="Count things")
     ended = stack.store.get_run(stack.run_id).epoch
 
-    handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    handle = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     assert handle.keys() == {"job_id", "run_id", "status", "title"}
@@ -1099,7 +1107,7 @@ async def test_resume_from_another_thread_runs_in_the_runs_own_conversation(stac
         orchestrator=stack.context.orchestrator,
     )
 
-    handle = json.loads(await stack.call("resume_workflow", context=elsewhere, run_id=first["run_id"]))
+    handle = json.loads(await stack.call("workflow", action="resume", context=elsewhere, run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     run = stack.store.get_run(stack.run_id)
@@ -1134,7 +1142,7 @@ async def test_resume_from_another_thread_that_the_runs_conversation_refuses_cha
 
     options = {"context": elsewhere, "run_id": first["run_id"], "source": _EDITED.format("x"), "rerun": ["n1"]}
 
-    assert await _refused(stack, "resume_workflow", **options) == refusal
+    assert await _refused(stack, "workflow", action="resume", **options) == refusal
     assert (stack.store.get_run(stack.run_id), stack.store.nodes(stack.run_id)) == before
     assert len(stack.scripts.launched) == 1
 
@@ -1157,7 +1165,7 @@ async def test_two_resume_calls_at_once_give_the_run_to_one_job(
 
     monkeypatch.setattr(stack.engine, "reopen", held)
     handles = [
-        json.loads(await stack.call("resume_workflow", run_id=first["run_id"], source=_EDITED.format(name)))
+        json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"], source=_EDITED.format(name)))
         for name in ("a", "b")
     ]
     both_admitted.set()
@@ -1190,7 +1198,8 @@ async def test_resume_that_took_the_run_and_could_not_start_keeps_it_from_a_call
 
     monkeypatch.setattr(stack.engine, "reopen", held)
     winner, loser = [
-        json.loads(await stack.call("resume_workflow", run_id=first["run_id"], rerun=rerun)) for rerun in ([], ["n1"])
+        json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"], rerun=rerun))
+        for rerun in ([], ["n1"])
     ]
     await stack.until(lambda: len(gates) == 2)
     stack.scripts.refuse_launch = ScriptRunManagerError("The worker backend refused the script.")
@@ -1272,7 +1281,7 @@ def test_job_standing_says_what_the_job_runtime_knows(
 async def test_cancel_for_a_job_leaves_a_run_that_another_job_took(stack: WorkflowStack) -> None:
     """A job's cancel names the job: once a resume gave the run to another one, it ends nothing."""
     first = await _failed(stack)
-    taken = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    taken = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     left = await stack.engine.cancel(stack.run_id, reason="The run's job was cancelled.", owner=first["job_id"])
@@ -1301,9 +1310,9 @@ async def test_cancelled_resume_that_never_took_the_run_leaves_it_to_the_job_tha
         return await reopen(*args, **options)
 
     monkeypatch.setattr(stack.engine, "reopen", held)
-    late = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    late = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
     await stack.until(lambda: slow)
-    taken = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    taken = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     await stack.jobs.cancel(late["job_id"], owner=stack.context.execution_identity, depth=0)
@@ -1322,9 +1331,9 @@ async def test_resume_call_that_is_delivered_again_returns_the_job_it_started(st
     """The same call names the same job, also after that job took the run: nothing is refused and nothing starts twice."""
     first = await _failed(stack)
 
-    once = json.loads(await stack.call("resume_workflow", run_id=first["run_id"], call_id="call-2"))
+    once = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"], call_id="call-2"))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
-    again = json.loads(await stack.call("resume_workflow", run_id=first["run_id"], call_id="call-2"))
+    again = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"], call_id="call-2"))
 
     assert (again["job_id"], again["run_id"]) == (once["job_id"], first["run_id"])
     assert (stack.store.get_run(stack.run_id).attempt, len(stack.scripts.launched)) == (2, 2)
@@ -1340,7 +1349,7 @@ async def test_resume_waits_until_the_runs_last_job_has_ended(
     monkeypatch.setattr(stack.engine, "wait", lambda _run_id: asyncio.Event().wait())
     await stack.finish_attempt(result="the first report")
 
-    refusal = await _refused(stack, "resume_workflow", run_id=handle["run_id"])
+    refusal = await _refused(stack, "workflow", action="resume", run_id=handle["run_id"])
 
     assert refusal == f"Run {handle['run_id']} is still delivering its report. Try again in a moment."
     assert stack.store.get_run(stack.run_id).result == "the first report"
@@ -1351,7 +1360,7 @@ async def test_resume_of_a_run_that_still_runs_is_refused_and_admits_no_job(stac
     """The model reads the sentence that says what to do first, and the run goes on untouched."""
     handle = await _started(stack)
 
-    refusal = await _refused(stack, "resume_workflow", run_id=handle["run_id"])
+    refusal = await _refused(stack, "workflow", action="resume", run_id=handle["run_id"])
 
     assert refusal == f"Run {handle['run_id']} is still running. Cancel it first."
     assert [job.job_id for job in stack.jobs.retained_jobs()] == [handle["job_id"]]
@@ -1366,11 +1375,14 @@ async def test_resume_is_refused_before_any_job_for_a_wrong_call_two_sources_or_
     handle = await _failed(stack)
     run_id = handle["run_id"]
 
-    assert await _refused(stack, "resume_workflow", run_id=run_id, rerun=["n9"]) == f"Run {run_id} has no call n9."
-    assert await _refused(stack, "resume_workflow", run_id=run_id, source=SCRIPT, path="wf.py") == (
+    assert (
+        await _refused(stack, "workflow", action="resume", run_id=run_id, rerun=["n9"])
+        == f"Run {run_id} has no call n9."
+    )
+    assert await _refused(stack, "workflow", action="resume", run_id=run_id, source=SCRIPT, path="wf.py") == (
         "Give at most one of source or path."
     )
-    assert await _refused(stack, "resume_workflow", context=_other_requester(stack), run_id=run_id) == (
+    assert await _refused(stack, "workflow", action="resume", context=_other_requester(stack), run_id=run_id) == (
         _UNKNOWN.format(run_id)
     )
     assert stack.store.get_run(run_id).state is WorkflowRunState.FAILED
@@ -1383,7 +1395,7 @@ async def test_resume_runs_an_edited_script_and_the_calls_rerun_names(stack: Wor
     handle = await _failed(stack)
     edited = "def main(args):\n    return 'edited'\n"
 
-    await stack.call("resume_workflow", run_id=handle["run_id"], source=edited, rerun=["n1"])
+    await stack.call("workflow", action="resume", run_id=handle["run_id"], source=edited, rerun=["n1"])
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     assert stack.store.get_run(handle["run_id"]).source == edited
@@ -1398,7 +1410,7 @@ async def test_refused_admission_of_a_resume_leaves_the_run_as_it_ended(stack: W
     stack.refuse_admission()
 
     with pytest.raises(CallFailed, match="not available"):
-        await stack.call("resume_workflow", run_id=handle["run_id"])
+        await stack.call("workflow", action="resume", run_id=handle["run_id"])
 
     run = stack.store.get_run(handle["run_id"])
     assert (run.state, run.attempt, len(stack.scripts.launched)) == (WorkflowRunState.FAILED, 1, 1)
@@ -1409,7 +1421,7 @@ async def test_inline_resume_waits_for_the_run_and_returns_its_report(stack: Wor
     """Where the call cannot be a job, it waits for the resumed run as an inline start does."""
     handle = await _failed(stack)
 
-    call = asyncio.create_task(stack.call("resume_workflow", depth=1, run_id=handle["run_id"]))
+    call = asyncio.create_task(stack.call("workflow", action="resume", depth=1, run_id=handle["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
     await stack.finish_attempt(result="resumed")
 
@@ -1420,7 +1432,7 @@ async def test_inline_resume_waits_for_the_run_and_returns_its_report(stack: Wor
 async def test_an_inline_resume_that_is_cancelled_cancels_its_run(stack: WorkflowStack) -> None:
     """The engine's one rule for a run with no job: when its last waiting call leaves, the run stops."""
     handle = await _failed(stack)
-    call = asyncio.create_task(stack.call("resume_workflow", depth=1, run_id=handle["run_id"]))
+    call = asyncio.create_task(stack.call("workflow", action="resume", depth=1, run_id=handle["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     call.cancel()
@@ -1435,7 +1447,7 @@ async def test_an_inline_resume_that_is_cancelled_cancels_its_run(stack: Workflo
 async def test_a_resumed_job_that_is_cancelled_cancels_the_run(stack: WorkflowStack) -> None:
     """The resumed run's job stops it as the first job did."""
     handle = await _failed(stack)
-    resumed = json.loads(await stack.call("resume_workflow", run_id=handle["run_id"]))
+    resumed = json.loads(await stack.call("workflow", action="resume", run_id=handle["run_id"]))
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
 
     await stack.jobs.cancel(resumed["job_id"], owner=stack.context.execution_identity, depth=0)
@@ -1465,7 +1477,7 @@ async def test_a_launch_that_is_refused_fails_the_run_and_its_job_with_the_reaso
     """An admitted job whose script cannot start ends failed with why, and its run is not left starting."""
     stack.scripts.refuse_launch = ScriptRunManagerError("The worker backend refused the script.")
 
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     job = await _ended_job(stack, handle["job_id"])
     run = stack.store.get_run(handle["run_id"])
 
@@ -1484,12 +1496,12 @@ async def test_ninth_top_level_run_is_refused_and_nested_runs_do_not_count(stack
     set_run(stack.store, inline.run_id, parent_run_id=stack.run_id, parent_node_key="@0")
 
     eighth = await _started(stack)
-    ninth = await _refused(stack, "start_workflow", source=SCRIPT)
+    ninth = await _refused(stack, "workflow", action="start", source=SCRIPT)
 
     assert ninth == "You have 8 workflow runs in progress, the limit. Wait for one to end or cancel one."
     assert len(stack.scripts.launched) == 9
-    await stack.call("cancel_workflow", run_id=eighth["run_id"])
-    assert json.loads(await stack.call("start_workflow", source=SCRIPT))["run_id"].startswith("wf-")
+    await stack.call("workflow", action="cancel", run_id=eighth["run_id"])
+    assert json.loads(await stack.call("workflow", action="start", source=SCRIPT))["run_id"].startswith("wf-")
     nested.cancel()
 
 
@@ -1501,7 +1513,7 @@ async def test_a_start_waits_for_the_stores_writer_off_the_event_loop(stack: Wor
     writer.execute("BEGIN IMMEDIATE")
     try:
         began = loop.time()
-        call = asyncio.create_task(stack.call("start_workflow", source=SCRIPT))
+        call = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT))
         for _ in range(10):
             await asyncio.sleep(0.01)
         waited = loop.time() - began
@@ -1521,9 +1533,9 @@ async def test_get_workflow_reports_the_state_counts_failed_calls_and_nodes(stac
     with pytest.raises(Exception, match="The counter failed"):
         await stack.result("@1", "tool", tool_args("counter", "fail"))
 
-    status = json.loads(await stack.call("get_workflow", run_id=handle["run_id"]))
-    everything = json.loads(await stack.call("get_workflow", run_id=handle["run_id"], nodes="all"))
-    failed = json.loads(await stack.call("get_workflow", run_id=handle["run_id"], nodes="failed"))
+    status = json.loads(await stack.call("workflow", action="get", run_id=handle["run_id"]))
+    everything = json.loads(await stack.call("workflow", action="get", run_id=handle["run_id"], nodes="all"))
+    failed = json.loads(await stack.call("workflow", action="get", run_id=handle["run_id"], nodes="failed"))
 
     assert status.keys() == {"run_id", "title", "status", "attempt", "counts", "usage", "waiting", "failed", "nodes"}
     assert (status["title"], status["status"], status["attempt"]) == ("Count things", "running", 1)
@@ -1571,10 +1583,18 @@ def test_a_workflow_job_is_granted_while_the_agent_has_the_toolkit_and_the_reque
 
 
 _OFFERED_DESCRIPTION = """\
-Run a workflow: a Python script that puts many agents to work in the background.
+Run and manage durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs).
 
+Actions (only pass parameters for the chosen action):
+- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.
+- `get`: run status, cost, open questions, failed calls, and nodes (`run_id`; optional `nodes`: `"active"` default, `"failed"`, or `"all"`; `messages=True` adds peer messages & shared state).
+- `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).
+- `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=["n4"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).
+- `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`)—no other parameters.
+- `save`: save a run's script as `workflows/<name>.py` for `action="start", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {"arg": "meaning"}`.
+
+Script authoring (`action="start"`):
 Use when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.
-Pass exactly one of source (inline Python), path (workspace file), or name (saved workflows/<name>.py).
 Define `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.
 
     from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
@@ -1583,15 +1603,15 @@ Define `def main(args):` returning the final report (str or JSON); MindRoom call
         phase("Research")
         try: notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
         except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run
-        draft = agent("Write report:\\n\\n" + "\\n\\n".join(notes))
+        draft = agent("Write report:\n\n" + "\n\n".join(notes))
         for _ in range(3):
-            chk = agent("List factual issues:\\n\\n" + draft, schema={"type": "object", "required": ["problems"],
+            chk = agent("List factual issues:\n\n" + draft, schema={"type": "object", "required": ["problems"],
                         "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
             if not chk["problems"]: break
-            draft = agent(f"Fix: {chk['problems']}\\n\\n{draft}")
+            draft = agent(f"Fix: {chk['problems']}\n\n{draft}")
         return draft
     # Multi-turn loop: dev, rev = spawn("dev"), spawn("rev", system="Review diffs. Reply APPROVE or list issues.")
-    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\\n{tests.output}\\n{r}")
+    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\n{tests.output}\n{r}")
     # Peers: parallel([lambda: agent("Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.", name="be"),
     #                  lambda: agent("Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.", name="fe")]); return state.get("contract")
 
@@ -1606,15 +1626,15 @@ SDK:
 
 Durability & execution:
 - Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
-- resume_workflow reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in rerun.
-- Returns {run_id, job_id, status, title} immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). get_workflow(run_id) shows calls and cost_usd/attempt_cost_usd. Uncapped unless max_cost_usd is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher max_cost_usd). Agents needing approval wait for user without failing.
+- `action="resume"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.
+- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `action="get"` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
 
 Models: haiku, opus (add an effort as in opus@high).
 Agents you can run with agent=: helper, roommate."""
 
 
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
-    """The offered description names the calls a script has now, how the report arrives, the models and the agents.
+    """The offered description names all actions, SDK calls, how the report arrives, the models, and the agents.
 
     The agents are those the owner may delegate to and those configured for the room, without the owner itself.
     """
@@ -1632,11 +1652,13 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
     }
     toolkit = WorkflowTools(config, "watcher", room_id, stack.context.runtime_paths)
     functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
-    description = functions["start_workflow"].description or ""
+    description = functions["workflow"].description or ""
 
     assert description == _OFFERED_DESCRIPTION
-    assert "Agents you can run" not in WorkflowTools(config)._start_description
-    assert set(functions["start_workflow"].parameters["properties"]) == {
+    assert "Agents you can run" not in WorkflowTools(config)._description
+    assert set(functions["workflow"].parameters["properties"]) == {
+        "action",
+        "run_id",
         "source",
         "path",
         "name",
@@ -1645,33 +1667,16 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
         "max_concurrent",
         "resource_profile",
         "max_cost_usd",
-    }
-    assert (functions["list_workflow_runs"].description or "").startswith(
-        "List this conversation's recent runs and your saved workflows (name, description, args).",
-    )
-    assert (functions["save_workflow"].description or "").startswith(
-        "Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.",
-    )
-    assert set(functions["save_workflow"].parameters["properties"]) == {"run_id", "name", "description"}
-    assert (functions["cancel_workflow"].description or "").startswith(
-        "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
-    )
-    assert (functions["resume_workflow"].description or "").startswith(
-        "Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow "
-        "explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as "
-        "one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.",
-    )
-    assert set(functions["resume_workflow"].parameters["properties"]) == {
-        "run_id",
-        "source",
-        "path",
+        "nodes",
+        "messages",
         "rerun",
-        "max_cost_usd",
+        "description",
     }
+    assert functions["workflow"].parameters["required"] == ["action"]
 
 
 def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:
-    """An agent's `workflow` entry sets the limits, and `get_workflow` can write its answer to a workspace file."""
+    """An agent's `workflow` entry sets the limits, and `workflow` can write its answer to a workspace file."""
     context = stack.context
     toolkit = get_tool_by_name(
         "workflow",
@@ -1686,19 +1691,53 @@ def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stac
 
     assert isinstance(toolkit, WorkflowTools)
     assert toolkit.limits == WorkflowLimits(max_concurrent_runs=2, max_runtime_hours=0)
-    assert "Models: default." in (functions["start_workflow"].description or "")
-    assert "mindroom_output_path" in functions["get_workflow"].parameters["properties"]
+    assert "Models: default." in (functions["workflow"].description or "")
+    assert "mindroom_output_path" in functions["workflow"].parameters["properties"]
 
 
 def test_workflow_toolkit_offers_expected_functions(stack: WorkflowStack) -> None:
-    """The workflow toolkit exposes its six lifecycle and saved-workflow functions."""
+    """The workflow toolkit exposes a single unified `workflow` action function."""
     names = set(toolkit_function_names(WorkflowTools(stack.context.config)))
 
-    assert names == {
-        "start_workflow",
-        "get_workflow",
-        "cancel_workflow",
-        "resume_workflow",
-        "list_workflow_runs",
-        "save_workflow",
-    }
+    assert names == {"workflow"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error"),
+    [
+        ({"action": "get"}, "`run_id` is required for action='get'."),
+        ({"action": "cancel"}, "`run_id` is required for action='cancel'."),
+        ({"action": "resume"}, "`run_id` is required for action='resume'."),
+        ({"action": "save", "run_id": "wf-1"}, "`name` is required for action='save'."),
+        ({"action": "save", "name": "flow"}, "`run_id` is required for action='save'."),
+        ({"action": "start", "source": SCRIPT, "nodes": "all"}, "cannot be used with action='start'."),
+        ({"action": "start", "source": SCRIPT, "run_id": "wf-1"}, "cannot be used with action='start'."),
+        ({"action": "resume", "run_id": "wf-1", "max_concurrent": 4}, "cannot be used with action='resume'."),
+        ({"action": "get", "run_id": "wf-1", "source": SCRIPT}, "cannot be used with action='get'."),
+        ({"action": "cancel", "run_id": "wf-1", "messages": True}, "cannot be used with action='cancel'."),
+        ({"action": "list", "run_id": "wf-1"}, "cannot be used with action='list'."),
+        ({"action": "save", "run_id": "wf-1", "name": "flow", "rerun": ["n1"]}, "cannot be used with action='save'."),
+    ],
+)
+async def test_workflow_validates_action_specific_parameters(
+    stack: WorkflowStack,
+    kwargs: dict[str, object],
+    expected_error: str,
+) -> None:
+    """Missing required parameters and cross-action parameters fail cleanly without launching a run."""
+    refusal = await _refused(stack, "workflow", **kwargs)
+    assert expected_error in refusal
+    assert stack.store.list_runs() == []
+    assert stack.scripts.launched == []
+
+
+def test_workflow_default_wait_only_backgrounds_workflow_jobs_immediately(stack: WorkflowStack) -> None:
+    """Schema projection and workflow start/resume jobs use 0s wait; synchronous control actions wait to finish."""
+    from mindroom.tool_jobs.execution import _default_wait  # noqa: PLC0415
+
+    toolkit = WorkflowTools(stack.context.config)
+    fn = replace(adapt_toolkit(toolkit, key="workflow").functions[0], registered_toolkit="workflow")
+    assert _default_wait(fn) == 0.0
+    assert _default_wait(fn, job_kind="workflow") == 0.0
+    assert _default_wait(fn, job_kind="tool") is None

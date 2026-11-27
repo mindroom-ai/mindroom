@@ -229,7 +229,7 @@ def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
 
     A value that is not an object is still refused there, so a tool body never receives one.
     """
-    tag_thread = toolkit_offers(ThreadTagsTools(), "tag_thread")
+    thread_tags = toolkit_offers(ThreadTagsTools(), "thread_tags")
     matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api")
     make_request = toolkit_offers(custom_api_tools()(), "make_request")
     event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
@@ -239,7 +239,10 @@ def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
         "json_data": {"name": "lamp", "tags": ["new"], "price": 12.5},
     }
 
-    validate_tool_arguments(dict(tag_thread.parameters), {"tag": "blocked", "data": {"priority": "high"}})
+    validate_tool_arguments(
+        dict(thread_tags.parameters),
+        {"action": "tag", "tag": "blocked", "data": {"priority": "high"}},
+    )
     validate_tool_arguments(dict(matrix_api.parameters), event)
     validate_tool_arguments(dict(make_request.parameters), request)
     with pytest.raises(ValueError, match="Invalid tool arguments"):

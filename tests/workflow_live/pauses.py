@@ -131,7 +131,7 @@ def main() -> int:
     say(f"the schema call ended {checker['state']}; starting the run with the limit")
     (deployment.workspace / name).write_text(_PAUSES.format(token=token, report=report))
     deployment.ask(
-        f'Call the tool start_workflow with path="{name}" and max_cost_usd={_LIMIT} and no other argument. '
+        f'Call the tool workflow with action="start", path="{name}", and max_cost_usd={_LIMIT} and no other argument. '
         "Call it once and only once. Reply with the run ID it returns.",
         dev,
     )

@@ -299,25 +299,31 @@ def test_validate_with_runtime_preserves_deprecation_warning_across_pass_two_edi
         pytest.param(
             ["dynamic_workflow"],
             {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
-            "start_workflow",
+            "workflow",
             id="run-workflow-alias",
         ),
         pytest.param(
             ["workflow", "dynamic_workflow"],
             {"rules": [{"match": "run_workflow", "action": "require_approval"}]},
-            "start_workflow",
+            "workflow",
             id="run-workflow-merged-alias",
         ),
         pytest.param(
             ["dynamic_workflow"],
             {"rules": [{"match": "create_workflow", "action": "require_approval"}]},
-            "save_workflow",
+            "workflow",
             id="create-workflow",
         ),
         pytest.param(
             ["dynamic_workflow"],
-            {"default": "require_approval", "rules": [{"match": "start_*", "action": "auto_approve"}]},
-            "start_workflow",
+            {"rules": [{"match": "list_workflows", "action": "require_approval"}]},
+            "workflow",
+            id="list-workflows",
+        ),
+        pytest.param(
+            ["dynamic_workflow"],
+            {"default": "require_approval", "rules": [{"match": "work*", "action": "auto_approve"}]},
+            "workflow",
             id="broad-glob-weakening-default",
         ),
     ],
@@ -340,12 +346,11 @@ def test_retired_dynamic_workflow_approval_rules_fail(
             ["dynamic_workflow"],
             [
                 {"match": "run_workflow", "action": "require_approval"},
-                {"match": "start_workflow", "action": "require_approval"},
-                {"match": "resume_workflow", "action": "require_approval"},
+                {"match": "workflow", "action": "require_approval"},
             ],
             id="explicit-exact-replacements",
         ),
-        pytest.param(["dynamic_workflow"], [{"match": "*_workflow*", "action": "require_approval"}], id="wildcard"),
+        pytest.param(["dynamic_workflow"], [{"match": "*workflow*", "action": "require_approval"}], id="wildcard"),
         pytest.param(["calculator"], [{"match": "run_workflow", "action": "require_approval"}], id="without-workflow"),
     ],
 )
@@ -362,7 +367,7 @@ def test_retired_dynamic_workflow_approval_rules_allowed(
     assert len(config.tool_approval.rules) == len(rules)
 
 
-@pytest.mark.parametrize("pattern", ["start_*", "run_*", "resume_*", "create_*"])
+@pytest.mark.parametrize("pattern", ["run_*", "create_*"])
 @pytest.mark.parametrize(
     ("default_action", "rule_action"),
     [("auto_approve", "require_approval"), ("require_approval", "auto_approve")],

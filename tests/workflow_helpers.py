@@ -1017,7 +1017,9 @@ class WorkflowStack:
         bind_toolkit_construction(toolkit, ToolConstruction("workflow", None))
         tools = toolkit_job_tools(toolkit, authored_name="workflow").values()
         returned = asyncio.Event()
-        held = _CALL_RETURNED.set(returned if depth == 0 and name in ("start_workflow", "resume_workflow") else None)
+        held = _CALL_RETURNED.set(
+            returned if depth == 0 and name == "workflow" and arguments.get("action") in ("start", "resume") else None,
+        )
         try:
             async with execution_resources():
                 with tool_runtime_context(context):

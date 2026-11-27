@@ -66,15 +66,22 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import WorkflowNode
 
-_START = "start_workflow"
-_RESUME = "resume_workflow"
+_WORKFLOW = "workflow"
 # The spec's teaching text, cut to what this release runs: each later release adds the lines for what it adds. The
 # list of models follows it.
-_START_DESCRIPTION = """\
-Run a workflow: a Python script that puts many agents to work in the background.
+_WORKFLOW_DESCRIPTION = """\
+Run and manage durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs).
 
+Actions (only pass parameters for the chosen action):
+- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.
+- `get`: run status, cost, open questions, failed calls, and nodes (`run_id`; optional `nodes`: `"active"` default, `"failed"`, or `"all"`; `messages=True` adds peer messages & shared state).
+- `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).
+- `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=["n4"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).
+- `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`)—no other parameters.
+- `save`: save a run's script as `workflows/<name>.py` for `action="start", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {"arg": "meaning"}`.
+
+Script authoring (`action="start"`):
 Use when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.
-Pass exactly one of source (inline Python), path (workspace file), or name (saved workflows/<name>.py).
 Define `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.
 
     from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
@@ -83,15 +90,15 @@ Define `def main(args):` returning the final report (str or JSON); MindRoom call
         phase("Research")
         try: notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
         except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run
-        draft = agent("Write report:\\n\\n" + "\\n\\n".join(notes))
+        draft = agent("Write report:\n\n" + "\n\n".join(notes))
         for _ in range(3):
-            chk = agent("List factual issues:\\n\\n" + draft, schema={"type": "object", "required": ["problems"],
+            chk = agent("List factual issues:\n\n" + draft, schema={"type": "object", "required": ["problems"],
                         "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
             if not chk["problems"]: break
-            draft = agent(f"Fix: {chk['problems']}\\n\\n{draft}")
+            draft = agent(f"Fix: {chk['problems']}\n\n{draft}")
         return draft
     # Multi-turn loop: dev, rev = spawn("dev"), spawn("rev", system="Review diffs. Reply APPROVE or list issues.")
-    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\\n{tests.output}\\n{r}")
+    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\n{tests.output}\n{r}")
     # Peers: parallel([lambda: agent("Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.", name="be"),
     #                  lambda: agent("Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.", name="fe")]); return state.get("contract")
 
@@ -106,19 +113,59 @@ SDK:
 
 Durability & execution:
 - Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
-- resume_workflow reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in rerun.
-- Returns {run_id, job_id, status, title} immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). get_workflow(run_id) shows calls and cost_usd/attempt_cost_usd. Uncapped unless max_cost_usd is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher max_cost_usd). Agents needing approval wait for user without failing.
+- `action="resume"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.
+- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `action="get"` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
-
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
+_NODE_FILTERS = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}
+_ALLOWED_WORKFLOW_PARAMS: dict[str, frozenset[str]] = {
+    "start": frozenset(
+        {"source", "path", "name", "args", "title", "max_concurrent", "resource_profile", "max_cost_usd"},
+    ),
+    "get": frozenset({"run_id", "nodes", "messages"}),
+    "cancel": frozenset({"run_id"}),
+    "resume": frozenset({"run_id", "source", "path", "rerun", "max_cost_usd"}),
+    "list": frozenset(),
+    "save": frozenset({"run_id", "name", "description"}),
+}
+_WORKFLOW_PARAMS = tuple(dict.fromkeys(k for keys in _ALLOWED_WORKFLOW_PARAMS.values() for k in sorted(keys)))
+_REQUIRED_WORKFLOW_PARAMS: dict[str, tuple[str, ...]] = {
+    "get": ("run_id",),
+    "cancel": ("run_id",),
+    "resume": ("run_id",),
+    "save": ("run_id", "name"),
+}
+
+
+def _validate_workflow_params(action: object, arguments: Mapping[str, Any]) -> str:
+    """Validate workflow action and action-specific parameters, or raise WorkflowRunStoreError."""
+    if not isinstance(action, str) or action not in _ALLOWED_WORKFLOW_PARAMS:
+        msg = f"Unsupported workflow action {action!r}. Expected one of: start, get, cancel, resume, list, save."
+        raise WorkflowRunStoreError(msg)
+    allowed = _ALLOWED_WORKFLOW_PARAMS[action]
+    unexpected = [
+        key
+        for key in _WORKFLOW_PARAMS
+        if (bool(arguments.get(key)) if key == "messages" else arguments.get(key) is not None) and key not in allowed
+    ]
+    if unexpected:
+        names = ", ".join(f"`{name}`" for name in unexpected)
+        msg = f"Parameter(s) {names} cannot be used with action={action!r}."
+        raise WorkflowRunStoreError(msg)
+    for key in _REQUIRED_WORKFLOW_PARAMS.get(action, ()):
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value.strip():
+            msg = f"`{key}` is required for action={action!r}."
+            raise WorkflowRunStoreError(msg)
+    return action
 
 
 class WorkflowTools(Toolkit, ManagedJobToolkit):
-    """Start, read and cancel the workflow runs of one agent and requester."""
+    """Start, inspect, cancel, resume, list, and save workflow runs for one agent and requester."""
 
     def __init__(
         self,
@@ -143,7 +190,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         models = sorted((runtime_config.models if runtime_config is not None else {}).items())
         levels = [f"{name}@{model.reasoning.levels[-1]}" for name, model in models if model.reasoning]
         effort = f" (add an effort as in {levels[0]})" if levels else ""
-        self._start_description = f"{_START_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
+        self._description = f"{_WORKFLOW_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
         # And the agents a run may name: those this agent may delegate to, and those configured for this room.
         agents = runtime_config.agents if runtime_config is not None else {}
         others = list(agents[agent_name].delegate_to) if agent_name in agents else []
@@ -151,92 +198,73 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             rooms = {name: resolve_room_aliases(other.rooms, runtime_paths) for name, other in agents.items()}
             others += [name for name in rooms if name not in (agent_name, *others) and current_room_id in rooms[name]]
         if others:
-            self._start_description += f"\nAgents you can run with agent=: {', '.join(others)}."
-        tools = [
-            self.start_workflow,
-            self.get_workflow,
-            self.cancel_workflow,
-            self.resume_workflow,
-            self.list_workflow_runs,
-            self.save_workflow,
-        ]
-        super().__init__(name="workflow", tools=tools)
+            self._description += f"\nAgents you can run with agent=: {', '.join(others)}."
+        super().__init__(name="workflow", tools=[self.workflow])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Describe `start_workflow` with the teaching text and this deployment's models."""
-        return replace(function, description=self._start_description) if function.name == _START else function
+        """Describe `workflow` with the action guide, SDK teaching text, and this deployment's models."""
+        return replace(function, description=self._description) if function.name == _WORKFLOW else function
 
-    async def start_workflow(
+    async def workflow(
         self,
+        action: Literal["start", "get", "cancel", "resume", "list", "save"],
+        run_id: str | None = None,
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
         args: dict[str, Any] | None = None,
         title: str | None = None,
-        max_concurrent: int = 16,
+        max_concurrent: int | None = None,
         resource_profile: ScriptResourceProfileName | None = None,
         max_cost_usd: float | None = None,
+        nodes: Literal["active", "failed", "all"] | None = None,
+        messages: bool = False,
+        rerun: list[str] | None = None,
+        description: str | None = None,
     ) -> str:
-        """Run a workflow where the call cannot be a background job: wait for the run and return its report.
+        """Run and manage durable background Python workflows."""
+        arguments: dict[str, Any] = {k: v for k, v in locals().items() if k not in {"self", "action"}}
+        validated = _validate_workflow_params(action, arguments)
+        if validated == "start":
+            return await self._start(arguments)
+        if validated == "get":
+            assert run_id is not None
+            return await self._get(run_id, nodes="active" if nodes is None else nodes, messages=messages)
+        if validated == "cancel":
+            assert run_id is not None
+            return await self._cancel(run_id)
+        if validated == "resume":
+            return await self._resume(arguments)
+        if validated == "list":
+            return await self._list()
+        assert run_id is not None
+        assert name is not None
+        return await self._save(run_id, name, description)
 
-        A call that is refused fails with the sentence that says why, as every function of this toolkit does.
-
-        Args:
-            source: Inline Python source.
-            path: Workspace-relative path of a Python file.
-            name: Name of a saved workflow; list_workflow_runs shows them and their args.
-            args: JSON object passed to main(args).
-            title: Three to six words shown on the run's card.
-            max_concurrent: How many agents run at once. Raise it for large fan-outs.
-            resource_profile: Worker size for the script itself.
-            max_cost_usd: Stop the run when it has spent this much; resume it with a higher limit.
-
-        """
-        arguments = {
-            "source": source,
-            "path": path,
-            "name": name,
-            "args": args,
-            "title": title,
-            "max_concurrent": max_concurrent,
-            "resource_profile": resource_profile,
-            "max_cost_usd": max_cost_usd,
-        }
+    async def _start(self, arguments: dict[str, Any]) -> str:
         engine, context = _waiting_runtime()
         outer = _outer_call()
         # A run inside a run is found by its script, which is read once, here, for its key and for the run.
         if outer is None:
-            text = None
-            origin = _inline_origin(context)
-            stopped = None
+            text, origin, stopped = None, _inline_origin(context), None
         else:
             text = await resolve_source(engine, context, arguments)
             origin = nested_key(outer, text, arguments.get("args"))
             stopped = _resumable_child(engine, outer, text, arguments) if running_child_run() is None else None
         if stopped is not None and outer is not None:
-            action = partial(self._continue_child, engine, context, origin, outer, stopped, arguments)
+            op = partial(self._continue_child, engine, context, origin, outer, stopped, arguments)
         else:
-            action = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
-        return await engine.delivery(await engine.attend(origin, action, context, self.limits))
+            op = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
+        return await engine.delivery(await engine.attend(origin, op, context, self.limits))
 
-    async def get_workflow(
-        self,
-        run_id: str,
-        nodes: Literal["active", "failed", "all"] = "active",
-        messages: bool = False,
-    ) -> str:
-        """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all"; messages=True adds peer messages and shared state.
-
-        Args:
-            run_id: The run's ID, as start_workflow returned it.
-            nodes: Which calls to list: "active", "failed" or "all".
-            messages: When True, include full peer message history and shared state.
-
-        """
+    async def _get(self, run_id: str, *, nodes: str, messages: bool) -> str:
+        if nodes not in _NODE_FILTERS:
+            msg = f"Invalid nodes filter {nodes!r}. Expected one of: active, failed, all."
+            raise WorkflowRunStoreError(msg)
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
         listed = await asyncio.to_thread(engine.store.nodes, run.run_id, light=True)
-        shown = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
+        shown = _NODE_FILTERS[nodes]
         # What each call used, over every time it ran; a call that asked no model has none.
         summary = await asyncio.to_thread(engine.store.usage_summary, run.run_id, attempt=run.attempt)
         used = summary.by_node
@@ -271,13 +299,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             status["result"] = run.outcome_text()
         return json.dumps(status, indent=2)
 
-    async def cancel_workflow(self, run_id: str) -> str:
-        """Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.
-
-        Args:
-            run_id: The run's ID, as start_workflow returned it.
-
-        """
+    async def _cancel(self, run_id: str) -> str:
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
         # The end of a run waits until its calls have stopped, so a call inside it would wait for itself.
@@ -289,32 +311,8 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         ended = await engine.cancel(run.run_id, reason="Cancelled by the agent.")
         return json.dumps({"run_id": ended.run_id, "status": ended.state.value})
 
-    async def resume_workflow(
-        self,
-        run_id: str,
-        source: str | None = None,
-        path: str | None = None,
-        rerun: list[str] | None = None,
-        max_cost_usd: float | None = None,
-    ) -> str:
-        """Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.
-
-        Args:
-            run_id: The run's ID, as start_workflow returned it.
-            source: Inline Python source that replaces the run's script.
-            path: Workspace-relative path of a Python file that replaces the run's script.
-            rerun: IDs of saved calls to run again, such as ["n4"].
-            max_cost_usd: New cost limit in USD; must exceed what the run has spent when it stopped at its limit.
-
-        """
+    async def _resume(self, arguments: dict[str, Any]) -> str:
         engine, context = _waiting_runtime()
-        arguments = {
-            "run_id": run_id,
-            "source": source,
-            "path": path,
-            "rerun": rerun,
-            "max_cost_usd": max_cost_usd,
-        }
         origin = _inline_origin(context)
         run, request = await _resumption(engine, context, arguments, self.limits, owner=origin)
         if run.owner != origin and (report := run.claims.get(origin)) is not None:
@@ -324,8 +322,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
         return await engine.delivery(await engine.attend(origin, reopen, context, self.limits))
 
-    async def list_workflow_runs(self) -> str:
-        """List this conversation's recent runs and your saved workflows (name, description, args)."""
+    async def _list(self) -> str:
         engine, context = _runtime()
         runs = await asyncio.to_thread(
             engine.store.list_runs,
@@ -357,18 +354,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         }
         return json.dumps(payload, indent=2)
 
-    async def save_workflow(self, run_id: str, name: str, description: str | None = None) -> str:
-        """Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.
-
-        A saved file documents itself for list_workflow_runs with its module docstring's first line and an optional
-        literal `ARGS = {"arg": "meaning"}`.
-
-        Args:
-            run_id: The run's ID, as start_workflow returned it.
-            name: Name of the saved workflow (1 to 64 lowercase letters, digits, hyphens, or underscores, starting with a letter or digit).
-            description: Optional one-line description added as the file's docstring when it has none.
-
-        """
+    async def _save(self, run_id: str, name: str, description: str | None) -> str:
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
         try:
@@ -386,15 +372,19 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         job_id: str,
         runtime: ToolJobRuntime,
     ) -> JobSpec | str | None:
-        """Return the job of the run a managed `start_workflow` or `resume_workflow` call starts, or why not.
+        """Return the job of the run a managed `workflow(action="start"|"resume")` call starts, or why not.
 
         Nothing runs here: a start writes its intent, a resume is only checked, and the job's operation, which runs
-        only once the runtime admitted the job, takes a resumed run and launches every attempt. The other functions
-        run as any tool's call does (None).
+        only once the runtime admitted the job, takes a resumed run and launches every attempt. Other actions run
+        as any tool's call does (None).
         """
-        if function_name not in (_START, _RESUME):
+        if function_name != _WORKFLOW:
+            return None
+        action = arguments.get("action")
+        if action not in ("start", "resume"):
             return None
         try:
+            _validate_workflow_params(action, arguments)
             engine, context = _runtime()
             # The plugins' hooks of a call, which the job's own task does not run for it: a decline reserves nothing.
             hooks = partial(
@@ -409,7 +399,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
                 await hooks(before=False, result=declined, blocked=True)
                 return declined
             after = partial(hooks, before=False)
-            if function_name == _RESUME:
+            if action == "resume":
                 return await _resume_job(engine, context, arguments, self.limits, job_id, runtime, after=after)
             run = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
 
@@ -435,8 +425,10 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         the call of a run that this start is made in: the new run is a run inside that one, under that call, and
         *source* is its script as its key was made from.
         """
-        title, max_concurrent = arguments.get("title"), arguments.get("max_concurrent", 16)
-        if not isinstance(max_concurrent, int) or max_concurrent < 1:
+        title = arguments.get("title")
+        raw_max_concurrent = arguments.get("max_concurrent")
+        max_concurrent = 16 if raw_max_concurrent is None else raw_max_concurrent
+        if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or max_concurrent < 1:
             msg = "max_concurrent must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
         max_cost = _validated_max_cost_usd(arguments.get("max_cost_usd"))
@@ -622,7 +614,7 @@ async def _handle_workflow_control(
     agent_name: str,
     engine: Callable[[], WorkflowEngine],
 ) -> bool:
-    """Resume the run a person's control event names, as `resume_workflow` does, and return whether it did.
+    """Resume the run a person's control event names, as `workflow(action="resume")` does, and return whether it did.
 
     Every bot in the room gets the event. Only `{run, action: "resume"}` from the run's requester, in the run's room
     and thread, to the run's agent does anything: the run is checked as the tool's resume is and gets a new job, named

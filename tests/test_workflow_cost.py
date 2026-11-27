@@ -252,14 +252,14 @@ async def test_unpriced_model_marks_the_total_unknown(unpriced: WorkflowStack) -
 
 @pytest.mark.asyncio
 async def test_get_workflow_shows_the_runs_cost_and_the_attempts(stack: WorkflowStack) -> None:
-    """`get_workflow` reports both sums, so a resumed run shows what the resume itself cost."""
+    """`workflow(action="get", ...)` reports both sums, so a resumed run shows what the resume itself cost."""
     stack.child_script(answer("first", _usd(0.40)), answer("more", _usd(0.10)))
     assert await stack.result("@0", "agent", _PROMPT) == "first"
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
     assert await stack.result("@1", "agent", {"prompt": "And this."}) == "more"
 
-    status = json.loads(await stack.call("get_workflow", run_id=stack.run_id, nodes="all"))
+    status = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id, nodes="all"))
 
     shown = status["usage"]
     assert (shown["cost_usd"], shown["attempt_cost_usd"]) == (pytest.approx(0.50), pytest.approx(0.10))
