@@ -626,7 +626,9 @@ async def test_retired_stored_claude_agent_filters_fail_closed_and_block_workspa
     ("toolkit_name", "stored", "replacement"),
     [
         ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
-        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model"),
+        ("thread_snooze", {"exclude_tools": ["snooze_thread"]}, "thread_snooze"),
+        ("thread_resolution", {"exclude_tools": ["resolve_thread"]}, "thread_resolution"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
         ("attachments", {"exclude_tools": ["register_attachment"]}, "attachment"),
         ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers"),

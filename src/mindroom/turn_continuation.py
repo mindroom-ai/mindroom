@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 __all__ = ["TURN_CONTINUATION_LIMIT", "continuation_decision_from_tools", "stopped_calls"]
 
 TURN_CONTINUATION_LIMIT = 4
-_MODEL_SWITCH_FUNCTION_NAME = "thread_model_write"
+_MODEL_SWITCH_FUNCTION_NAME = "thread_model"
 
 
 @dataclass(frozen=True)

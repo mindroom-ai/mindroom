@@ -500,9 +500,11 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "search_news": "google_search",
     },
     "serper": {
-        "search_web": "serper_search",
-        "search_news": "serper_search",
-        "search_scholar": "serper_search",
+        "search_web": "serper",
+        "search_news": "serper",
+        "search_scholar": "serper",
+        "serper_search": "serper",
+        "scrape_webpage": "serper",
     },
     "youtube": {
         "get_youtube_video_captions": "youtube_video",
@@ -1188,12 +1190,14 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "remove_contact": "contacts_write",
     },
     "knowledge_graph": {
-        "search_graph": "knowledge_graph_read",
-        "graph_entity": "knowledge_graph_read",
-        "delete_graph_fact": "knowledge_graph_write",
-        "delete_graph_entity": "knowledge_graph_write",
-        "merge_graph_entities": "knowledge_graph_write",
-        "update_graph_entity_summary": "knowledge_graph_write",
+        "search_graph": "knowledge_graph",
+        "graph_entity": "knowledge_graph",
+        "delete_graph_fact": "knowledge_graph",
+        "delete_graph_entity": "knowledge_graph",
+        "merge_graph_entities": "knowledge_graph",
+        "update_graph_entity_summary": "knowledge_graph",
+        "knowledge_graph_read": "knowledge_graph",
+        "knowledge_graph_write": "knowledge_graph",
     },
     "agent_manager": {
         "create_agent": "agent_manager_write",
@@ -1228,10 +1232,28 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "claude_end_session": "claude_agent_write",
     },
     "thread_model": {
-        "list_models": "thread_model_read",
-        "get_thread_model": "thread_model_read",
-        "switch_thread_model": "thread_model_write",
-        "reset_thread_model": "thread_model_write",
+        "list_models": "thread_model",
+        "get_thread_model": "thread_model",
+        "switch_thread_model": "thread_model",
+        "reset_thread_model": "thread_model",
+        "thread_model_read": "thread_model",
+        "thread_model_write": "thread_model",
+    },
+    "thread_snooze": {
+        "snooze_thread": "thread_snooze",
+        "unsnooze_thread": "thread_snooze",
+    },
+    "thread_resolution": {
+        "resolve_thread": "thread_resolution",
+        "reopen_thread": "thread_resolution",
+    },
+    "hackernews": {
+        "get_top_hackernews_stories": "hackernews",
+        "get_user_details": "hackernews",
+    },
+    "google_bigquery": {
+        "list_tables": "google_bigquery_inspect",
+        "describe_table": "google_bigquery_inspect",
     },
     "usage_stats": {
         "get_my_usage": "usage_stats",
@@ -1278,6 +1300,10 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
         "terminal",
         "claude_agent",
         "thread_model",
+        "thread_snooze",
+        "thread_resolution",
+        "hackernews",
+        "google_bigquery",
         "usage_stats",
     },
 )
@@ -1724,6 +1750,8 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
             "terminal",
             "claude_agent",
             "thread_model",
+            "thread_snooze",
+            "thread_resolution",
             "usage_stats",
         )
     },

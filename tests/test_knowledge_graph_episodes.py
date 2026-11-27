@@ -290,8 +290,23 @@ def test_automation_thread_renders_nothing() -> None:
     [
         # Graph lookups and edits (both consolidated and pre-upgrade retired names) are never evidence.
         pytest.param(
-            [_tool("knowledge_graph_read", "Alice leads Atlas", action="search", query="Atlas")],
+            [_tool("knowledge_graph", "Alice leads Atlas", action="search", query="Atlas")],
             id="graph-read",
+        ),
+        pytest.param(
+            [
+                _tool(
+                    "knowledge_graph",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    action="delete_fact",
+                    fact_id="f1",
+                ),
+            ],
+            id="graph-write",
+        ),
+        pytest.param(
+            [_tool("knowledge_graph_read", "Alice leads Atlas", action="search", query="Atlas")],
+            id="retired-graph-read-v2",
         ),
         pytest.param(
             [
@@ -302,7 +317,7 @@ def test_automation_thread_renders_nothing() -> None:
                     fact_id="f1",
                 ),
             ],
-            id="graph-write",
+            id="retired-graph-write-v2",
         ),
         pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="retired-graph-read"),
         pytest.param(
@@ -317,7 +332,7 @@ def test_automation_thread_renders_nothing() -> None:
                     "Alice leads Atlas",
                     command="cd /work && "
                     + "echo setup; " * 60
-                    + "mindroom-agent tools call knowledge_graph.knowledge_graph_read --json '{}'",
+                    + "mindroom-agent tools call knowledge_graph.knowledge_graph --json '{}'",
                 ),
             ],
             id="shell-lookup",

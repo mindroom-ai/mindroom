@@ -277,7 +277,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="switch",
-            tool_name="thread_model_write",
+            tool_name="thread_model",
             tool_args=switch_arguments,
             requires_confirmation=True,
         ),
@@ -297,7 +297,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         calls=(
             ApprovalCall(
                 "switch",
-                "thread_model_write",
+                "thread_model",
                 "helper",
                 100,
                 decision=ApprovalDecision.APPROVED,
@@ -308,7 +308,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         cli_call={
             "kind": "agent_cli",
             "toolkit": "thread_model",
-            "function": "thread_model_write",
+            "function": "thread_model",
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
@@ -396,7 +396,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="switch",
-            tool_name="thread_model_write",
+            tool_name="thread_model",
             tool_args=switch_arguments,
             requires_confirmation=True,
         ),
@@ -415,7 +415,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
         calls=(
             ApprovalCall(
                 "switch",
-                "thread_model_write",
+                "thread_model",
                 "helper",
                 100,
                 decision=ApprovalDecision.APPROVED,
@@ -426,7 +426,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
         cli_call={
             "kind": "agent_cli",
             "toolkit": "thread_model",
-            "function": "thread_model_write",
+            "function": "thread_model",
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
@@ -504,7 +504,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
         effects.append(value)
         return control_result if control else "action result: " + "x" * 600
 
-    name = "thread_model_write" if control else "action"
+    name = "thread_model" if control else "action"
     runtime = _helper_runtime(tmp_path, tools=["shell"])
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     build = _with_toolkit(

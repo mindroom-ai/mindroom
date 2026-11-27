@@ -87,7 +87,7 @@ def _team(
 
 
 def _switch(when: str, *, model_name: str = "large", call_id: str = "call-switch") -> dict[str, Any]:
-    return tool_call("thread_model_write", call_id, action="switch", model_name=model_name, when=when)
+    return tool_call("thread_model", call_id, action="switch", model_name=model_name, when=when)
 
 
 def _completed_tool_names(team: TeamTurn) -> list[str | None]:
@@ -130,7 +130,7 @@ async def test_a_member_s_next_turn_switch_is_answered_in_the_member_s_run(
     assert team.recorder.run_id == "run-1"
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text.endswith("Finished the task.")
-    assert "thread_model_write" in _completed_tool_names(team)
+    assert "thread_model" in _completed_tool_names(team)
 
 
 @pytest.mark.asyncio
@@ -387,7 +387,7 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
     snapshot = team.recorder.interrupted_snapshot()
     assert "Switching." not in snapshot.partial_text
     assert snapshot.partial_text.endswith("Half")
-    assert [tool.tool_name for tool in snapshot.completed_tools] == ["thread_model_write", "delegate_task_to_member"]
+    assert [tool.tool_name for tool in snapshot.completed_tools] == ["thread_model", "delegate_task_to_member"]
 
 
 @pytest.mark.asyncio

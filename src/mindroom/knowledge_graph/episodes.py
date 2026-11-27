@@ -16,7 +16,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, is_automation_hook_source
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS, KNOWLEDGE_GRAPH_SOURCE_ID
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.history.conversation_text import one_line, run_requester, utterances
@@ -48,9 +48,11 @@ _RETIRED_GRAPH_FUNCTIONS = (
     "delete_graph_entity",
     "merge_graph_entities",
     "update_graph_entity_summary",
+    "knowledge_graph_read",
+    "knowledge_graph_write",
 )
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
-_GRAPH_FUNCTIONS = ("knowledge_graph_read", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS, *_RETIRED_GRAPH_FUNCTIONS)
+_GRAPH_FUNCTIONS = ("knowledge_graph", *_RETIRED_GRAPH_FUNCTIONS)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.

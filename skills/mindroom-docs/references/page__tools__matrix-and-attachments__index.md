@@ -135,10 +135,10 @@ Writing a tag requires both the agent's Matrix account and the requesting user t
 ## [`thread_resolution`]
 
 `thread_resolution` lets an agent resolve or reopen threads in the current room.
-The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `resolve_thread` call wait for the requester's approval.
+The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `thread_resolution(action="resolve")` call wait for the requester's approval.
 It is not in default tool sets, so other agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
-`resolve_thread(thread_id=None)` adds the `resolved` state, and `reopen_thread(thread_id=None)` removes it.
+`thread_resolution(action="resolve", thread_id=None)` adds the `resolved` state, and `thread_resolution(action="reopen", thread_id=None)` removes it.
 Without `thread_id`, both require an active thread.
 Pass a thread root or reply event ID to target another thread in the current room, including from the room timeline; an ID that does not resolve to a thread returns an error and changes nothing.
 
@@ -150,7 +150,7 @@ agents:
       - thread_resolution
 ```
 
-To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `thread_resolution(action="resolve", thread_id=...)` for each one.
 
 ## [`thread_snooze`]
 
@@ -158,10 +158,10 @@ To close out finished threads, find candidates with `thread_tags(action="list", 
 The `mindroom config init` starter gives it to Mind, without an approval rule.
 It is not in default tool sets, so other agents cannot snooze threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
-`snooze_thread(until, note=None, thread_id=None)` adds the `snoozed` state, and `unsnooze_thread(thread_id=None)` removes it.
+`thread_snooze(action="snooze", until=..., note=None, thread_id=None)` adds the `snoozed` state, and `thread_snooze(action="unsnooze", thread_id=None)` removes it.
 `until` is an ISO-8601 datetime with a time part, such as `2026-11-14T09:00:00+01:00`; a value without an offset is UTC, and a date alone, an unparsable value, or a time that is not in the future returns an error and changes nothing.
 `note` is a reminder the wake message quotes; it is stored unencrypted in room state, even in an encrypted room.
-`unsnooze_thread` returns `Thread is not snoozed.` when the thread has no snooze.
+`thread_snooze(action="unsnooze")` returns `Thread is not snoozed.` when the thread has no snooze.
 Without `thread_id`, both require an active thread; pass a thread root or reply event ID to target another thread in the current room.
 
 When the time comes, the `snoozed` state ends and a message in the thread quotes the note.

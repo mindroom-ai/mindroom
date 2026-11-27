@@ -1007,7 +1007,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
             [
                 calls(
                     tool_call(
-                        "thread_model_write",
+                        "thread_model",
                         "call-2",
                         action="switch",
                         model_name="default",
@@ -1016,7 +1016,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
                 ),
                 answer("NO_REPLY"),
             ],
-            "🔧 `echo` [1]\n\n🔧 `thread_model_write` [2]",
+            "🔧 `echo` [1]\n\n🔧 `thread_model` [2]",
             id="fresh-attempt",
         ),
         # The fresh attempt answers nothing: a quiet turn neither retries it nor answers with the empty-reply notice.
@@ -1024,7 +1024,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
             [
                 calls(
                     tool_call(
-                        "thread_model_write",
+                        "thread_model",
                         "call-2",
                         action="switch",
                         model_name="default",
@@ -1033,7 +1033,7 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
                 ),
                 answer(""),
             ],
-            "🔧 `echo` [1]\n\n🔧 `thread_model_write` [2]",
+            "🔧 `echo` [1]\n\n🔧 `thread_model` [2]",
             id="empty-fresh-attempt",
         ),
     ],

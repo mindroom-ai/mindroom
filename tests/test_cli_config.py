@@ -720,7 +720,7 @@ class TestConfigInit:
         assert mind["automations"] == ["prompt_curation", "dreaming"]
         assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
         assert config["tool_approval"]["rules"] == [
-            {"match": "resolve_thread", "action": "require_approval"},
+            {"match": "thread_resolution", "arguments": {"action": "resolve"}, "action": "require_approval"},
             {"match": "manage_config", "action": "require_approval"},
             {"match": "manage_agent", "action": "require_approval"},
             {"match": "manage_team", "action": "require_approval"},

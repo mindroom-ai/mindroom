@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_READ_ACTIONS
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.desktop.credentials import has_ready_self_service_desktop
@@ -120,8 +120,10 @@ def locally_allowed(
         entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
     if entry is None:
         return False
-    # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
-    edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+    # Graph edits are actions of the knowledge_graph tool that only an agent allowed to edit its graph gets.
+    edits_graph = entry.name == "knowledge_graph" and not (
+        tool_name == "knowledge_graph" and origin.get("action") in KNOWLEDGE_GRAPH_READ_ACTIONS
+    )
     if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
         return False
     return _configured_tool_allowed(config, tools, entry, tool_name, origin, construction)

@@ -2242,37 +2242,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_tables",
-        "description": "List table names in the configured dataset.",
+        "name": "google_bigquery_inspect",
+        "description": "Inspect tables and schemas in the configured BigQuery dataset as JSON.\n- `list_tables`: List table IDs in the dataset.\n- `describe_table`: Describe `table_id` (table description and column names, types, modes, descriptions).",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "describe_table",
-        "description": "Describe one table in the configured dataset.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "table_id": {
+            "action": {
               "type": "string",
-              "description": "Table name inside the configured dataset."
+              "enum": [
+                "list_tables",
+                "describe_table"
+              ]
+            },
+            "table_id": {
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2286,7 +2269,7 @@
             }
           },
           "required": [
-            "table_id"
+            "action"
           ]
         },
         "strict": false,
@@ -2482,41 +2465,23 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_top_hackernews_stories",
-        "description": "Use this function to get top stories from Hacker News.",
+        "name": "hackernews",
+        "description": "Fetch top stories or user details from Hacker News as JSON.\n- `top_stories`: Top Hacker News stories (optional `num_stories`, default 10).\n- `user`: User details for `username`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "num_stories": {
-              "type": "integer",
-              "description": "(int) Number of stories to return. Defaults to 10."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_user_details",
-        "description": "Use this function to get the details of a Hacker News user using their username.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "username": {
+            "action": {
               "type": "string",
-              "description": "(str) Username of the user to get details for."
+              "enum": [
+                "top_stories",
+                "user"
+              ]
+            },
+            "num_stories": {
+              "type": "integer"
+            },
+            "username": {
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2530,7 +2495,7 @@
             }
           },
           "required": [
-            "username"
+            "action"
           ]
         },
         "strict": false,
@@ -4027,58 +3992,31 @@
     "guidance": null,
     "functions": [
       {
-        "name": "serper_search",
-        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search.\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
+        "name": "serper",
+        "description": "Search Google or scrape a webpage via Serper and return raw JSON.\n- `web`: Google web search for `query` (optional `num_results`).\n- `news`: Recent news search for `query` (optional `num_results`).\n- `scholar`: Google Scholar search for `query` (optional `num_results`).\n- `scrape`: Scrape `url` (optional `markdown=True` for Markdown output).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
-              "type": "string"
-            },
             "action": {
               "type": "string",
               "enum": [
                 "web",
                 "news",
-                "scholar"
+                "scholar",
+                "scrape"
               ]
+            },
+            "query": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
             },
             "num_results": {
               "type": "integer"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query",
-            "action"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "scrape_webpage",
-        "description": "Scrapes and extracts content from a webpage using the Serper scraping API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "(str) The URL of the webpage to scrape."
-            },
             "markdown": {
-              "type": "boolean",
-              "description": "(bool) Return content in markdown format (default: False)."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4092,7 +4030,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,

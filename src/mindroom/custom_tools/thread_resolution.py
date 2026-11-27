@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.custom_tools.attachment_helpers import resolve_current_room_thread_root
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
@@ -15,11 +15,18 @@ from mindroom.thread_tags import (
     set_thread_tag,
 )
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
+
+_ResolutionAction = Literal["resolve", "reopen"]
+_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "resolve": frozenset({"thread_id"}),
+    "reopen": frozenset({"thread_id"}),
+}
 
 
 class ThreadResolutionTools(Toolkit):
@@ -30,7 +37,7 @@ class ThreadResolutionTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="thread_resolution",
-            tools=[self.resolve_thread, self.reopen_thread],
+            tools=[self.thread_resolution],
         )
 
     @staticmethod
@@ -48,38 +55,6 @@ class ThreadResolutionTools(Toolkit):
             return cls._payload("error", thread_id=thread_id, message=error)
         assert root_id is not None
         return context, root_id
-
-    async def resolve_thread(self, thread_id: str | None = None) -> str:
-        """Mark the current or specified Matrix thread in the current room as resolved.
-
-        Args:
-            thread_id: Thread root or reply event ID in the current room.
-                Omit to use the active thread.
-
-        """
-        resolved = await self._thread_context(thread_id)
-        if isinstance(resolved, str):
-            return resolved
-        context, thread_id = resolved
-        try:
-            state = await set_thread_tag(
-                context.client,
-                context.room_id,
-                thread_id,
-                RESOLVED_THREAD_TAG,
-                set_by=context.requester_id,
-            )
-        except ThreadTagsError as exc:
-            return self._payload("error", action="resolve", thread_id=thread_id, message=str(exc))
-        if state is not None and SNOOZED_THREAD_TAG in state.tags:
-            await self._end_snooze(context, thread_id)
-        return self._payload(
-            "ok",
-            action="resolve",
-            room_id=context.room_id,
-            thread_id=thread_id,
-            resolved=True,
-        )
 
     @staticmethod
     async def _end_snooze(context: ToolRuntimeContext, thread_id: str) -> None:
@@ -104,18 +79,44 @@ class ThreadResolutionTools(Toolkit):
         if context.orchestrator is not None and SNOOZED_THREAD_TAG not in state.tags:
             context.orchestrator.thread_snooze.unsnoozed(context.room_id, thread_id)
 
-    async def reopen_thread(self, thread_id: str | None = None) -> str:
-        """Remove resolved state from the current or specified Matrix thread in the current room.
+    async def thread_resolution(
+        self,
+        action: _ResolutionAction,
+        thread_id: str | None = None,
+    ) -> str:
+        """Resolve or reopen the current or specified Matrix thread in the current room.
 
-        Args:
-            thread_id: Thread root or reply event ID in the current room.
-                Omit to use the active thread.
-
+        - `resolve`: mark `thread_id` (omit for active thread) as resolved and end any active snooze.
+        - `reopen`: remove resolved state from `thread_id` (omit for active thread).
         """
+        if (
+            error := validate_action_params("thread_resolution", action, _ALLOWED_PARAMS, {"thread_id": thread_id})
+        ) is not None:
+            return self._payload("error", message=error)
         resolved = await self._thread_context(thread_id)
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
+        if action == "resolve":
+            try:
+                state = await set_thread_tag(
+                    context.client,
+                    context.room_id,
+                    thread_id,
+                    RESOLVED_THREAD_TAG,
+                    set_by=context.requester_id,
+                )
+            except ThreadTagsError as exc:
+                return self._payload("error", action="resolve", thread_id=thread_id, message=str(exc))
+            if state is not None and SNOOZED_THREAD_TAG in state.tags:
+                await self._end_snooze(context, thread_id)
+            return self._payload(
+                "ok",
+                action="resolve",
+                room_id=context.room_id,
+                thread_id=thread_id,
+                resolved=True,
+            )
         try:
             state = await remove_thread_tag(
                 context.client,

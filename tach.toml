@@ -11232,7 +11232,7 @@ visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.tools.knowledge_graph"
-depends_on = ["mindroom.config.knowledge_graph", "mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
+depends_on = ["mindroom.tool_system.declarations", "mindroom.tool_system.registration"]
 
 # Exploration: the automation that asks the agent to explore its sources.
 [[modules]]

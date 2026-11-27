@@ -76,7 +76,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
     arguments: dict[str, object] = {"action": "switch", "model_name": "alternate", "when": when}
     if background_after is not None:
         arguments["background_after"] = background_after
-    model = ScriptedModel([calls(tool_call("thread_model_write", "switch", **arguments)), answer("switched")])
+    model = ScriptedModel([calls(tool_call("thread_model", "switch", **arguments)), answer("switched")])
     pending = None
     try:
         async with execution_resources():
@@ -123,7 +123,7 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                     assert not started.is_set()
                     assert resolve_thread_model_override(paths, "$thread", config=config).active == {}
                 assert await runtime.list_jobs(owner=owner, depth=0) == []
-                [schema] = [item for item in model.requests[0].tools if item.name == "thread_model_write"]
+                [schema] = [item for item in model.requests[0].tools if item.name == "thread_model"]
                 assert "background_after" not in schema.parameters["properties"]
     finally:
         release.set()

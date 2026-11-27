@@ -214,7 +214,7 @@ def _install_by_name(monkeypatch: pytest.MonkeyPatch, models: dict[str, ModelPro
 
 
 def _switch(call_id: str, model_name: str, when: str) -> list[ScriptStep]:
-    return calls(tool_call("thread_model_write", call_id, action="switch", model_name=model_name, when=when))
+    return calls(tool_call("thread_model", call_id, action="switch", model_name=model_name, when=when))
 
 
 def _final_only(text: str) -> list[ScriptStep]:
@@ -1465,7 +1465,7 @@ class TestUserIdPassthrough:
             calls(
                 tool_call("inspect", "call-1", path="report.txt"),
                 tool_call(
-                    "thread_model_write",
+                    "thread_model",
                     "call-switch",
                     action="switch",
                     model_name="default",
@@ -2009,7 +2009,7 @@ class TestUserIdPassthrough:
         snapshot = recorder.interrupted_snapshot()
         assert snapshot.user_message == "test"
         assert snapshot.partial_text == "Half done"
-        assert [tool.tool_name for tool in snapshot.completed_tools] == ["thread_model_write", "run_shell_command"]
+        assert [tool.tool_name for tool in snapshot.completed_tools] == ["thread_model", "run_shell_command"]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")

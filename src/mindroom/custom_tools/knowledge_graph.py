@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
+from mindroom.config.knowledge_graph import (
+    KNOWLEDGE_GRAPH_EDIT_ACTIONS,
+    KNOWLEDGE_GRAPH_READ_ACTIONS,
+    KNOWLEDGE_GRAPH_SOURCE_ID,
+)
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
@@ -13,6 +17,7 @@ from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_store
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import reject_unexpected_args, restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -22,6 +27,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import GraphFact, GraphStore
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -31,7 +37,16 @@ _KNOWLEDGE_SOURCE_DESCRIPTION = (
     "Facts about people, projects, documents, and events that your conversations and tools revealed, "
     "with when each held and its sources."
 )
-_WRITE_ACTIONS: dict[str, tuple[str, ...]] = {
+_GraphAction = Literal["search", "entity", "update_summary", "merge", "delete_fact", "delete_entity"]
+_ACTION_FIELDS: dict[str, str] = {
+    "search": "query limit",
+    "entity": "query",
+    "update_summary": "entity_id summary",
+    "merge": "duplicate_id into_id",
+    "delete_fact": "fact_id",
+    "delete_entity": "entity_id",
+}
+_WRITE_REQUIRED: dict[str, tuple[str, ...]] = {
     "update_summary": ("entity_id", "summary"),
     "merge": ("duplicate_id", "into_id"),
     "delete_fact": ("fact_id",),
@@ -53,17 +68,6 @@ def _render_fact(fact: GraphFact, *, with_id: bool = False) -> str:
         sources = f"{sources}; and {earlier} earlier"
     fact_id = f"\n  id: {fact.uuid}" if with_id else ""
     return f"- {fact.fact}{fact_id}\n  {validity}\n  sources: {sources}"
-
-
-def _validate_write_params(action: str, params: dict[str, str | None]) -> str | None:
-    required = _WRITE_ACTIONS.get(action)
-    if required is None:
-        return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
-    if unexpected := [field for field, value in params.items() if value is not None and field not in required]:
-        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
-    if missing := [field for field in required if params[field] is None]:
-        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
-    return None
 
 
 @dataclass(frozen=True)
@@ -122,15 +126,20 @@ class KnowledgeGraphTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
         self._edits = edits_knowledge_graph(config, agent_name)
-        tools = [self.knowledge_graph_read, *([self.knowledge_graph_write] if self._edits else [])]
-        super().__init__(name="knowledge_graph", tools=tools)
+        super().__init__(name="knowledge_graph", tools=[self.knowledge_graph])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``knowledge_graph`` to read actions and fields when edits are disabled."""
+        if function.name == "knowledge_graph" and not self._edits:
+            return restrict_actions(function, KNOWLEDGE_GRAPH_READ_ACTIONS, action_fields=_ACTION_FIELDS)
+        return function
 
     async def _search(self, query: str, limit: int) -> str:
         async def search(store: GraphStore, scope: GraphScope) -> str:
             facts = await store.search_facts(scope, query, max(1, min(limit, _MAX_LIMIT)))
             return "\n".join(_render_fact(fact, with_id=self._edits) for fact in facts) or f"No facts match {query!r}."
 
-        return await self._in_graph("knowledge_graph_read:search", search)
+        return await self._in_graph("knowledge_graph:search", search)
 
     async def _entity(self, name: str) -> str:
         async def look_up(store: GraphStore, scope: GraphScope) -> str:
@@ -150,73 +159,65 @@ class KnowledgeGraphTools(Toolkit):
                 rendered += f"\n{label}: {', '.join(others)}"
             return rendered
 
-        return await self._in_graph("knowledge_graph_read:entity", look_up)
+        return await self._in_graph("knowledge_graph:entity", look_up)
 
-    async def knowledge_graph_read(
+    async def knowledge_graph(  # noqa: PLR0911
         self,
-        action: Literal["search", "entity"],
-        query: str,
-        limit: int = 10,
-    ) -> str:
-        """Read facts or entities from your knowledge graph, with when each held and its sources.
-
-        Actions:
-        - `search`: Find facts matching `query` (up to `limit`, from 1 to 50); "conversation" means someone said it, "tool_results" means a tool returned it, and superseded facts held before later evidence replaced them.
-        - `entity`: Show the summary and facts for one person, organization, project, or other entity named `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise the closest match plus other close matches).
-
-        Args:
-            action: Lookup mode (`search` or `entity`).
-            query: Search query for `search`, or entity name/alias/Matrix ID/ID for `entity`.
-            limit: Maximum facts to return for `search`, from 1 to 50.
-
-        """
-        if action == "search":
-            return await self._search(query, limit)
-        if action == "entity":
-            return await self._entity(query)
-        return f"Error: Unsupported action {action!r}. Expected 'search' or 'entity'."
-
-    async def knowledge_graph_write(
-        self,
-        action: Literal["update_summary", "merge", "delete_fact", "delete_entity"],
+        action: _GraphAction,
+        query: str | None = None,
+        limit: int | None = None,
         fact_id: str | None = None,
         entity_id: str | None = None,
         duplicate_id: str | None = None,
         into_id: str | None = None,
         summary: str | None = None,
     ) -> str:
-        """Edit mistakes in your knowledge graph (available when knowledge_graph_edits is enabled).
+        """Access facts and entities in your knowledge graph.
 
-        Actions:
-        - `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right (e.g. after deleting a fact).
-        - `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between the two, and deleting the duplicate.
-        - `delete_fact`: Delete a wrong fact (`fact_id`) that never held or recorded your own lookup; keep historical superseded facts.
-        - `delete_entity`: Delete a non-entity (`entity_id`, such as a path, URL, or setting) with every fact that touches it; use `merge` for duplicates.
-
-        Args:
-            action: Edit operation to perform.
-            fact_id: Fact ID from `knowledge_graph_read` (required for `delete_fact`).
-            entity_id: Entity ID from `knowledge_graph_read` (required for `update_summary` and `delete_entity`).
-            duplicate_id: Entity ID to merge away (required for `merge`).
-            into_id: Entity ID to keep (required for `merge`).
-            summary: New entity summary (required for `update_summary`).
-
+        - `search`: Find facts matching `query` (optional `limit`, 1..50, default 10) with validity and sources ("conversation" = said, "tool_results" = tool output, superseded = replaced by later evidence).
+        - `entity`: Show summary and facts for `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise closest match plus other close matches).
+        - `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right.
+        - `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between them, and deleting the duplicate.
+        - `delete_fact`: Delete a wrong `fact_id` that never held or recorded your own lookup; keep historical superseded facts.
+        - `delete_entity`: Delete a non-entity `entity_id` (e.g. path, URL, setting) and every fact touching it; use `merge` for duplicates.
         """
-        if not self._edits:
+        if action in KNOWLEDGE_GRAPH_EDIT_ACTIONS and not self._edits:
             return "Error: knowledge_graph_edits is not enabled for this agent."
-        params = {
+        if action not in _ACTION_FIELDS:
+            allowed = KNOWLEDGE_GRAPH_READ_ACTIONS if not self._edits else tuple(_ACTION_FIELDS)
+            return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(allowed)}."
+        params: dict[str, object] = {
+            "query": query,
+            "limit": limit,
             "fact_id": fact_id,
             "entity_id": entity_id,
             "duplicate_id": duplicate_id,
             "into_id": into_id,
             "summary": summary,
         }
-        if (error := _validate_write_params(action, params)) is not None:
-            return error
+        if (
+            error := reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {name: value is not None for name, value in params.items()},
+            )
+        ) is not None:
+            return f"Error: {error}"
+        if action == "search":
+            if not isinstance(query, str) or not query.strip():
+                return "Error: Parameter(s) query required for action 'search'."
+            return await self._search(query, 10 if limit is None else limit)
+        if action == "entity":
+            if not isinstance(query, str) or not query.strip():
+                return "Error: Parameter(s) query required for action 'entity'."
+            return await self._entity(query)
+        required = _WRITE_REQUIRED[action]
+        if missing := [field for field in required if params[field] is None]:
+            return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
         if action == "merge" and duplicate_id == into_id:
             return "An entity cannot be merged into itself."
         return await self._in_graph(
-            f"knowledge_graph_write:{action}",
+            f"knowledge_graph:{action}",
             lambda store, scope: self._apply_write(
                 store,
                 scope,

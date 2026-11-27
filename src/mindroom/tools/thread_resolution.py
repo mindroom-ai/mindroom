@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     icon="CircleCheckBig",
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_resolution",
-    function_names=("reopen_thread", "resolve_thread"),
+    function_names=("thread_resolution",),
+    action_scoped_grants=("thread_resolution",),
     requires_room_context=True,
 )
 def thread_resolution_tools() -> type[ThreadResolutionTools]:
