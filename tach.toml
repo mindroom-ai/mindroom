@@ -9445,7 +9445,6 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.orchestration.script_checks",
     "mindroom.orchestration.script_runtime",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
