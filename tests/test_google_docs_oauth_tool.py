@@ -417,11 +417,11 @@ def test_google_docs_batch_update_returns_sanitized_http_error(tmp_path: Path) -
 def test_google_docs_batch_update_omits_write_control_when_required_revision_id_is_none(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
     offered = toolkit_offers(tool, "google_docs_batch_update")
-    assert "required_revision_id" not in offered.parameters["required"]
     assert offered.parameters["properties"]["required_revision_id"]["type"] == "string"
+    assert "anyOf" not in offered.parameters["properties"]["required_revision_id"]
     validate_tool_arguments(
-        dict(offered.parameters),
-        {"document_id": "document-id", "requests": _RICH_REQUESTS},
+        offered,
+        {"document_id": "document-id", "requests": _RICH_REQUESTS, "required_revision_id": None},
     )
 
     result = json.loads(

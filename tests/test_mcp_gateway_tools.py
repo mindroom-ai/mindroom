@@ -1683,3 +1683,56 @@ async def test_changed_manager_config_rejects_old_request_before_backend_contact
         assert not manager._states["example"].connected
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mcp_gateway_allows_explicit_null_only_for_derived_nullable_optionals(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP gateway admits explicit null for derived ``X | None = None`` but rejects it for non-nullable or authored."""
+
+    def derived_lookup(query: str, tag: str | None = None, count: int = 5) -> str:
+        return f"{query}:{tag}:{count}"
+
+    authored_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "tag": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    @passthrough_tool(name="authored_lookup", parameters=authored_schema)
+    def authored_lookup(query: str, tag: str | None = None) -> str:
+        return f"{query}:{tag}"
+
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[derived_lookup, authored_lookup]))
+
+    described = await gateway.get_tool(context, toolkit="calculator", function="derived_lookup")
+    assert "error" not in described
+    assert described["inputSchema"]["properties"]["tag"] == {"type": "string"}
+
+    ok = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="derived_lookup",
+        arguments={"query": "hi", "tag": None},
+    )
+    assert ok == {"result": "hi:None:5"}
+
+    non_nullable = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="derived_lookup",
+        arguments={"query": "hi", "count": None},
+    )
+    assert "error" in non_nullable
+    assert non_nullable["error"]["code"] == "invalid_arguments"
+
+    authored_null = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="authored_lookup",
+        arguments={"query": "hi", "tag": None},
+    )
+    assert "error" in authored_null
+    assert authored_null["error"]["code"] == "invalid_arguments"

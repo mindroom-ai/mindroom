@@ -34,6 +34,7 @@ from mindroom.tool_system.tool_schema import tool_description, tool_parameters, 
 from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.pandas import pandas_tools
+from mindroom.tools.sql import sql_tools
 from tests.agent_tool_helpers import toolkit_offers
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
@@ -689,6 +690,36 @@ def test_multi_type_nullable_union_keeps_any_of() -> None:
     )
 
 
+def test_non_none_default_nullable_parameter_keeps_any_of_including_run_sql_query() -> None:
+    """Nullable parameters with a non-``None`` default keep ``anyOf: [X, null]`` because ``null`` differs from omitted."""
+
+    def query(
+        limit: int | None = 10,
+        legacy: Optional[int] = 10,  # noqa: UP045
+        note: str | None = None,
+    ) -> str:
+        return ""
+
+    assert_same_bytes(
+        tool_parameters(query),
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                "legacy": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                "note": {"type": "string"},
+            },
+            "required": [],
+        },
+    )
+
+    sql_function = toolkit_offers(sql_tools()(db_url="sqlite://"), "run_sql_query")
+    assert sql_function.parameters["properties"]["limit"] == {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+    assert "limit" not in sql_function.parameters["required"]
+    validate_tool_arguments(dict(sql_function.parameters), {"query": "SELECT 1", "limit": None})
+    validate_tool_arguments(sql_function, {"query": "SELECT 1", "limit": None})
+
+
 def test_validated_entrypoint_still_accepts_explicit_none_for_plain_optional_schema() -> None:
     """Runtime validation still accepts explicit ``None`` when the JSON schema omits ``null``."""
 
@@ -697,7 +728,10 @@ def test_validated_entrypoint_still_accepts_explicit_none_for_plain_optional_sch
 
     assert tool_parameters(lookup) == {
         "type": "object",
-        "properties": {"x": {"type": "string"}, "limit": {"type": "integer"}},
+        "properties": {
+            "x": {"type": "string"},
+            "limit": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        },
         "required": [],
     }
     validated = validated_entrypoint(lookup)

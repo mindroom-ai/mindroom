@@ -21,7 +21,12 @@ from mindroom.tool_system import authoring
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolValue
-from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
+from mindroom.tool_system.tool_schema import (
+    nullable_optional_parameters,
+    tool_description,
+    tool_parameters,
+    validated_entrypoint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
@@ -197,6 +202,7 @@ def _adapt_function(toolkit: Toolkit, name: str, finishing: _Finishing) -> ToolF
             name=name,
             description=authoring.authored_description(function) or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
+            nullable_optional_parameters=nullable_optional_parameters(function) if authored is None else frozenset(),
             offer_background_after=toolkit.offer_background_after
             if offer_background_after is None
             else offer_background_after,

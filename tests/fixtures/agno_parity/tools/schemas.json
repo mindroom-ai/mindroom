@@ -15623,7 +15623,14 @@
               "type": "string"
             },
             "limit": {
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [

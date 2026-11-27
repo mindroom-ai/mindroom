@@ -66,14 +66,33 @@ def tool_parameters(entrypoint: Callable[..., Any], *, filled: Collection[str] =
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name in offered:
-        is_required = signature.parameters[name].default is inspect.Parameter.empty
-        if is_required:
+        default = signature.parameters[name].default
+        if default is inspect.Parameter.empty:
             required.append(name)
-        schema = _parameter_schema(hints.get(name), required=is_required)
+        schema = _parameter_schema(hints.get(name), default=default)
         if description := descriptions.get(name):
             schema["description"] = description
         properties[name] = schema
     return {"type": "object", "properties": properties, "required": required}
+
+
+def nullable_optional_parameters(entrypoint: Callable[..., Any], *, filled: Collection[str] = ()) -> frozenset[str]:
+    """Return parameter names whose ``None`` branch ``tool_parameters`` omitted because their default is ``None``.
+
+    Execution-side argument validation uses this set to keep accepting explicit JSON ``null`` for derived
+    ``X | None = None`` / ``Optional[X] = None`` parameters while still rejecting ``null`` for non-nullable defaults
+    and authored schemas.
+    """
+    signature = inspect.signature(entrypoint)
+    candidates = [
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind not in _UNNAMED_PARAMETERS and name not in filled and parameter.default is None
+    ]
+    if not candidates:
+        return frozenset()
+    hints = _resolved_annotations(entrypoint, candidates)
+    return frozenset(name for name in candidates if _is_nullable_optional(hints.get(name), None))
 
 
 def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, Any]) -> dict[str, Any]:
@@ -140,19 +159,27 @@ def _parameter_descriptions(entrypoint: Callable[..., Any]) -> dict[str, str]:
     return descriptions
 
 
-def _parameter_schema(hint: object, *, required: bool) -> dict[str, Any]:
-    """Return one parameter's schema: an unannotated one takes anything, and an optional ``X | None`` is ``X``'s.
+def _is_nullable_optional(hint: object, default: object) -> bool:
+    """Return whether a parameter defaults to ``None`` and has a two-member nullable union annotation."""
+    if default is not None or hint is None:
+        return False
+    arguments = get_args(hint)
+    return get_origin(hint) in (Union, UnionType) and len(arguments) == 2 and NoneType in arguments
 
-    When the parameter has a default (``required=False``), a two-member nullable union (``X | None``,
-    ``Optional[X]``, or ``Union[X, None]``) drops the null branch and renders as ``X`` because omitting the key
-    uses the default. A required nullable parameter (``required=True``) keeps ``anyOf: [X, {"type": "null"}]`` so
-    callers can pass ``null`` explicitly, and unions with three or more members always keep ``anyOf``.
+
+def _parameter_schema(hint: object, *, default: object = inspect.Parameter.empty) -> dict[str, Any]:
+    """Return one parameter's schema: an unannotated one takes anything, and ``X | None = None`` is ``X``'s.
+
+    When the parameter defaults to ``None``, a two-member nullable union (``X | None``, ``Optional[X]``, or
+    ``Union[X, None]``) drops the null branch and renders as ``X`` because omitting the key passes ``None``.
+    Required nullable parameters (no default) and nullable parameters with a non-``None`` default (such as
+    ``limit: int | None = 10``, where explicit ``null`` differs from omitting the key) keep
+    ``anyOf: [X, {"type": "null"}]``, and unions with three or more members always keep ``anyOf``.
     """
     if hint is None:
         return {}
-    arguments = get_args(hint)
-    if not required and get_origin(hint) in (Union, UnionType) and len(arguments) == 2 and NoneType in arguments:
-        hint = next(argument for argument in arguments if argument is not NoneType)
+    if _is_nullable_optional(hint, default):
+        hint = next(argument for argument in get_args(hint) if argument is not NoneType)
     return _schema(hint)
 
 
@@ -222,4 +249,10 @@ def _inlined(node: Any, definitions: dict[str, Any], active: frozenset[str]) -> 
     return _inlined(definitions[name], definitions, active | {name})
 
 
-__all__ = ["closed_parameters", "tool_description", "tool_parameters", "validated_entrypoint"]
+__all__ = [
+    "closed_parameters",
+    "nullable_optional_parameters",
+    "tool_description",
+    "tool_parameters",
+    "validated_entrypoint",
+]

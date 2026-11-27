@@ -70,8 +70,8 @@ from mindroom.scheduling.tasks import (
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
+from mindroom.tool_system.invocation import CallResult, ToolCall, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
@@ -79,7 +79,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
-from mindroom.tool_system.toolkits import adapt_toolkit, configure_toolkit_functions
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit, configure_toolkit_functions
 from tests.agent_tool_helpers import detached_policy
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
@@ -121,7 +121,7 @@ if TYPE_CHECKING:
     from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
-    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
@@ -3016,3 +3016,48 @@ def test_outside_an_agent_run_no_call_can_be_stored() -> None:
         prepare_scheduled_call("post_slack_message", '{"channel": "U1"}')
 
     assert str(exc_info.value) == "`post_slack_message` is not one of this agent's tools in this conversation."
+
+
+@pytest.mark.asyncio
+async def test_prepare_scheduled_call_allows_explicit_null_only_for_derived_nullable_optionals() -> None:
+    """Scheduled calls admit explicit null for derived ``X | None = None`` and reject it for non-nullable/authored."""
+
+    def derived_lookup(query: str, tag: str | None = None, count: int = 5) -> str:
+        return f"{query}:{tag}:{count}"
+
+    authored_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "tag": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    @passthrough_tool(name="authored_lookup", parameters=authored_schema)
+    def authored_lookup(query: str, tag: str | None = None) -> str:
+        return f"{query}:{tag}"
+
+    def schedule_tool_call() -> str:
+        return "ok"
+
+    functions = {
+        "schedule_tool_call": replace(adapt_callable(schedule_tool_call), toolkit="scheduler"),
+        "derived_lookup": replace(adapt_callable(derived_lookup), toolkit="notes"),
+        "authored_lookup": replace(adapt_callable(authored_lookup), toolkit="notes"),
+    }
+    (binder,) = bind_live_tools(functions, ())
+
+    async def check(_arguments: dict[str, object]) -> object:
+        resolved, parsed = prepare_scheduled_call("derived_lookup", '{"query": "hi", "tag": null}')
+        assert resolved.function.parameters["properties"]["tag"] == {"type": "string"}
+        assert parsed == {"query": "hi", "tag": None}
+        with pytest.raises(SchedulingError, match="do not match the tool's current parameters"):
+            prepare_scheduled_call("derived_lookup", '{"query": "hi", "count": null}')
+        with pytest.raises(SchedulingError, match="do not match the tool's current parameters"):
+            prepare_scheduled_call("authored_lookup", '{"query": "hi", "tag": null}')
+        return "ok"
+
+    call = ToolCall(
+        function=functions["schedule_tool_call"],
+        arguments={},
+        context=ToolCallContext(run_id="run-1", session_id="session-1", user_id=_REQUESTER),
+    )
+    assert await binder(call, check) == "ok"
