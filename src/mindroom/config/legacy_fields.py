@@ -380,14 +380,14 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 # Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
 # Last legacy release: v2026.11; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
 # Handling: Reject `slack_watch` in `include_tools`/`exclude_tools` on `slack` and fail closed in `tool_approval.rules`
-#   whenever `slack_watch` and `triggers` would receive different approval decisions.
+#   whenever `triggers` is enabled and `slack_watch` conflicts with `triggers` (allowing broad `slack_*` globs paired
+#   with an explicit exact `triggers` rule).
 # Coverage: tests/slack/test_event_source.py::test_retired_slack_watch_config_validation_fails_closed.
 _RETIRED_SLACK_FUNCTIONS: dict[str, str] = {
     "slack_watch": "triggers",
 }
 
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
-    "slack": _RETIRED_SLACK_FUNCTIONS,
     "scheduler": {
         "schedule": "scheduler",
         "edit_schedule": "scheduler",
@@ -953,6 +953,49 @@ def retired_trigger_approval_error(
             )
         ) is not None:
             return error
+    return None
+
+
+def retired_slack_watch_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide `triggers` differently from retired `slack_watch`."""
+    old, new = "slack_watch", "triggers"
+    first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
+    old_decision = _effective_approval_decision(
+        rules[first_old] if first_old is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
+    new_decision = _effective_approval_decision(
+        rules[first_new] if first_new is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
+    if old_decision == new_decision:
+        return None
+    if first_new is not None and rules[first_new].match == new:
+        if first_old is not None and not fnmatchcase("slack_post", rules[first_old].match):
+            return (
+                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} targets retired {old}, "
+                f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
+            )
+        return None
+    if first_old is not None:
+        return (
+            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+            f"{old} is now {new}, which now gets a different approval decision; "
+            f"rewrite the rules for {new}."
+        )
+    if first_new is not None:
+        return (
+            f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides {new}, "
+            f"changing tool_approval.default {default!r} that previously decided {old}; "
+            f"rewrite the rules for {new}."
+        )
     return None
 
 

@@ -234,8 +234,8 @@ In a private room, ask the agent, for example "Tell me when someone messages or 
 
 - `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
 - `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
-- Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), and `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives.
-- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_prompt` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
+- Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives, and `max_fires_per_hour=60` (capped by `external_trigger_policy.max_fires_per_hour`).
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
 Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
 Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.

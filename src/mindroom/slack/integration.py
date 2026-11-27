@@ -59,7 +59,8 @@ def _bind(
 ) -> None:
     """Let Slack events reach live bots, migrate legacy watches once, and register SlackEventSource."""
     from mindroom.slack.delivery import SlackRuntime  # noqa: PLC0415
-    from mindroom.slack.event_source import SlackEventSource, migrate_legacy_slack_watches  # noqa: PLC0415
+    from mindroom.slack.event_source import SlackEventSource  # noqa: PLC0415
+    from mindroom.slack.legacy_watch_migration import migrate_legacy_slack_watches  # noqa: PLC0415
 
     runtime = bound_slack_runtime(api_app)
     if runtime is not None and runtime.bots is bots and runtime.reactive_triggers is reactive_triggers:
@@ -68,19 +69,20 @@ def _bind(
 
     token: str | None = None
     if reactive_triggers is not None:
-        if reactive_triggers.store is not None:
-            try:
-                migrate_legacy_slack_watches(
-                    reactive_triggers.runtime_paths,
-                    reactive_triggers.store,
-                    reactive_triggers.config_provider(),
-                )
-            except Exception:
-                logger.exception("Failed to migrate legacy Slack watches.json")
         try:
             token = reactive_triggers.event_sources.register(SlackEventSource()).token
         except ValueError as exc:
             logger.warning("Could not register built-in Slack EventSource", reason=str(exc))
+        else:
+            if reactive_triggers.store is not None:
+                try:
+                    migrate_legacy_slack_watches(
+                        reactive_triggers.runtime_paths,
+                        reactive_triggers.store,
+                        reactive_triggers.config_provider(),
+                    )
+                except Exception:
+                    logger.exception("Failed to migrate legacy Slack watches.json")
 
     _runtimes(api_app)[_NAME] = SlackRuntime(
         bots,

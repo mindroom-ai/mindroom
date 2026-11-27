@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.reactive_triggers.event_sources import EventSource, EventSourceEmitter, EventSourceRegistry
+    from mindroom.event_sources import EventSource, EventSourceEmitter, EventSourceRegistry
     from mindroom.tool_system.plugins import PluginRoutesApp
 
 logger = get_logger(__name__)

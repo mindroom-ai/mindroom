@@ -261,6 +261,7 @@ def alice_slack_trigger(
             kind=kind,
             match=match or {},
             binding={"team_id": team_id, "slack_user_id": slack_user_id},
+            source_origin="registered",
         ),
         target=TriggerTargetSpec(
             agent=agent_name,

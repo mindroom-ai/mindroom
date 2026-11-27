@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.reactive_triggers.models import (
+    ExternalEventSourceSpec,
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
     ReactiveTriggerRecord,
@@ -19,12 +20,13 @@ from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.thread_tags import get_thread_tags
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Collection
 
     import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_sources import EventSourceRegistry
 
 
 type TriggerRecord = ExternalTriggerRecord | ReactiveTriggerRecord
@@ -33,6 +35,28 @@ type TriggerRecord = ExternalTriggerRecord | ReactiveTriggerRecord
 def is_trigger_owner(actor_user_id: str, owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
     """Return whether ``actor_user_id`` owns a trigger recorded under ``owner_user_id``."""
     return owner_user_id in equivalent_requester_ids(actor_user_id, config, runtime_paths)
+
+
+def can_view_reactive_trigger(
+    record: ReactiveTriggerRecord,
+    viewer_user_id: str,
+    *,
+    event_sources: EventSourceRegistry | None,
+    viewer_user_ids: Collection[str] | None = None,
+) -> bool:
+    """Return whether ``viewer_user_id`` may view ``record`` in listings or firing history."""
+    if viewer_user_ids is not None:
+        if record.owner_user_id in viewer_user_ids:
+            return True
+    elif record.owner_user_id == viewer_user_id:
+        return True
+    if isinstance(record.source, ExternalEventSourceSpec):
+        registered = event_sources.get(record.source.source_id) if event_sources is not None else None
+        if registered is not None and registered.private_room_only:
+            return False
+        if registered is None and (record.source.source_origin == "registered" or bool(record.source.binding)):
+            return False
+    return True
 
 
 def _get_trigger_with_store(

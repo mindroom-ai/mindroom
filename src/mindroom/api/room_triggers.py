@@ -15,12 +15,13 @@ from mindroom.api.app_state import app_state, notify_reactive_event_loop
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.api.room_reads import read_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
 from mindroom.matrix.state import resolve_room_id
 from mindroom.plugin_http import ClientUser, client_rooms, require_room_member
-from mindroom.reactive_triggers.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.reactive_triggers.management import (
     TriggerRecord,
+    can_view_reactive_trigger,
     delete_trigger_sync,
     get_trigger_record,
     is_trigger_owner,
@@ -133,19 +134,14 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
     rows: list[TriggerRow] = []
     for item in matched:
         can_manage = item.record.owner_user_id in owner_ids
-        registered = _registered_source_for_record(item.record, event_sources)
-        if (
-            not can_manage
-            and registered is not None
-            and isinstance(item.record, ReactiveTriggerRecord)
-            and await _is_private_room_only_source(
-                registered,
-                record=item.record,
-                config=config,
-                runtime_paths=runtime_paths,
-            )
+        if isinstance(item.record, ReactiveTriggerRecord) and not can_view_reactive_trigger(
+            item.record,
+            member.user_id,
+            event_sources=event_sources,
+            viewer_user_ids=owner_ids,
         ):
             continue
+        registered = _registered_source_for_record(item.record, event_sources)
         paused_reason = (
             await _paused_reason_for_owner_trigger(
                 request,
@@ -327,31 +323,10 @@ def _registered_source_for_record(
         event_sources is not None
         and isinstance(record, ReactiveTriggerRecord)
         and isinstance(record.source, ExternalEventSourceSpec)
+        and (record.source.source_origin == "registered" or bool(record.source.binding))
     ):
         return event_sources.get(record.source.source_id)
     return None
-
-
-async def _is_private_room_only_source(
-    source: EventSource,
-    *,
-    record: ReactiveTriggerRecord,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    if source.private_room_only:
-        return True
-    descriptor = await source.describe_for_user(
-        EventSourceContext(
-            owner_user_id=record.owner_user_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            target_room_id=record.target.room_id,
-            target_agent=record.target.agent,
-            credentials_manager=get_runtime_credentials_manager(runtime_paths),
-        ),
-    )
-    return descriptor is not None and descriptor.private_room_only
 
 
 async def _read_target_room_state(

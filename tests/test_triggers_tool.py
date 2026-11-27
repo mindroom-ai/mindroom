@@ -1481,7 +1481,8 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         admin_hist = _payload(await tool.triggers(action="history", limit=500))
     assert admin_hist["status"] == "ok"
-    assert [row["dedupe_key"] for row in admin_hist["firings"]] == ["$ev3", "$ev2", "$ev1"]
+    assert [row["trigger_id"] for row in admin_hist["firings"]] == ["owner-r", "other-r", "owner-r"]
+    assert all("dedupe_key" not in row and "error_message" not in row for row in admin_hist["firings"])
     assert all(row["event"] is None for row in admin_hist["firings"])
 
 
@@ -1949,12 +1950,13 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     ):
         admin_hist = _payload(await tool.triggers(action="history"))
     assert admin_hist["status"] == "ok"
-    assert [row["dedupe_key"] for row in admin_hist["firings"]] == [
-        "$ev_gh",
-        "$ev_priv_msg",
-        "$ev_priv_tag",
-        "$ev_lobby",
+    assert [row["trigger_id"] for row in admin_hist["firings"]] == [
+        "watch-gh",
+        "watch-priv-msg",
+        "watch-priv-tag",
+        "watch-lobby",
     ]
+    assert all("dedupe_key" not in row and "error_message" not in row for row in admin_hist["firings"])
 
 
 @pytest.mark.asyncio
@@ -2394,10 +2396,16 @@ async def test_history_rechecks_per_event_external_source_grants_for_non_admins(
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=narrowed_config)):
         admin_scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
         admin_unscoped = _payload(await tool.triggers(action="history"))
-    assert [row["dedupe_key"] for row in admin_scoped["firings"]] == ["$pr_org/b", "$pr_org/a"]
-    assert [row["dedupe_key"] for row in admin_unscoped["firings"]] == ["$pr_org/b", "$pr_org/a"]
-    assert all(row["event"] is None for row in admin_scoped["firings"])
-    assert all(row["event"] is None for row in admin_unscoped["firings"])
+    assert len(admin_scoped["firings"]) == 2
+    assert len(admin_unscoped["firings"]) == 2
+    assert all(
+        row["event"] is None and "dedupe_key" not in row and "error_message" not in row
+        for row in admin_scoped["firings"]
+    )
+    assert all(
+        row["event"] is None and "dedupe_key" not in row and "error_message" not in row
+        for row in admin_unscoped["firings"]
+    )
 
 
 @pytest.mark.asyncio
@@ -2470,24 +2478,27 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     redacted_row = scoped_other["firings"][0]
     assert redacted_row["id"] == owner_firing.id
     assert redacted_row["trigger_id"] == "owner-private"
-    assert redacted_row["dedupe_key"] == "$ev_secret"
+    assert "dedupe_key" not in redacted_row
     assert redacted_row["status"] == "skipped"
-    assert redacted_row["error_message"] == "delivery rate limited"
+    assert "error_message" not in redacted_row
     assert redacted_row["triage_reason"] is None
     assert redacted_row["event"] is None
     serialized_other = json.dumps(redacted_row)
     assert "classified private room body" not in serialized_other
     assert "@secret-sender:example.org" not in serialized_other
     assert "Confidential Title" not in serialized_other
+    assert "delivery rate limited" not in serialized_other
+    assert "$ev_secret" not in serialized_other
 
     assert scoped_own["status"] == "ok"
     assert scoped_own["firings"][0]["event"]["text"] == "admin visible body"
 
-    by_id = {row["dedupe_key"]: row for row in unscoped["firings"]}
-    assert by_id["$ev_secret"]["event"] is None
-    assert by_id["$ev_secret"]["triage_reason"] is None
-    assert by_id["$ev_secret"]["error_message"] == "delivery rate limited"
-    assert by_id["$ev_admin"]["event"]["text"] == "admin visible body"
+    by_trigger = {row["trigger_id"]: row for row in unscoped["firings"]}
+    assert by_trigger["owner-private"]["event"] is None
+    assert by_trigger["owner-private"]["triage_reason"] is None
+    assert "dedupe_key" not in by_trigger["owner-private"]
+    assert "error_message" not in by_trigger["owner-private"]
+    assert by_trigger["admin-own"]["event"]["text"] == "admin visible body"
 
     # Once admin leaves the watched room, even their own trigger's event content is redacted.
     live_members["!lobby:example.org"] = ["@owner:example.org"]

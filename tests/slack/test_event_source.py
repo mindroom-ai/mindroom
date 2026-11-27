@@ -20,14 +20,14 @@ from mindroom.constants import HOOK_SOURCE_KEY, SOURCE_KIND_KEY
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.slack import SlackTools
 from mindroom.custom_tools.triggers import TriggersTools
-from mindroom.delivery_replay import DeliveryReplayStore
+from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_sources import EventSourceContext
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.reactive_triggers import dispatch as reactive_dispatch
-from mindroom.reactive_triggers.event_sources import EventSourceContext
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     ReactiveTriggerRecord,
@@ -44,10 +44,10 @@ from mindroom.slack.event_source import (
     SLACK_EVENT_SOURCE_ID,
     SlackEventSource,
     _watch_room_problem_from_state,
-    migrate_legacy_slack_watches,
     started_by_slack_trigger,
 )
 from mindroom.slack.integration import SLACK_INTEGRATION, bound_slack_runtime
+from mindroom.slack.legacy_watch_migration import migrate_legacy_slack_watches
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system.catalog import ToolConfigOverrideError
 from mindroom.tool_system.plugins import config_plugins
@@ -110,6 +110,8 @@ def _make_config(
     *,
     assistant_tools: list[Any] | None = None,
     reactive_enabled: bool = True,
+    max_fires_per_hour: int = 60,
+    event_sources: dict[str, Any] | None = None,
 ) -> tuple[Config, RuntimePaths]:
     data: dict[str, Any] = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
@@ -131,7 +133,8 @@ def _make_config(
         "external_trigger_policy": {
             "enabled": True,
             "reactive_enabled": reactive_enabled,
-            "max_fires_per_hour": 60,
+            "max_fires_per_hour": max_fires_per_hour,
+            **({"event_sources": event_sources} if event_sources else {}),
         },
         "slack": {"email_domain": "example.com", "matrix_user_id_template": "@{localpart}:example.org"},
     }
@@ -177,6 +180,7 @@ def _rule(
             kind=kind,
             match=match or {},
             binding={"team_id": TEAM, "slack_user_id": SLACK_IDS["alice"]} if binding is None else binding,
+            source_origin="registered",
         ),
         target=TriggerTargetSpec(
             agent=agent,
@@ -224,6 +228,7 @@ def _tool_context(
     room_id: str = WATCH_ROOM,
     requester_id: str = ALICE,
     hook_source: str | None = None,
+    thread_id: str | None = None,
 ) -> ToolRuntimeContext:
     bot = SimpleNamespace(
         client=client,
@@ -238,7 +243,7 @@ def _tool_context(
     )
     return ToolRuntimeContext(
         agent_name="assistant",
-        target=MessageTarget.resolve(room_id, None, "$event", room_mode=True),
+        target=MessageTarget.resolve(room_id, thread_id, "$event", room_mode=thread_id is None),
         requester_id=requester_id,
         client=client,
         config=config,
@@ -288,7 +293,8 @@ async def test_describe_for_user_requires_app_token_and_personal_slack(tmp_path:
         desc.default_thread_key_from_event,
         desc.default_reopen_on_fire,
         desc.private_room_only,
-    ) == (False, True, True, True, True)
+        desc.default_max_fires_per_hour,
+    ) == (False, True, True, True, True, 60)
 
     project_ctx = replace(ctx, target_agent="project_only")
     assert await source.describe_for_user(project_ctx) is None
@@ -636,7 +642,7 @@ async def test_triggers_tool_history_paused_reason_and_watch_turn_guards_review_
     fid = store.list_firings(trigger_id=rule.trigger_id)[0].id
     assert store.claim_firing(fid, now=time.time(), triage_reason="Secret deal discussion") == "claimed"
 
-    # Owner in private room sees event + triage_reason; shared room is refused; non-owner admin gets redacted row.
+    # Owner in private room sees event + triage_reason; shared room is refused; non-owner admin sees neither rule nor history.
     with tool_runtime_context(
         _tool_context(config=config, paths=paths, client=client, service=service, room_id=WATCH_ROOM),
     ):
@@ -661,11 +667,15 @@ async def test_triggers_tool_history_paused_reason_and_watch_turn_guards_review_
             requester_id=ADMIN,
         ),
     ):
-        admin_hist = json.loads(await tool.triggers(action="history", trigger_id=rule.trigger_id))
-    assert admin_hist["status"] == "ok"
-    assert admin_hist["firings"][0]["event"] is None
-    assert admin_hist["firings"][0]["triage_reason"] is None
-    assert "Secret deal" not in json.dumps(admin_hist)
+        admin_list = json.loads(await tool.triggers(action="list"))
+        admin_hist_scoped = json.loads(await tool.triggers(action="history", trigger_id=rule.trigger_id))
+        admin_hist_unscoped = json.loads(await tool.triggers(action="history"))
+    assert admin_list["reactive_triggers"] == []
+    assert rule.trigger_id not in json.dumps(admin_list)
+    assert "paused_reason" not in json.dumps(admin_list)
+    assert admin_hist_scoped["status"] == "error"
+    assert admin_hist_unscoped["count"] == 0
+    assert "Secret deal" not in json.dumps(admin_hist_unscoped)
 
     # Inviting another human surfaces paused_reason in triggers(action="list").
     invited_client = _multi_room_client(
@@ -976,10 +986,11 @@ def test_migrate_legacy_slack_watches_and_replay_roots_once(
     both_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_both"].source)
     mention_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_mention"].source)
     dm_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_dm"].source)
-    assert (both_src.kind, both_src.match, both_src.binding) == (
+    assert (both_src.kind, both_src.match, both_src.binding, both_src.source_origin) == (
         "message",
         {"channel_id": [CHANNEL, OTHER_CHANNEL]},
         {"team_id": TEAM, "slack_user_id": SLACK_IDS["alice"]},
+        "registered",
     )
     assert (mention_src.kind, mention_src.match, dm_src.kind, dm_src.match) == (
         "mention",
@@ -1058,41 +1069,105 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
 
 
 def test_retired_slack_watch_config_validation_fails_closed(tmp_path: Path) -> None:
-    """Legacy slack_watch in tool_approval.rules or include_tools/exclude_tools fails closed with triggers guidance."""
-    base = {
+    """Legacy slack_watch approval rules only gate when triggers is enabled and handle broad vs exact rules cleanly."""
+    slack_only = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {"assistant": {"display_name": "Assistant", "tools": ["slack"]}},
     }
-
-    # tool_approval.rules mismatching slack_watch vs triggers fails closed
-    approval_mismatch = {
-        **base,
-        "tool_approval": {
-            "default": "auto_approve",
-            "rules": [{"match": "slack_watch", "action": "require_approval"}],
-        },
+    slack_and_triggers = {
+        **slack_only,
+        "agents": {"assistant": {"display_name": "Assistant", "tools": ["slack", "triggers"]}},
     }
+
+    # 1. tools: [slack] (no triggers) + slack_* require_approval + default: auto_approve -> loads!
+    Config.validate_with_runtime(
+        {
+            **slack_only,
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [{"match": "slack_*", "action": "require_approval"}],
+            },
+        },
+        test_runtime_paths(tmp_path / "s1"),
+    )
+
+    # 2. tools: [slack, triggers] + slack_* require_approval + default: auto_approve -> rejected!
     with pytest.raises((ToolConfigOverrideError, ValueError), match=r"slack_watch.*triggers"):
-        Config.validate_with_runtime(approval_mismatch, test_runtime_paths(tmp_path / "m1"))
+        Config.validate_with_runtime(
+            {
+                **slack_and_triggers,
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [{"match": "slack_*", "action": "require_approval"}],
+                },
+            },
+            test_runtime_paths(tmp_path / "s2"),
+        )
 
-    # Matching effective decisions load cleanly
-    approval_same = {
-        **base,
-        "tool_approval": {
-            "default": "auto_approve",
-            "rules": [
-                {"match": "slack_watch", "action": "require_approval"},
-                {"match": "triggers", "action": "require_approval"},
-            ],
+    # 3. tools: [slack, triggers] + slack_* require_approval + exact triggers auto_approve -> loads!
+    Config.validate_with_runtime(
+        {
+            **slack_and_triggers,
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "slack_*", "action": "require_approval"},
+                    {"match": "triggers", "action": "auto_approve"},
+                ],
+            },
         },
-    }
-    Config.validate_with_runtime(approval_same, test_runtime_paths(tmp_path / "m2"))
+        test_runtime_paths(tmp_path / "s3"),
+    )
+
+    # 4. tools: [slack, triggers] + exact slack_watch require_approval + exact triggers auto_approve -> rejected!
+    with pytest.raises((ToolConfigOverrideError, ValueError), match=r"slack_watch.*triggers"):
+        Config.validate_with_runtime(
+            {
+                **slack_and_triggers,
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [
+                        {"match": "slack_watch", "action": "require_approval"},
+                        {"match": "triggers", "action": "auto_approve"},
+                    ],
+                },
+            },
+            test_runtime_paths(tmp_path / "s4"),
+        )
+
+    # 5. tools: [slack, triggers] + exact slack_watch require_approval + exact triggers require_approval -> loads!
+    Config.validate_with_runtime(
+        {
+            **slack_and_triggers,
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "slack_watch", "action": "require_approval"},
+                    {"match": "triggers", "action": "require_approval"},
+                ],
+            },
+        },
+        test_runtime_paths(tmp_path / "s5"),
+    )
+
+    # Exact slack_watch without triggers rule -> rejected when triggers is enabled
+    with pytest.raises((ToolConfigOverrideError, ValueError), match=r"slack_watch.*triggers"):
+        Config.validate_with_runtime(
+            {
+                **slack_and_triggers,
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [{"match": "slack_watch", "action": "require_approval"}],
+                },
+            },
+            test_runtime_paths(tmp_path / "s6"),
+        )
 
     # include_tools / exclude_tools referencing slack_watch on slack fail closed with subscribe_event guidance
     for key in ("include_tools", "exclude_tools"):
         override_cfg = {
-            **base,
+            **slack_only,
             "agents": {
                 "assistant": {
                     "display_name": "Assistant",
@@ -1149,6 +1224,7 @@ def test_room_triggers_api_hides_slack_trigger_from_non_owners_and_shows_paused_
             kind="message",
             match={"channel_id": CHANNEL},
             binding={"team_id": TEAM, "slack_user_id": SLACK_IDS["alice"]},
+            source_origin="registered",
         ),
         target_room=room_id,
         description="Alice Slack watch",
@@ -1168,3 +1244,196 @@ def test_room_triggers_api_hides_slack_trigger_from_non_owners_and_shows_paused_
     bob_resp = h.req("GET", room_id, "@bob:localhost")
     assert bob_resp.status_code == 200
     assert "tr_slack_real" not in {row["trigger_id"] for row in bob_resp.json()["triggers"]}
+
+
+@pytest.mark.asyncio
+async def test_slack_subscribe_default_max_fires_per_hour_and_explicit_new_thread_false(tmp_path: Path) -> None:
+    """Slack subscribe_event defaults max_fires_per_hour to min(60, policy) and honors explicit new_thread=False."""
+    tool = TriggersTools()
+
+    # High policy limit (120): default gets 60; explicit max_fires_per_hour=12 is respected; explicit new_thread=False works in a thread.
+    cfg_high, paths_high = _make_config(tmp_path / "high", max_fires_per_hour=120)
+    install_slack_state(paths_high, app_token=APP_TOKEN)
+    connect_alice(paths_high)
+    agent_id = entity_identity_registry(cfg_high, paths_high).current_id("assistant").full_id
+    store_high = ReactiveTriggerStore(paths_high)
+    service_high = ReactiveTriggerService(
+        config_provider=lambda: cfg_high,
+        runtime_paths=paths_high,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=store_high,
+    )
+    service_high.event_sources.register(SlackEventSource())
+    client_high = _multi_room_client({WATCH_ROOM: room_state_client((ALICE, agent_id), room_id=WATCH_ROOM)})
+
+    with tool_runtime_context(
+        _tool_context(
+            config=cfg_high,
+            paths=paths_high,
+            client=client_high,
+            service=service_high,
+            thread_id="$existing_thread",
+        ),
+    ):
+        default_sub = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_default",
+                source_id="slack",
+                kind="message",
+                prompt="Watch Slack.",
+            ),
+        )
+        explicit_cap_and_thread = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_in_thread",
+                source_id="slack",
+                kind="message",
+                prompt="Deliver into this thread.",
+                max_fires_per_hour=12,
+                new_thread=False,
+            ),
+        )
+    assert default_sub["status"] == "ok"
+    assert default_sub["trigger"]["max_fires_per_hour"] == 60
+    assert default_sub["trigger"]["target"]["new_thread"] is True
+    assert default_sub["trigger"]["target"]["thread_key_from_event"] is True
+    assert default_sub["trigger"]["target"]["thread_id"] is None
+
+    assert explicit_cap_and_thread["status"] == "ok"
+    assert explicit_cap_and_thread["trigger"]["max_fires_per_hour"] == 12
+    assert explicit_cap_and_thread["trigger"]["target"]["new_thread"] is False
+    assert explicit_cap_and_thread["trigger"]["target"]["thread_key_from_event"] is False
+    assert explicit_cap_and_thread["trigger"]["target"]["thread_id"] == "$existing_thread"
+
+    # Lower policy cap (25): default is capped to min(60, 25) == 25.
+    cfg_low, paths_low = _make_config(tmp_path / "low", max_fires_per_hour=25)
+    install_slack_state(paths_low, app_token=APP_TOKEN)
+    connect_alice(paths_low)
+    agent_id_low = entity_identity_registry(cfg_low, paths_low).current_id("assistant").full_id
+    store_low = ReactiveTriggerStore(paths_low)
+    service_low = ReactiveTriggerService(
+        config_provider=lambda: cfg_low,
+        runtime_paths=paths_low,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=store_low,
+    )
+    service_low.event_sources.register(SlackEventSource())
+    client_low = _multi_room_client({WATCH_ROOM: room_state_client((ALICE, agent_id_low), room_id=WATCH_ROOM)})
+    with tool_runtime_context(_tool_context(config=cfg_low, paths=paths_low, client=client_low, service=service_low)):
+        capped_sub = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_capped",
+                source_id="slack",
+                kind="message",
+                prompt="Watch Slack.",
+            ),
+        )
+    assert capped_sub["status"] == "ok"
+    assert capped_sub["trigger"]["max_fires_per_hour"] == 25
+
+
+def test_slack_integration_bind_skips_migration_when_yaml_source_collides(tmp_path: Path) -> None:
+    """Pre-existing YAML event_sources.slack blocks Slack registration and leaves watches.json unmigrated/unarchived."""
+    config, paths = _make_config(
+        tmp_path,
+        event_sources={
+            "slack": {
+                "kind": "hmac",
+                "secret_env": "SLACK_WEBHOOK_SECRET",
+                "subscribers": [ALICE],
+            },
+        },
+    )
+    store = ReactiveTriggerStore(paths)
+    service = ReactiveTriggerService(
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    assert paths.control_state_root is not None
+    watches_path = paths.control_state_root / "slack" / "watches.json"
+    watches_path.parent.mkdir(parents=True, exist_ok=True)
+    watches_path.write_text(
+        json.dumps(
+            {
+                "watches": {
+                    "w1": {
+                        "watch_id": "w1",
+                        "owner_id": ALICE,
+                        "agent_name": "assistant",
+                        "room_id": WATCH_ROOM,
+                        "team_id": TEAM,
+                        "slack_user_id": SLACK_IDS["alice"],
+                        "mentions": True,
+                        "direct_messages": True,
+                        "channels": [],
+                        "created_at": NOW,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    app = FastAPI()
+    ensure_app_state(app)
+    SLACK_INTEGRATION.bind(app, {}, AgentReplyMembershipIndex(), service)
+    assert service.event_sources.get(SLACK_EVENT_SOURCE_ID) is None
+    assert watches_path.exists()
+    assert not watches_path.with_name("watches.json.migrated").exists()
+    assert store.has_migration("slack_watches_v1") is False
+    assert store.get_trigger("slack_watch_w1") is None
+
+
+def test_migrate_legacy_slack_watches_aborts_on_replay_store_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeliveryReplayStoreError aborts legacy watch migration before committing SQLite or archiving watches.json."""
+    config, paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(paths)
+    assert paths.control_state_root is not None
+    watches_path = paths.control_state_root / "slack" / "watches.json"
+    watches_path.parent.mkdir(parents=True, exist_ok=True)
+    watches_path.write_text(
+        json.dumps(
+            {
+                "watches": {
+                    "w1": {
+                        "watch_id": "w1",
+                        "owner_id": ALICE,
+                        "agent_name": "assistant",
+                        "room_id": WATCH_ROOM,
+                        "team_id": TEAM,
+                        "slack_user_id": SLACK_IDS["alice"],
+                        "mentions": True,
+                        "direct_messages": True,
+                        "channels": [],
+                        "created_at": NOW,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(self: DeliveryReplayStore, scope: str, *, now: int | None = None) -> dict[str, tuple[str, str, int]]:
+        del self, scope, now
+        msg = "corrupt replay store"
+        raise DeliveryReplayStoreError(msg)
+
+    monkeypatch.setattr(DeliveryReplayStore, "list_bound_thread_roots", _boom)
+    with pytest.raises(DeliveryReplayStoreError, match="corrupt replay store"):
+        migrate_legacy_slack_watches(paths, store, config)
+
+    assert watches_path.exists()
+    assert not watches_path.with_name("watches.json.migrated").exists()
+    assert store.has_migration("slack_watches_v1") is False
+    assert store.get_trigger("slack_watch_w1") is None

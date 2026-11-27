@@ -77,8 +77,8 @@ if TYPE_CHECKING:
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
+    from mindroom.event_sources import EventSourceEmitter
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-    from mindroom.reactive_triggers.event_sources import EventSourceEmitter
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 # Plugin routes import these from outside src/, so they stay public though no module here imports them.

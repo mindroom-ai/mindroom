@@ -113,6 +113,7 @@ class ExternalEventSourceSpec(BaseModel):
     kind: str
     match: dict[str, str | bool | int | list[str]] = Field(default_factory=dict)
     binding: dict[str, str | bool | int] = Field(default_factory=dict)
+    source_origin: Literal["yaml", "registered"] = "yaml"
 
     @field_validator("source_id", "kind")
     @classmethod

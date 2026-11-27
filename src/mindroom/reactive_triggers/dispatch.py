@@ -12,12 +12,12 @@ from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowe
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
+from mindroom.event_sources import EventSourceContext
 from mindroom.hooks.sender import send_matrix_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
-from mindroom.reactive_triggers.event_sources import EventSourceContext
 from mindroom.reactive_triggers.external_sources import check_external_event_source_access
 from mindroom.reactive_triggers.github_pr import check_github_pr_source_access
 from mindroom.reactive_triggers.matching import REACTIVE_TRIGGER_DEDUPE_KEY, REACTIVE_TRIGGER_ID_KEY
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.reactive_triggers.event_sources import EventSourceRegistry
+    from mindroom.event_sources import EventSourceRegistry
     from mindroom.reactive_triggers.models import FiringRecord, ReactiveTriggerRecord, TriggerEvent
 
 logger = get_logger(__name__)
@@ -141,28 +141,16 @@ async def check_reactive_source_access(
 
     source = rule.source
     if isinstance(source, ExternalEventSourceSpec):
-        registered = event_sources.get(source.source_id) if event_sources is not None else None
-        if registered is not None:
-            ctx = EventSourceContext(
-                owner_user_id=rule.owner_user_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                target_room_id=rule.target.room_id,
-                target_agent=rule.target.agent,
-                target_room_state=(
-                    known_room_states.get(rule.target.room_id) if known_room_states is not None else None
-                ),
-                client=source_bot.client if source_bot is not None else None,
-            )
-            return await registered.check_delivery_access(ctx, rule=rule, event=event)
-        reason = check_external_event_source_access(
-            owner_user_id=rule.owner_user_id,
-            source_spec=source,
+        return await _check_external_source_access(
+            rule=rule,
+            source=source,
             event=event,
+            source_bot=source_bot,
             config=config,
             runtime_paths=runtime_paths,
+            known_room_states=known_room_states,
+            event_sources=event_sources,
         )
-        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
     if isinstance(source, GitHubPRSourceSpec):
         fn = check_github_pr_source_access
@@ -181,6 +169,41 @@ async def check_reactive_source_access(
             known_room_states=known_room_states,
         )
     return None
+
+
+async def _check_external_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    source: ExternalEventSourceSpec,
+    event: TriggerEvent,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None,
+    event_sources: EventSourceRegistry | None,
+) -> DispatchResult | None:
+    if source.source_origin == "registered" or bool(source.binding):
+        registered = event_sources.get(source.source_id) if event_sources is not None else None
+        if registered is None:
+            return DispatchResult(status="skipped", reason="source_removed")
+        ctx = EventSourceContext(
+            owner_user_id=rule.owner_user_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            target_room_id=rule.target.room_id,
+            target_agent=rule.target.agent,
+            target_room_state=(known_room_states.get(rule.target.room_id) if known_room_states is not None else None),
+            client=source_bot.client if source_bot is not None else None,
+        )
+        return await registered.check_delivery_access(ctx, rule=rule, event=event)
+    reason = check_external_event_source_access(
+        owner_user_id=rule.owner_user_id,
+        source_spec=source,
+        event=event,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
 
 async def _resolve_source_room_state(

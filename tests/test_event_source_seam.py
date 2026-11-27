@@ -10,7 +10,7 @@ import uuid
 from contextlib import closing
 from dataclasses import replace
 from types import ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -34,6 +34,15 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_SOURCE_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.triggers import TriggersTools
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
+from mindroom.event_sources import (
+    EventSource,
+    EventSourceContext,
+    EventSourceDescriptor,
+    EventSourceEmitter,
+    EventSourceInactiveError,
+    EventSourceRegistry,
+    ValidatedSubscription,
+)
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
@@ -42,12 +51,6 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.plugin_lifecycle import PluginLifecycle, PluginLifespans
 from mindroom.reactive_triggers import (
     DispatchResult,
-    EventSource,
-    EventSourceContext,
-    EventSourceDescriptor,
-    EventSourceEmitter,
-    EventSourceInactiveError,
-    EventSourceRegistry,
     ExternalEventSourceSpec,
     FiringRecord,
     ReactiveTriggerRecord,
@@ -58,9 +61,10 @@ from mindroom.reactive_triggers import (
     TriageSpec,
     TriggerEvent,
     TriggerTargetSpec,
-    ValidatedSubscription,
+    check_external_event_source_access,
     check_reactive_source_access,
     dispatch_reactive_trigger,
+    fan_out_external_event,
     matches_external_event,
 )
 from mindroom.slack.integration import SLACK_INTEGRATION
@@ -126,6 +130,7 @@ def _make_rule(
     kind: str = "build.failed",
     match: dict[str, str | bool | int | list[str]] | None = None,
     binding: dict[str, str | bool | int] | None = None,
+    source_origin: Literal["yaml", "registered"] = "registered",
     target: TriggerTargetSpec | None = None,
     triage: TriageSpec | None = None,
     enabled: bool = True,
@@ -134,7 +139,13 @@ def _make_rule(
     return ReactiveTriggerRecord(
         trigger_id=trigger_id,
         owner_user_id=owner_user_id,
-        source=ExternalEventSourceSpec(source_id=source_id, kind=kind, match=match or {}, binding=binding or {}),
+        source=ExternalEventSourceSpec(
+            source_id=source_id,
+            kind=kind,
+            match=match or {},
+            binding=binding or {},
+            source_origin=source_origin,
+        ),
         triage=triage,
         target=target
         or TriggerTargetSpec(
@@ -152,7 +163,9 @@ def _make_rule(
 
 
 def _bot(
-    *, latest_thread_event_id: str | None = "$latest", joined_rooms: Collection[str] = (_ROOM_B,)
+    *,
+    latest_thread_event_id: str | None = "$latest",
+    joined_rooms: Collection[str] = (_ROOM_B,),
 ) -> SimpleNamespace:
     client = AsyncMock()
     client.rooms = {room_id: SimpleNamespace(room_id=room_id) for room_id in joined_rooms}
@@ -381,9 +394,9 @@ def test_event_source_registry_validation_and_collisions(tmp_path: Path) -> None
         event_sources={
             "github": GitHubEventSourceConfig(
                 kind="github",
-                secret_env="GH_SECRET",
+                secret_env="GH_SECRET",  # noqa: S106
                 allowed_repos=["org/repo"],
-                subscribers=[_OWNER],  # noqa: S106
+                subscribers=[_OWNER],
             ),
         },
     )
@@ -420,7 +433,8 @@ def test_event_source_registry_validation_and_collisions(tmp_path: Path) -> None
     assert registry.emitter_for_plugin("acme", "acme-alerts") is e_dash
     assert registry.emitter_for_plugin("other", "acme_builds") is None
     assert registry.emitter_for_plugin("slack", "slack") is None
-    assert registry.is_active_token("slack", builtin_slack.token) is True
+    assert registry.unregister("slack", "wrong-token") is False
+    assert registry.unregister("slack", builtin_slack.token) is True
 
 
 @pytest.mark.asyncio
@@ -448,8 +462,6 @@ async def test_event_source_registry_reload_token_fencing(tmp_path: Path) -> Non
 
     assert isinstance(old_emitter, EventSourceEmitter)
     assert new_emitter.token != old_emitter.token
-    assert registry.is_active_token("acme_builds", old_emitter.token) is False
-    assert registry.is_active_token("acme_builds", new_emitter.token) is True
 
     # Old lifespan teardown must NOT remove replacement; old emitter fails closed.
     assert registry.unregister("acme_builds", old_emitter.token) is False
@@ -496,18 +508,21 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
     migrated_a = _make_rule(trigger_id="slack_watch_a", source_id="slack", kind="message", binding={"team_id": "T1"})
     migrated_b = _make_rule(trigger_id="slack_watch_b", source_id="slack", kind="mention")
     assert upgraded.has_migration("slack_watches_v1") is False
-    imported = upgraded.import_triggers_once(
-        "slack_watches_v1",
-        [preexisting, migrated_a, migrated_b],
-        thread_keys=[
-            ("collide_rule", "C1:1", "$hijacked-root", 2000.0),
-            ("slack_watch_a", "C1:1", "$root-a", 1000.0),
-            ("slack_watch_b", "C1:1", "$root-b", 1200.0),
-            ("orphan_rule", "C1:1", "$orphan-root", 1200.0),
-        ],
-        now=1500.0,
-    )
+    with patch("mindroom.reactive_triggers.store.logger.warning") as mock_warn:
+        imported = upgraded.import_triggers_once(
+            "slack_watches_v1",
+            [preexisting, migrated_a, migrated_b],
+            thread_keys=[
+                ("collide_rule", "C1:1", "$hijacked-root", 2000.0),
+                ("slack_watch_a", "C1:1", "$root-a", 1000.0),
+                ("slack_watch_b", "C1:1", "$root-b", 1200.0),
+                ("orphan_rule", "C1:1", "$orphan-root", 1200.0),
+            ],
+            now=1500.0,
+        )
     assert imported == 2
+    mock_warn.assert_called_once()
+    assert mock_warn.call_args.kwargs["skipped_trigger_ids"] == ["collide_rule"]
     assert upgraded.has_migration("slack_watches_v1") is True
     assert upgraded.get_thread_key_binding("collide_rule", "C1:1", now=1500.0) == "$original-root"
     loaded_a = upgraded.get_trigger("slack_watch_a")
@@ -1512,9 +1527,19 @@ async def test_triggers_tool_registered_event_source_paused_test_history_and_wat
     assert (shared_scoped["status"], shared_unscoped["count"]) == ("error", 0)
 
     with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        admin_hist = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
-    assert (admin_hist["firings"][0]["event"], admin_hist["firings"][0]["triage_reason"]) == (None, None)
-    assert "acquisition" not in json.dumps(admin_hist)
+        admin_list = json.loads(await tool.triggers(action="list"))
+        admin_hist_scoped = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
+        admin_hist_unscoped = json.loads(await tool.triggers(action="history"))
+        admin_test = json.loads(await tool.triggers(action="test", trigger_id="sl_1"))
+    assert (
+        admin_list["reactive_triggers"],
+        admin_hist_scoped["status"],
+        admin_hist_unscoped["count"],
+        admin_test["status"],
+    ) == ([], "error", 0, "error")
+    assert "sl_1" not in json.dumps(admin_list)
+    assert "paused_reason" not in json.dumps(admin_list)
+    assert "acquisition" not in json.dumps(admin_hist_unscoped)
 
     mutating_calls: list[dict[str, Any]] = [
         {"action": "watch_room", "prompt": "x"},
@@ -1541,3 +1566,351 @@ async def test_triggers_tool_registered_event_source_paused_test_history_and_wat
 
     with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room, hook_source=None)):
         assert json.loads(await tool.triggers(action="delete", trigger_id="sl_1"))["status"] == "ok"
+
+
+def test_event_source_descriptor_default_max_fires_validation() -> None:
+    """EventSourceDescriptor validates default_max_fires_per_hour >= 1 (and rejects booleans)."""
+    assert EventSourceDescriptor(source_id="ok", description="Ok").default_max_fires_per_hour is None
+    assert (
+        EventSourceDescriptor(
+            source_id="ok",
+            description="Ok",
+            default_max_fires_per_hour=60,
+        ).default_max_fires_per_hour
+        == 60
+    )
+    for bad in (0, -5, True, False):
+        with pytest.raises(ValueError, match="default_max_fires_per_hour"):
+            EventSourceDescriptor(source_id="ok", description="Ok", default_max_fires_per_hour=bad)
+
+
+@pytest.mark.asyncio
+async def test_registered_source_admin_visibility_and_unregistered_hiding(tmp_path: Path) -> None:
+    """Non-owner admins cannot see private or unregistered registered-source rules or owner paused_reason."""
+    shared_room, admin = "!shared:localhost", "@admin:localhost"
+    tool, _store, _priv_source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
+    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
+
+    class _PublicSource(EventSource):
+        source_id = "public_alerts"
+        description = "Public alerts"
+        allowed_kinds = ("alert",)
+        private_room_only = False
+
+        async def check_delivery_access(
+            self,
+            ctx: EventSourceContext,
+            *,
+            rule: ReactiveTriggerRecord,
+            event: TriggerEvent | None = None,
+        ) -> DispatchResult | None:
+            del ctx, rule, event
+            return DispatchResult(status="skipped", reason="owner-only pause detail")
+
+    registry.register(_PublicSource())
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        sub_priv = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="owner_priv",
+                source_id="slack_private",
+                kind="message",
+                prompt="Private watch",
+            ),
+        )
+        sub_pub = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="owner_pub",
+                source_id="public_alerts",
+                kind="alert",
+                prompt="Public alert",
+            ),
+        )
+    assert (sub_priv["status"], sub_pub["status"]) == ("ok", "ok")
+
+    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
+        admin_list = json.loads(await tool.triggers(action="list"))
+    listed_by_id = {t["trigger_id"]: t for t in admin_list["reactive_triggers"]}
+    assert "owner_priv" not in listed_by_id
+    assert "owner_pub" in listed_by_id
+    assert "paused_reason" not in listed_by_id["owner_pub"]
+    assert "owner-only pause detail" not in json.dumps(admin_list)
+
+    entry_token = registry._entries["slack_private"].token
+    assert registry.unregister("slack_private", entry_token) is True
+    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
+        admin_list_after = json.loads(await tool.triggers(action="list"))
+        admin_hist_after = json.loads(await tool.triggers(action="history", trigger_id="owner_priv"))
+    assert "owner_priv" not in {t["trigger_id"] for t in admin_list_after["reactive_triggers"]}
+    assert admin_hist_after["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_registered_source_history_redaction_and_per_rule_caching(tmp_path: Path) -> None:
+    """Redacted history omits error_message and dedupe_key, and check_history_access caches per rule_uid."""
+    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
+    tool, store, priv_source, room_members, make_ctx = _setup_registered_tool_env(
+        tmp_path,
+        connected_users={_OWNER, admin},
+    )
+    priv_source.visible_to.add(admin)
+
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        assert (
+            json.loads(
+                await tool.triggers(
+                    action="subscribe_event",
+                    trigger_id="owner_priv",
+                    source_id="slack_private",
+                    kind="message",
+                    prompt="Private watch",
+                ),
+            )["status"]
+            == "ok"
+        )
+    owner_rule = store.get_trigger("owner_priv")
+    assert owner_rule is not None
+    for idx in range(3):
+        assert store.enqueue_firing(
+            "owner_priv",
+            f"T1:C3:100.{idx}",
+            TriggerEvent(
+                source_type="external_event",
+                source_id="slack_private",
+                kind="message",
+                event_id=f"ev-{idx}",
+                timestamp=1_000.0 + idx,
+                text=f"Secret msg {idx}",
+            ),
+            expected_rule_uid=owner_rule.rule_uid,
+        )
+    priv_source.history_contexts.clear()
+    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room)):
+        owner_hist = json.loads(await tool.triggers(action="history", trigger_id="owner_priv"))
+    assert owner_hist["count"] == 3
+    assert len(priv_source.history_contexts) == 1
+
+    room_members[private_room] = [admin, "@mindroom_research:localhost"]
+    with tool_runtime_context(make_ctx(requester_id=admin, room_id=private_room)):
+        assert (
+            json.loads(
+                await tool.triggers(
+                    action="subscribe_event",
+                    trigger_id="admin_priv",
+                    source_id="slack_private",
+                    kind="message",
+                    prompt="Admin private watch",
+                ),
+            )["status"]
+            == "ok"
+        )
+    admin_rule = store.get_trigger("admin_priv")
+    assert admin_rule is not None
+    assert store.enqueue_firing(
+        "admin_priv",
+        "T_TEAM:C_SECRET:1700000.001",
+        TriggerEvent(
+            source_type="external_event",
+            source_id="slack_private",
+            kind="message",
+            event_id="admin-ev-1",
+            timestamp=2_000.0,
+            text="Top secret DM",
+        ),
+        expected_rule_uid=admin_rule.rule_uid,
+    )
+    assert store.mark_skipped(store.list_firings(trigger_id="admin_priv")[0].id, "another person is in this room")
+
+    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
+        redacted_hist = json.loads(await tool.triggers(action="history", trigger_id="admin_priv"))
+    assert redacted_hist["count"] == 1
+    row = redacted_hist["firings"][0]
+    assert (row["event"], row["triage_reason"]) == (None, None)
+    assert "error_message" not in row
+    assert "dedupe_key" not in row
+    assert "another person is in this room" not in json.dumps(row)
+    assert "T_TEAM:C_SECRET" not in json.dumps(row)
+
+
+@pytest.mark.asyncio
+async def test_registered_and_yaml_external_sources_are_strictly_isolated(tmp_path: Path) -> None:
+    """YAML webhooks never match/authorize registered rules, emit_event never matches YAML rules, and subscribe fails closed on conflicts."""
+    gh_cfg = GitHubEventSourceConfig(
+        kind="github",
+        secret_env="GH_SECRET",  # noqa: S106
+        allowed_repos=["org/app"],
+        allowed_events=["push"],
+        subscribers=[_OWNER],
+    )
+    config, runtime_paths = _make_config(tmp_path, event_sources={"shared_id": gh_cfg})
+    store = ReactiveTriggerStore(runtime_paths)
+
+    reg_rule = _make_rule(
+        trigger_id="reg_rule",
+        source_id="shared_id",
+        kind="push",
+        match={"repo": "org/app"},
+        source_origin="registered",
+    )
+    yaml_rule = _make_rule(
+        trigger_id="yaml_rule",
+        source_id="shared_id",
+        kind="push",
+        match={"repo": "org/app"},
+        source_origin="yaml",
+    )
+    store.create_trigger(reg_rule)
+    store.create_trigger(yaml_rule)
+
+    event = TriggerEvent(
+        source_type="external_event",
+        source_id="shared_id",
+        kind="push",
+        event_id="ev-1",
+        timestamp=1_000.0,
+        data={"repo": "org/app"},
+    )
+
+    # YAML webhook fan-out must match ONLY yaml_rule, NEVER reg_rule.
+    enqueued = fan_out_external_event(
+        source_id="shared_id",
+        source=gh_cfg,
+        event=event,
+        store=store,
+        config=config,
+        runtime_paths=runtime_paths,
+        now=1_000.0,
+    )
+    assert enqueued == 1
+    assert len(store.list_firings(trigger_id="yaml_rule")) == 1
+    assert store.list_firings(trigger_id="reg_rule") == []
+
+    # Even with an empty EventSourceRegistry (registered source absent), dispatch NEVER falls back to YAML config!
+    empty_registry = EventSourceRegistry(lambda: config, AsyncMock(return_value=0))
+    assert (
+        check_external_event_source_access(
+            owner_user_id=_OWNER,
+            source_spec=reg_rule.source,  # type: ignore[arg-type]
+            event=event,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        == "source_removed"
+    )
+    reg_dispatch_check = await check_reactive_source_access(
+        rule=reg_rule,
+        event=event,
+        source_bot=None,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=AgentReplyMembershipIndex(),
+        event_sources=empty_registry,
+    )
+    assert reg_dispatch_check == DispatchResult(status="skipped", reason="source_removed")
+
+    # Service emit_event matches ONLY source_origin=="registered" rules, NEVER source_origin=="yaml" rules.
+    config_no_yaml, runtime_paths2 = _make_config(tmp_path / "svc")
+    store2 = ReactiveTriggerStore(runtime_paths2)
+    store2.create_trigger(reg_rule)
+    store2.create_trigger(yaml_rule)
+    service = ReactiveTriggerService(
+        config_provider=lambda: config_no_yaml,
+        runtime_paths=runtime_paths2,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=store2,
+    )
+    emitter = service.event_sources.register(_CustomSource("shared_id"))
+    assert await emitter.emit(kind="push", event_id="ev-2", data={"repo": "org/app"}) == 1
+    assert len(store2.list_firings(trigger_id="reg_rule")) == 1
+    assert store2.list_firings(trigger_id="yaml_rule") == []
+
+    # If a source_id appears in BOTH YAML event_sources and EventSourceRegistry (e.g. after config reload),
+    # triggers(action="subscribe_event") fails closed with an explicit conflict error.
+    tool, _store3, _priv, _rm, make_ctx = _setup_registered_tool_env(tmp_path / "conflict", connected_users={_OWNER})
+    ctx = make_ctx(requester_id=_OWNER)
+    conflict_registry: EventSourceRegistry = ctx.orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
+    # Simulate a config reload introducing a YAML source colliding with an already-registered source.
+    ctx.config.external_trigger_policy.event_sources["slack_private"] = gh_cfg
+    assert conflict_registry.get("slack_private") is not None
+    with tool_runtime_context(ctx):
+        conflict_res = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                source_id="slack_private",
+                kind="message",
+                prompt="Watch",
+            ),
+        )
+    assert conflict_res["status"] == "error"
+    assert "conflict" in conflict_res["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_update_passes_readonly_binding_copy_and_ignores_in_place_mutation_attempts(tmp_path: Path) -> None:
+    """Updating match passes a read-only MappingProxyType copy of binding and persists the original binding untouched."""
+    mutation_blocked = False
+
+    class _MutatingSource(EventSource):
+        source_id = "mut_src"
+        description = "Mutating test source"
+        allowed_kinds = ("message",)
+
+        async def validate_subscription(
+            self,
+            ctx: EventSourceContext,
+            *,
+            kind: str,
+            match: Mapping[str, Any],
+            existing_binding: Mapping[str, Any] | None = None,
+        ) -> ValidatedSubscription:
+            nonlocal mutation_blocked
+            del ctx
+            if existing_binding is not None:
+                try:
+                    existing_binding["team_id"] = "T_TAMPERED"  # type: ignore[index]
+                except TypeError:
+                    mutation_blocked = True
+                return ValidatedSubscription(
+                    kind=kind,
+                    match=dict(match),
+                    binding={"team_id": "T_RETURNED_TAMPERED", "slack_user_id": "U_EVIL"},
+                )
+            return ValidatedSubscription(
+                kind=kind,
+                match=dict(match),
+                binding={"team_id": "T_ORIG", "slack_user_id": "U_ORIG"},
+            )
+
+    tool, store, _priv, _rm, make_ctx = _setup_registered_tool_env(tmp_path)
+    ctx = make_ctx(requester_id=_OWNER)
+    ctx.orchestrator.reactive_triggers.event_sources.register(_MutatingSource())  # type: ignore[union-attr]
+
+    with tool_runtime_context(ctx):
+        created = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="mut_1",
+                source_id="mut_src",
+                kind="message",
+                prompt="Watch",
+                match={"channel_id": "C1"},
+            ),
+        )
+        assert created["status"] == "ok"
+        updated = json.loads(
+            await tool.triggers(
+                action="update",
+                trigger_id="mut_1",
+                match={"channel_id": "C2"},
+            ),
+        )
+    assert updated["status"] == "ok"
+    assert mutation_blocked is True
+    reloaded = store.get_trigger("mut_1")
+    assert reloaded is not None
+    assert isinstance(reloaded.source, ExternalEventSourceSpec)
+    assert reloaded.source.match == {"channel_id": "C2"}
+    assert reloaded.source.binding == {"team_id": "T_ORIG", "slack_user_id": "U_ORIG"}
+    assert reloaded.source.source_origin == "registered"

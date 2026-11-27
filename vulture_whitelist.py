@@ -503,3 +503,5 @@ _._proxy_configs  # Docker APIClient proxy config cleared to isolate DOCKER_CONF
 _._auth_configs  # Docker APIClient auth config pinned empty so pull/build never reload DOCKER_CONFIG (src/mindroom/tools/docker.py)
 _.rest_client  # Daytona ApiClient REST pool rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
 _._toolbox_api_client  # Daytona SDK toolbox client rebuilt for per-instance verify_ssl=False (src/mindroom/tools/daytona.py)
+_.calling_room_id  # EventSourceContext attribute exposed to plugins (src/mindroom/event_sources.py)
+_.register_event_source  # PluginLifecycle method called by plugins (src/mindroom/plugin_lifecycle.py)

@@ -1175,9 +1175,12 @@ class ReactiveTriggerStore:
             if conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (stripped_name,)).fetchone() is not None:
                 return 0
             inserted_ids: set[str] = set()
+            skipped_ids: list[str] = []
             for record in triggers:
                 if _insert_trigger_row(conn, record, or_ignore=True):
                     inserted_ids.add(record.trigger_id)
+                else:
+                    skipped_ids.append(record.trigger_id)
             for trigger_id, thread_key, thread_root_id, updated_at in thread_keys:
                 if trigger_id not in inserted_ids:
                     continue
@@ -1196,6 +1199,12 @@ class ReactiveTriggerStore:
                 "INSERT INTO applied_migrations (name, applied_at) VALUES (?, ?)",
                 (stripped_name, current_time),
             )
+            if skipped_ids:
+                logger.warning(
+                    "Skipped colliding trigger IDs during migration import",
+                    migration_name=stripped_name,
+                    skipped_trigger_ids=skipped_ids,
+                )
             return len(inserted_ids)
 
     def prune_old_firings(

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mindroom.reactive_triggers.dispatch import DispatchResult
     from mindroom.reactive_triggers.models import ReactiveTriggerRecord, TriggerEvent
 
-EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+_EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 _RESERVED_BUILTIN_SOURCE_IDS: frozenset[str] = frozenset({"slack"})
 
 type ExternalMatchValue = str | bool | int | list[str]
@@ -32,7 +32,7 @@ class EventSourceInactiveError(RuntimeError):
     """Raised when an EventSourceEmitter emits after its registration was replaced or removed."""
 
 
-class EventSourceEmitHandler(Protocol):
+class _EventSourceEmitHandler(Protocol):
     """Async fan-out callback implemented by ReactiveTriggerService.emit_event."""
 
     async def __call__(
@@ -62,6 +62,15 @@ class EventSourceDescriptor:
     default_thread_key_from_event: bool = False
     default_reopen_on_fire: bool = False
     private_room_only: bool = False
+    default_max_fires_per_hour: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate descriptor bounds."""
+        if self.default_max_fires_per_hour is not None and (
+            isinstance(self.default_max_fires_per_hour, bool) or self.default_max_fires_per_hour < 1
+        ):
+            msg = "default_max_fires_per_hour must be an integer >= 1 when set"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +111,7 @@ class EventSource:
     default_thread_key_from_event: bool = False
     default_reopen_on_fire: bool = False
     private_room_only: bool = False
+    default_max_fires_per_hour: int | None = None
 
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         """Return user-facing metadata for ctx.owner_user_id, or None when hidden/unavailable."""
@@ -117,6 +127,7 @@ class EventSource:
             default_thread_key_from_event=self.default_thread_key_from_event,
             default_reopen_on_fire=self.default_reopen_on_fire,
             private_room_only=self.private_room_only,
+            default_max_fires_per_hour=self.default_max_fires_per_hour,
         )
 
     async def validate_subscription(
@@ -213,7 +224,7 @@ class EventSourceEmitter:
         dedupe_key: str | None = None,
     ) -> int:
         """Emit one normalized event stamped with this emitter's source_id, failing closed once inactive."""
-        if not self._registry.is_active_token(self.source_id, self.token):
+        if not self._registry._is_active_token(self.source_id, self.token):
             msg = f"Event source {self.source_id!r} emitter is no longer active"
             raise EventSourceInactiveError(msg)
         stripped_kind = kind.strip()
@@ -256,7 +267,7 @@ class _RegisteredEventSource:
 class EventSourceRegistry:
     """Reload-safe, token-fenced registry of built-in and plugin-owned EventSources."""
 
-    def __init__(self, config_provider: Callable[[], Config], emit_handler: EventSourceEmitHandler) -> None:
+    def __init__(self, config_provider: Callable[[], Config], emit_handler: _EventSourceEmitHandler) -> None:
         self._config_provider = config_provider
         self._emit_handler = emit_handler
         self._lock = threading.RLock()
@@ -265,7 +276,7 @@ class EventSourceRegistry:
     def register(self, source: EventSource, *, owner_plugin: str | None = None) -> EventSourceEmitter:
         """Register an EventSource with namespace/collision checks and atomic same-plugin hot-reload replacement."""
         source_id = source.source_id
-        if not isinstance(source_id, str) or EVENT_SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+        if not isinstance(source_id, str) or _EVENT_SOURCE_ID_PATTERN.fullmatch(source_id) is None:
             msg = f"Invalid event source_id {source_id!r}: must match ^[A-Za-z0-9_-]{{1,64}}$"
             raise ValueError(msg)
         if owner_plugin is not None:
@@ -322,7 +333,7 @@ class EventSourceRegistry:
             entry = self._entries.get(source_id)
             return entry.emitter if entry is not None and entry.owner_plugin == plugin_name else None
 
-    def is_active_token(self, source_id: str, token: str) -> bool:
+    def _is_active_token(self, source_id: str, token: str) -> bool:
         """Return whether token still matches the active registration for source_id."""
         with self._lock:
             entry = self._entries.get(source_id)

@@ -245,7 +245,7 @@ _SIGNATURES = {
     ),
     "EventSourceDescriptor": (
         "(source_id, description, allowed_kinds, match_fields, example, default_once, default_new_thread, "
-        "default_thread_key_from_event, default_reopen_on_fire, private_room_only)"
+        "default_thread_key_from_event, default_reopen_on_fire, private_room_only, default_max_fires_per_hour)"
     ),
     "EventSourceEmitter": "(source_id, token)",
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
@@ -719,7 +719,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 36), "d16fd044f82673e51a0aafca8044e78ca51057876a3f08f8b69eef7384414020")
+_PINNED_VERSION = ((1, 36), "ad3111669f511d0196924a64f2a6d4fc016363997a2253f897136778cdf735ce")
 
 
 def _is_enum(obj: object) -> bool:

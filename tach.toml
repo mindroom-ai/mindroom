@@ -2200,7 +2200,7 @@ depends_on = [
     "mindroom.api.room_reads",
     "mindroom.matrix.state",
     "mindroom.plugin_http",
-    "mindroom.reactive_triggers.event_sources",
+    "mindroom.event_sources",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
@@ -6472,7 +6472,7 @@ depends_on = [
     "mindroom.plugin_lifecycle",
     "mindroom.plugin_worker_services",
     "mindroom.providers.registry",
-    "mindroom.reactive_triggers.event_sources",
+    "mindroom.event_sources",
     "mindroom.tool_system.atlassian_connections",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.declarations",
@@ -11300,6 +11300,7 @@ depends_on = [
     "mindroom.slack.api",
     "mindroom.slack.delivery",
     "mindroom.slack.event_source",
+    "mindroom.slack.legacy_watch_migration",
     "mindroom.slack.reply_mirror",
 ]
 # Core reaches Slack only through the integration registry.
@@ -11341,10 +11342,9 @@ depends_on = [
 [[modules]]
 path = "mindroom.slack.event_source"
 depends_on = [
-    "mindroom.delivery_replay",
+    "mindroom.event_sources",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.reactive_triggers.dispatch",
-    "mindroom.reactive_triggers.event_sources",
     "mindroom.reactive_triggers.models",
     "mindroom.slack.api",
     "mindroom.slack.app",
@@ -11353,6 +11353,14 @@ depends_on = [
     "mindroom.slack.render",
     "mindroom.slack.turns",
     "mindroom.tool_system.worker_routing",
+]
+
+[[modules]]
+path = "mindroom.slack.legacy_watch_migration"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.slack.event_source",
+    "mindroom.slack.turns",
 ]
 
 [[modules]]
@@ -11509,14 +11517,22 @@ path = "mindroom.active_runs"
 depends_on = ["mindroom.matrix.state_failures"]
 
 [[modules]]
-path = "mindroom.reactive_triggers"
-depends_on = []
-
-[[modules]]
-path = "mindroom.reactive_triggers.event_sources"
+path = "mindroom.event_sources"
 depends_on = [
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers"
+depends_on = [
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.service",
+    "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
 ]
 
 [[modules]]
@@ -11558,7 +11574,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks.sender",
     "mindroom.matrix.room_reconciliation",
-    "mindroom.reactive_triggers.event_sources",
+    "mindroom.event_sources",
     "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.github_pr",
     "mindroom.reactive_triggers.matching",
@@ -11592,7 +11608,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.transport_progress",
     "mindroom.reactive_triggers.dispatch",
-    "mindroom.reactive_triggers.event_sources",
+    "mindroom.event_sources",
     "mindroom.reactive_triggers.github_pr",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
@@ -11608,7 +11624,7 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
-    "mindroom.reactive_triggers.event_sources",
+    "mindroom.event_sources",
     "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.github_pr",
     "mindroom.reactive_triggers.management",

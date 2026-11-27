@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import SupervisedLoop
 from mindroom.event_journal import ConversationCursor
+from mindroom.event_sources import EventSourceRegistry
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.conversation_reads import projected_visible_messages
@@ -28,7 +29,6 @@ from mindroom.reactive_triggers.dispatch import (
     check_room_source_owner_authorization,
     dispatch_reactive_trigger,
 )
-from mindroom.reactive_triggers.event_sources import EventSourceRegistry
 from mindroom.reactive_triggers.github_pr import GitHubPRPoller
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
 from mindroom.reactive_triggers.models import (
@@ -391,6 +391,7 @@ class ReactiveTriggerService:
             rule
             for rule in rules
             if isinstance(rule.source, ExternalEventSourceSpec)
+            and rule.source.source_origin == "registered"
             and not _is_rule_expired(rule, now)
             and (allowed_owners is None or rule.owner_user_id in allowed_owners)
         ]

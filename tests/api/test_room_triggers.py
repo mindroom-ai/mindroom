@@ -18,10 +18,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
+from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers.dispatch import DispatchResult
-from mindroom.reactive_triggers.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     GitHubPRCheckpoint,
@@ -580,6 +580,7 @@ def test_registered_event_source_hides_private_room_triggers_and_reports_owner_p
             kind="message",
             match={"channel_id": ["C_SECRET"]},
             binding={"team_id": "T_SECRET", "slack_user_id": "U_SECRET"},
+            source_origin="registered",
         ),
         description="My private Slack watch",
         prompt="Summarize private Slack DM",
@@ -592,6 +593,7 @@ def test_registered_event_source_hides_private_room_triggers_and_reports_owner_p
             kind="deploy",
             match={"env": "prod"},
             binding={"token": "BIND_SECRET"},
+            source_origin="registered",
         ),
         description="Deploy alerts",
         prompt="Announce deploy",
@@ -657,3 +659,42 @@ def test_registered_event_source_hides_private_room_triggers_and_reports_owner_p
     assert alice_unreadable.status_code == 200
     rows_unreadable = {row["trigger_id"]: row for row in alice_unreadable.json()["triggers"]}
     assert rows_unreadable["tr_slack"]["paused_reason"] == "Cannot verify private room state"
+
+
+def test_unregistered_private_event_source_stays_hidden_from_non_owners(tmp_path: Path) -> None:
+    """Disabling/unregistering a private_room_only plugin source keeps its stored rule hidden from non-owners."""
+    h = _Harness(tmp_path)
+    registry = EventSourceRegistry(lambda: h.config, AsyncMock(return_value=0))
+    priv_emitter = registry.register(_RoomTestEventSource("slack_priv", private_room_only=True))
+    registry.register(_RoomTestEventSource("public_src", private_room_only=False))
+    ensure_app_state(h.app).embedded = SimpleNamespace(  # type: ignore[assignment]
+        reactive_triggers=SimpleNamespace(event_sources=registry),
+    )
+    h.add_reactive(
+        "tr_slack",
+        ExternalEventSourceSpec(
+            source_id="slack_priv",
+            kind="message",
+            binding={"team_id": "T1"},
+            source_origin="registered",
+        ),
+        description="Private Slack watch",
+        prompt="Summarize",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_yaml",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push"),
+        description="GitHub push",
+        prompt="Review",
+        created_at=2.0,
+    )
+
+    assert registry.unregister("slack_priv", priv_emitter.token) is True
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    assert {row["trigger_id"] for row in bob_resp.json()["triggers"]} == {"tr_yaml"}
+    assert "tr_slack" not in bob_resp.text
+    alice_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
+    assert "tr_slack" in alice_rows
+    assert alice_rows["tr_slack"]["paused_reason"] is None
