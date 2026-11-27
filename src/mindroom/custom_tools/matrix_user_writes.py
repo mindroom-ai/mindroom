@@ -1,4 +1,4 @@
-"""What the `matrix_user` toolkit writes as the person: a message or a file, reactions, edits, redactions, and membership.
+"""What the `matrix_user` toolkit writes as the person: messages, files, reactions, edits, redactions, membership, and read state.
 
 Each write sends at most one message event or redaction, so none ends with only a part of it sent.
 Each message, file, reaction, edit, and redaction names the agent as its author in the content the send helpers are
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_delivery import MatrixSendOutcome
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["MatrixUserWrite", "write_as_person"]
+__all__ = ["MatrixUserWrite", "mark_read", "write_as_person"]
 
 logger = get_logger(__name__)
 
@@ -66,6 +66,8 @@ _WRITES_WINDOW_SECONDS = 30.0
 _RATE_LIMIT_LOCK = Lock()
 # Recent writes by agent, requester, and room: the room written to, else the person messaged, else none for a new room.
 _RECENT_WRITES: defaultdict[tuple[str, str, str], deque[float]] = defaultdict(deque)
+_WRITE_ACTIONS = frozenset({"send", "react", "edit", "redact", "join", "leave", "invite", "create_room", "mark_read"})
+_NOTHING_TO_MARK = "The room has no events to mark read."
 _ONE_TARGET = "send needs exactly one of room_id and user_id."
 _NOTHING_TO_SEND = "send needs message or attachment."
 _ONE_EVENT = "send takes message or attachment, not both: send the text and the file as two calls."
@@ -115,6 +117,8 @@ class MatrixUserWrite:
 
     def problem(self) -> str | None:
         """Return what the arguments lack, or why they are refused, without asking the homeserver anything."""
+        if self.action not in _WRITE_ACTIONS:
+            return f"Unsupported action {self.action!r}. Expected one of: {', '.join(sorted(_WRITE_ACTIONS))}."
         if self.action == "send":
             return self._send_problem()
         if self.action == "create_room":
@@ -130,10 +134,14 @@ class MatrixUserWrite:
         missing = next((name for name, value in needed.items() if value is None), None)
         if missing is not None:
             return f"{self.action} needs {missing}."
-        if self.action == "react":
-            # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
-            return reaction_key_error(str(self.emoji).strip())
-        return _user_problem(self.user_id) if self.action == "invite" else None
+        # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
+        return (
+            reaction_key_error(str(self.emoji).strip())
+            if self.action == "react"
+            else _user_problem(self.user_id)
+            if self.action == "invite"
+            else None
+        )
 
     def _create_room_problem(self) -> str | None:
         if self.name is None:
@@ -208,7 +216,7 @@ def _audit(
     )
 
 
-async def _write(
+async def _write(  # noqa: PLR0911 - one return per action
     client: nio.AsyncClient,
     actor: MatrixUserActor,
     turn: ToolRuntimeContext,
@@ -246,6 +254,8 @@ async def _write(
     if write.action == "leave":
         await matrix_json(client, "POST", f"/rooms/{room}/leave", {})
         return {"room_id": room_id}
+    if write.action == "mark_read":
+        return await mark_read(client, room_id, event_id=write.event_id)
     # The only action left: invite.
     await matrix_json(client, "POST", f"/rooms/{room}/invite", {"user_id": write.user_id})
     return {"room_id": room_id}
@@ -573,3 +583,30 @@ async def _only_the_two(client: nio.AsyncClient, room_id: str, person: str, them
     }
     present = {user_id for user_id, membership in memberships.items() if membership in {"join", "invite"}}
     return memberships.get(person) == "join" and present == {person, them}
+
+
+async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | None) -> dict[str, object]:
+    """Mark a room read up to ``event_id``, by default its newest event, and clear the person's marked-unread flag.
+
+    It moves the read marker and a private read receipt, which only the person sees. An event the room does not hold
+    moves nothing. The result names the event only when the room's newest was taken.
+    """
+    room = quote(room_id, safe="")
+    if event_id is None:
+        newest = await matrix_json(client, "GET", f"/rooms/{room}/messages?{urlencode({'dir': 'b', 'limit': 1})}")
+        read_up_to = next(iter(json_objects(newest, "chunk")), {}).get("event_id")
+        if not isinstance(read_up_to, str):
+            raise MatrixRequestError(_NOTHING_TO_MARK)
+    else:
+        await read_event(client, room_id, event_id)
+        read_up_to = event_id
+    markers = {"m.fully_read": read_up_to, "m.read.private": read_up_to}
+    await matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)
+    person = quote(client.user_id, safe="")
+    try:
+        await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
+    except REQUEST_FAILURES as error:
+        failure = request_failure(error)
+        msg = f"The room is read up to {read_up_to}, but clearing its unread mark was not confirmed: {failure}"
+        raise MatrixRequestError(msg) from None
+    return {} if event_id is not None else {"read_up_to": read_up_to}

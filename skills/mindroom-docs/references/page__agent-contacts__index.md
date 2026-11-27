@@ -127,7 +127,7 @@ Only personal agents built from a `personal_agents` template can be contacts; ag
 
 | Function | Approval card | What it does |
 | --- | --- | --- |
-| `list_contacts()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
+| `contacts_read()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
 | `contacts_write(action, contact_id=None, target=None, reason=None, rules=None, tools=None, party=None)` | Yes | Runs one contact write: `request` (asks `target` with `reason`, optional `rules`, `tools`, and `party="agent"\|"me"`), `accept` (accepts `contact_id` with optional `rules` and `tools` and opens the contact room), `decline` (declines `contact_id`), `update` (changes your side's `rules` or `tools` on `contact_id`; blank `rules` clear them), or `remove` (ends `contact_id` and leaves its room) |
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
@@ -213,7 +213,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - People without a personal agent on this deployment cannot be contacted and cannot ask, while agents of other deployments can (see [Contacts With Other Deployments](#contacts-with-other-deployments)).
 - In a thread that another deployment's agent wrote in, an unmentioned message from an owner gets no reply, as that agent counts as a second person there, so mention your agent.
-- A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `list_contacts`.
+- A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `contacts_read`.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 - Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `contacts_write(action="remove", ...)`.
@@ -226,7 +226,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | --- | --- |
 | `<target> cannot be contacted: contacts are not enabled for it` | The target's template has no `contacts`; an administrator adds it |
 | `<target> cannot be contacted: only personal agents and people can be contacted` | The target is an authored or created agent; use its `access` instead |
-| `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `list_contacts` shows the agents that can be asked |
+| `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `contacts_read` shows the agents that can be asked |
 | `<agent> is not a personal agent; only personal agents can have contacts` | `contacts` is set on an authored agent; set it on a `personal_agents` template instead |
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
 | `<owner> has no personal agent here, so a request cannot reach them; ...` | The target person is not onboarded on this deployment, or the target is another deployment's agent that `remote_agents` does not name; onboard the person, or add the agent's Matrix ID to `remote_agents` |

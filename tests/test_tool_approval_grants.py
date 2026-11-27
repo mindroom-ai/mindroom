@@ -1181,6 +1181,7 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("github", "get_pull_request", "github_read_issues_prs"),
         ("google_drive", "google_drive_trash_file", "google_drive_write"),
         ("google_drive", "google_drive_download_file", "google_drive_read"),
+        ("google_docs", "google_docs_get_document", "google_docs_read"),
         ("google_docs", "google_docs_create_document", "google_docs_write"),
         ("google_docs", "google_docs_insert_text", "google_docs_write"),
         ("google_docs", "google_docs_replace_text", "google_docs_write"),
@@ -1204,6 +1205,7 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("e2b", "list_files", "e2b_inspect"),
         ("daytona", "list_files", "daytona_inspect"),
         ("email", "email_user", "smtp_send_email"),
+        ("twilio", "send_sms", "twilio_send"),
         ("twilio", "get_call_details", "twilio_read"),
         ("discord", "get_channel_messages", "discord_read"),
         ("discord", "send_message", "discord_send"),
@@ -1233,7 +1235,8 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("terminal", "terminal_run", "terminal_write"),
         ("terminal", "terminal_send", "terminal_write"),
         ("terminal", "terminal_list", "terminal_read"),
-        ("claude_agent", "claude_session_status", "claude_agent_status"),
+        ("claude_agent", "claude_session_status", "claude_agent_read"),
+        ("claude_agent", "claude_agent_status", "claude_agent_read"),
         ("claude_agent", "claude_start_session", "claude_agent_write"),
         ("claude_agent", "claude_send", "claude_agent_write"),
         ("claude_agent", "claude_interrupt", "claude_agent_write"),
@@ -3158,7 +3161,8 @@ def test_wave3b_registry_action_scoped_grants_bind_per_action(
     ("toolkit_name", "tool_name"),
     [
         ("gmail", "gmail_send_to_self"),
-        ("google_docs", "google_docs_get_document"),
+        ("google_docs", "google_docs_read"),
+        ("twilio", "twilio_send"),
         ("google_sheets", "google_sheets_read"),
     ],
 )
@@ -3231,6 +3235,7 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     }
     for retired_match, replacement in (
         ("work_send_email", "work_gmail_send"),
+        ("work_google_docs_get_document", "work_google_docs_read"),
         ("work_google_docs_batch_update", "work_google_docs_write"),
         ("work_google_tasks_delete_task", "work_google_tasks_write"),
     ):
@@ -3652,18 +3657,18 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
             toolkit_name=toolkit_name,
         )
 
-    # Single-verb claude_agent_status has no action= param and is NOT action-scoped.
-    assert "claude_agent_status" not in registry.entries["claude_agent"].action_scoped_grants
-    status_op = grant_operation(config, "claude_agent_status", {}, tools=registry, toolkit_name="claude_agent")
+    # Single-verb claude_agent_read has no action= param and is NOT action-scoped.
+    assert "claude_agent_read" not in registry.entries["claude_agent"].action_scoped_grants
+    status_op = grant_operation(config, "claude_agent_read", {}, tools=registry, toolkit_name="claude_agent")
     assert status_op is not None
     assert (status_op.tool_name, status_op.mcp_server_id, status_op.mcp_tool_name) == (
-        "claude_agent_status",
+        "claude_agent_read",
         None,
         None,
     )
     assert scheduled_call_offers_any_arguments(
         config,
-        "claude_agent_status",
+        "claude_agent_read",
         {},
         requester_id="@alice:example.org",
         approver_id="@alice:example.org",
@@ -3677,7 +3682,9 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
     wildcard_cases = (
         ("script", ["script_read", "script_write"]),
         ("terminal", ["terminal_read", "terminal_write"]),
-        ("claude_agent", ["claude_agent_status", "claude_agent_write"]),
+        ("claude_agent", ["claude_agent_read", "claude_agent_write"]),
+        ("google_docs", ["google_docs_read", "google_docs_write"]),
+        ("twilio", ["twilio_send", "twilio_read"]),
         ("thread_model", ["thread_model_read", "thread_model_write"]),
         ("usage_stats", ["usage_stats"]),
     )
@@ -3713,7 +3720,10 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
         ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
         ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
-        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_status"),
+        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_read"),
+        ("claude_agent", {"include_tools": ["claude_agent_status"]}, "claude_agent_read"),
+        ("google_docs", {"exclude_tools": ["google_docs_get_document"]}, "google_docs_read"),
+        ("twilio", {"include_tools": ["send_sms"]}, "twilio_send"),
         ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
     )
@@ -3772,12 +3782,12 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
         assert op_a.key != op_b.key
         assert grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit) is None
 
-    # Kept zero-arg reads remain tool-wide grants (not action-scoped).
+    # Single-verb zero-arg reads remain tool-wide grants (not action-scoped).
     for toolkit, fn in (
-        ("shared_directories", "list_shared_directories"),
-        ("contacts", "list_contacts"),
+        ("shared_directories", "shared_directories_read"),
+        ("contacts", "contacts_read"),
         ("agent_manager", "agent_settings"),
-        ("email_invite", "list_email_invites"),
+        ("email_invite", "email_invite_read"),
     ):
         op = grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit)
         assert op is not None
@@ -3792,7 +3802,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             {"agents": {"a": {"display_name": "A", "tools": ["shared_directories"], "include_default_tools": False}}},
             "delete_shared_directory",
             "*_shared_directory",
-            ["shared_directories_write"],
+            ["shared_directories_read", "shared_directories_write"],
         ),
         (
             {
@@ -3802,7 +3812,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             },
             "invite_by_email",
             "*_email*",
-            ["email_invite_write"],
+            ["email_invite_read", "email_invite_write"],
         ),
         (
             {
@@ -3849,7 +3859,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             },
             "request_contact",
             "*_contact",
-            ["agent_manager_write", "contacts_write"],
+            ["agent_manager_write", "contacts_read", "contacts_write"],
         ),
     ]
     for extra, exact_old, glob_old, replacements in cases:
@@ -3864,7 +3874,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
                 {**base, "tool_approval": {"rules": [{"match": exact_old, "action": "require_approval"}]}},
                 runtime_paths,
             )
-        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+        with pytest.raises(ConfigRuntimeValidationError, match="|".join(replacements)):
             Config.validate_with_runtime(
                 {**base, "tool_approval": {"rules": [{"match": glob_old, "action": "require_approval"}]}},
                 runtime_paths,
@@ -3898,6 +3908,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
         # Contacts enabled on template or in a per-user override.
         ({"agent_extra": {"contacts": {}}}, {}, "request_contact", "contacts_write"),
         ({"users": {"@alice:example.org": {"contacts": {}}}}, {}, "remove_contact", "contacts_write"),
+        ({"agent_extra": {"contacts": {}}}, {}, "list_contacts", "contacts_read"),
         # Knowledge graph enabled on template, defaults, or per-user override.
         ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph_read"),
         ({}, {"knowledge_graph": True}, "graph_entity", "knowledge_graph_read"),
@@ -3915,10 +3926,22 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
             "email_invite_write",
         ),
         (
+            {"users": {"@alice:example.org": {"tools": ["email_invite"]}}},
+            {},
+            "list_email_invites",
+            "email_invite_read",
+        ),
+        (
             {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
             {},
             "accept_shared_directory",
             "shared_directories_write",
+        ),
+        (
+            {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
+            {},
+            "list_shared_directories",
+            "shared_directories_read",
         ),
     ],
 )
@@ -3956,12 +3979,15 @@ def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
 @pytest.mark.parametrize(
     ("toolkit", "retired_name", "replacement", "kept_read"),
     [
-        ("shared_directories", "delete_shared_directory", "shared_directories_write", "list_shared_directories"),
+        ("shared_directories", "delete_shared_directory", "shared_directories_write", "shared_directories_read"),
+        ("shared_directories", "list_shared_directories", "shared_directories_read", None),
         ("contacts", "request_contact", "contacts_write", None),
+        ("contacts", "list_contacts", "contacts_read", None),
         ("knowledge_graph", "search_graph", "knowledge_graph_read", None),
         ("knowledge_graph", "delete_graph_fact", "knowledge_graph_write", None),
         ("agent_manager", "create_agent", "agent_manager_write", None),
-        ("email_invite", "invite_by_email", "email_invite_write", "list_email_invites"),
+        ("email_invite", "invite_by_email", "email_invite_write", "email_invite_read"),
+        ("email_invite", "list_email_invites", "email_invite_read", None),
     ],
 )
 def test_retired_identity_access_graph_include_exclude_overrides_fail_config_load(
@@ -4042,7 +4068,7 @@ def test_malformed_personal_agent_user_override_keeps_template_error_path_with_a
         ("atlassian", "jira_write", ("create", "update", "comment", "transition")),
         ("atlassian", "confluence_read", ("search", "get", "list_attachments", "download_attachment")),
         ("atlassian", "confluence_write", ("create", "update", "comment")),
-        ("slack", "slack_inspect", ("search", "recent", "read", "download")),
+        ("slack", "slack_read", ("search", "recent", "read", "download")),
         ("slack", "slack_send", ("post", "upload")),
         ("slack", "slack_manage", ("edit", "delete", "react")),
         ("outlook_mail", "outlook_mail_read", ("search", "get_message", "get_automatic_replies")),
@@ -4123,27 +4149,27 @@ def test_atlassian_slack_and_microsoft_365_registry_action_scoped_grants_bind_pe
             ],
             None,
         ),
-        # Retired slack_read fails closed under require_approval default and with slack_* catch-all.
+        # Retired slack_inspect fails closed under require_approval default and with slack_* catch-all.
         (
             ["slack"],
             "require_approval",
-            [{"match": "slack_read", "action": "auto_approve"}],
-            r"slack_read.*slack_inspect",
-        ),
-        (
-            ["slack"],
-            "auto_approve",
-            [
-                {"match": "slack_read", "action": "auto_approve"},
-                {"match": "slack_*", "action": "require_approval"},
-            ],
-            r"slack_read.*slack_inspect",
+            [{"match": "slack_inspect", "action": "auto_approve"}],
+            r"slack_inspect.*slack_read",
         ),
         (
             ["slack"],
             "auto_approve",
             [
                 {"match": "slack_inspect", "action": "auto_approve"},
+                {"match": "slack_*", "action": "require_approval"},
+            ],
+            r"slack_inspect.*slack_read",
+        ),
+        (
+            ["slack"],
+            "auto_approve",
+            [
+                {"match": "slack_read", "action": "auto_approve"},
                 {"match": "slack_*", "action": "require_approval"},
             ],
             None,
@@ -4153,7 +4179,7 @@ def test_atlassian_slack_and_microsoft_365_registry_action_scoped_grants_bind_pe
             ["slack"],
             "auto_approve",
             [
-                {"match": "slack_inspect", "script": "check.py"},
+                {"match": "slack_read", "script": "check.py"},
                 {"match": "slack_send", "script": "check.py"},
                 {"match": "slack_manage", "script": "check.py"},
                 {"match": "slack_*", "script": "check.py"},
@@ -4558,13 +4584,13 @@ def test_plugin_declared_retired_functions_fail_closed_on_wildcard_scripts(tmp_p
     [
         ({"atlassian": {"include_tools": ["jira_search_issues"]}}, r"atlassian\.include_tools.*jira_read"),
         ({"atlassian": {"exclude_tools": ["confluence_update_page"]}}, r"atlassian\.exclude_tools.*confluence_write"),
-        ({"slack": {"include_tools": ["slack_read"]}}, r"slack\.include_tools.*slack_inspect"),
-        ({"slack": {"exclude_tools": ["slack_read"]}}, r"slack\.exclude_tools.*slack_inspect"),
+        ({"slack": {"include_tools": ["slack_inspect"]}}, r"slack\.include_tools.*slack_read"),
+        ({"slack": {"exclude_tools": ["slack_inspect"]}}, r"slack\.exclude_tools.*slack_read"),
         ({"slack": {"include_tools": ["slack_post"]}}, r"slack\.include_tools.*slack_send"),
-        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_inspect"),
+        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_read"),
         ({"slack": {"exclude_tools": ["slack_watch"]}}, r"subscribe_event"),
         ({"atlassian": {"exclude_tools": ["jira_write"]}}, None),
-        ({"slack": {"include_tools": ["slack_inspect"]}}, None),
+        ({"slack": {"include_tools": ["slack_read"]}}, None),
     ],
 )
 def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(

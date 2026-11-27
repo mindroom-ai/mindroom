@@ -325,7 +325,7 @@ async def test_a_blank_read_argument_is_left_out(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "first_request"),
-    [("messages", "messages"), ("room", "joined_members"), ("mark_read", "messages")],
+    [("messages", "messages"), ("room", "joined_members")],
 )
 async def test_a_room_named_by_alias_is_resolved_for_reads(
     config: Config,
@@ -340,8 +340,6 @@ async def test_a_room_named_by_alias_is_resolved_for_reads(
             DIRECTORY_PATH: {"room_id": ALIASED_ROOM, "servers": ["example.com"]},
             f"{room_path}/messages": {"chunk": [room_event("$newest", "m.room.message", {"body": "Hi"})]},
             f"{room_path}/joined_members": {"joined": {}},
-            f"{room_path}/read_markers": {},
-            f"/_matrix/client/v3/user/{OWNER}/rooms/{ALIASED_ROOM}/account_data/m.marked_unread": {},
         },
     )
 
@@ -458,6 +456,30 @@ def test_the_read_function_takes_no_user_to_act_as(config: Config, paths: Runtim
         "page_token",
         "limit",
     ]
+    assert "mark_read" not in function.parameters["properties"]["action"]["enum"]
+    write = toolkit_offers(owner_toolkit(config, paths), "matrix_user_write")
+    assert "mark_read" in write.parameters["properties"]["action"]["enum"]
+
+
+@pytest.mark.asyncio
+async def test_mark_read_is_rejected_by_matrix_user_read_and_requires_a_turn_on_write(
+    config: Config,
+    paths: RuntimePaths,
+    homeserver: FakeHomeserver,
+) -> None:
+    """mark_read is rejected by matrix_user_read validation and requires a conversation turn on matrix_user_write."""
+    toolkit = owner_toolkit(config, paths)
+    with owner_turn(config, paths), homeserver.serving_the_toolkit():
+        read_result = json.loads(
+            await toolkit.matrix_user_read(action="mark_read", room_id=ROOM, query="stray"),  # type: ignore[arg-type]
+        )
+    with homeserver.serving_the_toolkit():
+        no_turn = json.loads(await toolkit.matrix_user_write(action="mark_read", room_id=ROOM))
+
+    assert read_result["status"] == "error"
+    assert "Unsupported action" in read_result["message"]
+    assert no_turn == error_result("mark_read", WRITE_TURN_NEEDED)
+    assert homeserver.requests == []
 
 
 def test_a_rule_that_requires_approval_gates_the_write_function(config: Config, paths: RuntimePaths) -> None:

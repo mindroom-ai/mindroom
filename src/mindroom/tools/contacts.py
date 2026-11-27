@@ -17,7 +17,7 @@ register_builtin_tool_metadata(
         icon_color="text-cyan-500",
         config_fields=[],
         dependencies=[],
-        function_names=("list_contacts", "contacts_write"),
+        function_names=("contacts_read", "contacts_write"),
         action_scoped_grants=("contacts_write",),
     ),
 )

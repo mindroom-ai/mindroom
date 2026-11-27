@@ -52,7 +52,6 @@ __all__ = [
     "MatrixRequestError",
     "download_file",
     "json_objects",
-    "mark_read",
     "matrix_json",
     "optional_json",
     "read_event",
@@ -109,7 +108,6 @@ _NOT_FETCHED = (
     f"{RETAINED_MEDIA_MAX_BYTES // (1024 * 1024)} MiB)."
 )
 _OTHER_ROOM = "That event is in another room."
-_NOTHING_TO_MARK = "The room has no events to mark read."
 _UNREACHABLE = "The Matrix homeserver could not be reached."
 _TIMED_OUT = "The homeserver took too long to answer."
 
@@ -846,30 +844,3 @@ async def download_file(
     if record is None:
         raise MatrixRequestError(_NOT_FETCHED)
     return {"attachment_id": record.attachment_id, "name": _name(name), "mime_type": mime_type, "size_bytes": len(data)}
-
-
-async def mark_read(client: nio.AsyncClient, room_id: str, *, event_id: str | None) -> dict[str, object]:
-    """Mark a room read up to ``event_id``, by default its newest event, and clear the person's marked-unread flag.
-
-    It moves the read marker and a private read receipt, which only the person sees. An event the room does not hold
-    moves nothing. The result names the event only when the room's newest was taken.
-    """
-    room = quote(room_id, safe="")
-    if event_id is None:
-        newest = await matrix_json(client, "GET", f"/rooms/{room}/messages?{urlencode({'dir': 'b', 'limit': 1})}")
-        read_up_to = next(iter(json_objects(newest, "chunk")), {}).get("event_id")
-        if not isinstance(read_up_to, str):
-            raise MatrixRequestError(_NOTHING_TO_MARK)
-    else:
-        await read_event(client, room_id, event_id)
-        read_up_to = event_id
-    markers = {"m.fully_read": read_up_to, "m.read.private": read_up_to}
-    await matrix_json(client, "POST", f"/rooms/{room}/read_markers", markers)
-    person = quote(client.user_id, safe="")
-    try:
-        await matrix_json(client, "PUT", f"/user/{person}/rooms/{room}/account_data/m.marked_unread", {"unread": False})
-    except REQUEST_FAILURES as error:
-        failure = request_failure(error)
-        msg = f"The room is read up to {read_up_to}, but clearing its unread mark was not confirmed: {failure}"
-        raise MatrixRequestError(msg) from None
-    return {} if event_id is not None else {"read_up_to": read_up_to}

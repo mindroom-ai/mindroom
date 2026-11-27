@@ -107,7 +107,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["claude-agent-sdk"],
     docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#claude_agent",
-    function_names=("claude_agent_status", "claude_agent_write"),
+    function_names=("claude_agent_read", "claude_agent_write"),
     workspace_writers=("claude_agent_write",),
     action_scoped_grants=("claude_agent_write",),
 )

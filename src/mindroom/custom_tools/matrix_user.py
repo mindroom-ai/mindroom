@@ -15,7 +15,6 @@ from mindroom.custom_tools.matrix_user_authority import MatrixUserActor, MatrixU
 from mindroom.custom_tools.matrix_user_reads import (
     REQUEST_FAILURES,
     download_file,
-    mark_read,
     read_messages,
     read_people,
     read_room,
@@ -46,7 +45,8 @@ if TYPE_CHECKING:
 
 _NOT_SET_UP = "matrix_user is not set up: the runtime has no MATRIX_USER_APPSERVICE_TOKEN."
 _NOT_THIS_AGENT = "matrix_user acts only for the agent it was built for."
-_ROOM_ACTIONS = frozenset({"room", "messages", "download", "mark_read"})
+_READ_ACTIONS = frozenset({"rooms", "messages", "search", "room", "people", "download"})
+_ROOM_ACTIONS = frozenset({"room", "messages", "download"})
 _PEOPLE_QUERY_NEEDED = "people needs query: a name, or a full Matrix ID such as @alice:example.com."
 _SEARCH_QUERY_NEEDED = "search needs query: the words to look for."
 _EVENT_NEEDED = "download needs event_id: the ID of the message with the file."
@@ -65,15 +65,14 @@ def _non_blank(value: str | None) -> str | None:
 
 def _read_problem(action: str, *, room_id: str | None, event_id: str | None, query: str | None) -> str | None:
     """Return which argument the read ``action`` is missing, without asking the homeserver anything."""
+    if action not in _READ_ACTIONS:
+        return f"Unsupported action {action!r}. Expected one of: {', '.join(sorted(_READ_ACTIONS))}."
     if action in _ROOM_ACTIONS:
         if room_id is None:
             return room_needed(action)
         if action == "download":
             # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
-            if get_tool_runtime_context() is None:
-                return _TURN_NEEDED
-            if event_id is None:
-                return _EVENT_NEEDED
+            return _TURN_NEEDED if get_tool_runtime_context() is None else _EVENT_NEEDED if event_id is None else None
         return None
     if action == "rooms" or query is not None:
         return None
@@ -162,7 +161,7 @@ class MatrixUserTools(Toolkit):
         append_tool_runtime_attachment_id(str(fields["attachment_id"]))
         return fields
 
-    async def _read(  # noqa: PLR0911 - one return per action
+    async def _read(
         self,
         client: nio.AsyncClient,
         action: str,
@@ -196,8 +195,6 @@ class MatrixUserTools(Toolkit):
                 page_token=page_token,
                 limit=limit,
             )
-        if action == "mark_read":
-            return await mark_read(client, str(room_id), event_id=event_id)
         if action == "download":
             return await self._download(client, require_tool_runtime_context(), str(room_id), str(event_id))
         # The only action left: search.
@@ -218,7 +215,7 @@ class MatrixUserTools(Toolkit):
 
     async def matrix_user_read(
         self,
-        action: Literal["rooms", "messages", "search", "room", "people", "download", "mark_read"],
+        action: Literal["rooms", "messages", "search", "room", "people", "download"],
         room_id: str | None = None,
         event_id: str | None = None,
         thread_id: str | None = None,
@@ -236,7 +233,6 @@ class MatrixUserTools(Toolkit):
         - room: room_id's name, topic, encryption, whether it is a DM, and up to limit members.
         - people: query is a full Matrix ID for that profile, or a name to search the user directory.
         - download: The file of message event_id in room_id, as an attachment ID for your other tools.
-        - mark_read: Mark room_id read for them, up to event_id or its newest message.
         """
         room_id, event_id, query = _non_blank(room_id), _non_blank(event_id), _non_blank(query)
         if (problem := _read_problem(action, room_id=room_id, event_id=event_id, query=query)) is not None:
@@ -257,7 +253,7 @@ class MatrixUserTools(Toolkit):
 
     async def matrix_user_write(
         self,
-        action: Literal["send", "react", "edit", "redact", "join", "leave", "invite", "create_room"],
+        action: Literal["send", "react", "edit", "redact", "join", "leave", "invite", "create_room", "mark_read"],
         room_id: str | None = None,
         user_id: str | None = None,
         message: str | None = None,
@@ -279,6 +275,7 @@ class MatrixUserTools(Toolkit):
         - redact: Remove your owner's message or reaction event_id in room_id; message is the reason.
         - join, leave: room_id. invite: user_id into room_id.
         - create_room: A private room called name; invite people with invite.
+        - mark_read: Mark room_id read for your owner, up to event_id or its newest message.
         """
         # Like any argument an action does not take, create_room's room_id and an attachment other than send's are left
         # out, so they name no room or file, for the rate limit or the audit line.

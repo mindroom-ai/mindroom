@@ -47,7 +47,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 
 Asking again for an address that was already sent replaces the old link, which stops working.
 
-`list_email_invites()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
+`email_invite_read()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
 ## Without a Mail Server
 

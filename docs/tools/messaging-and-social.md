@@ -164,9 +164,9 @@ agents:
 
 ## [`twilio`]
 
-`twilio` sends SMS with `send_sms` and reads call details or recent messages with `twilio_read`.
+`twilio` sends SMS with `twilio_send` and reads call details or recent messages with `twilio_read`.
 Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
-`send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
+`twilio_send()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -177,7 +177,7 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `region` | `text` | `null` | Twilio region, such as `au1`, or `TWILIO_REGION`. |
 | `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
-| `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
+| `enable_send_sms` | `boolean` | `true` | Enable `twilio_send()`. |
 | `enable_get_call_details` | `boolean` | `true` | Read call details. |
 | `enable_list_messages` | `boolean` | `true` | List recent SMS. |
 | `all` | `boolean` | `false` | Enable all actions. |

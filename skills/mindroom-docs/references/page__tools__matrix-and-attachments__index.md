@@ -38,12 +38,12 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
+`matrix_room(action="room_info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
 |--------|---------|
-| `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
+| `room_info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
 | `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads, unless a foreground approval asked after the resolve still waits), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
@@ -264,7 +264,7 @@ react("$event_id", "👍")
 
 ## [`email_invite`]
 
-`list_email_invites()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
+`email_invite_read()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
 `email_invite_write(action, email)` invites (`action="invite"`) or revokes (`action="revoke"`) one address in the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for `email_invite_write` is recommended (timed grants are scoped per `action`).
 When `action="invite"` is called for a person who may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
 With `action="revoke"`, its asker, its approver, or anyone who may invite can revoke an open invite, and an invite already used is reported with the account that used it.
@@ -327,7 +327,7 @@ matrix_api(
 `matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they ask.
 It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
 
-`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` reads as the owner and changes nothing.
 
 | Action | Returns |
 |--------|---------|
@@ -337,7 +337,6 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
 | `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
 | `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
-| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
@@ -363,6 +362,7 @@ A rule with `arguments` (or a `script` rule) can decide per call from the argume
 | `join`, `leave` | Joins or leaves `room_id` |
 | `invite` | Invites `user_id` into `room_id` |
 | `create_room` | Creates a private room called `name` and invites nobody; `invite` adds people |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
 Nothing is sent, reacted, or edited into an encrypted room.

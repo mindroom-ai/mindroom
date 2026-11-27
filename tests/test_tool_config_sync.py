@@ -336,7 +336,7 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert _BUILTINS.entries["pubmed"].function_names == ("search_pubmed",)
     assert _BUILTINS.entries["youtube"].function_names == ("youtube_video",)
-    assert _BUILTINS.entries["twilio"].function_names == ("send_sms", "twilio_read")
+    assert _BUILTINS.entries["twilio"].function_names == ("twilio_send", "twilio_read")
     assert _BUILTINS.entries["x"].function_names == ("x_read", "x_write")
 
 

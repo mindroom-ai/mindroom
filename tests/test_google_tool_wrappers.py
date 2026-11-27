@@ -1063,7 +1063,7 @@ def test_google_docs_provider_failures_preserve_status_without_provider_text(
     if operation == "create":
         result = tool.google_docs_write(action="create", title="Recovery notes")
     elif operation == "read":
-        result = tool.google_docs_get_document("document-id")
+        result = tool.google_docs_read("document-id")
     elif operation == "insert":
         result = tool.google_docs_write(action="insert_text", document_id="document-id", text="text")
     elif operation == "replace":

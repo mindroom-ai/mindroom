@@ -214,7 +214,7 @@ def _terms(agent_name: str, rules: str, tools: str) -> str:
 def test_confirm_gates() -> None:
     """All contact writes always ask the owner on a card; listing stays an ungated zero-arg read."""
     functions = adapt_toolkit(ContactsTools("mind_alice")).functions
-    assert {function.name for function in functions} == {"list_contacts", "contacts_write"}
+    assert {function.name for function in functions} == {"contacts_read", "contacts_write"}
     assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == {"contacts_write"}
 
 
@@ -782,7 +782,7 @@ async def test_the_requesting_owner_removes_a_pending_contact_without_leaving_an
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_shows_own_contacts_and_contactable_agents(tmp_path: Path) -> None:
+async def test_contacts_read_shows_own_contacts_and_contactable_agents(tmp_path: Path) -> None:
     """The owner sees their own contacts with their side's effective terms and an active contact's room, and the agents to ask.
 
     A new conversation finds a contact's room only here, and the terms include the configured rules and default tools.
@@ -829,7 +829,7 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
     runtime = _runtime()
     tool = ContactsTools("mind_alice")
 
-    assert "only works while answering a request" in await tool.list_contacts()
+    assert "only works while answering a request" in await tool.contacts_read()
 
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered():
         refused = await tool.contacts_write("request", target="nobody", reason="Say hi")
@@ -840,7 +840,7 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
             rules="Be brief",
             tools=["calculator"],
         )
-        listing = yaml.safe_load(await tool.list_contacts())
+        listing = yaml.safe_load(await tool.contacts_read())
         contact_id = listing["contacts"][0]["id"]
         updated = await tool.contacts_write("update", contact_id=contact_id, rules="Be kind")
         cleared = await tool.contacts_write("update", contact_id=contact_id, rules="", tools=[])
@@ -943,7 +943,7 @@ def test_a_personal_agent_with_contacts_is_built_with_the_contacts_tools_and_mat
     )
     offered = {toolkit.name: {function.name for function in toolkit.functions} for toolkit in build.spec.toolkits}
 
-    assert offered["contacts"] == {"list_contacts", "contacts_write"}
+    assert offered["contacts"] == {"contacts_read", "contacts_write"}
     assert "matrix_message" in offered
 
 

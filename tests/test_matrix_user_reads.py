@@ -6,14 +6,12 @@ import json
 from functools import partial
 from typing import TYPE_CHECKING
 
-import aiohttp
 import pytest
 
 from mindroom.attachments.storage import load_attachment, register_audio_attachment
 from mindroom.custom_tools.matrix_user_reads import (
     MatrixRequestError,
     download_file,
-    mark_read,
     read_messages,
     read_people,
     read_room,
@@ -52,7 +50,6 @@ ROOM_PATH = f"/_matrix/client/v3/rooms/{ROOM}"
 MESSAGES_PATH = f"{ROOM_PATH}/messages"
 SEARCH_PATH = "/_matrix/client/v3/search"
 MEDIA_PATH = "/_matrix/client/v1/media/download/example.com/abc"
-MARKED_UNREAD_PATH = f"/_matrix/client/v3/user/{OWNER}/rooms/{ROOM}/account_data/m.marked_unread"
 # What a page of messages asks for: the messages, and the reactions to count on them.
 MESSAGES_FILTER = {"types": ["m.room.message", "m.room.encrypted", "m.reaction"]}
 CAROL = "@carol:example.com"
@@ -1184,109 +1181,18 @@ async def test_download_of_an_event_without_media_is_an_error(
 
 
 @pytest.mark.asyncio
-async def test_mark_read_sends_a_private_receipt_and_clears_the_flag(
-    client: nio.AsyncClient,
-    homeserver: FakeHomeserver,
-) -> None:
-    """Marking read moves the read marker and a private receipt, never a public one, and clears marked-unread.
-
-    Without an event, the room's newest event is the one, and the result names it.
-    """
-    homeserver.answers.update(
-        {
-            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
-            f"{ROOM_PATH}/read_markers": {},
-            MARKED_UNREAD_PATH: {},
-            MESSAGES_PATH: {"chunk": [text_message("$newest", "Bye", minute=9)], "end": "t1"},
-        },
-    )
-
-    seen = await mark_read(client, ROOM, event_id="$seen")
-    newest = await mark_read(client, ROOM, event_id=None)
-
-    assert seen == {}
-    assert newest == {"read_up_to": "$newest"}
-    assert [(request.method, request.path, request.body) for request in homeserver.requests] == [
-        ("GET", f"{ROOM_PATH}/event/$seen", None),
-        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$seen", "m.read.private": "$seen"}),
-        ("PUT", MARKED_UNREAD_PATH, {"unread": False}),
-        ("GET", MESSAGES_PATH, None),
-        ("POST", f"{ROOM_PATH}/read_markers", {"m.fully_read": "$newest", "m.read.private": "$newest"}),
-        ("PUT", MARKED_UNREAD_PATH, {"unread": False}),
-    ]
-    newest_request = homeserver.requests[3]
-    assert (newest_request.query["dir"], newest_request.query["limit"]) == (["b"], ["1"])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("answer", "said"),
-    [
-        (matrix_error(500, "M_UNKNOWN", "Internal error"), "Matrix answered 500 M_UNKNOWN: Internal error"),
-        (TimeoutError(), "The homeserver took too long to answer."),
-        (aiohttp.ServerDisconnectedError(), "The Matrix homeserver could not be reached."),
-    ],
-    ids=["refused", "timeout", "unreachable"],
-)
-async def test_mark_read_reports_when_only_the_markers_moved(
-    client: nio.AsyncClient,
-    homeserver: FakeHomeserver,
-    answer: Answer | Exception,
-    said: str,
-) -> None:
-    """When the marked-unread flag cannot be cleared, the error says the read markers moved all the same.
-
-    A flag step that times out or finds no homeserver says so, never the transport's text.
-    """
-    homeserver.answers.update(
-        {
-            f"{ROOM_PATH}/event/$seen": text_message("$seen", "Hi", room_id=ROOM),
-            f"{ROOM_PATH}/read_markers": {},
-            MARKED_UNREAD_PATH: answer,
-        },
-    )
-
-    with pytest.raises(MatrixRequestError) as error:
-        await mark_read(client, ROOM, event_id="$seen")
-
-    assert str(error.value) == f"The room is read up to $seen, but clearing its unread mark was not confirmed: {said}"
-    assert f"{ROOM_PATH}/read_markers" in homeserver.paths()
-
-
-@pytest.mark.asyncio
-async def test_mark_read_of_an_event_outside_the_room_changes_nothing(
-    client: nio.AsyncClient,
-    homeserver: FakeHomeserver,
-) -> None:
-    """An event the room does not hold is refused before any marker moves."""
-    homeserver.answers[f"{ROOM_PATH}/event/$elsewhere"] = matrix_error(404, "M_NOT_FOUND", "Event not found")
-
-    with pytest.raises(MatrixRequestError, match="404 M_NOT_FOUND"):
-        await mark_read(client, ROOM, event_id="$elsewhere")
-
-    assert homeserver.paths() == [f"{ROOM_PATH}/event/$elsewhere"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["mark_read", "download"])
 async def test_an_event_from_another_room_is_refused(
     client: nio.AsyncClient,
     homeserver: FakeHomeserver,
     tmp_path: Path,
-    action: str,
 ) -> None:
-    """An event the homeserver gives from another room is refused before any marker moves or any file is fetched."""
+    """An event the homeserver gives from another room is refused before any file is fetched."""
     elsewhere = {**_file_event("m.file", "notes.txt", "text/plain", 4), "room_id": "!other:example.com"}
     homeserver.answers.update({f"{ROOM_PATH}/event/$file": elsewhere, MEDIA_PATH: Answer(b"note")})
     storage = tmp_path / "storage"
-    read = (
-        mark_read(client, ROOM, event_id="$file")
-        if action == "mark_read"
-        else download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
-    )
 
     with pytest.raises(MatrixRequestError) as error:
-        await read
+        await download_file(client, ROOM, "$file", storage_path=storage, for_room_id=CHAT, for_thread_id=None)
 
     assert str(error.value) == "That event is in another room."
     assert homeserver.paths() == [f"{ROOM_PATH}/event/$file"]
