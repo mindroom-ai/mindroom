@@ -7122,33 +7122,63 @@ def test_open_health_http_client_reuses_default_ssl_context_and_respects_monkeyp
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Health checks cache the default SSLContext, bypass caching with custom TLS env, and omit verify when patched."""
+    """Health checks cache default and stat-keyed SSL_CERT_FILE contexts, bypass SSL_CERT_DIR, and respect patches."""
+    import certifi  # noqa: PLC0415
+
     docker_backend_module._cached_default_ssl_context.cache_clear()
+    created_contexts: list[object] = []
+    real_create_ssl_context = httpx.create_ssl_context
+
+    def _tracking_create_ssl_context(*, verify: bool = True) -> object:
+        assert verify is True
+        ctx = real_create_ssl_context(verify=True)
+        created_contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(docker_backend_module.httpx, "create_ssl_context", _tracking_create_ssl_context)
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
     with (
         docker_backend_module._open_health_http_client(timeout=5.0) as first,
         docker_backend_module._open_health_http_client(timeout=5.0) as second,
     ):
         assert first._transport._pool._ssl_context is second._transport._pool._ssl_context
+    assert len(created_contexts) == 1
 
-    # Setting SSL_CERT_DIR or SSL_CERT_FILE bypasses the cache so rotated CA bundles are reloaded.
+    # Unchanged SSL_CERT_FILE reuses the cached SSLContext; replacing the file at the same path reloads it.
+    ca_bytes = Path(certifi.where()).read_bytes()
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_bytes(ca_bytes)
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+    with (
+        docker_backend_module._open_health_http_client(timeout=5.0) as file_first,
+        docker_backend_module._open_health_http_client(timeout=5.0) as file_second,
+    ):
+        assert file_first._transport._pool._ssl_context is file_second._transport._pool._ssl_context
+        assert file_first._transport._pool._ssl_context is not created_contexts[0]
+    assert len(created_contexts) == 2
+
+    rotated_ca = tmp_path / "ca-rotated.pem"
+    rotated_ca.write_bytes(ca_bytes + b"\n")
+    rotated_ca.replace(ca_file)
+    with (
+        docker_backend_module._open_health_http_client(timeout=5.0) as rotated_first,
+        docker_backend_module._open_health_http_client(timeout=5.0) as rotated_second,
+    ):
+        assert rotated_first._transport._pool._ssl_context is rotated_second._transport._pool._ssl_context
+        assert rotated_first._transport._pool._ssl_context is not created_contexts[1]
+    assert len(created_contexts) == 3
+
+    # Setting SSL_CERT_DIR bypasses caching on every call.
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
     with (
-        docker_backend_module._open_health_http_client(timeout=5.0) as third,
-        docker_backend_module._open_health_http_client(timeout=5.0) as fourth,
+        docker_backend_module._open_health_http_client(timeout=5.0) as dir_first,
+        docker_backend_module._open_health_http_client(timeout=5.0) as dir_second,
     ):
-        assert third._transport._pool._ssl_context is not fourth._transport._pool._ssl_context
-
-    import certifi  # noqa: PLC0415
-
-    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
-    monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
-    with (
-        docker_backend_module._open_health_http_client(timeout=5.0) as fifth,
-        docker_backend_module._open_health_http_client(timeout=5.0) as sixth,
-    ):
-        assert fifth._transport._pool._ssl_context is not sixth._transport._pool._ssl_context
+        assert dir_first._transport._pool._ssl_context is not dir_second._transport._pool._ssl_context
+    assert len(created_contexts) == 5
 
     seen_kwargs: list[dict[str, object]] = []
 

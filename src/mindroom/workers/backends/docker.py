@@ -184,15 +184,27 @@ _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
 _REAL_HTTPX_CLIENT = httpx.Client
 
 
-@functools.lru_cache(maxsize=1)
-def _cached_default_ssl_context() -> ssl.SSLContext:
+@functools.lru_cache(maxsize=4)
+def _cached_default_ssl_context(
+    cache_key: tuple[str, int, int, int, int] | None,
+) -> ssl.SSLContext:
+    del cache_key
     return httpx.create_ssl_context(verify=True)
 
 
 def _default_ssl_context() -> ssl.SSLContext:
-    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+    if os.environ.get("SSL_CERT_DIR"):
         return httpx.create_ssl_context(verify=True)
-    return _cached_default_ssl_context()
+    ssl_cert_file = os.environ.get("SSL_CERT_FILE")
+    if not ssl_cert_file:
+        return _cached_default_ssl_context(None)
+    try:
+        stat_result = Path(ssl_cert_file).stat()
+    except OSError:
+        return httpx.create_ssl_context(verify=True)
+    return _cached_default_ssl_context(
+        (ssl_cert_file, stat_result.st_dev, stat_result.st_ino, stat_result.st_mtime_ns, stat_result.st_size),
+    )
 
 
 def _open_health_http_client(*, timeout: float) -> httpx.Client:
