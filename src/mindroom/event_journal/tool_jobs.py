@@ -100,6 +100,8 @@ def _iso_to_epoch_us(value: object) -> int:
 def _safe_text(value: object) -> tuple[str | None, bool]:
     if not isinstance(value, str):
         return None, True
+    if "\x00" in value:
+        return None, False
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
@@ -130,13 +132,15 @@ def _extract_metadata(job_json: str) -> tuple[object, ...]:
     recipient, ok_recipient = _safe_text(raw_recipient)
     room_id, ok_room = _safe_text(raw_room_id)
     delegation_id, ok_deleg = _safe_text(job_delegation_id_from_payload(kind, adapter))
+    status = raw.get("status")
     cold = (
         isinstance(raw.get("job_id"), str)
         and isinstance(owner, dict)
         and ok_recipient
         and ok_room
         and ok_deleg
-        and raw.get("status") in TERMINAL_STATUSES
+        and isinstance(status, str)
+        and status in TERMINAL_STATUSES
         and raw.get("consumed") is True
         and kind != "workflow"
         and not is_workflow_node_payload(kind, adapter)

@@ -268,7 +268,16 @@ async def test_legacy_tool_jobs_table_upgrades_and_backfills_metadata(
             owner=wf_owner,
         ),
         ("zzzzcorrupt", "{not valid json"),
+        (
+            "zzzzliststatus",
+            '{"job_id": "zzzzliststatus", "status": [], "consumed": true, "owner": {"agent_name": "code"}}',
+        ),
         ("zzzzmissingowner", '{"status": "completed", "consumed": true}'),
+        (
+            "zzzznul",
+            '{"job_id": "zzzznul", "status": "completed", "consumed": true, '
+            '"owner": {"agent_name": "code", "room_id": "\\u0000"}}',
+        ),
         (
             "zzzzsurrogate",
             '{"job_id": "zzzzsurrogate", "status": "completed", "consumed": true, '
@@ -304,7 +313,9 @@ async def test_legacy_tool_jobs_table_upgrades_and_backfills_metadata(
             "wf000001main",
             "wf000002node",
             "zzzzcorrupt",
+            "zzzzliststatus",
             "zzzzmissingowner",
+            "zzzznul",
             "zzzzsurrogate",
         ]
         assert await jobs.load_ended_rooms() == frozenset({("code", "!inline:test"), ("team", "!team:test")})
