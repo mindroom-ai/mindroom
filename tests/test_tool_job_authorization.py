@@ -134,7 +134,7 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "delete_graph_fact" in toolkit_function_names(toolkit)
+    assert "knowledge_graph_write" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed(tool_name: str) -> bool:
@@ -149,10 +149,10 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
             tools=builtin_tool_registry(),
         )
 
-    assert allowed("delete_graph_fact")
+    assert allowed("knowledge_graph_write")
     config.agents["lead"].knowledge_graph_edits = False
-    assert not allowed("delete_graph_fact")
-    assert allowed("search_graph")
+    assert not allowed("knowledge_graph_write")
+    assert allowed("knowledge_graph_read")
 
 
 def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:

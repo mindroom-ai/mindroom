@@ -2017,7 +2017,7 @@ def create_agent(
         )
     )
     prompt_skills = None if skill_hidden else skills
-    # The graph is one more source of the knowledge search, which agents call far more than search_graph.
+    # The graph is one more source of the knowledge search, which agents call far more than knowledge_graph_read.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
     if agent.knowledge_graph and kept_knowledge is None:
         from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415

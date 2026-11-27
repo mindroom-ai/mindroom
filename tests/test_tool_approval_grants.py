@@ -1000,6 +1000,16 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         ("x", "x_read", ("search_posts", "get_home_timeline")),
         ("x", "x_write", ("create_post", "reply_to_post", "send_dm")),
         (None, "attachment", ("list", "get", "register", "inline_image")),
+        (
+            "shared_directories",
+            "shared_directories_write",
+            ("create", "invite", "accept", "decline", "remove", "delete"),
+        ),
+        ("contacts", "contacts_write", ("request", "accept", "decline", "update", "remove")),
+        ("knowledge_graph", "knowledge_graph_read", ("search", "entity")),
+        ("knowledge_graph", "knowledge_graph_write", ("update_summary", "merge", "delete_fact", "delete_entity")),
+        ("agent_manager", "agent_manager_write", ("create", "update", "set_avatar", "delete")),
+        ("email_invite", "email_invite_write", ("invite", "revoke")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
@@ -3346,3 +3356,264 @@ def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) ->
         runtime_paths,
     )
     assert valid.agents["a"].tools[0].overrides == {"exclude_tools": ["view_file"]}
+
+
+def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:
+    """Action-scoped grants separate actions; retired exact, glob, and wildcard script rules fail closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    config = Config()
+
+    for toolkit, fn, first_action, second_action in (
+        ("shared_directories", "shared_directories_write", "create", "delete"),
+        ("contacts", "contacts_write", "request", "remove"),
+        ("knowledge_graph", "knowledge_graph_read", "search", "entity"),
+        ("knowledge_graph", "knowledge_graph_write", "update_summary", "delete_fact"),
+        ("agent_manager", "agent_manager_write", "create", "delete"),
+        ("email_invite", "email_invite_write", "invite", "revoke"),
+    ):
+        op_a = grant_operation(config, fn, {"action": first_action}, tools=registry, toolkit_name=toolkit)
+        op_b = grant_operation(config, fn, {"action": second_action}, tools=registry, toolkit_name=toolkit)
+        assert op_a is not None
+        assert op_b is not None
+        assert op_a.mcp_server_id == toolkit
+        assert (op_a.mcp_tool_name, op_b.mcp_tool_name) == (first_action, second_action)
+        assert op_a.key != op_b.key
+        assert grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit) is None
+
+    # Kept zero-arg reads remain tool-wide grants (not action-scoped).
+    for toolkit, fn in (
+        ("shared_directories", "list_shared_directories"),
+        ("contacts", "list_contacts"),
+        ("agent_manager", "agent_settings"),
+        ("email_invite", "list_email_invites"),
+    ):
+        op = grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit)
+        assert op is not None
+        assert op.mcp_server_id is None
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    # Exact, glob, and wildcard script approval rules targeting retired names fail closed for all 5 toolkits.
+    cases: list[tuple[dict[str, object], str, str, list[str]]] = [
+        (
+            {"agents": {"a": {"display_name": "A", "tools": ["shared_directories"], "include_default_tools": False}}},
+            "delete_shared_directory",
+            "*_shared_directory",
+            ["shared_directories_write"],
+        ),
+        (
+            {
+                "agents": {
+                    "a": {"display_name": "A", "tools": ["email_invite"], "include_default_tools": False},
+                },
+            },
+            "invite_by_email",
+            "*_email*",
+            ["email_invite_write"],
+        ),
+        (
+            {
+                "knowledge_graph": {"model": "default"},
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "knowledge_graph": True,
+                        "knowledge_graph_edits": True,
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            "delete_graph_fact",
+            "delete_graph_*",
+            ["knowledge_graph_read", "knowledge_graph_write"],
+        ),
+        (
+            {
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "created_agents_per_owner": 1,
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            "create_agent",
+            "*_agent",
+            ["agent_manager_write"],
+        ),
+        (
+            {
+                "personal_agents": {
+                    "mind": {
+                        "agent": {
+                            "display_name": "{user_first_name}",
+                            "role": "Personal",
+                            "contacts": {},
+                            "include_default_tools": False,
+                        },
+                    },
+                },
+            },
+            "request_contact",
+            "*_contact",
+            ["agent_manager_write", "contacts_write"],
+        ),
+    ]
+    for extra, exact_old, glob_old, replacements in cases:
+        base: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            **extra,
+        }
+        expected_target = replacements[-1]
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": exact_old, "action": "require_approval"}]}},
+                runtime_paths,
+            )
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": glob_old, "action": "require_approval"}]}},
+                runtime_paths,
+            )
+        with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py"):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": "*", "script": "check.py"}]}},
+                runtime_paths,
+            )
+        loaded = Config.validate_with_runtime(
+            {
+                **base,
+                "tool_approval": {
+                    "rules": [
+                        *[{"match": name, "script": "check.py"} for name in (*replacements, "skill")],
+                        {"match": "*", "script": "check.py"},
+                    ],
+                },
+            },
+            runtime_paths,
+        )
+        assert loaded.tool_approval.rules[-1].match == "*"
+
+
+@pytest.mark.parametrize(
+    ("template_extra", "defaults_extra", "retired_match", "replacement"),
+    [
+        # Template-only personal_agents enables agent_manager even before any generated agent exists.
+        ({}, {}, "update_agent", "agent_manager_write"),
+        ({}, {}, "set_avatar", "agent_manager_write"),
+        # Contacts enabled on template or in a per-user override.
+        ({"agent_extra": {"contacts": {}}}, {}, "request_contact", "contacts_write"),
+        ({"users": {"@alice:example.org": {"contacts": {}}}}, {}, "remove_contact", "contacts_write"),
+        # Knowledge graph enabled on template, defaults, or per-user override.
+        ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph_read"),
+        ({}, {"knowledge_graph": True}, "graph_entity", "knowledge_graph_read"),
+        (
+            {"users": {"@alice:example.org": {"knowledge_graph": True}}},
+            {},
+            "merge_graph_entities",
+            "knowledge_graph_write",
+        ),
+        # Tools enabled via template.users overrides.
+        (
+            {"users": {"@alice:example.org": {"tools": ["email_invite"]}}},
+            {},
+            "revoke_email_invite",
+            "email_invite_write",
+        ),
+        (
+            {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
+            {},
+            "accept_shared_directory",
+            "shared_directories_write",
+        ),
+    ],
+)
+def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
+    tmp_path: Path,
+    template_extra: dict[str, object],
+    defaults_extra: dict[str, object],
+    retired_match: str,
+    replacement: str,
+) -> None:
+    """Template-only personal_agents configs fail closed on retired approval rules before any user is onboarded."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    agent_cfg: dict[str, object] = {
+        "display_name": "{user_first_name}",
+        "role": "Personal assistant",
+        "include_default_tools": False,
+        **dict(template_extra.get("agent_extra", {})),  # type: ignore[arg-type]
+    }
+    template: dict[str, object] = {"agent": agent_cfg}
+    if "users" in template_extra:
+        template["users"] = template_extra["users"]
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "knowledge_graph": {"model": "default"},
+        "defaults": {"tools": [], **defaults_extra},
+        "personal_agents": {"mind": template},
+        "tool_approval": {"rules": [{"match": retired_match, "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=replacement):
+        Config.validate_with_runtime(data, runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "retired_name", "replacement", "kept_read"),
+    [
+        ("shared_directories", "delete_shared_directory", "shared_directories_write", "list_shared_directories"),
+        ("contacts", "request_contact", "contacts_write", None),
+        ("knowledge_graph", "search_graph", "knowledge_graph_read", None),
+        ("knowledge_graph", "delete_graph_fact", "knowledge_graph_write", None),
+        ("agent_manager", "create_agent", "agent_manager_write", None),
+        ("email_invite", "invite_by_email", "email_invite_write", "list_email_invites"),
+    ],
+)
+def test_retired_identity_access_graph_include_exclude_overrides_fail_config_load(
+    tmp_path: Path,
+    toolkit: str,
+    retired_name: str,
+    replacement: str,
+    kept_read: str | None,
+) -> None:
+    """Retired include_tools/exclude_tools fail closed at config load while kept read names stay valid."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    for filter_key in ("include_tools", "exclude_tools"):
+        data: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {
+                    "display_name": "A",
+                    "tools": [{toolkit: {filter_key: [retired_name]}}],
+                    "include_default_tools": False,
+                },
+            },
+        }
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match=rf"{toolkit}\.{filter_key}: {retired_name} was removed; .*`{replacement}`",
+        ):
+            Config.validate_with_runtime(data, runtime_paths)
+
+    if kept_read is not None:
+        valid = Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "tools": [{toolkit: {"exclude_tools": [kept_read]}}],
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            runtime_paths,
+        )
+        assert valid.agents["a"].tools[0].overrides == {"exclude_tools": [kept_read]}

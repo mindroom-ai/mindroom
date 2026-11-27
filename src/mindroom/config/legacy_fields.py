@@ -893,8 +893,64 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "register_attachment": "attachment",
         "inline_image": "attachment",
     },
+    # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
+    # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
+    #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
+    #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
+    #   and list_email_invites).
+    # Last legacy release: v2026.11.651; replacement: unreleased; consolidated into action-dispatched read/write
+    #   functions with ToolMetadata.action_scoped_grants.
+    # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
+    #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
+    #   in include_tools/exclude_tools at config load.
+    # Coverage: tests/test_tool_approval_grants.py::test_identity_access_graph_action_scoped_grants_and_fail_closed_migration,
+    #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
+    #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
+    "shared_directories": {
+        "create_shared_directory": "shared_directories_write",
+        "invite_to_shared_directory": "shared_directories_write",
+        "remove_from_shared_directory": "shared_directories_write",
+        "delete_shared_directory": "shared_directories_write",
+        "accept_shared_directory": "shared_directories_write",
+        "decline_shared_directory": "shared_directories_write",
+    },
+    "contacts": {
+        "request_contact": "contacts_write",
+        "accept_contact": "contacts_write",
+        "decline_contact": "contacts_write",
+        "update_contact": "contacts_write",
+        "remove_contact": "contacts_write",
+    },
+    "knowledge_graph": {
+        "search_graph": "knowledge_graph_read",
+        "graph_entity": "knowledge_graph_read",
+        "delete_graph_fact": "knowledge_graph_write",
+        "delete_graph_entity": "knowledge_graph_write",
+        "merge_graph_entities": "knowledge_graph_write",
+        "update_graph_entity_summary": "knowledge_graph_write",
+    },
+    "agent_manager": {
+        "create_agent": "agent_manager_write",
+        "update_agent": "agent_manager_write",
+        "set_avatar": "agent_manager_write",
+        "delete_agent": "agent_manager_write",
+    },
+    "email_invite": {
+        "invite_by_email": "email_invite_write",
+        "revoke_email_invite": "email_invite_write",
+    },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
+    {
+        "skills",
+        "attachments",
+        "shared_directories",
+        "contacts",
+        "knowledge_graph",
+        "agent_manager",
+        "email_invite",
+    },
+)
 
 
 def _effective_approval_decision(
@@ -1109,11 +1165,35 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
     )
 
 
+def _retired_consolidated_setting_checker(
+    toolkit_name: str,
+) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
+    """Return a setting checker rejecting retired include/exclude filters for ``toolkit_name``."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
+
+    def check(settings: Mapping[str, object]) -> tuple[str, str] | None:
+        return _retired_function_filter(
+            settings,
+            renames,
+            guidance_for=lambda _key, new: (
+                f"`{new}` is now a consolidated action-dispatched function; "
+                f"remove the retired per-function filter and use `tool_approval.rules` matching `{new}` "
+                "if per-action gating is needed"
+            ),
+        )
+
+    return check
+
+
 _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
     "filesystem": retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
     "slack": _retired_slack_setting,
+    **{
+        name: _retired_consolidated_setting_checker(name)
+        for name in ("shared_directories", "contacts", "knowledge_graph", "agent_manager", "email_invite")
+    },
 }
 
 

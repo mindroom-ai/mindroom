@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_SOURCE_ID
 from mindroom.config.resolution import edits_knowledge_graph
@@ -31,6 +31,12 @@ _KNOWLEDGE_SOURCE_DESCRIPTION = (
     "Facts about people, projects, documents, and events that your conversations and tools revealed, "
     "with when each held and its sources."
 )
+_WRITE_ACTIONS: dict[str, tuple[str, ...]] = {
+    "update_summary": ("entity_id", "summary"),
+    "merge": ("duplicate_id", "into_id"),
+    "delete_fact": ("fact_id",),
+    "delete_entity": ("entity_id",),
+}
 
 
 def _date(value: datetime | None) -> str:
@@ -47,6 +53,17 @@ def _render_fact(fact: GraphFact, *, with_id: bool = False) -> str:
         sources = f"{sources}; and {earlier} earlier"
     fact_id = f"\n  id: {fact.uuid}" if with_id else ""
     return f"- {fact.fact}{fact_id}\n  {validity}\n  sources: {sources}"
+
+
+def _validate_write_params(action: str, params: dict[str, str | None]) -> str | None:
+    required = _WRITE_ACTIONS.get(action)
+    if required is None:
+        return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
+    if unexpected := [field for field, value in params.items() if value is not None and field not in required]:
+        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
+    if missing := [field for field in required if params[field] is None]:
+        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
+    return None
 
 
 @dataclass(frozen=True)
@@ -105,54 +122,17 @@ class KnowledgeGraphTools(Toolkit):
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
         self._edits = edits_knowledge_graph(config, agent_name)
-        edits = (
-            [
-                self.delete_graph_fact,
-                self.delete_graph_entity,
-                self.merge_graph_entities,
-                self.update_graph_entity_summary,
-            ]
-            if self._edits
-            else []
-        )
-        super().__init__(name="knowledge_graph", tools=[self.search_graph, self.graph_entity, *edits])
+        tools = [self.knowledge_graph_read, *([self.knowledge_graph_write] if self._edits else [])]
+        super().__init__(name="knowledge_graph", tools=tools)
 
-    async def search_graph(self, query: str, limit: int = 10) -> str:
-        """Find facts about people, projects, documents, and events that your conversations and tools revealed.
-
-        Each fact shows when it held and its sources: "conversation" means someone said it, "tool_results" means a
-        tool returned it. Facts marked superseded were true before later evidence replaced them.
-
-        Args:
-            query: What to look up, for example "who owns Project Atlas".
-            limit: Most facts to return, from 1 to 50.
-
-        Returns:
-            Matching facts with their validity and sources.
-
-        """
-
+    async def _search(self, query: str, limit: int) -> str:
         async def search(store: GraphStore, scope: GraphScope) -> str:
             facts = await store.search_facts(scope, query, max(1, min(limit, _MAX_LIMIT)))
             return "\n".join(_render_fact(fact, with_id=self._edits) for fact in facts) or f"No facts match {query!r}."
 
-        return await self._in_graph("search_graph", search)
+        return await self._in_graph("knowledge_graph_read:search", search)
 
-    async def graph_entity(self, name: str) -> str:
-        """Show what the knowledge graph knows about one person, organization, project, or other entity.
-
-        An entity named exactly ``name`` in any letter case is returned, and a configured alias, agent key, or Matrix
-        ID finds the entity it names; otherwise the closest match, followed by the names of other close matches to look
-        up if it is not the one you meant.
-
-        Args:
-            name: The entity's name, for example "Alice" or "Project Atlas".
-
-        Returns:
-            The entity's summary and the facts that touch it.
-
-        """
-
+    async def _entity(self, name: str) -> str:
         async def look_up(store: GraphStore, scope: GraphScope) -> str:
             entity = await store.entity(scope, name)
             if entity is None:
@@ -170,103 +150,120 @@ class KnowledgeGraphTools(Toolkit):
                 rendered += f"\n{label}: {', '.join(others)}"
             return rendered
 
-        return await self._in_graph("graph_entity", look_up)
+        return await self._in_graph("knowledge_graph_read:entity", look_up)
 
-    async def delete_graph_fact(self, fact_id: str) -> str:
-        """Delete a wrong fact from your knowledge graph.
+    async def knowledge_graph_read(
+        self,
+        action: Literal["search", "entity"],
+        query: str,
+        limit: int = 10,
+    ) -> str:
+        """Read facts or entities from your knowledge graph, with when each held and its sources.
 
-        Delete a fact that never held, names the wrong person or thing, or records your own lookups instead of a fact
-        about your subjects. A fact that held and later changed is history: keep it, because newer evidence marks it
-        superseded. A later conversation or tool result that states the fact again can add it back. The summaries of
-        the entities it connects can still state it; rewrite those with `update_graph_entity_summary`.
-
-        Args:
-            fact_id: The fact's id, as `search_graph` and `graph_entity` show it.
-
-        Returns:
-            The deleted fact, or that no fact has this id.
-
-        """
-
-        async def delete(store: GraphStore, scope: GraphScope) -> str:
-            fact = await store.delete_fact(scope, fact_id)
-            if fact is None:
-                return f"No fact in your graph has id {fact_id!r}."
-            return f"Deleted the fact {fact!r}."
-
-        return await self._in_graph("delete_graph_fact", delete)
-
-    async def delete_graph_entity(self, entity_id: str) -> str:
-        """Delete an entity that does not belong in your knowledge graph, with every fact that touches it.
-
-        Delete an entity that is not a person, agent, organization, location, event, project, product, document, or
-        account, such as a file path, URL, or setting, or that never existed. To combine two entities for the same
-        person or thing, merge them with `merge_graph_entities` instead, which keeps the facts.
+        Actions:
+        - `search`: Find facts matching `query` (up to `limit`, from 1 to 50); "conversation" means someone said it, "tool_results" means a tool returned it, and superseded facts held before later evidence replaced them.
+        - `entity`: Show the summary and facts for one person, organization, project, or other entity named `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise the closest match plus other close matches).
 
         Args:
-            entity_id: The entity's id, as `graph_entity` shows it.
-
-        Returns:
-            The deleted entity's name, or that no entity has this id.
+            action: Lookup mode (`search` or `entity`).
+            query: Search query for `search`, or entity name/alias/Matrix ID/ID for `entity`.
+            limit: Maximum facts to return for `search`, from 1 to 50.
 
         """
+        if action == "search":
+            return await self._search(query, limit)
+        if action == "entity":
+            return await self._entity(query)
+        return f"Error: Unsupported action {action!r}. Expected 'search' or 'entity'."
 
-        async def delete(store: GraphStore, scope: GraphScope) -> str:
-            name = await store.delete_entity(scope, entity_id)
-            if name is None:
-                return f"No entity in your graph has id {entity_id!r}."
-            return f"Deleted {name!r} and every fact that touched it."
+    async def knowledge_graph_write(
+        self,
+        action: Literal["update_summary", "merge", "delete_fact", "delete_entity"],
+        fact_id: str | None = None,
+        entity_id: str | None = None,
+        duplicate_id: str | None = None,
+        into_id: str | None = None,
+        summary: str | None = None,
+    ) -> str:
+        """Edit mistakes in your knowledge graph (available when knowledge_graph_edits is enabled).
 
-        return await self._in_graph("delete_graph_entity", delete)
-
-    async def merge_graph_entities(self, duplicate_id: str, into_id: str) -> str:
-        """Merge an entity into another entity for the same person or thing, such as a nickname into a full name.
-
-        The duplicate's facts move onto the other entity, which keeps its name and summary; facts between the two are
-        dropped, and the duplicate is deleted. `graph_entity` also takes an id, to check an entity before merging it.
+        Actions:
+        - `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right (e.g. after deleting a fact).
+        - `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between the two, and deleting the duplicate.
+        - `delete_fact`: Delete a wrong fact (`fact_id`) that never held or recorded your own lookup; keep historical superseded facts.
+        - `delete_entity`: Delete a non-entity (`entity_id`, such as a path, URL, or setting) with every fact that touches it; use `merge` for duplicates.
 
         Args:
-            duplicate_id: The id of the entity to merge away, as `graph_entity` shows it.
-            into_id: The id of the entity to keep.
-
-        Returns:
-            Both entities' names and how many facts moved, or that an id is unknown.
+            action: Edit operation to perform.
+            fact_id: Fact ID from `knowledge_graph_read` (required for `delete_fact`).
+            entity_id: Entity ID from `knowledge_graph_read` (required for `update_summary` and `delete_entity`).
+            duplicate_id: Entity ID to merge away (required for `merge`).
+            into_id: Entity ID to keep (required for `merge`).
+            summary: New entity summary (required for `update_summary`).
 
         """
-        if duplicate_id == into_id:
+        if not self._edits:
+            return "Error: knowledge_graph_edits is not enabled for this agent."
+        params = {
+            "fact_id": fact_id,
+            "entity_id": entity_id,
+            "duplicate_id": duplicate_id,
+            "into_id": into_id,
+            "summary": summary,
+        }
+        if (error := _validate_write_params(action, params)) is not None:
+            return error
+        if action == "merge" and duplicate_id == into_id:
             return "An entity cannot be merged into itself."
+        return await self._in_graph(
+            f"knowledge_graph_write:{action}",
+            lambda store, scope: self._apply_write(
+                store,
+                scope,
+                action,
+                fact_id=fact_id,
+                entity_id=entity_id,
+                duplicate_id=duplicate_id,
+                into_id=into_id,
+                summary=summary,
+            ),
+        )
 
-        async def merge(store: GraphStore, scope: GraphScope) -> str:
+    @staticmethod
+    async def _apply_write(
+        store: GraphStore,
+        scope: GraphScope,
+        action: Literal["update_summary", "merge", "delete_fact", "delete_entity"],
+        *,
+        fact_id: str | None,
+        entity_id: str | None,
+        duplicate_id: str | None,
+        into_id: str | None,
+        summary: str | None,
+    ) -> str:
+        if action == "update_summary" and entity_id is not None and summary is not None:
+            name = await store.update_entity_summary(scope, entity_id, summary)
+            return (
+                f"Updated the summary of {name!r}."
+                if name is not None
+                else f"No entity in your graph has id {entity_id!r}."
+            )
+        if action == "merge" and duplicate_id is not None and into_id is not None:
             merged = await store.merge_entities(scope, duplicate_id, into_id)
             if merged is None:
                 return f"{duplicate_id!r} or {into_id!r} is not the id of an entity in your graph."
             facts = "fact" if merged.moved_facts == 1 else "facts"
             return f"Merged {merged.duplicate!r} into {merged.into!r}, moving {merged.moved_facts} {facts}."
-
-        return await self._in_graph("merge_graph_entities", merge)
-
-    async def update_graph_entity_summary(self, entity_id: str, summary: str) -> str:
-        """Replace an entity's summary, for example to remove what a fact you deleted said.
-
-        Keep everything the old summary says that is still right; later conversations and tool results that mention
-        the entity add to the new summary.
-
-        Args:
-            entity_id: The entity's id, as `graph_entity` shows it.
-            summary: The new summary.
-
-        Returns:
-            The entity's name, or that no entity has this id.
-
-        """
-
-        async def update(store: GraphStore, scope: GraphScope) -> str:
-            name = await store.update_entity_summary(scope, entity_id, summary)
-            if name is None:
-                return f"No entity in your graph has id {entity_id!r}."
-            return f"Updated the summary of {name!r}."
-
-        return await self._in_graph("update_graph_entity_summary", update)
+        if action == "delete_fact" and fact_id is not None:
+            fact = await store.delete_fact(scope, fact_id)
+            return f"Deleted the fact {fact!r}." if fact is not None else f"No fact in your graph has id {fact_id!r}."
+        assert entity_id is not None
+        name = await store.delete_entity(scope, entity_id)
+        return (
+            f"Deleted {name!r} and every fact that touched it."
+            if name is not None
+            else f"No entity in your graph has id {entity_id!r}."
+        )
 
     async def _in_graph(self, function: str, work: Callable[[GraphStore, GraphScope], Awaitable[str]]) -> str:
         """Run ``work`` on the caller's own graph, turning a failure into a message the agent can relay."""

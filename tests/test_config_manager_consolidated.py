@@ -261,7 +261,8 @@ def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
         )
 
     assert (
-        "agents.creator_research was created by another agent; its owners change it with update_agent" in update_result
+        'agents.creator_research was created by another agent; its owners change it with agent_manager_write(action="update", ...)'
+        in update_result
     )
     assert "Successfully" not in update_result
     assert remove_result.startswith("Error:")

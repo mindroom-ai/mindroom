@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -31,6 +31,15 @@ if TYPE_CHECKING:
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
+
+_WRITE_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "create": ((), ("agent_name", "owner")),
+    "invite": (("agent_name",), ("owner",)),
+    "accept": (("owner",), ("agent_name",)),
+    "decline": (("owner",), ("agent_name",)),
+    "remove": (("agent_name",), ("owner",)),
+    "delete": ((), ("agent_name", "owner")),
+}
 
 
 def _payload(status: str, **fields: object) -> str:
@@ -114,6 +123,22 @@ def _answer_error(context: ToolRuntimeContext, agent: str, action: str) -> str |
     return None
 
 
+def _validate_write_params(action: str, name: str, agent_name: str | None, owner: str | None) -> str | None:
+    spec = _WRITE_ACTIONS.get(action)
+    if spec is None:
+        msg = f"Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
+        return _payload("error", action=action, name=name, message=msg)
+    required, forbidden = spec
+    params = {"agent_name": agent_name, "owner": owner}
+    if unexpected := [field for field in forbidden if params[field] is not None]:
+        msg = f"Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
+        return _payload("error", action=action, name=name, message=msg)
+    if missing := [field for field in required if not (value := params[field]) or not value.strip()]:
+        msg = f"Parameter(s) {', '.join(missing)} required for action {action!r}."
+        return _payload("error", action=action, name=name, message=msg)
+    return None
+
+
 class SharedDirectoryTools(Toolkit):
     """Create directories other agents can read from their own workers."""
 
@@ -123,22 +148,11 @@ class SharedDirectoryTools(Toolkit):
     def __init__(self, agent_name: str | None = None) -> None:
         # The calling agent, bound when the tool is built, so a team member shares as itself rather than as the team.
         self._agent_name = agent_name
-        super().__init__(
-            name="shared_directories",
-            tools=[
-                self.create_shared_directory,
-                self.invite_to_shared_directory,
-                self.remove_from_shared_directory,
-                self.delete_shared_directory,
-                self.list_shared_directories,
-                self.accept_shared_directory,
-                self.decline_shared_directory,
-            ],
-        )
+        super().__init__(name="shared_directories", tools=[self.list_shared_directories, self.shared_directories_write])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Keep wait budgets on recursive directory deletion while omitting them from metadata operations."""
-        if function.name == "delete_shared_directory":
+        """Keep wait budgets on shared directory writes while omitting them from listing."""
+        if function.name == "shared_directories_write":
             return replace(function, offer_background_after=True)
         return function
 
@@ -149,32 +163,6 @@ class SharedDirectoryTools(Toolkit):
         if not is_shareable_agent(context.config, self._agent_name):
             return _payload("error", message="Private agents cannot share directories.")
         return context, self._agent_name
-
-    def create_shared_directory(self, name: str) -> str:
-        """Create a directory you can write and later share read-only with other agents.
-
-        Args:
-            name: Directory name: 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
-        try:
-            directory = create_shared_directory(context.runtime_paths, owner=agent, name=name)
-        except SharedDirectoryError as exc:
-            return _payload("error", name=name, message=str(exc))
-        return _payload(
-            "ok",
-            name=name,
-            path=next(
-                str(view.path)
-                for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
-                if view.directory == directory
-            ),
-            message=_changed_message(context, [agent], "Created."),
-        )
 
     @staticmethod
     def _invitation_error(context: ToolRuntimeContext, agent: str, agent_name: str) -> str | None:
@@ -189,21 +177,19 @@ class SharedDirectoryTools(Toolkit):
             return "Agents can only be invited on behalf of a user."
         return None
 
-    def invite_to_shared_directory(self, name: str, agent_name: str) -> str:
-        """Let another agent read one of your shared directories from its own worker.
+    def _create(self, context: ToolRuntimeContext, agent: str, name: str) -> str:
+        try:
+            directory = create_shared_directory(context.runtime_paths, owner=agent, name=name)
+        except SharedDirectoryError as exc:
+            return _payload("error", name=name, message=str(exc))
+        path = next(
+            str(view.path)
+            for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
+            if view.directory == directory
+        )
+        return _payload("ok", name=name, path=path, message=_changed_message(context, [agent], "Created."))
 
-        When the user you act for may not use that agent, the invitation waits until a user who may use it
-        accepts it through that agent.
-
-        Args:
-            name: Name of a directory you created.
-            agent_name: Name of the agent to invite.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
+    def _invite(self, context: ToolRuntimeContext, agent: str, name: str, agent_name: str) -> str:
         if (error := self._invitation_error(context, agent, agent_name)) is not None:
             return _payload("error", name=name, agent=agent_name, message=error)
         if not _requester_may_use(context, agent_name):
@@ -217,28 +203,14 @@ class SharedDirectoryTools(Toolkit):
             )
         except SharedDirectoryError as exc:
             return _payload("error", name=name, agent=agent_name, message=str(exc))
-        return _payload(
-            "ok",
-            name=name,
-            agent=agent_name,
-            members=list(directory.members),
-            message=_changed_message(context, [agent_name], f"{agent_name} can now read it.")
+        message = (
+            _changed_message(context, [agent_name], f"{agent_name} can now read it.")
             if added
-            else f"{agent_name} is already a member.",
+            else f"{agent_name} is already a member."
         )
+        return _payload("ok", name=name, agent=agent_name, members=list(directory.members), message=message)
 
-    def accept_shared_directory(self, owner: str, name: str) -> str:
-        """Accept an invitation to read another agent's shared directory, once the user you act for agrees.
-
-        Args:
-            owner: Agent that owns the directory.
-            name: Name of the directory.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
+    def _accept(self, context: ToolRuntimeContext, agent: str, owner: str, name: str) -> str:
         if (error := _answer_error(context, agent, "accepted")) is not None:
             return _payload("error", owner=owner, name=name, message=error)
         try:
@@ -250,33 +222,23 @@ class SharedDirectoryTools(Toolkit):
             )
         except SharedDirectoryError as exc:
             return _payload("error", owner=owner, name=name, message=str(exc))
+        path = next(
+            (
+                str(view.path)
+                for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
+                if view.directory == directory
+            ),
+            None,
+        )
         return _payload(
             "ok",
             owner=owner,
             name=name,
-            path=next(
-                (
-                    str(view.path)
-                    for view in agent_shared_directory_views(context.config, context.runtime_paths, agent)
-                    if view.directory == directory
-                ),
-                None,
-            ),
+            path=path,
             message=_changed_message(context, [agent], "Accepted; you can now read it."),
         )
 
-    def decline_shared_directory(self, owner: str, name: str) -> str:
-        """Decline an invitation to read another agent's shared directory.
-
-        Args:
-            owner: Agent that owns the directory.
-            name: Name of the directory.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
+    def _decline(self, context: ToolRuntimeContext, agent: str, owner: str, name: str) -> str:
         if (error := _answer_error(context, agent, "declined")) is not None:
             return _payload("error", owner=owner, name=name, message=error)
         try:
@@ -285,18 +247,7 @@ class SharedDirectoryTools(Toolkit):
             return _payload("error", owner=owner, name=name, message=str(exc))
         return _payload("ok", owner=owner, name=name, message="Declined.")
 
-    def remove_from_shared_directory(self, name: str, agent_name: str) -> str:
-        """Stop sharing one of your directories with an agent.
-
-        Args:
-            name: Name of a directory you created.
-            agent_name: Name of the member to remove.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
+    def _remove(self, context: ToolRuntimeContext, agent: str, name: str, agent_name: str) -> str:
         try:
             before, after = remove_shared_directory_member(
                 context.runtime_paths,
@@ -314,17 +265,7 @@ class SharedDirectoryTools(Toolkit):
             message = f"{agent_name} is not a member."
         return _payload("ok", name=name, agent=agent_name, members=list(after.members), message=message)
 
-    def delete_shared_directory(self, name: str) -> str:
-        """Delete one of your shared directories and every file in it.
-
-        Args:
-            name: Name of a directory you created.
-
-        """
-        resolved = self._context()
-        if isinstance(resolved, str):
-            return resolved
-        context, agent = resolved
+    def _delete(self, context: ToolRuntimeContext, agent: str, name: str) -> str:
         try:
             directory = delete_shared_directory(context.runtime_paths, owner=agent, name=name)
         except SharedDirectoryError as exc:
@@ -336,7 +277,10 @@ class SharedDirectoryTools(Toolkit):
         )
 
     def list_shared_directories(self) -> str:
-        """List the shared directories you own or joined, with their paths and your access, and your pending invitations."""
+        """List the shared directories you own or joined, with their paths and your access, and your pending invitations.
+
+        Takes no arguments.
+        """
         resolved = self._context()
         if isinstance(resolved, str):
             return resolved
@@ -366,3 +310,43 @@ class SharedDirectoryTools(Toolkit):
             )
         ]
         return _payload("ok", directories=entries, invitations=invitations)
+
+    def shared_directories_write(
+        self,
+        action: Literal["create", "invite", "accept", "decline", "remove", "delete"],
+        name: str,
+        agent_name: str | None = None,
+        owner: str | None = None,
+    ) -> str:
+        """Create, share, join, or delete shared directories.
+
+        Actions:
+        - `create`: Create a directory (`name`) you can write and later share read-only with other agents.
+        - `invite`: Let `agent_name` read your shared directory (`name`) from its own worker; waits for acceptance when the user may not use `agent_name`.
+        - `accept`: Accept a pending invitation from `owner` to read shared directory `name`, once the user agrees.
+        - `decline`: Decline a pending invitation from `owner` to read shared directory `name`.
+        - `remove`: Stop sharing your directory (`name`) with `agent_name`, or cancel its pending invitation.
+        - `delete`: Delete your shared directory (`name`) and every file in it.
+
+        Args:
+            action: Operation to perform.
+            name: Directory name: 1-64 lowercase letters, digits, '-' or '_', starting with a letter or digit.
+            agent_name: Target agent name (required for `invite` and `remove`).
+            owner: Owning agent name (required for `accept` and `decline`).
+
+        """
+        if (error := _validate_write_params(action, name, agent_name, owner)) is not None:
+            return error
+        resolved = self._context()
+        if isinstance(resolved, str):
+            return resolved
+        context, agent = resolved
+        handlers = {
+            "create": lambda: self._create(context, agent, name),
+            "invite": lambda: self._invite(context, agent, name, agent_name or ""),
+            "accept": lambda: self._accept(context, agent, owner or "", name),
+            "decline": lambda: self._decline(context, agent, owner or "", name),
+            "remove": lambda: self._remove(context, agent, name, agent_name or ""),
+            "delete": lambda: self._delete(context, agent, name),
+        }
+        return handlers[action]()

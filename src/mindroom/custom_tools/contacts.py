@@ -15,8 +15,13 @@ if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord
     from mindroom.tool_system.tool_function import ToolFunction
 
-# The owner approves these on a card, because the model issuing the call also reads untrusted content.
-_CONFIRMED = frozenset({"request_contact", "accept_contact", "update_contact"})
+_WRITE_ACTIONS: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    "request": (("target", "reason"), frozenset({"target", "reason", "rules", "tools", "party"})),
+    "accept": (("contact_id",), frozenset({"contact_id", "rules", "tools"})),
+    "decline": (("contact_id",), frozenset({"contact_id"})),
+    "update": (("contact_id",), frozenset({"contact_id", "rules", "tools"})),
+    "remove": (("contact_id",), frozenset({"contact_id"})),
+}
 
 
 def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
@@ -41,6 +46,22 @@ def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
     return f"Contact {record.id} with {other.id} already exists and is {record.status}{room}; it is returned unchanged."
 
 
+def _validate_write_params(action: str, params: dict[str, object]) -> str | None:
+    spec = _WRITE_ACTIONS.get(action)
+    if spec is None:
+        return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
+    required, allowed = spec
+    unexpected = [field for field, value in params.items() if value is not None and field not in allowed]
+    if unexpected:
+        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
+    missing = [field for field in required if params[field] is None]
+    if missing:
+        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
+    if params["party"] not in (None, "agent", "me"):
+        return f"Error: Invalid party {params['party']!r}. Expected 'agent' or 'me'."
+    return None
+
+
 class ContactsTools(Toolkit):
     """Tools for the contacts of one personal agent, each acting for the owner who asks."""
 
@@ -50,24 +71,21 @@ class ContactsTools(Toolkit):
             name="contacts",
             tools=[
                 self.list_contacts,
-                self.request_contact,
-                self.accept_contact,
-                self.decline_contact,
-                self.update_contact,
-                self.remove_contact,
+                self.contacts_write,
             ],
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Require confirmation of each request, each acceptance, and each change of rules."""
-        if function.name in _CONFIRMED:
+        """Require confirmation of every contact write."""
+        # The owner approves writes on a card, because the model issuing the call also reads untrusted content.
+        if function.name == "contacts_write":
             return replace(function, gate=ToolGate.CONFIRM)
         return function
 
     async def list_contacts(self) -> str:
         """List your owner's contacts with their IDs, status, room, and your side's rules and tools, and the agents that can be asked.
 
-        Pending requests that wait for your owner's answer show `you: target`.
+        Takes no arguments. Pending requests that wait for your owner's answer show `you: target`.
         """
         try:
             return await run_blocking_until_complete(
@@ -78,26 +96,78 @@ class ContactsTools(Toolkit):
         except ValueError as exc:
             return f"Error: {exc}"
 
-    async def request_contact(
+    async def _dispatch_write(
         self,
-        target: str,
-        reason: str,
+        action: Literal["request", "accept", "decline", "update", "remove"],
+        *,
+        contact_id: str | None,
+        target: str | None,
+        reason: str | None,
+        rules: str | None,
+        tools: list[str] | None,
+        party: Literal["agent", "me"] | None,
+    ) -> str:
+        context = require_tool_runtime_context()
+        if action == "request":
+            assert target is not None
+            assert reason is not None
+            actor, record, posted = await flow.request_contact(
+                context,
+                self.agent_name,
+                target=target,
+                reason=reason,
+                rules=rules,
+                tools=tools,
+                party="agent" if party is None else party,
+            )
+            return _asked(actor.owner, record, posted=posted) + flow.own_side_terms(actor, record)
+        assert contact_id is not None
+        actor = flow.tool_actor(context, self.agent_name)
+        if action == "accept":
+            record = await flow.accept_contact(actor, contact_id, rules=rules, tools=tools)
+            return f"Accepted. Contact room: {record.room_id}." + flow.own_side_terms(actor, record)
+        if action == "decline":
+            record = await flow.decline_contact(actor, contact_id)
+            return f"Declined contact {record.id}."
+        if action == "update":
+            record = await flow.update_contact(actor, contact_id, rules=rules, tools=tools)
+            return f"Updated contact {record.id}." + flow.own_side_terms(actor, record)
+        record = await flow.remove_contact(actor, contact_id)
+        return f"Removed contact {record.id}."
+
+    async def contacts_write(
+        self,
+        action: Literal["request", "accept", "decline", "update", "remove"],
+        contact_id: str | None = None,
+        target: str | None = None,
+        reason: str | None = None,
         rules: str | None = None,
         tools: list[str] | None = None,
-        party: Literal["agent", "me"] = "agent",
+        party: Literal["agent", "me"] | None = None,
     ) -> str:
-        """Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.
+        """Request, answer, update, or remove a contact; your owner approves every write on a card.
 
-        `target` is a personal agent's name or Matrix ID, a person's Matrix ID, or the Matrix ID of an agent of another MindRoom deployment. `reason` tells the other owner why you ask.
-        `rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
-        With `party="me"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.
-        Your owner approves the request on a card, then the other owner decides in their personal room;
-        you are told in this thread when they accept or decline, or with `party="me"` your owner is invited to the contact room when they accept.
+        Actions:
+        - `request`: Ask `target` (personal agent name/Matrix ID, person Matrix ID, or remote deployment agent Matrix ID) for contact with `reason`, optional `rules`, `tools` (toolkit names, never function names), and `party` (`"agent"` default or `"me"` as owner without rules/tools).
+        - `accept`: Accept pending request `contact_id` to open a contact room; optional `rules` and `tools` (omit a field to keep what is set).
+        - `decline`: Decline pending request `contact_id` and notify the requesting thread; requester cannot ask again until the declined contact is removed.
+        - `update`: Change your side's `rules` or `tools` on `contact_id` from the next turn; omit a field to keep it, blank `rules` clear them, `tools` replaces the list.
+        - `remove`: End `contact_id` and leave its room; only the declining owner removes a local decline, while your owner may remove a remote decline.
         """
+        params: dict[str, object] = {
+            "contact_id": contact_id,
+            "target": target,
+            "reason": reason,
+            "rules": rules,
+            "tools": tools,
+            "party": party,
+        }
+        if (error := _validate_write_params(action, params)) is not None:
+            return error
         try:
-            actor, record, posted = await flow.request_contact(
-                require_tool_runtime_context(),
-                self.agent_name,
+            return await self._dispatch_write(
+                action,
+                contact_id=contact_id,
                 target=target,
                 reason=reason,
                 rules=rules,
@@ -106,72 +176,3 @@ class ContactsTools(Toolkit):
             )
         except ValueError as exc:
             return f"Error: {exc}"
-        return _asked(actor.owner, record, posted=posted) + flow.own_side_terms(actor, record)
-
-    async def accept_contact(
-        self,
-        contact_id: str,
-        rules: str | None = None,
-        tools: list[str] | None = None,
-    ) -> str:
-        """Accept a pending contact request that asks your owner, opening a room where both sides talk.
-
-        `rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
-        Omit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,
-        then the requesting agent is told in the thread it asked from and continues there; an agent of another
-        deployment learns of it from your agent joining the room.
-        """
-        try:
-            actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
-            record = await flow.accept_contact(actor, contact_id, rules=rules, tools=tools)
-        except ValueError as exc:
-            return f"Error: {exc}"
-        return f"Accepted. Contact room: {record.room_id}." + flow.own_side_terms(actor, record)
-
-    async def decline_contact(self, contact_id: str) -> str:
-        """Decline a pending contact request that asks your owner, and tell the thread it came from.
-
-        The requester cannot ask again until your owner removes the declined contact. An agent of another deployment
-        learns of the decline from its rejected invite.
-        """
-        try:
-            record = await flow.decline_contact(
-                flow.tool_actor(require_tool_runtime_context(), self.agent_name),
-                contact_id,
-            )
-        except ValueError as exc:
-            return f"Error: {exc}"
-        return f"Declined contact {record.id}."
-
-    async def update_contact(
-        self,
-        contact_id: str,
-        rules: str | None = None,
-        tools: list[str] | None = None,
-    ) -> str:
-        """Change the rules or tools of your owner's side of a contact; it applies from the next turn in that contact.
-
-        Omit a field to keep it; blank `rules` remove your side's rules. `tools` replace the list and are toolkit names you have, never function names.
-        Your owner approves the change on a card.
-        """
-        try:
-            actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
-            record = await flow.update_contact(actor, contact_id, rules=rules, tools=tools)
-        except ValueError as exc:
-            return f"Error: {exc}"
-        return f"Updated contact {record.id}." + flow.own_side_terms(actor, record)
-
-    async def remove_contact(self, contact_id: str) -> str:
-        """Remove a contact; the agents leave its room, which an owner keeps only if they joined it.
-
-        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact,
-        except that your owner may remove a request an agent of another deployment declined.
-        """
-        try:
-            record = await flow.remove_contact(
-                flow.tool_actor(require_tool_runtime_context(), self.agent_name),
-                contact_id,
-            )
-        except ValueError as exc:
-            return f"Error: {exc}"
-        return f"Removed contact {record.id}."

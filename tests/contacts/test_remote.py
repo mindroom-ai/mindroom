@@ -268,7 +268,7 @@ async def test_the_requester_may_remove_a_request_another_deployment_declined(tm
     runtime = _runtime()
     with pytest.raises(
         ValueError,
-        match=f"^{re.escape(REMOTE)} declined contact out; remove it with remove_contact to ask again",
+        match=f'^{re.escape(REMOTE)} declined contact out; remove it with contacts_write\\(action="remove", \\.\\.\\.\\) to ask again',
     ):
         await _request(config, paths, runtime, target=REMOTE)
     actor = flow.tool_actor(flow_context(config, paths, runtime), "mind_alice")
@@ -301,7 +301,7 @@ async def test_the_toolkit_says_who_was_asked(tmp_path: Path) -> None:
     runtime = _runtime()
     context = flow_context(config, paths, runtime)
     with _matrix(), tool_runtime_context(context):
-        result = await ContactsTools("mind_alice").request_contact(target=REMOTE, reason="Find a slot")
+        result = await ContactsTools("mind_alice").contacts_write("request", target=REMOTE, reason="Find a slot")
     record = _stored(paths)[0]
     assert result.startswith(
         f"Asked {REMOTE}, an agent of another MindRoom deployment, for contact {record.id}; "
@@ -748,7 +748,10 @@ async def test_the_other_agent_rejecting_the_invite_is_the_decline(tmp_path: Pat
         await _member(config, paths, runtime, "mind_alice", membership="leave")
     assert _statuses(paths) == ["declined"]
     [post] = [call for call in send.await_args_list if call.args[1] == ORIGIN_ROOM]
-    assert post.args[2]["body"] == f"{REMOTE} declined contact out; remove it with remove_contact to ask again."
+    assert (
+        post.args[2]["body"]
+        == f'{REMOTE} declined contact out; remove it with contacts_write(action="remove", ...) to ask again.'
+    )
     runtime.bots["mind_alice"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
 
 
@@ -1039,7 +1042,10 @@ async def test_a_start_catches_up_on_a_decline_it_never_saw(tmp_path: Path) -> N
     assert _statuses(paths) == ["declined"]
     read.assert_awaited_once_with(runtime.clients["mind_alice"], REMOTE_ROOM, REMOTE)
     [post] = [call for call in send.await_args_list if call.args[1] == ORIGIN_ROOM]
-    assert post.args[2]["body"] == f"{REMOTE} declined contact out; remove it with remove_contact to ask again."
+    assert (
+        post.args[2]["body"]
+        == f'{REMOTE} declined contact out; remove it with contacts_write(action="remove", ...) to ask again.'
+    )
     runtime.bots["mind_alice"].change_local_membership.assert_awaited_once_with(REMOTE_ROOM, "leave")
 
 
