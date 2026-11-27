@@ -62,7 +62,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   Split into `<toolkit>_read` / `<toolkit>_write` (or `_send` / `_run` / `_inspect`) only for a real boundary: read-only `include_tools` isolation, `ToolGate.CONFIRM`, or a mega-schema (>15–20 parameters).
   Use declarative `tool_approval.rules[].arguments` when only approval gating differs across actions.
 - **Naming**: Function names must match `^[a-zA-Z0-9_-]{1,64}$` (no dots; OpenAI, Anthropic, and Claude Code reject `.` and Gemini reserves `default_api.`) and use a single underscore (`<toolkit>_<verb>`), never `__`.
-  Every integration, provider, or database toolkit outside the core-primitive allowlist (`filesystem`, `shell`, `dynamic_tools`, `delegate`, `chat_ui`, `attachments`, `thread_*`, etc.) must name every function `<toolkit>` or `<toolkit>_<verb>`.
+  Every integration, provider, or database toolkit outside the core-primitive allowlist (`filesystem`, `shell`, `dynamic_tools`, `delegate`, `chat_ui`, `attachments`, `thread_*`, etc.) and explicit multi-product/prefix exceptions (`atlassian`, `email`, `googlesearch`, `baidusearch`, `financial_datasets_api`) must name every function `<toolkit>` or `<toolkit>_<verb>`.
   `tests/tool_system/test_toolkits.py` enforces zero duplicate function names and strict prefix compliance across `schemas.json` and `schemas_all_enabled.json`.
 - **Token efficiency**: Keep tool and parameter descriptions short and plain, drop text that repeats error messages or UI cards, omit legacy parameters from schemas, prefer string-first arguments where ergonomic, and rely on plain JSON types for `X | None = None` optionals.
   Measure schema and result token deltas against `origin/main` on every tool change.

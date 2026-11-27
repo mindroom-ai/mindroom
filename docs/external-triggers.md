@@ -236,7 +236,7 @@ def check():
 Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers(action="watch_script", ...)`:
 
 - **Email watching + cheap triage (`gmail`):** *"Whenever I get an unread email from my accountant or about an invoice, summarize it and draft a reply."* The check polls `tool("gmail", "gmail_read", action="search_emails", query=...)`, tracks `seen_ids` in `state` so idle ticks cost zero LLM tokens, and optionally attaches `triage_instructions` + a cheap `triage_model` to filter out noise before waking the main agent. Write tools configured to require approval under `tool_approval` (such as `gmail_send`) stay blocked inside the background tick, while the woken turn can still ask you to approve sending a reply.
-- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
+- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "website_read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
 - **Smart home threshold alerts (`homeassistant`):** *"Alert me if the garage door stays open for more than 15 minutes."* Read `tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door")`, compare Home Assistant's `last_changed` timestamp against the current UTC time, and track `alerted_for` in `state` so each open event alerts once:
 
   ```python
@@ -257,7 +257,7 @@ Users normally describe what they want in plain language in chat and let the age
       return {"title": "Garage door open >15m", "data": {"minutes_open": round(minutes_open, 1)}}
   ```
 
-- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
+- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "postgres_run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
 - **Cross-agent wakeups & thread workflows:** Any `watch_script` runs with the authoring agent's credentials, but can wake a different agent or team (`target_agent`), post into a fresh thread (`new_thread=True`, optional `thread_key`), or reopen a resolved thread (`reopen_on_fire=True`).
 
 #### `check()` authoring contract

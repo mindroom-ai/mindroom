@@ -63,8 +63,8 @@ agents:
 ```
 
 ```python
-create_srt(transcription_srt, "clips/demo.srt")
-embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
+moviepy_video_tools_create_srt(transcription_srt, "clips/demo.srt")
+moviepy_video_tools_embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
 ```
 
 ## [`giphy`]

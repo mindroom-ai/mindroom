@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
+    SINGLE_VERB_RENAMED_TARGETS,
     STRICT_WILDCARD_SCRIPT_TOOLKITS,
 )
 
@@ -476,7 +477,46 @@ def _is_broad_glob_for_old(rule: _ApprovalRule, *, old: str, broad_probe: str) -
     return any(fnmatchcase(old, pattern) and fnmatchcase(broad_probe, pattern) for pattern in rule.match_patterns())
 
 
-def _retired_approval_pair_error_for_agent(
+_RetiredApprovalFailureKind = Literal["script", "conflict", "rem_old", "rem_new"]
+
+
+def _format_retired_approval_error(
+    kind: _RetiredApprovalFailureKind,
+    index: int,
+    *,
+    rules: Sequence[_ApprovalRule],
+    old: str,
+    news: Sequence[str],
+    default: str,
+) -> str:
+    joined = ", ".join(news)
+    target = news[0] if len(news) == 1 else f"[{joined}]"
+    if kind == "script":
+        return (
+            f"tool_approval.rules[{index}].match {rules[index].match!r} runs approval script "
+            f"{rules[index].script!r} for retired tool {old}; {old} is now {joined}; "
+            f"update the script for {joined} and add an explicit match: {target} rule."
+        )
+    if kind == "conflict":
+        return (
+            f"tool_approval.rules[{index}].match {rules[index].match!r} targets retired {old}, "
+            f"which conflicts with {joined}; remove the retired {old} rule or reconcile it with {joined}."
+        )
+    if kind == "rem_old":
+        verb = "gets" if len(news) == 1 else "get"
+        return (
+            f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; "
+            f"{old} is now {joined}, which now {verb} a different approval decision; "
+            f"rewrite the rules for {target}."
+        )
+    return (
+        f"tool_approval.rules[{index}].match {rules[index].match!r} now decides {joined}, "
+        f"changing tool_approval.default {default!r} that previously decided {old}; "
+        f"rewrite the rules for {target}."
+    )
+
+
+def _retired_approval_pair_failure_for_agent(
     rules: Sequence[_ApprovalRule],
     *,
     old: str,
@@ -486,7 +526,7 @@ def _retired_approval_pair_error_for_agent(
     default_timeout_days: float,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
-) -> str | None:
+) -> tuple[_RetiredApprovalFailureKind, int] | None:
     old_indices = _agent_rule_indices(rules, old, agent)
     new_indices = _agent_rule_indices(rules, new, agent)
     shared_prefix_len = 0
@@ -517,11 +557,7 @@ def _retired_approval_pair_error_for_agent(
         )
         is not None
     ):
-        return (
-            f"tool_approval.rules[{script_index}].match {rules[script_index].match!r} runs approval script "
-            f"{rules[script_index].script!r} for retired tool {old}; {old} is now {new}; "
-            f"update the script for {new} and add an explicit match: {new} rule."
-        )
+        return ("script", script_index)
     old_chain = _effective_approval_chain(
         rules,
         old_indices,
@@ -555,30 +591,50 @@ def _retired_approval_pair_error_for_agent(
             if broad_probe is not None
             else None
         )
-        return (
-            f"tool_approval.rules[{conflict_index}].match {rules[conflict_index].match!r} targets retired {old}, "
-            f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
-            if conflict_index is not None
-            else None
-        )
+        return ("conflict", conflict_index) if conflict_index is not None else None
     if rem_old:
         report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
-        return (
-            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; "
-            f"{old} is now {new}, which now gets a different approval decision; "
-            f"rewrite the rules for {new}."
-        )
+        return ("rem_old", report_index)
     if rem_new:
         report_index = next(
             (index for index in rem_new if new not in rules[index].match_patterns()),
             rem_new[0],
         )
-        return (
-            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
-            f"changing tool_approval.default {default!r} that previously decided {old}; "
-            f"rewrite the rules for {new}."
-        )
+        return ("rem_new", report_index)
     return None
+
+
+def _retired_approval_pair_error_for_agent(
+    rules: Sequence[_ApprovalRule],
+    *,
+    old: str,
+    new: str,
+    agent: str,
+    default: str,
+    default_timeout_days: float,
+    reject_wildcard_scripts: bool = False,
+    broad_probe: str | None = None,
+) -> str | None:
+    failure = _retired_approval_pair_failure_for_agent(
+        rules,
+        old=old,
+        new=new,
+        agent=agent,
+        default=default,
+        default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=reject_wildcard_scripts,
+        broad_probe=broad_probe,
+    )
+    if failure is None:
+        return None
+    return _format_retired_approval_error(
+        failure[0],
+        failure[1],
+        rules=rules,
+        old=old,
+        news=[new],
+        default=default,
+    )
 
 
 def _first_retired_approval_error(
@@ -684,31 +740,58 @@ def retired_action_argument_approval_error(
 
 
 def retired_consolidated_approval_error(
-    toolkit_name: str,
+    toolkit_checks: Sequence[tuple[str, Mapping[str, str], bool | None]],
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
-    renames: Mapping[str, str] | None = None,
     agent_names: Collection[str] = (),
-    *,
-    reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
-    """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
-    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
-    if not effective_renames:
-        return None
-    return _first_retired_approval_error(
-        effective_renames.items(),
-        rules=rules,
-        default=default,
-        default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=(
+    """Return a migration error when approval rules decide consolidated functions differently from retired names.
+
+    Groups enabled replacements by retired name so a shared bare name across multiple enabled toolkits
+    (such as ``run_query`` across ``postgres`` and ``redshift``) names every failing replacement at once.
+    """
+    targets_by_old: dict[str, dict[str, bool]] = {}
+    for toolkit_name, renames, reject_wildcard_scripts in toolkit_checks:
+        reject_wildcards = (
             toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
             if reject_wildcard_scripts is None
             else reject_wildcard_scripts
-        ),
-        agent_names=agent_names,
-    )
+        )
+        for old, new in renames.items():
+            targets = targets_by_old.setdefault(old, {})
+            targets[new] = targets.get(new, False) or reject_wildcards
+
+    probes = _probe_agents(rules, agent_names)
+    for old, targets in targets_by_old.items():
+        first_failure: tuple[_RetiredApprovalFailureKind, int] | None = None
+        failing_news: list[str] = []
+        for new, reject_wildcards in targets.items():
+            for agent in probes:
+                failure = _retired_approval_pair_failure_for_agent(
+                    rules,
+                    old=old,
+                    new=new,
+                    agent=agent,
+                    default=default,
+                    default_timeout_days=default_timeout_days,
+                    reject_wildcard_scripts=reject_wildcards,
+                )
+                if failure is not None:
+                    if first_failure is None:
+                        first_failure = failure
+                    failing_news.append(new)
+                    break
+        if first_failure is not None:
+            return _format_retired_approval_error(
+                first_failure[0],
+                first_failure[1],
+                rules=rules,
+                old=old,
+                news=failing_news,
+                default=default,
+            )
+    return None
 
 
 def _retired_function_filter(
@@ -726,94 +809,8 @@ def _retired_function_filter(
     return None
 
 
-_SINGLE_VERB_RENAMED_TARGETS = frozenset(
-    {
-        "contacts_read",
-        "email_invite_read",
-        "shared_directories_read",
-        "google_docs_read",
-        "claude_agent_read",
-        "twilio_send",
-        "agentql_scrape_website",
-        "agentql_custom_scrape_website",
-        "airflow_save_dag_file",
-        "airflow_read_dag_file",
-        "arxiv_search",
-        "arxiv_read_papers",
-        "aws_lambda_list_functions",
-        "aws_lambda_invoke_function",
-        "aws_ses_send_email",
-        "browserbase_screenshot",
-        "cartesia_text_to_speech",
-        "cartesia_list_voices",
-        "cartesia_localize_voice",
-        "crawl4ai_crawl",
-        "csv_query",
-        "custom_api_request",
-        "duckdb_run_query",
-        "eleven_labs_get_voices",
-        "eleven_labs_generate_sound_effect",
-        "eleven_labs_text_to_speech",
-        "exa_research",
-        "fal_generate_media",
-        "fal_image_to_image",
-        "firecrawl_scrape_website",
-        "firecrawl_crawl_website",
-        "firecrawl_map_website",
-        "firecrawl_search_web",
-        "gemini_generate_image",
-        "gemini_generate_video",
-        "giphy_search_gifs",
-        "google_bigquery_run_sql_query",
-        "google_scholar_search",
-        "groq_transcribe_audio",
-        "groq_translate_audio",
-        "groq_generate_speech",
-        "jina_read_url",
-        "jina_search_query",
-        "linkup_search",
-        "lumalabs_generate_video",
-        "lumalabs_image_to_video",
-        "modelslabs_generate_media",
-        "moviepy_video_tools_extract_audio",
-        "moviepy_video_tools_create_srt",
-        "moviepy_video_tools_embed_captions",
-        "neo4j_run_cypher_query",
-        "newspaper_read_article",
-        "openai_transcribe_audio",
-        "openai_generate_image",
-        "openai_generate_speech",
-        "pandas_create_dataframe",
-        "pandas_run_operation",
-        "postgres_run_query",
-        "postgres_export_table_to_path",
-        "pubmed_search",
-        "redshift_run_query",
-        "redshift_export_table_to_path",
-        "replicate_generate_media",
-        "resend_send_email",
-        "scrapegraph_smartscraper",
-        "scrapegraph_markdownify",
-        "scrapegraph_searchscraper",
-        "scrapegraph_crawl",
-        "scrapegraph_scrape",
-        "serpapi_search_google",
-        "serpapi_search_youtube",
-        "sql_run_query",
-        "tavily_search",
-        "tavily_search_context",
-        "tavily_extract",
-        "trafilatura_html_to_text",
-        "trafilatura_crawl_website",
-        "website_read_url",
-        "wikipedia_search",
-        "zendesk_search",
-    },
-)
-
-
 def _is_single_verb_renamed_target(new: str) -> bool:
-    return new in _SINGLE_VERB_RENAMED_TARGETS or new.endswith("_google_docs_read")
+    return new in SINGLE_VERB_RENAMED_TARGETS or new.endswith("_google_docs_read")
 
 
 def _single_verb_rename_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:

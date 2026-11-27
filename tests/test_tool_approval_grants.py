@@ -5087,3 +5087,70 @@ def test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped(t
         "while preserving any other entries in the list"
     ) in bq_message
     assert "action" not in bq_message.split("was removed; ", 1)[1]
+
+
+def test_shared_retired_bare_name_reports_all_enabled_replacements(tmp_path: Path) -> None:
+    """When multiple enabled toolkits share a retired bare name, migration errors name every failing replacement."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    def _validate(agents: dict[str, dict[str, object]], rules: list[dict[str, object]]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "defaults": {"tools": []},
+                "agents": agents,
+                "tool_approval": {"rules": rules},
+            },
+            runtime_paths,
+        )
+
+    two_db_agents = {
+        "pg_agent": {"display_name": "PG", "tools": ["postgres"], "include_default_tools": False},
+        "rs_agent": {"display_name": "RS", "tools": ["redshift"], "include_default_tools": False},
+    }
+
+    # Exact retired rule matching shared `run_query` across separate agents names both replacements.
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _validate(two_db_agents, [{"match": "run_query", "action": "require_approval"}])
+    message = str(exc_info.value)
+    assert "postgres_run_query" in message
+    assert "redshift_run_query" in message
+    assert "[postgres_run_query, redshift_run_query]" in message
+
+    # Adding only one explicit override while keeping `run_query` still fails on the uncovered sibling.
+    with pytest.raises(ConfigRuntimeValidationError) as partial_exc_info:
+        _validate(
+            two_db_agents,
+            [
+                {"match": "postgres_run_query", "action": "require_approval"},
+                {"match": "run_query", "action": "require_approval"},
+            ],
+        )
+    partial_message = str(partial_exc_info.value)
+    assert "redshift_run_query" in partial_message
+    assert "postgres_run_query" not in partial_message
+
+    # Rewriting the rule to cover both enabled replacements loads cleanly.
+    loaded = _validate(
+        two_db_agents,
+        [{"match": ["postgres_run_query", "redshift_run_query"], "action": "require_approval"}],
+    )
+    assert loaded.tool_approval.rules[0].match == ["postgres_run_query", "redshift_run_query"]
+
+    # Wildcard approval scripts also name all enabled replacements for a shared retired bare name.
+    two_web_agents = {
+        "web_agent": {"display_name": "Web", "tools": ["website"], "include_default_tools": False},
+        "jina_agent": {"display_name": "Jina", "tools": ["jina"], "include_default_tools": False},
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as wildcard_exc_info:
+        _validate(
+            two_web_agents,
+            [{"match": "skill", "script": "check.py"}, {"match": "*", "script": "check.py"}],
+        )
+    wildcard_message = str(wildcard_exc_info.value)
+    assert "jina_read_url" in wildcard_message
+    assert "website_read_url" in wildcard_message
+    assert "[jina_read_url, website_read_url]" in wildcard_message
