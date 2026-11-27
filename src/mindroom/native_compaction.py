@@ -83,7 +83,7 @@ def native_replay_route_matches(message: Message, route: str | None) -> bool | N
         return None
     if state is None:
         return route is None
-    if not isinstance(state.get("route"), str):
+    if not isinstance(state, dict) or not isinstance(state.get("route"), str):
         return False
     # Missing provenance cannot prove that legacy thinking used canonical input.
     prefix_route = state["route"] if state.get("checkpoint_prefix", True) else None

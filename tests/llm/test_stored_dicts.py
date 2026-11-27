@@ -7,16 +7,27 @@ decode, are ``tests/llm/test_codecs.py``'s.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
 
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import EMPTY_META, UNSET, InvalidModelStamp, Message, MessageMeta, ModelProvenance
+from mindroom.llm.messages import (
+    EMPTY_META,
+    UNSET,
+    InvalidStamp,
+    Message,
+    MessageMeta,
+    ModelProvenance,
+    is_queued_notice_message,
+    stable_serialize,
+)
 from mindroom.llm.request_identity import message_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.native_compaction import native_replay_route_matches, recorded_native_settings
 
 # --- media -----------------------------------------------------------------------------------------------------
 
@@ -404,7 +415,7 @@ def test_legacy_provider_data_round_trips_all_18_internal_keys_and_opaque_wire_k
 
 
 def test_message_meta_tri_state_malformed_and_legacy_values_round_trip() -> None:
-    """Tri-state ``native_compaction`` / ``portable_replay``, ``InvalidModelStamp``, and legacy persisted notices."""
+    """Tri-state ``native_compaction`` / ``portable_replay``, ``InvalidStamp``, and legacy persisted notices."""
     # 3-state native_compaction
     absent = Message.from_dict({"id": "a", "role": "assistant", "created_at": 1})
     assert absent.meta.native_compaction is UNSET
@@ -420,7 +431,11 @@ def test_message_meta_tri_state_malformed_and_legacy_values_round_trip() -> None
     malformed_nc = Message.from_dict(
         {"id": "b", "role": "assistant", "provider_data": {"mindroom_native_compaction": "bad"}, "created_at": 1},
     )
-    assert malformed_nc.meta.native_compaction == {}
+    assert malformed_nc.meta.native_compaction == InvalidStamp("bad")
+    assert malformed_nc.provider_data is None
+    assert malformed_nc.to_dict()["provider_data"] == {"mindroom_native_compaction": "bad"}
+    assert native_replay_route_matches(malformed_nc, "route-1") is False
+    assert recorded_native_settings(malformed_nc) is None
 
     # 3-state portable_replay
     portable_false = Message.from_dict(
@@ -439,14 +454,15 @@ def test_message_meta_tri_state_malformed_and_legacy_values_round_trip() -> None
         {"id": "pb", "role": "assistant", "provider_data": {"mindroom_portable_replay": 1}, "created_at": 1},
     )
     assert portable_bad.meta.portable_replay is None
-    assert "provider_data" not in portable_bad.to_dict()
+    assert portable_bad.provider_data == {"mindroom_portable_replay": 1}
+    assert portable_bad.to_dict()["provider_data"] == {"mindroom_portable_replay": 1}
 
-    # InvalidModelStamp lossless round-trip
+    # InvalidStamp lossless round-trip on mindroom_model
     bad_stamp = {"id": "only-id"}
     invalid_model = Message.from_dict(
         {"id": "im", "role": "assistant", "provider_data": {"mindroom_model": bad_stamp}, "created_at": 1},
     )
-    assert invalid_model.meta.model == InvalidModelStamp(bad_stamp)
+    assert invalid_model.meta.model == InvalidStamp(bad_stamp)
     assert invalid_model.to_dict()["provider_data"] == {"mindroom_model": bad_stamp}
 
     # Legacy queued notice "persisted"
@@ -468,6 +484,102 @@ def test_message_meta_tri_state_malformed_and_legacy_values_round_trip() -> None
         "mindroom_queued_message_notice": "persisted",
         "mindroom_queued_message_notice_response_turn_id": "turn-old",
     }
+
+
+@pytest.mark.parametrize("raw_summary", [{}, []], ids=["dict", "list"])
+def test_unhashable_compaction_summary_decodes_and_round_trips_losslessly(raw_summary: object) -> None:
+    """Unhashable ``mindroom_compaction_summary`` values never raise ``TypeError`` and preserve wire bytes and digest."""
+    stored = {
+        "id": "u-summary",
+        "role": "user",
+        "content": "hello",
+        "provider_data": {"mindroom_compaction_summary": raw_summary},
+        "created_at": 1,
+    }
+
+    decoded = Message.from_dict(stored)
+
+    assert decoded.meta == EMPTY_META
+    assert decoded.meta.compaction_summary is None
+    assert decoded.provider_data == {"mindroom_compaction_summary": raw_summary}
+    assert decoded.to_dict() == stored
+    expected_digest = hashlib.sha256(
+        stable_serialize([{"role": "user", "content": "hello", "provider_data": stored["provider_data"]}, []]).encode(
+            "utf-8",
+            "surrogatepass",
+        ),
+    ).digest()
+    assert message_digest(decoded) == expected_digest
+
+
+@pytest.mark.parametrize(
+    ("wire_provider_data", "expected_meta", "expected_remaining"),
+    [
+        pytest.param(
+            {"mindroom_aggregate_usage": False},
+            EMPTY_META,
+            {"mindroom_aggregate_usage": False},
+            id="aggregate_usage_false",
+        ),
+        pytest.param(
+            {"mindroom_portable_replay": None},
+            EMPTY_META,
+            {"mindroom_portable_replay": None},
+            id="portable_replay_none",
+        ),
+        pytest.param(
+            {"mindroom_portable_replay": 1},
+            EMPTY_META,
+            {"mindroom_portable_replay": 1},
+            id="portable_replay_int",
+        ),
+        pytest.param(
+            {"mindroom_fallback_model": None},
+            EMPTY_META,
+            {"mindroom_fallback_model": None},
+            id="fallback_model_none",
+        ),
+        pytest.param(
+            {"mindroom_queued_message_notice": False},
+            EMPTY_META,
+            {"mindroom_queued_message_notice": False},
+            id="queued_notice_false",
+        ),
+        pytest.param(
+            {"mindroom_native_compaction": "bad"},
+            MessageMeta(native_compaction=InvalidStamp("bad")),
+            None,
+            id="native_compaction_bad",
+        ),
+    ],
+)
+def test_non_canonical_wire_provider_data_round_trips_losslessly_with_digest_parity(
+    wire_provider_data: dict[str, object],
+    expected_meta: MessageMeta,
+    expected_remaining: dict[str, object] | None,
+) -> None:
+    """Explicit falsy or non-canonical wire values decode to default/invalid ``meta`` and preserve exact wire bytes and digest."""
+    stored = {
+        "id": "m-nc",
+        "role": "assistant",
+        "content": "ok",
+        "provider_data": dict(wire_provider_data),
+        "created_at": 1,
+    }
+
+    decoded = Message.from_dict(stored)
+
+    assert decoded.meta == expected_meta
+    assert decoded.provider_data == expected_remaining
+    assert is_queued_notice_message(decoded) is False
+    assert decoded.to_dict() == stored
+    expected_digest = hashlib.sha256(
+        stable_serialize([{"role": "assistant", "content": "ok", "provider_data": wire_provider_data}, []]).encode(
+            "utf-8",
+            "surrogatepass",
+        ),
+    ).digest()
+    assert message_digest(decoded) == expected_digest
 
 
 def test_message_meta_does_not_alias_across_shallow_replace() -> None:

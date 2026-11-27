@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from enum import Enum
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.message_meta import EMPTY_META, UNSET, InvalidStamp, MessageMeta, ModelProvenance, Unset
 from mindroom.llm.usage import MessageMetrics
 from mindroom.logging_config import get_logger
 
@@ -51,138 +51,6 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
     if not items:
         return None
     return [decode(item) for item in items]
-
-
-class Unset(Enum):
-    """Sentinel for a tri-state metadata field absent from a stored message (distinct from explicit ``None``)."""
-
-    UNSET = "unset"
-
-
-UNSET = Unset.UNSET
-
-
-@dataclass(frozen=True, slots=True)
-class ModelProvenance:
-    """The model that answered a message: its id and its route's provider name, which usage rows and prices key by."""
-
-    model_id: str
-    provider: str
-
-
-@dataclass(frozen=True, slots=True)
-class InvalidModelStamp:
-    """A stored ``mindroom_model`` value that does not match ``{"id": str, "provider": str}``."""
-
-    raw: object
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class MessageMeta:
-    """Internal MindRoom control and provenance metadata, stored inside ``provider_data`` on the wire."""
-
-    model: ModelProvenance | InvalidModelStamp | None = None
-    aggregate_usage: bool = False
-    attempt_rewritten: bool = False
-    fallback_model: str | None = None
-    cut_off_text: str | None = None
-    media_msgtype: str | None = None
-    queued_message_notice: bool | Literal["persisted"] = False
-    queued_notice_turn_id: str | None = None
-    prompt_update: bool = False
-    native_compaction: dict[str, Any] | None | Unset = UNSET
-    encrypted_replay_reset: str | None = None
-    compaction_summary: Literal["scope", "run"] | None = None
-    compaction_summary_follows: bool = False
-    thread_context_note: bool = False
-    own_thread_message: bool = False
-    request_identity: str | None = None
-    cache_routing: str | None = None
-    portable_replay: bool | None = None
-
-
-EMPTY_META = MessageMeta()
-
-
-def _str_or_none(value: object) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def _decode_model_stamp(raw: object) -> ModelProvenance | InvalidModelStamp:
-    if isinstance(raw, dict):
-        recorded = cast("dict[str, object]", raw)
-        model_id, provider = recorded.get("id"), recorded.get("provider")
-        if isinstance(model_id, str) and isinstance(provider, str):
-            return ModelProvenance(model_id=model_id, provider=provider)
-    return InvalidModelStamp(raw)
-
-
-def _split_provider_data(raw: Mapping[str, Any]) -> tuple[dict[str, Any] | None, MessageMeta]:
-    pd = dict(raw)
-    model = _decode_model_stamp(pd.pop("mindroom_model")) if "mindroom_model" in pd else None
-    notice = pd.pop("mindroom_queued_message_notice", None)
-    summary = pd.pop("mindroom_compaction_summary", None)
-    portable = pd.pop("mindroom_portable_replay", None)
-    native: dict[str, Any] | None | Unset = UNSET
-    if "mindroom_native_compaction" in pd:
-        raw_native = pd.pop("mindroom_native_compaction")
-        native = raw_native if raw_native is None or isinstance(raw_native, dict) else {}
-    meta = MessageMeta(
-        model=model,
-        aggregate_usage=pd.pop("mindroom_aggregate_usage", None) is True,
-        attempt_rewritten=pd.pop("mindroom_attempt_rewritten", None) is True,
-        fallback_model=_str_or_none(pd.pop("mindroom_fallback_model", None)),
-        cut_off_text=_str_or_none(pd.pop("mindroom_cut_off_text", None)),
-        media_msgtype=_str_or_none(pd.pop("mindroom_media_msgtype", None)),
-        queued_message_notice=notice if notice is True or notice == "persisted" else False,
-        queued_notice_turn_id=_str_or_none(pd.pop("mindroom_queued_message_notice_response_turn_id", None)),
-        prompt_update=pd.pop("mindroom_prompt_update", None) is True,
-        native_compaction=native,
-        encrypted_replay_reset=_str_or_none(pd.pop("mindroom_encrypted_replay_reset", None)),
-        compaction_summary=cast("Literal['scope', 'run']", summary) if summary in {"scope", "run"} else None,
-        compaction_summary_follows=pd.pop("mindroom_compaction_summary_follows", None) is True,
-        thread_context_note=pd.pop("mindroom_thread_context_note", None) is True,
-        own_thread_message=pd.pop("mindroom_own_thread_message", None) is True,
-        request_identity=_str_or_none(pd.pop("mindroom_request", None)),
-        cache_routing=_str_or_none(pd.pop("mindroom_cache_routing", None)),
-        portable_replay=portable if isinstance(portable, bool) else None,
-    )
-    return pd or None, EMPTY_META if meta == EMPTY_META else meta
-
-
-def _meta_to_dict(meta: MessageMeta) -> dict[str, Any]:
-    if meta is EMPTY_META:
-        return {}
-    notice = meta.queued_message_notice
-    out: dict[str, Any] = {
-        key: value
-        for key, value in (
-            ("mindroom_aggregate_usage", True if meta.aggregate_usage else None),
-            ("mindroom_attempt_rewritten", True if meta.attempt_rewritten else None),
-            ("mindroom_fallback_model", meta.fallback_model),
-            ("mindroom_cut_off_text", meta.cut_off_text),
-            ("mindroom_media_msgtype", meta.media_msgtype),
-            ("mindroom_queued_message_notice", notice if notice is True or notice == "persisted" else None),
-            ("mindroom_queued_message_notice_response_turn_id", meta.queued_notice_turn_id),
-            ("mindroom_prompt_update", True if meta.prompt_update else None),
-            ("mindroom_encrypted_replay_reset", meta.encrypted_replay_reset),
-            ("mindroom_compaction_summary", meta.compaction_summary),
-            ("mindroom_compaction_summary_follows", True if meta.compaction_summary_follows else None),
-            ("mindroom_thread_context_note", True if meta.thread_context_note else None),
-            ("mindroom_own_thread_message", True if meta.own_thread_message else None),
-            ("mindroom_request", meta.request_identity),
-            ("mindroom_cache_routing", meta.cache_routing),
-            ("mindroom_portable_replay", meta.portable_replay),
-        )
-        if value is not None
-    }
-    if isinstance(meta.model, ModelProvenance):
-        out["mindroom_model"] = {"id": meta.model.model_id, "provider": meta.model.provider}
-    elif isinstance(meta.model, InvalidModelStamp):
-        out["mindroom_model"] = meta.model.raw
-    if meta.native_compaction is not UNSET:
-        out["mindroom_native_compaction"] = meta.native_compaction
-    return out
 
 
 def is_queued_notice_message(message: Message) -> bool:
@@ -282,7 +150,7 @@ class Message:
         ``from_history`` and ``stop_after_tool_call`` only when True, and ``add_to_agent_memory: False`` when
         ``is_turn_context`` is True. Internal ``meta`` entries merge into ``provider_data`` on the wire.
         """
-        meta_data = _meta_to_dict(self.meta)
+        meta_data = self.meta.to_provider_data()
         if isinstance(self.provider_data, dict):
             provider_data: Any = {**self.provider_data, **meta_data} if meta_data else self.provider_data
         else:
@@ -349,7 +217,7 @@ class Message:
         tool_call_id, tool_calls = _stored_call_ids(data, message_id)
         raw_pd = data.get("provider_data")
         if isinstance(raw_pd, dict):
-            provider_data, meta = _split_provider_data(raw_pd)
+            provider_data, meta = MessageMeta.from_provider_data(raw_pd)
         else:
             provider_data, meta = raw_pd, EMPTY_META
         return cls(
@@ -510,7 +378,7 @@ __all__ = [
     "EMPTY_META",
     "MEDIA_FOLLOW_UP_TEXT",
     "UNSET",
-    "InvalidModelStamp",
+    "InvalidStamp",
     "Message",
     "MessageMeta",
     "ModelProvenance",

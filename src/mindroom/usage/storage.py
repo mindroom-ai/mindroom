@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import InvalidModelStamp, ModelProvenance
+from mindroom.llm.messages import InvalidStamp, ModelProvenance
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.llm.usage import TOKEN_FIELDS, RequestUsage, TokenCounts
 
@@ -137,7 +137,7 @@ def _message_request_snapshot(message: Message) -> dict[str, object] | None:
         return None
     snapshot = _project_request(request)
     assert snapshot is not None, "a request reported counters, so it projects to a snapshot"
-    if isinstance(message.meta.model, InvalidModelStamp):
+    if isinstance(message.meta.model, InvalidStamp):
         snapshot["model"] = snapshot["model_provider"] = False
     return snapshot
 
