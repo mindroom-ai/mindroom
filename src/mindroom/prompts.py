@@ -134,7 +134,7 @@ INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options
 ```"""
 
 SKILLS_TOOL_USAGE_PROMPT = (
-    "Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); "
+    'Load skills via `skill(action="instructions", name=...)` if available (skill names are not callable tools); '
     "do not read global `SKILL.md` files directly."
 )
 
@@ -233,8 +233,8 @@ BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT = (
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "
     "Their content was not inspected. Do not claim to have seen, heard, or read the removed media. "
-    "Do not repeat get_attachment(view=True) for it on this model. "
-    "Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. "
+    'Do not repeat attachment(action="get", ..., view=True) for it on this model. '
+    'Use attachment(action="get", ...) without view to inspect metadata or save the file with mindroom_output_path. '
     "Then use other available tools to extract or interpret its content. "
     "If no suitable tool is available, explain the limitation to the user."
 )
@@ -415,7 +415,7 @@ Signals to look for (any one of these warrants action):
 - The user corrected your style, tone, format, legibility, or verbosity. Frustration signals like "stop doing X", "this is too verbose", "just give me the answer", or an explicit "remember this" are FIRST-CLASS skill signals. Update the relevant skill to embed the preference so the next session starts already knowing.
 - The user corrected your workflow, approach, or sequence of steps. Encode the correction as a pitfall or explicit step in the skill that governs that class of task.
 - A non-trivial technique, fix, workaround, debugging path, or tool-usage pattern emerged that a future session would benefit from. Capture it.
-- A skill that was loaded or consulted in the conversation (for example through get_skill_instructions) turned out to be wrong, missing a step, or outdated. Patch it now.
+- A skill that was loaded or consulted in the conversation (for example through the skill tool) turned out to be wrong, missing a step, or outdated. Patch it now.
 
 Preference order: prefer the earliest action that fits, but do pick one when a signal above fired:
 1. UPDATE A SKILL THAT WAS IN PLAY. If a learner-owned skill loaded in the conversation covers the new learning, patch that one first.

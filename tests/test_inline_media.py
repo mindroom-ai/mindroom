@@ -145,8 +145,12 @@ async def test_inline_image_encrypted_upload_registers_and_attaches_only_referen
         patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome", new=uploads),
         tool_runtime_context(ctx),
     ):
-        res1 = json.loads(await AttachmentTools().inline_image(rec1.attachment_id, alt="Chart"))
-        res2 = json.loads(await AttachmentTools().inline_image(rec2.attachment_id, alt="Unused"))
+        res1 = json.loads(
+            await AttachmentTools().attachment("inline_image", attachment_id=rec1.attachment_id, alt="Chart"),
+        )
+        res2 = json.loads(
+            await AttachmentTools().attachment("inline_image", attachment_id=rec2.attachment_id, alt="Unused"),
+        )
 
     assert res1["status"] == "ok"
     assert res1["markdown"] == "![Chart](mxc://hs/img1)"
@@ -196,7 +200,9 @@ async def test_inline_image_reuses_runtime_encrypted_media_in_encrypted_room(tmp
         patch("mindroom.custom_tools.attachments.upload_media_bytes_as_mxc_outcome", new=AsyncMock()) as upload,
         tool_runtime_context(ctx),
     ):
-        payload = json.loads(await AttachmentTools().inline_image("att_screen", alt="Desktop"))
+        payload = json.loads(
+            await AttachmentTools().attachment("inline_image", attachment_id="att_screen", alt="Desktop"),
+        )
 
     assert payload["status"] == "ok"
     assert payload["markdown"] == "![Desktop](mxc://hs/screen1)"

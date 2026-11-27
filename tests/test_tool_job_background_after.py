@@ -604,9 +604,9 @@ async def test_offer_background_after_false_hides_schema_while_keeping_job_gate_
             with tool_runtime_context(context):
                 projected = {defn.name: defn for defn in offered_definitions(actor, raw_defs)}
                 assert wait_mode(gated_add, depth=0, context=context) == "managed"
-        for hidden in ("add", "write_file", "read_file", "tool_search", "list_attachments"):
+        for hidden in ("add", "write_file", "read_file", "tool_search", "view_file"):
             assert "background_after" not in projected[hidden].parameters["properties"]
-        for shown in ("grep", "find_files", "call_tool", "get_attachment", "run_shell_command"):
+        for shown in ("grep", "find_files", "call_tool", "attachment", "run_shell_command"):
             assert "background_after" in projected[shown].parameters["properties"]
             assert "background_after" not in projected[shown].parameters.get("required", [])
 

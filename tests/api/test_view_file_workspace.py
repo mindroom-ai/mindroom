@@ -256,7 +256,7 @@ async def test_view_file_transports_workspace_between_storage_mounts(
             assert not result.images
             return
         assert result.images, result.content
-        reopened = await tools.get_attachment(receipt["attachment_id"], view=True)
+        reopened = await tools.attachment("get", attachment_id=receipt["attachment_id"], view=True)
 
     assert result.images[0].content == _png_bytes()
     assert isinstance(reopened, ToolValue)

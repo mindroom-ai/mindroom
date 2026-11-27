@@ -988,7 +988,7 @@ async def test_oversized_text_file_is_omitted_early_while_small_file_and_non_fil
     content = str(sent.content)
     assert "[Inline file attachment omitted]" in content
     assert "bad\u2039msg\u203aexport.json (att_export1, 2.0 MiB)" in content
-    assert "get_attachment" in content
+    assert 'attachment(action="get"' in content
     assert "mindroom_output_path" in content
     assert "view=True" in content
     # Oversized JSON is skipped by byte size without ever passing its 2 MiB payload to the tokenizer.
@@ -1040,7 +1040,7 @@ async def test_pdfs_use_headroom_not_text_cap_so_ten_page_pdf_inlines_and_huge_p
     assert omitted_request.messages[-1].files is None
     omitted_content = str(omitted_request.messages[-1].content)
     assert "manual.pdf (" in omitted_content
-    assert "get_attachment" not in omitted_content
+    assert 'attachment(action="get"' not in omitted_content
 
 
 @pytest.mark.asyncio

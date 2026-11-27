@@ -360,18 +360,22 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
 #   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep) previously exposed individual per-operation function names that could appear in
+#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
 #   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625 / unreleased); replacement: unreleased;
-#   consolidated into action-dispatched and risk-scoped functions.
-# Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone), allow configs with
-#   an explicit exact rule deciding the replacement function, and otherwise reject tool_approval.rules when any
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
+#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+# Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
+#   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
+#   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
 #   retired function's effective decision differs from the replacement's effective decision (regardless of other
-#   toolkits).
+#   toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments entry,
+#   directing operators to `attachment` / `view_file` and `tool_approval.rules`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
@@ -878,7 +882,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "search_zep_memory": "zep_read",
         "add_zep_message": "zep_add_message",
     },
+    "skills": {
+        "get_skill_instructions": "skill",
+        "get_skill_reference": "skill",
+        "get_skill_script": "skill",
+    },
+    "attachments": {
+        "list_attachments": "attachment",
+        "get_attachment": "attachment",
+        "register_attachment": "attachment",
+        "inline_image": "attachment",
+    },
 }
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
 
 
 def _effective_approval_decision(
@@ -904,10 +920,18 @@ def _retired_approval_pair_error(
     new: str,
     default: str,
     default_timeout_days: float,
+    reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
 ) -> str | None:
     first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
     first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
+    explicit_new = first_new is not None and rules[first_new].match == new
+    if not explicit_new and reject_wildcard_scripts and first_old is not None and rules[first_old].script is not None:
+        return (
+            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs approval script "
+            f"{rules[first_old].script!r} for retired tool {old}; {old} is now {new}; "
+            f"update the script for {new} and add an explicit match: {new} rule."
+        )
     old_decision = _effective_approval_decision(
         rules[first_old] if first_old is not None else None,
         default=default,
@@ -920,13 +944,17 @@ def _retired_approval_pair_error(
     )
     if old_decision == new_decision:
         return None
-    if first_new is not None and rules[first_new].match == new:
-        if broad_probe is not None and first_old is not None and not fnmatchcase(broad_probe, rules[first_old].match):
-            return (
+    if explicit_new:
+        return (
+            (
                 f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} targets retired {old}, "
                 f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
             )
-        return None
+            if broad_probe is not None
+            and first_old is not None
+            and not fnmatchcase(broad_probe, rules[first_old].match)
+            else None
+        )
     if first_old is not None:
         return (
             f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
@@ -943,14 +971,15 @@ def _retired_approval_pair_error(
 
 
 def _first_retired_approval_error(
+    pairs: Iterable[tuple[str, str]],
+    *,
     rules: Sequence[_ApprovalRule],
-    renames: Mapping[str, str],
     default: str,
     default_timeout_days: float = 7.0,
-    *,
+    reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
 ) -> str | None:
-    for old, new in renames.items():
+    for old, new in pairs:
         if (
             error := _retired_approval_pair_error(
                 rules,
@@ -958,6 +987,7 @@ def _first_retired_approval_error(
                 new=new,
                 default=default,
                 default_timeout_days=default_timeout_days,
+                reject_wildcard_scripts=reject_wildcard_scripts,
                 broad_probe=broad_probe,
             )
         ) is not None:
@@ -971,7 +1001,12 @@ def retired_trigger_approval_error(
     default_timeout_days: float = 7.0,
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
-    return _first_retired_approval_error(rules, _RETIRED_TRIGGER_FUNCTIONS, default, default_timeout_days)
+    return _first_retired_approval_error(
+        _RETIRED_TRIGGER_FUNCTIONS.items(),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
 
 
 def retired_slack_watch_approval_error(
@@ -981,10 +1016,10 @@ def retired_slack_watch_approval_error(
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from retired `slack_watch`."""
     return _first_retired_approval_error(
-        rules,
-        _RETIRED_SLACK_FUNCTIONS,
-        default,
-        default_timeout_days,
+        _RETIRED_SLACK_FUNCTIONS.items(),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
         broad_probe="slack_post",
     )
 
@@ -998,10 +1033,14 @@ def retired_consolidated_approval_error(
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
-    return (
-        _first_retired_approval_error(rules, effective_renames, default, default_timeout_days)
-        if effective_renames
-        else None
+    if not effective_renames:
+        return None
+    return _first_retired_approval_error(
+        effective_renames.items(),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=toolkit_name in _STRICT_WILDCARD_SCRIPT_TOOLKITS,
     )
 
 
@@ -1045,6 +1084,19 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     )
 
 
+def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired attachment function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_CONSOLIDATED_FUNCTIONS["attachments"],
+        guidance_for=lambda _key, new: (
+            f"`{new}` is now a single unified function with an `action` parameter (alongside standalone `view_file`); "
+            f"remove the per-function filter and use `tool_approval.rules` matching `{new}` if per-action gating "
+            "(such as restricting `register` or `inline_image`) is needed"
+        ),
+    )
+
+
 def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first retired Slack function filter in ``settings``, and its migration guidance."""
     return _retired_function_filter(
@@ -1057,13 +1109,19 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
     )
 
 
+_RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
+    "filesystem": retired_file_setting,
+    "triggers": _retired_trigger_setting,
+    "attachments": _retired_attachments_setting,
+    "slack": _retired_slack_setting,
+}
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
-    if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
-        return retired
-    if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
-        return retired
-    if tool_name == "slack" and (retired := _retired_slack_setting(overrides)) is not None:
+    if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None and (
+        retired := checker(overrides)
+    ) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
@@ -1156,16 +1214,9 @@ def retired_dynamic_workflow_approval_error(
     default_timeout_days: float = 7.0,
 ) -> str | None:
     """Return a migration error when approval rules decide a `workflow` function differently from its retired name."""
-    for old, replacements in _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS.items():
-        for new in replacements:
-            if (
-                error := _retired_approval_pair_error(
-                    rules,
-                    old=old,
-                    new=new,
-                    default=default,
-                    default_timeout_days=default_timeout_days,
-                )
-            ) is not None:
-                return error
-    return None
+    return _first_retired_approval_error(
+        ((old, new) for old, replacements in _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS.items() for new in replacements),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )

@@ -74,7 +74,7 @@ class ApprovalGrantScope:
     invoking_agent: str
 
 
-_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler"})
+_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler", "attachment"})
 _TOOLKIT_DISPATCH_SCOPED_ARGS: dict[tuple[str, str], str] = {
     ("file_generation", "generate_file"): "format",
     ("visualization", "create_chart"): "chart_type",

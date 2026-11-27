@@ -102,7 +102,7 @@ from mindroom.workers.named import named_workers_refusal
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -553,20 +553,6 @@ def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_
     return toolkits
 
 
-def _agent_tool_output_file_policy(
-    agent_runtime: ResolvedAgentRuntime,
-    runtime_paths: constants.RuntimePaths,
-    tool_output_auto_save_threshold_bytes: int,
-) -> ToolOutputFilePolicy:
-    """Resolve the shared output-file policy for one agent's in-process tools."""
-    return ToolOutputFilePolicy.from_runtime(
-        agent_runtime.workspace.root,
-        runtime_paths,
-        auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        tools_use_workdir=current_tool_workdir() is not None,
-    )
-
-
 @timed("system_prompt_assembly.agent_create.model_instance")
 def _build_agent_model_provider(
     config: Config,
@@ -630,8 +616,11 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         )
 
     def wrap_direct[T: Toolkit](toolkit: T) -> T:
-        threshold = config.defaults.tool_output_auto_save_threshold_bytes
-        policy = _agent_tool_output_file_policy(agent_runtime, runtime_paths, threshold)
+        policy = ToolOutputFilePolicy.for_current_tools(
+            agent_runtime.workspace.root,
+            runtime_paths,
+            auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+        )
         return constructed(configure_toolkit_functions(toolkit, output_files=policy))
 
     if tool_name == "memory":
@@ -1191,37 +1180,6 @@ def _is_workspace_writer(function: ToolFunction, tools: ToolRegistry) -> bool:
     return metadata.executes_code
 
 
-def _deferred_entry_writes_workspace(
-    entry: EffectiveToolConfig,
-    *,
-    agent_tools: AgentTools,
-    runtime_paths: constants.RuntimePaths,
-    worker_target: ResolvedWorkerTarget,
-    config: Config,
-    narrowed_tools: tuple[str, ...] | None,
-    supports_native_tool_approval: bool,
-) -> bool:
-    """Return whether a CLI-deferred toolkit entry still offers a workspace writer after filters and approval."""
-    metadata = agent_tools.tools.get(entry.name)
-    if metadata is None or (not metadata.workspace_writers and not metadata.executes_code):
-        return False
-    try:
-        functions, writes = agent_tools.functions_for(entry, runtime_paths, worker_target)
-    except (OSError, ValueError, TypeError):
-        return False
-    if not writes or (functions is not None and not functions):
-        return False
-    candidates = metadata.workspace_writers or (functions or ())
-    if not candidates:
-        return True
-    return any(
-        (functions is None or name in functions)
-        and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-        and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
-        for name in candidates
-    )
-
-
 _SCHEDULED_CALL_FUNCTIONS = frozenset({"schedule_tool_call", "run_scheduled_call"})
 
 
@@ -1300,24 +1258,43 @@ def _prompt_tool_capabilities(
     supports_native_tool_approval: bool,
 ) -> tuple[bool, bool]:
     """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
+
+    def deferred_entry_offers(entry: EffectiveToolConfig, *, function_name: str | None = None) -> bool:
+        """Return whether a CLI-deferred entry offers ``function_name``, or any workspace writer when omitted."""
+        metadata = agent_tools.tools.get(entry.name)
+        if metadata is None:
+            return False
+        if function_name is None and not metadata.workspace_writers and not metadata.executes_code:
+            return False
+        try:
+            functions, writes = agent_tools.functions_for(entry, runtime_paths, worker_target)
+        except (OSError, ValueError, TypeError):
+            return False
+        if function_name is not None:
+            candidates: Iterable[str] = (function_name,)
+        else:
+            if not writes or (functions is not None and not functions):
+                return False
+            candidates = metadata.workspace_writers or (functions or ())
+            if not candidates:
+                return True
+        return any(
+            (functions is None or name in functions)
+            and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
+            and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
+            for name in candidates
+        )
+
     discoverable = _discoverable_functions(offered, portable_deferred_tools=portable_deferred_tools)
     has_skill_manage = any(
         function.registered_toolkit == "skill_manage" and function.name == "skill_manage" for function in discoverable
+    ) or (
+        (skill_manage_entry := deferred_configs.get("skill_manage")) is not None
+        and deferred_entry_offers(skill_manage_entry, function_name="skill_manage")
     )
     has_workspace_skill_writer = any(
         _is_workspace_writer(function, agent_tools.tools) for function in discoverable
-    ) or any(
-        _deferred_entry_writes_workspace(
-            entry,
-            agent_tools=agent_tools,
-            runtime_paths=runtime_paths,
-            worker_target=worker_target,
-            config=config,
-            narrowed_tools=narrowed_tools,
-            supports_native_tool_approval=supports_native_tool_approval,
-        )
-        for entry in deferred_configs.values()
-    )
+    ) or any(deferred_entry_offers(entry) for entry in deferred_configs.values())
     supports_output_redirect = any(_function_accepts_output_path(function) for function in discoverable) or any(
         name not in _NO_OUTPUT_REDIRECT_TOOLKITS for name in deferred_configs
     )
@@ -1483,6 +1460,15 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             persona_built[tool_name] = filtered
         return entry
 
+    def defer_entry(name: str, adapted: AdaptedToolkit) -> tuple[ToolDeferral, AdaptedToolkit]:
+        metadata = agent_tools.tools.get(name)
+        return defer_toolkit(
+            name,
+            metadata.description if metadata else "",
+            adapted,
+            portable_search=portable_deferred_tools,
+        )
+
     def offered_entry(
         toolkit: Toolkit,
         adapted: AdaptedToolkit,
@@ -1494,13 +1480,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         deferral = None
         # initial deferred tools stay in the rendered prompt prefix as plain non-deferred tools.
         if wire_deferred_tools and tool_entry.defer and not tool_entry.initial:
-            metadata = agent_tools.tools.get(authored_name)
-            deferral, adapted = defer_toolkit(
-                authored_name,
-                metadata.description if metadata else "",
-                adapted,
-                portable_search=portable_deferred_tools,
-            )
+            deferral, adapted = defer_entry(authored_name, adapted)
         announcement = computer_announcement_middleware(
             toolkit,
             tool_name,
@@ -1518,21 +1498,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
 
     dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
+    # Auto-injected skill_manage (from skill_learning.enabled, not authored) is built eagerly first and deferred only
+    # after collision resolution if another deferred toolkit still survives with offered functions.
+    auto_injected_skill_manage = (
+        "skill_manage" in resolved_tool_configs and "skill_manage" not in agent_tools.facts.tool_names
+    )
+    auto_skill_manage_toolkit: Toolkit | None = None
 
-    def tool_entries() -> Iterator[tuple[str, EffectiveToolConfig]]:
-        yield from resolved_tool_configs.items()
-        # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
-        # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
-        if (
-            dynamic_tools_entry is not None
-            and portable_deferred_tools
-            and any(entry.deferral is not None for entry in entries)
-        ):
-            yield dynamic_tools_entry.name, dynamic_tools_entry
-
-    for tool_name, tool_entry in tool_entries():
+    def try_build_entry(tool_entry: EffectiveToolConfig) -> _ToolkitEntry | None:
         try:
-            entry = build_entry(tool_entry)
+            return build_entry(tool_entry)
         except Exception as exc:
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
@@ -1541,18 +1516,35 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 ) from exc
             logger.warning(
                 "Could not load tool for agent construction",
-                tool=tool_name,
+                tool=tool_entry.name,
                 agent=agent_name,
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
-            continue
-        if entry is not None:
-            entries.append(entry)
-            target_names = (
-                worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
-            )
-            target_names.append(tool_name)
+            return None
+
+    def record_entry(tool_name: str, entry: _ToolkitEntry) -> None:
+        entries.append(entry)
+        target_names = (
+            worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
+        )
+        target_names.append(tool_name)
+
+    for tool_name, tool_entry in resolved_tool_configs.items():
+        if (entry := try_build_entry(tool_entry)) is not None:
+            record_entry(tool_name, entry)
+            if auto_injected_skill_manage and tool_name == "skill_manage":
+                auto_skill_manage_toolkit = entry.toolkit
+
+    has_pre_collision_deferred = any(entry.deferral is not None for entry in entries)
+    # Only portable tool search rewrites call_tool, so dynamic_tools is ignored everywhere else and when nothing defers.
+    built_dynamic_tools = (
+        try_build_entry(dynamic_tools_entry)
+        if dynamic_tools_entry is not None and portable_deferred_tools and has_pre_collision_deferred
+        else None
+    )
+    if built_dynamic_tools is not None and dynamic_tools_entry is not None:
+        record_entry(dynamic_tools_entry.name, built_dynamic_tools)
     if not disable_runtime_capabilities:
         for tool_name in deferred_configs:
             if config.is_tool_preset(tool_name):
@@ -1570,10 +1562,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         enabled=not disable_runtime_capabilities
         and narrowed_tools is None
         and background_tool_jobs_enabled(config, runtime_paths),
-        output_file_policy=_agent_tool_output_file_policy(
-            agent_runtime,
+        output_file_policy=ToolOutputFilePolicy.for_current_tools(
+            agent_runtime.workspace.root,
             runtime_paths,
-            config.defaults.tool_output_auto_save_threshold_bytes,
+            auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
         ),
     )
     if controls is not None:
@@ -1646,6 +1638,27 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 else:
                     pruned_offered.append(entry)
             offered = tuple(pruned_offered)
+    has_surviving_deferred = any(entry.deferral is not None and bool(entry.adapted.functions) for entry in offered)
+    if auto_skill_manage_toolkit is not None and wire_deferred_tools and has_surviving_deferred:
+        can_use_portable_search = built_dynamic_tools is not None and any(
+            entry.toolkit is built_dynamic_tools.toolkit
+            and {"tool_search", "call_tool"}.issubset(
+                {function.name for function in entry.adapted.functions if function.gate is None},
+            )
+            for entry in offered
+        )
+        if not portable_deferred_tools or can_use_portable_search:
+            deferred_offered: list[_ToolkitEntry] = []
+            for entry in offered:
+                if entry.toolkit is auto_skill_manage_toolkit and entry.deferral is None and entry.adapted.functions:
+                    deferral, adapted = defer_entry("skill_manage", entry.adapted)
+                    deferred_offered.append(replace(entry, adapted=adapted, deferral=deferral))
+                else:
+                    deferred_offered.append(entry)
+            offered = tuple(deferred_offered)
+    elif not has_surviving_deferred and built_dynamic_tools is not None:
+        offered = tuple(entry for entry in offered if entry.toolkit is not built_dynamic_tools.toolkit)
+        local_tool_names = [name for name in local_tool_names if name != "dynamic_tools"]
     cli_deferred = []
     for deferred_entry in deferred_configs.values():
 
@@ -1808,14 +1821,15 @@ def _build_agent_role_context(
 def _skill_usage_instructions(
     config: Config,
     skills: SkillsToolkit | None,
-    hidden_functions: frozenset[str],
+    *,
+    skill_hidden: bool,
     refused: Sequence[RefusedWorkspaceSkill],
 ) -> list[str]:
-    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides.
+    """Return the skill-function guidance for an agent offered skills.
 
     Each workspace skill in ``refused`` gets a line saying why it did not load, also when no skill loads.
     """
-    if hidden_functions == SKILL_FUNCTION_NAMES:
+    if skill_hidden:
         return []
     refusals = [
         f"Workspace skill `{skill.path}` did not load. {skill.reason}. Fix the file and it loads on your next run."
@@ -1823,10 +1837,8 @@ def _skill_usage_instructions(
     ]
     if skills is None or not skills.skills:
         return refusals
-    # Name any skill functions hidden by approval so the agent knows they are unavailable.
     usage = config.get_prompt("SKILLS_TOOL_USAGE_PROMPT")
-    hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
-    return [*((usage,) if usage.strip() else ()), *((hidden,) if hidden_functions else ()), *refusals]
+    return [*((usage,) if usage.strip() else ()), *refusals]
 
 
 def _build_agent_instructions(
@@ -2095,14 +2107,13 @@ def create_agent(
         tool_function_filter,
     )
     workspace = agent_runtime.workspace
-    output_file_policy = _agent_tool_output_file_policy(
-        agent_runtime,
+    output_file_policy = ToolOutputFilePolicy.for_current_tools(
+        workspace.root,
         runtime_paths,
-        config.defaults.tool_output_auto_save_threshold_bytes,
+        auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
-    # Approval rules hide generated functions, so skill guidance names the skill functions they hide
-    # and is left out when they hide all of them.
-    hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
+    # Approval rules hide generated functions, so skill guidance and the catalog are omitted when approval hides `skill`.
+    skill_hidden = any(tool_may_require_approval(config, name) for name in SKILL_FUNCTION_NAMES)
     refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
@@ -2118,7 +2129,7 @@ def create_agent(
             refused=refused_skills,
         )
     )
-    prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
+    prompt_skills = None if skill_hidden else skills
     # The graph is one more source of the knowledge search, which agents call far more than search_graph.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
     if agent.knowledge_graph and kept_knowledge is None:
@@ -2196,8 +2207,8 @@ def create_agent(
         skill_instructions=_skill_usage_instructions(
             config,
             prompt_skills,
-            hidden_skill_functions,
-            refused_skills if persona is None else (),
+            skill_hidden=skill_hidden,
+            refused=refused_skills if persona is None else (),
         ),
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,

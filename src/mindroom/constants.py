@@ -298,9 +298,12 @@ def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
     return {key: value for key, value in values.items() if isinstance(value, str)}
 
 
-def _resolve_runtime_relative_path(raw_value: str, *, base_dir: Path) -> Path:
+def _resolve_runtime_relative_path(raw_value: str, *, base_dir: Path, home_dir: str | None = None) -> Path:
     """Resolve one runtime-owned path value relative to its config directory."""
-    path = Path(raw_value).expanduser()
+    if home_dir and (raw_value == "~" or raw_value.startswith(("~/", f"~{os.sep}"))):
+        path = Path(home_dir) / raw_value[2:].lstrip(f"/{os.sep}")
+    else:
+        path = Path(raw_value).expanduser()
     if not path.is_absolute():
         path = base_dir / path
     return path.resolve()
@@ -761,6 +764,8 @@ def _sandbox_shell_system_env_values(
 
 def trusted_tool_runtime_env_values(
     runtime_paths: RuntimePaths,
+    *,
+    home_dir: str | None = None,
 ) -> Mapping[str, str]:
     """Return the runtime env available while trusted code rebuilds tool instances.
 
@@ -773,7 +778,7 @@ def trusted_tool_runtime_env_values(
     for name in tuple(merged_env):
         if name != "GOOGLE_APPLICATION_CREDENTIALS" and not name.endswith("_FILE"):
             continue
-        source_path = runtime_env_path(runtime_paths, name)
+        source_path = runtime_env_path(runtime_paths, name, home_dir=home_dir)
         if source_path is None:
             continue
         merged_env[name] = str(source_path)
@@ -806,6 +811,7 @@ def shell_execution_runtime_env_values(
     *,
     extra_env_passthrough: str | None = None,
     process_env: Mapping[str, str] | None = None,
+    home_dir: str | None = None,
 ) -> Mapping[str, str]:
     """Return the env visible to shell execution after explicit passthrough is applied."""
     merged_env = dict(
@@ -814,7 +820,7 @@ def shell_execution_runtime_env_values(
             process_env=process_env,
         ),
     )
-    merged_env.update(trusted_tool_runtime_env_values(runtime_paths))
+    merged_env.update(trusted_tool_runtime_env_values(runtime_paths, home_dir=home_dir))
     return cast("Mapping[str, str]", MappingProxyType(merged_env))
 
 
@@ -867,14 +873,14 @@ def read_secret_file(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig").strip()
 
 
-def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
+def runtime_env_path(runtime_paths: RuntimePaths, name: str, *, home_dir: str | None = None) -> Path | None:
     """Resolve one runtime env var, read as ``RuntimePaths.env_value`` reads it, as a filesystem path.
 
     Relative paths are interpreted relative to the runtime config directory.
     """
     if (value := runtime_paths.env_value(name)) is None:
         return None
-    return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir)
+    return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir, home_dir=home_dir)
 
 
 def secret_from_env_or_file(runtime_paths: RuntimePaths, value_env: str, file_env: str) -> str | None:

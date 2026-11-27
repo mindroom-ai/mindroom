@@ -132,7 +132,7 @@ def _inline_media_note(
         return None, inline_bytes + data_bytes
     text = (
         f"[Attached {kind} not sent inline: {reason}. Its content was not inspected. "
-        "Use get_attachment without view to inspect or save it, then use other available tools.]"
+        'Use attachment(action="get", ...) without view to inspect or save it, then use other available tools.]'
     )
     return {"type": "text", "text": text}, inline_bytes
 

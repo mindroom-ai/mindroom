@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import json
@@ -13,7 +14,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 from pydantic import BaseModel
 
@@ -63,15 +64,57 @@ class ToolOutputFilePolicy:
         workspace_root: Path,
         runtime_paths: RuntimePaths,
         *,
-        auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        auto_save_threshold_bytes: int | None = None,
         tools_use_workdir: bool = False,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
-            auto_save_threshold_bytes=auto_save_threshold_bytes,
+            auto_save_threshold_bytes=(
+                DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+                if auto_save_threshold_bytes is None
+                else auto_save_threshold_bytes
+            ),
             tools_use_workdir=tools_use_workdir,
+        )
+
+    @classmethod
+    @overload
+    def for_current_tools(
+        cls,
+        workspace_root: Path,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy: ...
+
+    @classmethod
+    @overload
+    def for_current_tools(
+        cls,
+        workspace_root: Path | None,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy | None: ...
+
+    @classmethod
+    def for_current_tools(
+        cls,
+        workspace_root: Path | None,
+        runtime_paths: RuntimePaths,
+        *,
+        auto_save_threshold_bytes: int | None = None,
+    ) -> ToolOutputFilePolicy | None:
+        """Build a policy for the current tool workdir context, or None without a workspace."""
+        if workspace_root is None:
+            return None
+        return cls.from_runtime(
+            workspace_root,
+            runtime_paths,
+            auto_save_threshold_bytes=auto_save_threshold_bytes,
+            tools_use_workdir=current_tool_workdir() is not None,
         )
 
     @property
@@ -240,7 +283,7 @@ def _error_receipt(error: str) -> dict[str, object]:
     }
 
 
-def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
+def _with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
     """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
 
     With ``tools_use_workdir``, the path is described as relative to the saved tool outputs, where such a policy puts it.
@@ -521,20 +564,31 @@ def _redirect_result_to_file(
     )
 
 
+def _serialized_auto_save_payload(
+    result: object,
+    *,
+    policy: ToolOutputFilePolicy,
+) -> _SerializedToolOutput | None:
+    if structured_result_requested():
+        return None
+    try:
+        serialized = _serialize_tool_output(result)
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
+        return None
+    if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
+        return None
+    return serialized
+
+
 def _auto_save_large_result(
     result: object,
     *,
     policy: ToolOutputFilePolicy,
     tool_name: str,
 ) -> object:
-    if structured_result_requested():
-        return result
-    try:
-        serialized = _serialize_tool_output(result)
-    except Exception as exc:
-        logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
-        return result
-    if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
+    serialized = _serialized_auto_save_payload(result, policy=policy)
+    if serialized is None:
         return result
     try:
         return _write_auto_saved_result(serialized, policy=policy, tool_name=tool_name)
@@ -591,15 +645,7 @@ def prepare_tool_output_file(
     return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
 
 
-def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
-    """Apply the shared explicit redirect or large-result policy after execution."""
-    if isinstance(result, ToolOutputFileHandled):
-        return result.result
-    finalized = (
-        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
-        if request.path is None
-        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
-    )
+def _wrap_finalized_outcome(result: object, finalized: object) -> object:
     if isinstance(result, ToolOutcome) and result.is_error and finalized is not result:
         return ToolOutcome(
             content=str(finalized),
@@ -610,6 +656,46 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
             saved_output=saved_output_envelope(finalized),
         )
     return finalized
+
+
+def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply the shared explicit redirect or large-result policy after execution."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
+    finalized = (
+        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+        if request.path is None
+        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    )
+    return _wrap_finalized_outcome(result, finalized)
+
+
+async def _finalize_tool_output_file_async(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply explicit redirect or large-result auto-save off the event-loop thread."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
+    if request.path is not None:
+        finalized = await asyncio.to_thread(
+            _redirect_result_to_file,
+            result,
+            policy=request.policy,
+            validated_path=request.path,
+        )
+        return _wrap_finalized_outcome(result, finalized)
+    serialized = _serialized_auto_save_payload(result, policy=request.policy)
+    if serialized is None:
+        return result
+    try:
+        finalized = await asyncio.to_thread(
+            _write_auto_saved_result,
+            serialized,
+            policy=request.policy,
+            tool_name=request.tool_name,
+        )
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
+        return result
+    return _wrap_finalized_outcome(result, finalized)
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
@@ -639,7 +725,7 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
         return replace(function, strict=False, entrypoint=entrypoint)
     return replace(
         function,
-        parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
+        parameters=_with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
         strict=False,
         entrypoint=entrypoint,
     )
@@ -654,21 +740,31 @@ def _handling_output_files(
     """Return ``entrypoint`` taking ``mindroom_output_path`` out of each call and saving or redirecting its output.
 
     A synchronous entrypoint stays synchronous, so preparing the path, the call, and writing the file share its thread.
+    An async entrypoint offloads filesystem path validation and output writes off the event-loop thread.
     """
     if inspect.iscoroutinefunction(entrypoint):
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         @functools.wraps(entrypoint)
         async def async_wrapper(*args: object, mindroom_output_path: object = None, **kwargs: object) -> object:
-            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
-            if isinstance(request, dict):
-                return request
+            if normalize_output_path_argument(mindroom_output_path) is None:
+                request = ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=None)
+            else:
+                prepared = await asyncio.to_thread(
+                    prepare_tool_output_file,
+                    policy,
+                    tool_name=tool_name,
+                    output_path=mindroom_output_path,
+                )
+                if isinstance(prepared, dict):
+                    return prepared
+                request = prepared
             token = _active_output_request.set(request)
             try:
                 result = await async_entrypoint(*args, **kwargs)
             finally:
                 _active_output_request.reset(token)
-            return finalize_tool_output_file(request, result)
+            return await _finalize_tool_output_file_async(request, result)
 
         return async_wrapper
 

@@ -91,8 +91,8 @@ _DEFAULT_ISSUE_READ_FIELDS = (*_DEFAULT_ISSUE_FIELDS, "description")
 # Field selectors whose results already include each issue's space.
 _PROJECT_FIELD_SELECTORS = frozenset({"project", "*all", "*navigable"})
 _ATTACHMENT_USAGE = (
-    "Usable in this turn only. Open it with get_attachment(attachment_id), or save it with "
-    "get_attachment(attachment_id, mindroom_output_path=...); download it again in a later turn."
+    'Usable in this turn only. Open it with attachment(action="get", attachment_id=...), or save it with '
+    'attachment(action="get", attachment_id=..., mindroom_output_path=...); download it again in a later turn.'
 )
 
 
@@ -960,8 +960,8 @@ class AtlassianToolkit(Toolkit):
         """Download one Confluence page attachment into this conversation.
 
         Returns a context attachment ID (att_...) that is usable in this turn only.
-        Open it with get_attachment(attachment_id), or save it to the workspace with
-        get_attachment(attachment_id, mindroom_output_path=...); in a later turn, download it again.
+        Open it with attachment(action="get", attachment_id=...), or save it to the workspace with
+        attachment(action="get", attachment_id=..., mindroom_output_path=...); in a later turn, download it again.
 
         Args:
             page_id: Numeric Confluence page ID that owns the attachment.

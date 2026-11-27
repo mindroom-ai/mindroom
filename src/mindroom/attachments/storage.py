@@ -287,8 +287,8 @@ _OMITTED_INLINE_FILES_BASE_GUIDANCE = (
     "Do not claim to have read the omitted file content."
 )
 _OMITTED_INLINE_FILES_TOOL_GUIDANCE = (
-    " Use get_attachment(attachment_id, mindroom_output_path=...) to save and inspect it selectively with tools, "
-    "or get_attachment(attachment_id, view=True) if full viewing is needed. "
+    ' Use attachment(action="get", attachment_id=..., mindroom_output_path=...) to save and inspect it selectively with tools, '
+    'or attachment(action="get", attachment_id=..., view=True) if full viewing is needed. '
     "If attachment tools are unavailable, ask the user for a smaller excerpt."
 )
 _OMITTED_INLINE_FILES_NO_ID_GUIDANCE = " Ask the user for a smaller excerpt."

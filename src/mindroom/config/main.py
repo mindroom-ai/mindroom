@@ -1738,7 +1738,8 @@ class Config(BaseModel):
         ):
             raise ToolConfigOverrideError(slack_watch_error)
 
-        for toolkit_name in sorted(enabled_toolkits):
+        # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
+        for toolkit_name in sorted(enabled_toolkits | {"skills"}):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             metadata = tools.entries.get(toolkit_name)
             if (
