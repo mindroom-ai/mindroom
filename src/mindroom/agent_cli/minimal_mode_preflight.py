@@ -96,13 +96,12 @@ def minimal_subagent_candidates(
     """List agents to advertise as minimal subagents; a child that still cannot run fails with a recovery hint."""
     if caller_identity is not None and caller_identity.channel != "matrix":
         return []
-    if tool_may_require_approval(config, SHELL_FUNCTION):
-        return []
     tools = config_plugins(config, runtime_paths).tools
     return [
         name
         for name in agent_names
         if name in config.agents
+        and not tool_may_require_approval(config, SHELL_FUNCTION, agent_name=name)
         and _effective_shell(config, name, tools) is not None
         and not minimal_shell_problems(config, runtime_paths, name)
     ]

@@ -268,12 +268,18 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     }
 
 
-def _call_approval_authority(config: Config, tools: ToolRegistry, key: ToolKey) -> tuple[Any, ...]:
+def _call_approval_authority(
+    config: Config,
+    tools: ToolRegistry,
+    key: ToolKey,
+    *,
+    agent_name: str,
+) -> tuple[Any, ...]:
     registered_toolkit = None if key.toolkit == "agent" else key.toolkit
     names = (SHELL_FUNCTION, *approval_policy_names(config, tools, registered_toolkit, key.function))
     return (
         config.tool_approval.model_dump(exclude={"rules"}),
-        *((name, effective_tool_approval_policy(config, name)) for name in names),
+        *((name, effective_tool_approval_policy(config, name, agent_name=agent_name)) for name in names),
     )
 
 
@@ -288,8 +294,18 @@ def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKe
         old_agent is None
         or current_agent is None
         or not set(old_agent.rooms) <= set(current_agent.rooms)
-        or _call_approval_authority(current, config_plugins(current, context.runtime_paths).tools, key)
-        != _call_approval_authority(context.config, context.plugins.tools, key)
+        or _call_approval_authority(
+            current,
+            config_plugins(current, context.runtime_paths).tools,
+            key,
+            agent_name=context.agent_name,
+        )
+        != _call_approval_authority(
+            context.config,
+            context.plugins.tools,
+            key,
+            agent_name=context.agent_name,
+        )
         or _catalog_authority(current, context.agent_name) != _catalog_authority(context.config, context.agent_name)
     ):
         msg = "Current configuration no longer permits this prepared CLI call"

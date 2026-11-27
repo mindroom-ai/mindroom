@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
@@ -11,13 +12,21 @@ if TYPE_CHECKING:
 
     class _ApprovalRule(Protocol):
         @property
-        def match(self) -> str: ...
+        def match(self) -> str | list[str]: ...
+        @property
+        def agents(self) -> str | list[str] | None: ...
+        @property
+        def arguments(self) -> Mapping[str, Any] | None: ...
         @property
         def action(self) -> str | None: ...
         @property
         def script(self) -> str | None: ...
         @property
         def timeout_days(self) -> float | None: ...
+        def match_patterns(self) -> tuple[str, ...]: ...
+        def agent_patterns(self) -> tuple[str, ...] | None: ...
+        def matches_tool(self, tool_name: str) -> bool: ...
+        def matches_agent(self, agent_name: str) -> bool: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -311,14 +320,49 @@ _RETIRED_FILE_SETTINGS = {
 #   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
 #   tests/test_filesystem_tool_config.py::test_approval_rules_for_a_retired_file_name_offered_elsewhere_load,
 #   tests/test_filesystem_tool_config.py::test_retired_file_approval_check_skips_configs_without_filesystem_and_checks_presets.
-def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
+_UNMATCHED_AGENT_PROBE = "\x00"
+
+
+def _probe_agents(rules: Sequence[_ApprovalRule], agent_names: Collection[str] = ()) -> tuple[str, ...]:
+    if not any(rule.agents is not None for rule in rules):
+        return (_UNMATCHED_AGENT_PROBE,)
+    probes = list(agent_names)
+    for rule in rules:
+        for pattern in rule.agent_patterns() or ():
+            candidate = pattern.replace("*", "x").replace("?", "x")
+            if fnmatchcase(candidate, pattern):
+                probes.append(candidate)
+    probes.append(_UNMATCHED_AGENT_PROBE)
+    return tuple(dict.fromkeys(probes))
+
+
+def _agent_rule_indices(rules: Sequence[_ApprovalRule], name: str, agent_name: str) -> tuple[int, ...]:
+    indices: list[int] = []
+    for index, rule in enumerate(rules):
+        if not rule.matches_tool(name) or not rule.matches_agent(agent_name):
+            continue
+        indices.append(index)
+        if rule.arguments is None:
+            break
+    return tuple(indices)
+
+
+def approval_rule_a_file_rename_escapes(
+    rules: Sequence[_ApprovalRule],
+    offered_elsewhere: Collection[str],
+    agent_names: Collection[str] = (),
+) -> str | None:
     """Return the rule that decided a retired file function but not its replacement, as text, or None."""
+    probes = _probe_agents(rules, agent_names)
     for old, new in _RETIRED_FILE_FUNCTIONS.items():
-        first_old, first_new = (
-            next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
-        )
-        if old not in offered_elsewhere and first_old is not None and first_old != first_new:
-            return f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}"
+        if old in offered_elsewhere:
+            continue
+        for agent in probes:
+            old_indices = _agent_rule_indices(rules, old, agent)
+            new_indices = _agent_rule_indices(rules, new, agent)
+            if old_indices and new_indices[: len(old_indices)] != old_indices:
+                report_index = next((index for index in old_indices if index not in new_indices), old_indices[0])
+                return f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; {old} is now {new}"
     return None
 
 
@@ -1243,57 +1287,137 @@ def _effective_approval_decision(
     return (rule.action, rule.script, timeout_days)
 
 
-def _retired_approval_pair_error(
+def _effective_approval_chain(
+    rules: Sequence[_ApprovalRule],
+    indices: tuple[int, ...],
+    *,
+    default: str,
+    default_timeout_days: float,
+) -> tuple[tuple[str, tuple[str | None, str | None, float | None]], ...]:
+    chain = [
+        (
+            json.dumps(rules[index].arguments, sort_keys=True, separators=(",", ":")),
+            _effective_approval_decision(
+                rules[index],
+                default=default,
+                default_timeout_days=default_timeout_days,
+            ),
+        )
+        for index in indices
+    ]
+    if not indices or rules[indices[-1]].arguments is not None:
+        chain.append(
+            (
+                "null",
+                _effective_approval_decision(None, default=default, default_timeout_days=default_timeout_days),
+            ),
+        )
+    return tuple(chain)
+
+
+def _is_broad_glob_for_old(rule: _ApprovalRule, *, old: str, broad_probe: str) -> bool:
+    return any(fnmatchcase(old, pattern) and fnmatchcase(broad_probe, pattern) for pattern in rule.match_patterns())
+
+
+def _retired_approval_pair_error_for_agent(
     rules: Sequence[_ApprovalRule],
     *,
     old: str,
     new: str,
+    agent: str,
     default: str,
     default_timeout_days: float,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
 ) -> str | None:
-    first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
-    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
-    explicit_new = first_new is not None and rules[first_new].match == new
-    if not explicit_new and reject_wildcard_scripts and first_old is not None and rules[first_old].script is not None:
+    old_indices = _agent_rule_indices(rules, old, agent)
+    new_indices = _agent_rule_indices(rules, new, agent)
+    shared_prefix_len = 0
+    for old_index, new_index in zip(old_indices, new_indices, strict=False):
+        if old_index != new_index:
+            break
+        shared_prefix_len += 1
+    shared_prefix = old_indices[:shared_prefix_len]
+    rem_old = old_indices[shared_prefix_len:]
+    rem_new = new_indices[shared_prefix_len:]
+    rem_new_explicit_unconditional = (
+        bool(rem_new)
+        and all(new in rules[index].match_patterns() for index in rem_new)
+        and rules[rem_new[-1]].arguments is None
+    )
+    if (
+        reject_wildcard_scripts
+        and not (rem_new_explicit_unconditional and all(rules[index].script is None for index in shared_prefix))
+        and (
+            script_index := next(
+                (
+                    index
+                    for index in old_indices
+                    if rules[index].script is not None and new not in rules[index].match_patterns()
+                ),
+                None,
+            )
+        )
+        is not None
+    ):
         return (
-            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs approval script "
-            f"{rules[first_old].script!r} for retired tool {old}; {old} is now {new}; "
+            f"tool_approval.rules[{script_index}].match {rules[script_index].match!r} runs approval script "
+            f"{rules[script_index].script!r} for retired tool {old}; {old} is now {new}; "
             f"update the script for {new} and add an explicit match: {new} rule."
         )
-    old_decision = _effective_approval_decision(
-        rules[first_old] if first_old is not None else None,
+    old_chain = _effective_approval_chain(
+        rules,
+        old_indices,
         default=default,
         default_timeout_days=default_timeout_days,
     )
-    new_decision = _effective_approval_decision(
-        rules[first_new] if first_new is not None else None,
+    new_chain = _effective_approval_chain(
+        rules,
+        new_indices,
         default=default,
         default_timeout_days=default_timeout_days,
     )
-    if old_decision == new_decision:
+    if old_chain == new_chain:
         return None
-    if explicit_new:
-        return (
-            (
-                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} targets retired {old}, "
-                f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
+    extra_new = [index for index in rem_new if index not in rem_old]
+    explicit_new_override = rem_new_explicit_unconditional or (
+        bool(extra_new)
+        and all(new in rules[index].match_patterns() for index in extra_new)
+        and set(rem_old) <= set(rem_new)
+    )
+    if explicit_new_override:
+        conflict_index = (
+            next(
+                (
+                    index
+                    for index in rem_old
+                    if not _is_broad_glob_for_old(rules[index], old=old, broad_probe=broad_probe)
+                ),
+                None,
             )
             if broad_probe is not None
-            and first_old is not None
-            and not fnmatchcase(broad_probe, rules[first_old].match)
             else None
         )
-    if first_old is not None:
         return (
-            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+            f"tool_approval.rules[{conflict_index}].match {rules[conflict_index].match!r} targets retired {old}, "
+            f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
+            if conflict_index is not None
+            else None
+        )
+    if rem_old:
+        report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
+        return (
+            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; "
             f"{old} is now {new}, which now gets a different approval decision; "
             f"rewrite the rules for {new}."
         )
-    if first_new is not None:
+    if rem_new:
+        report_index = next(
+            (index for index in rem_new if new not in rules[index].match_patterns()),
+            rem_new[0],
+        )
         return (
-            f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides {new}, "
+            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
             f"changing tool_approval.default {default!r} that previously decided {old}; "
             f"rewrite the rules for {new}."
         )
@@ -1308,20 +1432,24 @@ def _first_retired_approval_error(
     default_timeout_days: float = 7.0,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
+    agent_names: Collection[str] = (),
 ) -> str | None:
+    probes = _probe_agents(rules, agent_names)
     for old, new in pairs:
-        if (
-            error := _retired_approval_pair_error(
-                rules,
-                old=old,
-                new=new,
-                default=default,
-                default_timeout_days=default_timeout_days,
-                reject_wildcard_scripts=reject_wildcard_scripts,
-                broad_probe=broad_probe,
-            )
-        ) is not None:
-            return error
+        for agent in probes:
+            if (
+                error := _retired_approval_pair_error_for_agent(
+                    rules,
+                    old=old,
+                    new=new,
+                    agent=agent,
+                    default=default,
+                    default_timeout_days=default_timeout_days,
+                    reject_wildcard_scripts=reject_wildcard_scripts,
+                    broad_probe=broad_probe,
+                )
+            ) is not None:
+                return error
     return None
 
 
@@ -1329,6 +1457,7 @@ def retired_trigger_approval_error(
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
+    agent_names: Collection[str] = (),
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
     return _first_retired_approval_error(
@@ -1336,6 +1465,7 @@ def retired_trigger_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        agent_names=agent_names,
     )
 
 
@@ -1343,6 +1473,7 @@ def retired_slack_watch_approval_error(
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
+    agent_names: Collection[str] = (),
 ) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from retired `slack_watch`."""
     return _first_retired_approval_error(
@@ -1352,6 +1483,7 @@ def retired_slack_watch_approval_error(
         default_timeout_days=default_timeout_days,
         # Probe historical broad globs like `slack_*` without matching `slack_w*`.
         broad_probe="slack_post",
+        agent_names=agent_names,
     )
 
 
@@ -1361,6 +1493,7 @@ def retired_consolidated_approval_error(
     default: str,
     default_timeout_days: float = 7.0,
     renames: Mapping[str, str] | None = None,
+    agent_names: Collection[str] = (),
     *,
     reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
@@ -1378,6 +1511,7 @@ def retired_consolidated_approval_error(
             if reject_wildcard_scripts is None
             else reject_wildcard_scripts
         ),
+        agent_names=agent_names,
     )
 
 
@@ -1666,6 +1800,7 @@ def retired_dynamic_workflow_approval_error(
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
+    agent_names: Collection[str] = (),
 ) -> str | None:
     """Return a migration error when approval rules decide a `workflow` function differently from its retired name."""
     return _first_retired_approval_error(
@@ -1674,4 +1809,5 @@ def retired_dynamic_workflow_approval_error(
         default=default,
         default_timeout_days=default_timeout_days,
         reject_wildcard_scripts=True,
+        agent_names=agent_names,
     )

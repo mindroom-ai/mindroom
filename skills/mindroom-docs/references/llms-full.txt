@@ -14390,7 +14390,7 @@ tool_approval:
       action: require_approval
 ```
 
-A `script` rule can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](https://docs.mindroom.chat/tool-approval/#auto-approval-for-a-few-minutes) or with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything), covers later calls.
+A rule with `arguments` (or a `script` rule) can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](https://docs.mindroom.chat/tool-approval/#auto-approval-for-a-few-minutes) or with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything), covers later calls.
 
 | Action | Does |
 |--------|------|
@@ -17976,16 +17976,23 @@ None of these ownership rules grants responder access.
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack sending and message management, plus shell calls selected by a review script:
+This example gates Slack sending and message management, allows read-only `matrix_message` calls while gating writes, gates `run_shell_command` for one agent, and delegates other shell calls to a review script:
 
 ```yaml
 tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_send
+    - match: [slack_send, slack_manage]
       action: require_approval
-    - match: slack_manage
+    - match: matrix_message
+      arguments:
+        action: read
+      action: auto_approve
+    - match: matrix_message
+      action: require_approval
+    - match: run_shell_command
+      agents: research
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py
@@ -17997,11 +18004,18 @@ tool_approval:
 | `default` | `auto_approve` or `require_approval` | `auto_approve` | Decision for calls that no rule matches |
 | `timeout_days` | number, greater than 0 and at most 36500 | `7` | How long an approval card stays open before it expires |
 | `rules` | list | `[]` | Ordered rules; the first matching rule wins |
-| `rules[].match` | string | Required | Case-sensitive glob over exposed function names, not toolkit identifiers, so the same function name in another toolkit also matches |
+| `rules[].match` | string or non-empty list of strings | Required | Case-sensitive glob (or list of globs) over exposed function names, not toolkit identifiers, so the same function name in another toolkit also matches |
+| `rules[].agents` | string or non-empty list of strings | Unset | Optional case-sensitive glob (or list of globs) over configured agent names (for personal agents, the generated instance name rather than the template name); unset matches every agent |
+| `rules[].arguments` | mapping | Unset | Optional mapping of supplied top-level argument names to scalar matchers or non-empty lists of matchers; every listed key must match |
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
+
+`rules[].arguments` checks the same supplied top-level arguments that `script` rules receive (after call decoding, before tool defaults are filled in, so omitted arguments with defaults do not match).
+String matchers use case-sensitive globs, booleans, numbers, and `null` use strict equality (`true` never matches `1`, and `false` never matches `0`), a list matches if any element matches, and multiple keys combine with AND.
+Prefer fail-closed allowlisting (`auto_approve` specific safe argument values, followed by a fallback `require_approval` rule) over denylisting dangerous values under `default: auto_approve`, because omitted defaults and path or formatting variations (where `*` matches `/`) can bypass a denylist rule.
+Avoid glob allowlists on shell commands or free-text arguments (for example, `command: "git status*"` also matches `git status; rm -rf ~`); use a `script` rule when you need to parse, normalize, or denylist argument values.
 
 [`config_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 
@@ -18028,7 +18042,7 @@ The approved call runs only with the exact arguments shown on the card.
 ### Auto-Approval for a Few Minutes
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
-It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments.
+It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments (for non-action-scoped tools such as `matrix_message` or `desktop`, a timed grant covers the whole function just as it does with `script` rules).
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
