@@ -2,7 +2,7 @@
 
 Claude compacts a long conversation server-side when a request carries the ``compact_20260112`` edit, and
 returns a ``compaction`` block whose encrypted content replaces the earlier prefix on later requests. MindRoom
-stores that checkpoint on the assistant message under ``mindroom_native_compaction`` without changing the
+stores that checkpoint on the assistant message in ``meta.native_compaction`` without changing the
 canonical conversation, so another model or the portable compactor can still read the original messages.
 The shared selection and route rules live in :mod:`mindroom.native_compaction`.
 """
@@ -18,7 +18,6 @@ from mindroom.model_defaults import (
     CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES,
 )
 from mindroom.native_compaction import (
-    NATIVE_CHECKPOINT_KEY,
     checkpoint_items,
     native_checkpoint_state,
     native_replay_messages,
@@ -174,7 +173,7 @@ def record_native_checkpoint_on(
     *,
     checkpoint_prefix: bool,
 ) -> None:
-    """Record ``mindroom_native_compaction`` on one completed assistant message, from its response blocks."""
+    """Record ``meta.native_compaction`` on one completed assistant message, from its response blocks."""
     provider_data = message.provider_data or {}
     # The API serializes a no-op compaction with a null summary, which the stored blocks omit; restore the
     # explicit marker so the shared selector sees the no-op rather than an opaque payload.
@@ -182,10 +181,10 @@ def record_native_checkpoint_on(
         {**block, "content": block.get("content")} if block.get("type") == "compaction" else block
         for block in provider_data.get(CLAUDE_BLOCKS_KEY, [])
     ]
-    message.provider_data = {
-        **provider_data,
-        NATIVE_CHECKPOINT_KEY: native_checkpoint_state(items, replay, checkpoint_prefix=checkpoint_prefix),
-    }
+    message.meta = replace(
+        message.meta,
+        native_compaction=native_checkpoint_state(items, replay, checkpoint_prefix=checkpoint_prefix),
+    )
 
 
 __all__ = [

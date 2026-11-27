@@ -19,7 +19,7 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.matrix_rtc.call_tools import record_call_token_usage
@@ -336,7 +336,7 @@ def test_spend_charges_a_resumed_run_for_its_requests_this_month(
         return Message(
             role="assistant",
             created_at=created_at,
-            provider_data={"mindroom_model": {"id": model.id, "provider": model.provider}},
+            meta=MessageMeta(model=ModelProvenance(model.id, model.provider)),
             metrics=MessageMetrics(tokens=TokenCounts(input_tokens=1_000_000, total_tokens=1_000_000)),
         )
 

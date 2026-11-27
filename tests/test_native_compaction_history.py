@@ -29,13 +29,11 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import EMPTY_META, Message, MessageMeta
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import (
-    ENCRYPTED_REPLAY_RESET_KEY,
-    NATIVE_CHECKPOINT_KEY,
     _NativeReplay,
     iter_readable_checkpoints,
     native_replay,
@@ -298,10 +296,10 @@ def test_restore_native_policy_requires_latest_compatible_response(tmp_path: Pat
     latest = Message(role="assistant", content="Waiting for approval")
     record_native_checkpoint(latest, [], None if change == "disabled" else native)
     if change == "missing":
-        latest.provider_data = None
+        latest.meta = EMPTY_META
     elif change == "invalid_threshold":
-        assert latest.provider_data is not None
-        latest.provider_data["mindroom_native_compaction"]["threshold"] = True
+        assert isinstance(latest.meta.native_compaction, dict)
+        latest.meta.native_compaction["threshold"] = True
     messages = [
         Message(role="user", content="Canonical facts"),
         checkpoint,
@@ -476,6 +474,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     # The stored response's context outgrew what the replayed history shows, which its reported size keeps in view.
     stamp_request_identity(answer, model, ModelRequest(messages=(old, latest[0])))
     stored_provider_data = dict(answer.provider_data or {})
+    stored_meta = answer.meta
     session = _session(
         "session",
         runs=[_completed_run("old", messages=[old]), _completed_run("recent", messages=latest)],
@@ -507,6 +506,7 @@ async def test_proxy_replay_budget_counts_tokens_and_discards_stored_chain(
     assert _continues(sent) is None
     assert sent["input"][0] == {"role": "user", "content": "Keep the recent instruction"}
     assert latest[-1].provider_data == stored_provider_data
+    assert latest[-1].meta == stored_meta
 
 
 @pytest.mark.asyncio
@@ -821,18 +821,21 @@ def test_restore_portable_policy_requires_latest_provenance(
     older = Message(
         role="assistant",
         content="Older answer",
-        provider_data={"response_id": "resp_older", "mindroom_portable_replay": not portable},
+        provider_data={"response_id": "resp_older"},
+        meta=MessageMeta(portable_replay=not portable),
     )
     messages = [
         older,
-        Message(
-            role="assistant",
-            content="Latest answer",
-            provider_data={
-                "response_id": "resp_latest",
-                "mindroom_response_stored": True,
-                "mindroom_conversation_sha256": conversation_digest([older]),
-                **provider_data,
+        Message.from_dict(
+            {
+                "role": "assistant",
+                "content": "Latest answer",
+                "provider_data": {
+                    "response_id": "resp_latest",
+                    "mindroom_response_stored": True,
+                    "mindroom_conversation_sha256": conversation_digest([older]),
+                    **provider_data,
+                },
             },
         ),
         Message(role="user", content="Continue"),
@@ -992,9 +995,9 @@ def test_native_replay_starts_over_at_the_later_of_a_checkpoint_and_a_reset() ->
     checkpoint = Message(
         role="assistant",
         content="Ready",
-        provider_data={NATIVE_CHECKPOINT_KEY: {"route": "route-1", "items": [{"type": "compaction", "content": "S"}]}},
+        meta=MessageMeta(native_compaction={"route": "route-1", "items": [{"type": "compaction", "content": "S"}]}),
     )
-    reset = Message(role="assistant", content="Recovered", provider_data={ENCRYPTED_REPLAY_RESET_KEY: "scope-1"})
+    reset = Message(role="assistant", content="Recovered", meta=MessageMeta(encrypted_replay_reset="scope-1"))
     follow_up = Message(role="user", content="Continue")
     checkpoint_first = [system, question, checkpoint, follow_up, reset, follow_up]
     reset_first = [system, question, reset, follow_up, checkpoint, follow_up]

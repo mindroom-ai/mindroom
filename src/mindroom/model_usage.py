@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import usage_sums_attempts
-
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.usage import MessageMetrics
@@ -105,7 +103,7 @@ def message_context_tokens(
     model_id: str | None,
 ) -> ContextTokens | None:
     """Return the request context one response reported, or None when its usage is absent or sums retried attempts."""
-    if usage_sums_attempts(message.provider_data):
+    if message.meta.aggregate_usage:
         # The counters sum several retried attempts, so they describe no single request's context.
         return None
     return metrics_context_tokens(

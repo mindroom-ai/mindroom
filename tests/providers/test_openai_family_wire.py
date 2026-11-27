@@ -43,7 +43,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     DeferredTools,
     ModelRequest,
@@ -2109,7 +2109,7 @@ async def test_native_compaction_replays_without_storage_and_records_its_route(t
     assert body["store"] is False
     assert body["include"] == ["reasoning.encrypted_content"]
     assert body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
-    assert turn.message.provider_data["mindroom_native_compaction"] == {
+    assert turn.message.meta.native_compaction == {
         "route": "route-1",
         "threshold": 50_000,
         "checkpoint_prefix": False,
@@ -2361,7 +2361,8 @@ async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) 
     assert body["include"] == ["reasoning.encrypted_content"]
     assert body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
     assert body["provider"] == {"order": ["openai"], "allow_fallbacks": False}
-    assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
+    assert isinstance(turn.message.meta.native_compaction, dict)
+    assert turn.message.meta.native_compaction["route"] == native.route
 
 
 @pytest.mark.asyncio
@@ -2508,7 +2509,9 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
                 "response_id": "resp_cmp",
                 "mindroom_response_stored": False,
                 RESPONSE_OUTPUT_KEY: checkpoint_output,
-                "mindroom_native_compaction": {
+            },
+            meta=MessageMeta(
+                native_compaction={
                     "route": native.route,
                     "threshold": native.threshold,
                     "checkpoint_prefix": True,
@@ -2517,7 +2520,7 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
                         checkpoint_output[1],
                     ],
                 },
-            },
+            ),
         ),
         Message(role="user", content="Check Paris weather"),
         Message(
@@ -2528,12 +2531,14 @@ def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
                 "response_id": "resp_tail",
                 "mindroom_response_stored": False,
                 RESPONSE_OUTPUT_KEY: tail_output,
-                "mindroom_native_compaction": {
+            },
+            meta=MessageMeta(
+                native_compaction={
                     "route": native.route,
                     "threshold": native.threshold,
                     "checkpoint_prefix": True,
                 },
-            },
+            ),
         ),
         Message(role="tool", tool_call_id="fc_lookup", content="Sunny, 20C"),
         Message(role="user", content="Next question after provider change"),
@@ -2598,9 +2603,8 @@ async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new
     assert second_body["include"] == ["reasoning.encrypted_content"]
     assert second_body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
     # New checkpoint and reasoning are stored normally; original messages were not mutated.
-    assert turn.message.provider_data["mindroom_native_compaction"]["items"][0]["encrypted_content"] == (
-        "enc-compaction-openai"
-    )
+    assert isinstance(turn.message.meta.native_compaction, dict)
+    assert turn.message.meta.native_compaction["items"][0]["encrypted_content"] == ("enc-compaction-openai")
     assert turn.message.provider_data[RESPONSE_OUTPUT_KEY][0]["encrypted_content"] == "enc-reason-openai"
     assert messages == original_snapshot
     assert any(
@@ -2830,7 +2834,7 @@ async def test_openrouter_responses_request_after_recovery_is_sized_as_the_wire_
     # The answer after the checkpoint anchors a request that still replays the checkpoint, at the size it reported.
     anchor = history[5]
     anchor.metrics = MessageMetrics(tokens=TokenCounts(input_tokens=150, output_tokens=5))
-    anchor.provider_data = {**anchor.provider_data, **model_provenance(adapter.identity.id, adapter.identity.provider)}
+    anchor.meta = replace(anchor.meta, model=ModelProvenance(adapter.identity.id, adapter.identity.provider))
     stamp_request_identity(anchor, provider, ModelRequest(messages=history[:5], native_compaction=native))
     sizer = RequestSizer(provider, "openai")
     before = ModelRequest(messages=history, native_compaction=native)
@@ -2911,7 +2915,7 @@ async def test_openrouter_responses_stripped_resend_keeps_the_transient_retries_
     inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
     assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False, False, False]
     assert inputs[1] == inputs[2] == inputs[3]
-    assert turn.message.provider_data["mindroom_encrypted_replay_reset"] == adapter.capabilities.replay_reset_scope
+    assert turn.message.meta.encrypted_replay_reset == adapter.capabilities.replay_reset_scope
 
 
 @pytest.mark.asyncio
@@ -3113,7 +3117,7 @@ async def test_openrouter_responses_media_fallback_after_recovery_stays_stripped
     assert ["input_image" in sent_input for sent_input in inputs] == [True, True, False]
     assert FALLBACK_MARKER in inputs[2]
     # The answer records the reset, so the next request keeps the old upstream's state out too.
-    assert turn.message.provider_data["mindroom_encrypted_replay_reset"] == adapter.capabilities.replay_reset_scope
+    assert turn.message.meta.encrypted_replay_reset == adapter.capabilities.replay_reset_scope
 
 
 @pytest.mark.asyncio

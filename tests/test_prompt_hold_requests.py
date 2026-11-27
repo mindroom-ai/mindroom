@@ -22,9 +22,8 @@ from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.media import Image
-from mindroom.llm.messages import PROMPT_UPDATE_KEY, Message, system_text
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import Capabilities, ModelRequest, ToolSpec, complete
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
 from mindroom.media_inputs import MediaInputs
 from mindroom.participation import ParticipationGate
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
@@ -799,7 +798,7 @@ def _held_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, turns: list[Any
 
 def _told(request: ModelRequest) -> list[str]:
     """Return the system prompt updates ``request`` holds."""
-    return [str(message.content) for message in request.messages if PROMPT_UPDATE_KEY in (message.provider_data or {})]
+    return [str(message.content) for message in request.messages if message.meta.prompt_update]
 
 
 @pytest.mark.asyncio
@@ -862,7 +861,7 @@ async def _paused_adding(
         paused.run_id,
     )
     assert stored is not None
-    assert (REQUEST_IDENTITY_KEY in (stored.messages[-1].provider_data or {})) != image
+    assert (stored.messages[-1].meta.request_identity is not None) != image
     return paused
 
 

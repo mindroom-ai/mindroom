@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
@@ -332,7 +332,7 @@ def test_usage_stored_under_a_per_api_provider_name_reports_under_its_route_name
     newer.model = "gpt-6-luna"
     for message in newer.messages or ():
         if message.metrics.tokens.total_tokens and message.role == "assistant" and not message.from_history:
-            message.provider_data = {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
+            message.meta = MessageMeta(model=ModelProvenance("gpt-6-luna", "OpenAI"))
     newer.metrics.details = {
         "model": [ModelMetrics(tokens=newer.metrics.tokens, id="gpt-6-luna", provider="OpenAI")],
     }
@@ -398,10 +398,8 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
         # What the owned loop stamps on each request's assistant message: its usage and the model that answered.
         message.created_at = created_at
         message.metrics = MessageMetrics(tokens=TokenCounts(**metrics))
-        message.provider_data = {
-            "secret": "private provider metadata",
-            "mindroom_model": {"id": model_id, "provider": provider},
-        }
+        message.provider_data = {"secret": "private provider metadata"}
+        message.meta = MessageMeta(model=ModelProvenance(model_id, provider))
     config, paths, storage = _usage_store(tmp_path, run)
     if not retained_run:
         with sqlite3.connect(storage.path) as connection:

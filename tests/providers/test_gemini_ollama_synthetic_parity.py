@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.models import ModelConfig
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, ModelProvenance
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
@@ -238,7 +238,8 @@ async def test_synthetic_streams_the_pinned_plan_of_each_case(name: str, tmp_pat
     assert calls == ([] if case.call_id is None else [_shell_call(case.call_id)])
     assert completed.message.content == text
     assert completed.message.tool_calls == (calls or None)
-    assert completed.message.provider_data == {"mindroom_model": {"id": "lorem-ipsum", "provider": "Synthetic"}}
+    assert completed.message.provider_data is None
+    assert completed.message.meta.model == ModelProvenance("lorem-ipsum", "Synthetic")
     assert completed.stop_reason == ("tool_use" if calls else "end")
 
 

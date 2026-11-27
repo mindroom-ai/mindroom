@@ -30,7 +30,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, MEDIA_MSGTYPE_KEY, Message
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message, MessageMeta
 from mindroom.model_defaults import OPENAI_DECISIONS_MODEL
 from mindroom.participation import ParticipationGate
 from mindroom.participation_hook import participation_hook
@@ -147,7 +147,7 @@ async def test_typesafe_controls_real_gate_without_model_check(
         Message(
             role="user",
             content=render_transient_context(["Private memory and hook context"]),
-            add_to_agent_memory=False,
+            is_turn_context=True,
         ),
         Message(role="user", content="Can anyone explain this?"),
     ]
@@ -576,12 +576,12 @@ async def test_a_media_message_reaches_the_judge_as_its_kind_whatever_its_body(
         Message(
             role="user",
             content=_msg("@bob:example.org", "tax-return-2026.pdf"),
-            provider_data={MEDIA_MSGTYPE_KEY: "m.file"},
+            meta=MessageMeta(media_msgtype="m.file"),
         ),
         Message(
             role="assistant",
             content="\n\n[audio message: voice-note.ogg]",
-            provider_data={MEDIA_MSGTYPE_KEY: "m.audio"},
+            meta=MessageMeta(media_msgtype="m.audio"),
         ),
         Message(role="user", content=_msg("@alice:example.org", "Got it, thanks.")),
     ]
@@ -606,7 +606,7 @@ async def test_the_agents_own_thread_messages_reach_the_judge_as_the_assistant(
     messages = [
         Message(role="user", content=_msg("@alice:example.org", "Can you render the mockup?")),
         own_thread_message(_msg(ids["helper"], "Here is the mockup.", event_id="$sent-1")),
-        own_thread_message(_msg(ids["helper"], "mockup.png", event_id="$sent-2"), {MEDIA_MSGTYPE_KEY: "m.image"}),
+        own_thread_message(_msg(ids["helper"], "mockup.png", event_id="$sent-2"), media_msgtype="m.image"),
         Message(role="user", content=_msg("@alice:example.org", "Thanks, that is the one.")),
     ]
     model = ScriptedModel([answer("Useful answer")])

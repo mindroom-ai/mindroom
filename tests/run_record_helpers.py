@@ -11,8 +11,7 @@ from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics
 
@@ -40,7 +39,7 @@ def reply(
         role="assistant",
         content=content,
         tool_calls=list(calls) or None,
-        provider_data=model_provenance(model, PROVIDER),
+        meta=MessageMeta(model=ModelProvenance(model, PROVIDER)),
         metrics=metrics,
     )
 
@@ -138,8 +137,8 @@ def settled[RecordT: AnyRunRecord](record: RecordT) -> RecordT:
     copy.created_at = 0
     for message in copy.messages:
         message.id, message.created_at = "", 0
-        if message.provider_data is not None:
-            message.provider_data.pop(REQUEST_IDENTITY_KEY, None)
+        if message.meta.request_identity is not None:
+            message.meta = replace(message.meta, request_identity=None)
     if copy.metrics is not None:
         copy.metrics.duration = copy.metrics.time_to_first_token = None
     if isinstance(copy, TeamRunRecord):

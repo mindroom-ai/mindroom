@@ -28,7 +28,7 @@ from mindroom.hooks.enrichment import render_transient_context
 from mindroom.json_utils import object_with_unique_keys
 from mindroom.judgment.state import JudgmentMessage
 from mindroom.llm.media import rendered_label
-from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message, is_media_follow_up
+from mindroom.llm.messages import Message, is_media_follow_up
 from mindroom.llm.provider import complete, count_turn_usage
 from mindroom.logging_config import get_logger
 from mindroom.memory import strip_user_turn_time_prefix
@@ -108,7 +108,7 @@ def _annotation_placeholder(match: re.Match[str]) -> str:
     placeholder = _sent([kind for kind, _ in files])
     body = match[2]
     # LEGACY_COMPAT: Thread context stored without the media msgtype marker.
-    # Legacy format: a stored thread-context message with no ``MEDIA_MSGTYPE_KEY`` whose line before its attachment
+    # Legacy format: a stored thread-context message with no ``media_msgtype`` whose line before its attachment
     # annotation is an uncaptioned file's name, after any user-turn time prefix, or ``[audio message: <name>]``.
     # Last legacy release: v2026.11.304 wrote context messages without the marker; the next release marks media.
     # Handling: that line is dropped, so the name never reaches the judge; any other line is a caption and is kept.
@@ -133,7 +133,7 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
         for message in messages
         # A compaction summary retells earlier tool results, and a media follow-up is the loop's, not a person's.
         if message.role in {"user", "assistant"}
-        and message.add_to_agent_memory
+        and not message.is_turn_context
         and not is_compaction_summary(message)
         and not is_media_follow_up(message)
     ]
@@ -150,7 +150,7 @@ def _external_decision_messages(messages: Sequence[Message]) -> tuple[JudgmentMe
             # Content blocks can hold media or provider data no placeholder describes.
             return "unreadable_content"
         text = message.content or ""
-        if (msgtype := (message.provider_data or {}).get(MEDIA_MSGTYPE_KEY)) in _MEDIA_MSGTYPES:
+        if (msgtype := message.meta.media_msgtype) in _MEDIA_MSGTYPES:
             # A media event's body may be its file name, so the judge reads only its kind.
             placeholder = _sent([_MEDIA_MSGTYPES[msgtype]])
             text = _CDATA_BODY.sub(placeholder, text, count=1) if "<![CDATA[" in text else placeholder

@@ -500,10 +500,10 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_onl
     assert len(members) == 1
     sent = [message for message in leader_request if message.role != "system"]
     stored = [message for message in record.messages if message.role != "system"][: len(sent)]
-    assert [(message.content, message.add_to_agent_memory) for message in stored] == [
-        (message.content, message.add_to_agent_memory) for message in sent
+    assert [(message.content, message.is_turn_context) for message in stored] == [
+        (message.content, message.is_turn_context) for message in sent
     ]
-    assert stored[-1].add_to_agent_memory is False
+    assert stored[-1].is_turn_context is True
     assert all(transient not in json.dumps(member.to_dict()) for member in members)
 
 

@@ -184,7 +184,7 @@ async def prepare_materialized_team_execution(
         model=leader.model,
         prompt=message,
         transient_context_messages=(
-            (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
+            (Message(role="user", content=transient_turn_context, is_turn_context=True),)
             if transient_turn_context
             else ()
         ),

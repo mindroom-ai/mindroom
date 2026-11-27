@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 from time import time
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -52,23 +53,13 @@ def _media_list[T](decode: Callable[[Mapping[str, Any]], T], items: list[Mapping
     return [decode(item) for item in items]
 
 
-# ``Message.provider_data`` key marking an assistant message whose usage sums a retried request's attempts, so usage
-# readers do not take the sum for one request's size; ``usage_sums_attempts`` reads it.
-AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
-# ``Message.provider_data`` key marking an assistant message that answered another request than the one its caller
-# sent, such as a retry without the media the provider rejected, so its usage sizes no request of the caller's.
-REWRITTEN_ATTEMPT_KEY = "mindroom_attempt_rewritten"
-# ``Message.provider_data`` key naming the configured fallback reference that answered an assistant turn, so later
-# requests on another route never reuse its stored continuation or encrypted replay state.
-FALLBACK_MODEL_KEY = "mindroom_fallback_model"
-# ``Message.provider_data`` key holding the text a response streamed before it was cut off, on the assistant message
-# without content that stands for it in its run; recovery of a run its user stopped keeps that text.
-CUT_OFF_TEXT_KEY = "mindroom_cut_off_text"
-# ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
-# which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
-# (``usage/storage.py``, ``agent_loop/helper.py``). It also tells a run's own model messages from the replies its
-# input carries (``is_own_model_message``).
-MODEL_PROVENANCE_KEY = "mindroom_model"
+class Unset(Enum):
+    """Sentinel for a tri-state metadata field absent from a stored message (distinct from explicit ``None``)."""
+
+    UNSET = "unset"
+
+
+UNSET = Unset.UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,50 +70,124 @@ class ModelProvenance:
     provider: str
 
 
-def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
-    """Return the provider data recording that ``model_id`` answered a message, under ``MODEL_PROVENANCE_KEY``.
+@dataclass(frozen=True, slots=True)
+class InvalidModelStamp:
+    """A stored ``mindroom_model`` value that does not match ``{"id": str, "provider": str}``."""
 
-    ``provider`` is the route's provider name (``ModelIdentity.provider``), which usage rows and prices key by.
-    """
-    return {MODEL_PROVENANCE_KEY: {"id": model_id, "provider": provider}}
-
-
-def read_model_provenance(provider_data: Mapping[str, object] | None) -> ModelProvenance | None:
-    """Return the model ``provider_data`` records as having answered its message, as ``model_provenance`` wrote it.
-
-    None when it records no model, or records one in another shape, as a stored row changed by another writer can.
-    """
-    stamp = (provider_data or {}).get(MODEL_PROVENANCE_KEY)
-    if not isinstance(stamp, dict):
-        return None
-    recorded = cast("dict[str, object]", stamp)
-    model_id, provider = recorded.get("id"), recorded.get("provider")
-    if isinstance(model_id, str) and isinstance(provider, str):
-        return ModelProvenance(model_id=model_id, provider=provider)
-    return None
+    raw: object
 
 
-def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
-    """Return whether ``provider_data`` marks its message's usage as the sum of a retried request's attempts.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MessageMeta:
+    """Internal MindRoom control and provenance metadata, stored inside ``provider_data`` on the wire."""
 
-    Such usage counts toward the totals but describes no one request: not its size, its price, or its time.
-    """
-    return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+    model: ModelProvenance | InvalidModelStamp | None = None
+    aggregate_usage: bool = False
+    attempt_rewritten: bool = False
+    fallback_model: str | None = None
+    cut_off_text: str | None = None
+    media_msgtype: str | None = None
+    queued_message_notice: bool | Literal["persisted"] = False
+    queued_notice_turn_id: str | None = None
+    prompt_update: bool = False
+    native_compaction: dict[str, Any] | None | Unset = UNSET
+    encrypted_replay_reset: str | None = None
+    compaction_summary: Literal["scope", "run"] | None = None
+    compaction_summary_follows: bool = False
+    thread_context_note: bool = False
+    own_thread_message: bool = False
+    request_identity: str | None = None
+    cache_routing: str | None = None
+    portable_replay: bool | None = None
 
 
-# ``Message.provider_data`` key naming the Matrix media ``msgtype`` a thread-context message shows, whose body may be the
-# file's name.
-MEDIA_MSGTYPE_KEY = "mindroom_media_msgtype"
-# ``Message.provider_data`` key marking a queued-message notice MindRoom wrote, which tells the model a newer message waits.
-QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
-# ``Message.provider_data`` key marking a system prompt update, which only ``providers/pipeline/prompt_hold.py`` adds
-# to a request and no run stores; the Chat wire sends it as a system message where it stands.
-PROMPT_UPDATE_KEY = "mindroom_prompt_update"
+EMPTY_META = MessageMeta()
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _decode_model_stamp(raw: object) -> ModelProvenance | InvalidModelStamp:
+    if isinstance(raw, dict):
+        recorded = cast("dict[str, object]", raw)
+        model_id, provider = recorded.get("id"), recorded.get("provider")
+        if isinstance(model_id, str) and isinstance(provider, str):
+            return ModelProvenance(model_id=model_id, provider=provider)
+    return InvalidModelStamp(raw)
+
+
+def _split_provider_data(raw: Mapping[str, Any]) -> tuple[dict[str, Any] | None, MessageMeta]:
+    pd = dict(raw)
+    model = _decode_model_stamp(pd.pop("mindroom_model")) if "mindroom_model" in pd else None
+    notice = pd.pop("mindroom_queued_message_notice", None)
+    summary = pd.pop("mindroom_compaction_summary", None)
+    portable = pd.pop("mindroom_portable_replay", None)
+    native: dict[str, Any] | None | Unset = UNSET
+    if "mindroom_native_compaction" in pd:
+        raw_native = pd.pop("mindroom_native_compaction")
+        native = raw_native if raw_native is None or isinstance(raw_native, dict) else {}
+    meta = MessageMeta(
+        model=model,
+        aggregate_usage=pd.pop("mindroom_aggregate_usage", None) is True,
+        attempt_rewritten=pd.pop("mindroom_attempt_rewritten", None) is True,
+        fallback_model=_str_or_none(pd.pop("mindroom_fallback_model", None)),
+        cut_off_text=_str_or_none(pd.pop("mindroom_cut_off_text", None)),
+        media_msgtype=_str_or_none(pd.pop("mindroom_media_msgtype", None)),
+        queued_message_notice=notice if notice is True or notice == "persisted" else False,
+        queued_notice_turn_id=_str_or_none(pd.pop("mindroom_queued_message_notice_response_turn_id", None)),
+        prompt_update=pd.pop("mindroom_prompt_update", None) is True,
+        native_compaction=native,
+        encrypted_replay_reset=_str_or_none(pd.pop("mindroom_encrypted_replay_reset", None)),
+        compaction_summary=cast("Literal['scope', 'run']", summary) if summary in {"scope", "run"} else None,
+        compaction_summary_follows=pd.pop("mindroom_compaction_summary_follows", None) is True,
+        thread_context_note=pd.pop("mindroom_thread_context_note", None) is True,
+        own_thread_message=pd.pop("mindroom_own_thread_message", None) is True,
+        request_identity=_str_or_none(pd.pop("mindroom_request", None)),
+        cache_routing=_str_or_none(pd.pop("mindroom_cache_routing", None)),
+        portable_replay=portable if isinstance(portable, bool) else None,
+    )
+    return pd or None, EMPTY_META if meta == EMPTY_META else meta
+
+
+def _meta_to_dict(meta: MessageMeta) -> dict[str, Any]:
+    if meta is EMPTY_META:
+        return {}
+    notice = meta.queued_message_notice
+    out: dict[str, Any] = {
+        key: value
+        for key, value in (
+            ("mindroom_aggregate_usage", True if meta.aggregate_usage else None),
+            ("mindroom_attempt_rewritten", True if meta.attempt_rewritten else None),
+            ("mindroom_fallback_model", meta.fallback_model),
+            ("mindroom_cut_off_text", meta.cut_off_text),
+            ("mindroom_media_msgtype", meta.media_msgtype),
+            ("mindroom_queued_message_notice", notice if notice is True or notice == "persisted" else None),
+            ("mindroom_queued_message_notice_response_turn_id", meta.queued_notice_turn_id),
+            ("mindroom_prompt_update", True if meta.prompt_update else None),
+            ("mindroom_encrypted_replay_reset", meta.encrypted_replay_reset),
+            ("mindroom_compaction_summary", meta.compaction_summary),
+            ("mindroom_compaction_summary_follows", True if meta.compaction_summary_follows else None),
+            ("mindroom_thread_context_note", True if meta.thread_context_note else None),
+            ("mindroom_own_thread_message", True if meta.own_thread_message else None),
+            ("mindroom_request", meta.request_identity),
+            ("mindroom_cache_routing", meta.cache_routing),
+            ("mindroom_portable_replay", meta.portable_replay),
+        )
+        if value is not None
+    }
+    if isinstance(meta.model, ModelProvenance):
+        out["mindroom_model"] = {"id": meta.model.model_id, "provider": meta.model.provider}
+    elif isinstance(meta.model, InvalidModelStamp):
+        out["mindroom_model"] = meta.model.raw
+    if meta.native_compaction is not UNSET:
+        out["mindroom_native_compaction"] = meta.native_compaction
+    return out
 
 
 def is_queued_notice_message(message: Message) -> bool:
     """Return whether a message is a queued-message notice MindRoom wrote."""
-    marker = (message.provider_data or {}).get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
+    marker = message.meta.queued_message_notice
     # LEGACY_COMPAT: Queued-message notices marked "persisted" after delivery.
     # Legacy format: a stored notice whose marker is ``"persisted"`` instead of ``True``; once a reply was delivered,
     # MindRoom rewrote the notices its stored runs held into one marked so, and a reply that opened a scope rewrote a
@@ -146,13 +211,9 @@ def is_own_model_message(message: Message) -> bool:
     """Return whether a model answered ``message`` in the run that holds it.
 
     A run's input can carry the thread's earlier replies as assistant messages; only a message a model answered
-    carries its provenance (``MODEL_PROVENANCE_KEY``), and a history copy is marked ``from_history``.
+    carries its provenance (``meta.model``), and a history copy is marked ``from_history``.
     """
-    return (
-        message.role == "assistant"
-        and not message.from_history
-        and MODEL_PROVENANCE_KEY in (message.provider_data or {})
-    )
+    return message.role == "assistant" and not message.from_history and message.meta.model is not None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -160,7 +221,7 @@ class Message:
     """One message in a model conversation.
 
     A ``system`` message is a prompt, which history never replays and only a paused run stores. ``from_history``
-    marks a copy replayed from a stored run (never stored again), and ``add_to_agent_memory=False`` marks turn context
+    marks a copy replayed from a stored run (never stored again), and ``is_turn_context=True`` marks turn context
     MindRoom sent to the model rather than conversation, such as memory results and the approval receipt: a run stores
     it where it was sent, unless it stopped after a call, so a resume and later turns send it again unchanged, except
     under a message limit, while text summaries and the readers of what was said leave it out.
@@ -195,10 +256,11 @@ class Message:
     reasoning_content: str | None = None
     redacted_reasoning_content: str | None = None
     provider_data: dict[str, Any] | None = None
+    meta: MessageMeta = EMPTY_META
     metrics: MessageMetrics = field(default_factory=MessageMetrics)
     created_at: int = field(default_factory=_now)
     from_history: bool = False
-    add_to_agent_memory: bool = True
+    is_turn_context: bool = False
 
     def get_content_string(self) -> str:
         """Return the text of ``content``: the first text block of a block list, else its JSON."""
@@ -217,9 +279,14 @@ class Message:
         """Return the stored dict: None and empty values dropped, media as dicts, ``created_at`` always.
 
         A flag is written only when it differs from its default, which ``from_dict`` reads for an absent key:
-        ``from_history`` and ``stop_after_tool_call`` only when True, and ``add_to_agent_memory`` only when False, which
-        a run's turn context holds.
+        ``from_history`` and ``stop_after_tool_call`` only when True, and ``add_to_agent_memory: False`` when
+        ``is_turn_context`` is True. Internal ``meta`` entries merge into ``provider_data`` on the wire.
         """
+        meta_data = _meta_to_dict(self.meta)
+        if isinstance(self.provider_data, dict):
+            provider_data: Any = {**self.provider_data, **meta_data} if meta_data else self.provider_data
+        else:
+            provider_data = meta_data or self.provider_data
         values: dict[str, Any] = {
             "id": self.id,
             "content": self.content,
@@ -235,7 +302,7 @@ class Message:
             "tool_call_error": self.tool_call_error,
             "tool_calls": self.tool_calls,
             "redacted_reasoning_content": self.redacted_reasoning_content,
-            "provider_data": self.provider_data,
+            "provider_data": provider_data,
         }
         result = {
             key: value
@@ -253,7 +320,7 @@ class Message:
         metrics = self.metrics.to_dict()
         if metrics:
             result["metrics"] = metrics
-        if not self.add_to_agent_memory:
+        if self.is_turn_context:
             result["add_to_agent_memory"] = False
         result["created_at"] = self.created_at
         return result
@@ -262,8 +329,9 @@ class Message:
     def from_dict(cls, data: Mapping[str, Any]) -> Message:
         """Rebuild from a stored dict.
 
-        Keys this type does not model are ignored. ``add_to_agent_memory`` is True unless the dict says otherwise, as
-        ``to_dict`` writes it and ``model_dump``-shaped payloads carry it.
+        Keys this type does not model are ignored. Stored ``add_to_agent_memory: False`` decodes as
+        ``is_turn_context=True``, and the 18 internal MindRoom keys stored inside ``provider_data`` decode into
+        ``meta``.
         """
         # LEGACY_COMPAT: Agno 3 message dicts carry keys the owned Message dropped.
         # Legacy format: ``run_data`` messages, summary-row segments, and tool-job payloads written by the
@@ -279,6 +347,11 @@ class Message:
         message_id = identifier if isinstance(identifier, str) else _new_id()
         created_at = data.get("created_at")
         tool_call_id, tool_calls = _stored_call_ids(data, message_id)
+        raw_pd = data.get("provider_data")
+        if isinstance(raw_pd, dict):
+            provider_data, meta = _split_provider_data(raw_pd)
+        else:
+            provider_data, meta = raw_pd, EMPTY_META
         return cls(
             role=data["role"],
             content=data.get("content"),
@@ -297,11 +370,12 @@ class Message:
             files=_media_list(File.from_dict, data.get("files")),
             reasoning_content=data.get("reasoning_content"),
             redacted_reasoning_content=data.get("redacted_reasoning_content"),
-            provider_data=data.get("provider_data"),
+            provider_data=provider_data,
+            meta=meta,
             metrics=MessageMetrics.from_dict(metrics) if isinstance(metrics, dict) else MessageMetrics(),
             created_at=created_at if isinstance(created_at, int) else _now(),
             from_history=data.get("from_history", False),
-            add_to_agent_memory=data.get("add_to_agent_memory", True),
+            is_turn_context=not data.get("add_to_agent_memory", True),
         )
 
 
@@ -433,29 +507,23 @@ def stored_tool_call(call_id: str, name: str | None, arguments: str) -> dict[str
 
 
 __all__ = [
-    "AGGREGATE_USAGE_KEY",
-    "CUT_OFF_TEXT_KEY",
-    "FALLBACK_MODEL_KEY",
+    "EMPTY_META",
     "MEDIA_FOLLOW_UP_TEXT",
-    "MEDIA_MSGTYPE_KEY",
-    "MODEL_PROVENANCE_KEY",
-    "PROMPT_UPDATE_KEY",
-    "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
-    "REWRITTEN_ATTEMPT_KEY",
+    "UNSET",
+    "InvalidModelStamp",
     "Message",
+    "MessageMeta",
     "ModelProvenance",
     "ToolResultView",
+    "Unset",
     "is_media_follow_up",
     "is_own_model_message",
     "is_queued_notice_message",
     "media_items",
-    "model_provenance",
-    "read_model_provenance",
     "stable_serialize",
     "stored_tool_call",
     "system_text",
     "system_texts",
     "tool_result_view",
-    "usage_sums_attempts",
     "with_joined_system",
 ]

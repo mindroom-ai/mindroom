@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
@@ -294,16 +294,16 @@ def test_reporting_keeps_usage_after_real_compaction_and_reopen(usage_db: Conver
 
 def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_is_no_request() -> None:
     """A request's stored model comes from its message; a message summing retried attempts describes no one request."""
-    answered = {"mindroom_model": {"id": "reply-model", "provider": "test-provider"}}
+    answered = ModelProvenance("reply-model", "test-provider")
     single = Message(
         role="assistant",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
-        provider_data=answered,
+        meta=MessageMeta(model=answered),
     )
     retried = Message(
         role="assistant",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=300, output_tokens=3)),
-        provider_data={**answered, "mindroom_aggregate_usage": True},
+        meta=MessageMeta(model=answered, aggregate_usage=True),
     )
 
     requests = [request for message in (single, retried) if (request := _message_request_snapshot(message))]
@@ -318,7 +318,7 @@ def test_an_assistant_message_from_history_is_no_request_of_the_run() -> None:
     replayed = Message(
         role="assistant",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
-        provider_data={"mindroom_model": {"id": "reply-model", "provider": "test-provider"}},
+        meta=MessageMeta(model=ModelProvenance("reply-model", "test-provider")),
         from_history=True,
     )
 
@@ -335,10 +335,12 @@ def test_an_assistant_message_from_history_is_no_request_of_the_run() -> None:
 )
 def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attribution(recorded: object) -> None:
     """A recorded model that is not the shape the loop writes marks both of the request's model fields invalid."""
-    message = Message(
-        role="assistant",
-        metrics=MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=1)),
-        provider_data={"mindroom_model": recorded},
+    message = Message.from_dict(
+        {
+            "role": "assistant",
+            "metrics": {"input_tokens": 100, "output_tokens": 1},
+            "provider_data": {"mindroom_model": recorded},
+        },
     )
 
     request = _message_request_snapshot(message)

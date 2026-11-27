@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -50,7 +50,7 @@ from mindroom.hooks import (
     HookBindings,
     HookRegistry,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -64,16 +64,11 @@ from mindroom.llm.provider import (
     TurnCompleted,
     UsageReported,
 )
-from mindroom.llm.request_identity import (
-    CACHE_ROUTING_KEY,
-    REQUEST_IDENTITY_KEY,
-    cache_routing_digest,
-    request_prefixes,
-)
+from mindroom.llm.request_identity import cache_routing_digest, request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
+from mindroom.native_compaction import native_checkpoint_state
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_storage import store as store_module
@@ -166,32 +161,31 @@ def checkpointed_answer(item: dict[str, object], basis: str) -> Message:
     return Message(
         role="assistant",
         content="answer after the checkpoint",
-        provider_data={
-            "mindroom_native_compaction": {
+        meta=MessageMeta(
+            native_compaction={
                 "route": "another-model-route",
                 "threshold": 50_000,
                 "checkpoint_prefix": True,
                 "items": [item],
                 "basis": basis,
             },
-        },
+        ),
     )
 
 
 def stamp_request_identity(answer: Message, model: ModelProvider, request: ModelRequest) -> None:
     """Record on ``answer`` the identity of ``request`` and any cache-routing digest, as the model loop does.
 
-    A request without an identity, such as one holding media at a URL, leaves ``REQUEST_IDENTITY_KEY`` unstamped.
+    A request without an identity, such as one holding media at a URL, leaves ``request_identity`` unstamped.
     """
-    base = answer.provider_data or {}
-    updated = base
     identity = request_prefixes(model, request)[-1]
-    if identity is not None:
-        updated = {**updated, REQUEST_IDENTITY_KEY: identity}
-    if (routing := cache_routing_digest(model.model_params)) is not None:
-        updated = {**updated, CACHE_ROUTING_KEY: routing}
-    if updated is not base:
-        answer.provider_data = updated
+    routing = cache_routing_digest(model.model_params)
+    if identity is not None or routing is not None:
+        answer.meta = replace(
+            answer.meta,
+            request_identity=identity if identity is not None else answer.meta.request_identity,
+            cache_routing=routing if routing is not None else answer.meta.cache_routing,
+        )
 
 
 def record_native_checkpoint(
@@ -200,10 +194,7 @@ def record_native_checkpoint(
     settings: NativeCompactionReplay | None,
 ) -> None:
     """Record on ``message`` the native-compaction state a completed response with output ``items`` stores."""
-    message.provider_data = {
-        **(message.provider_data or {}),
-        NATIVE_CHECKPOINT_KEY: native_checkpoint_state(items, settings),
-    }
+    message.meta = replace(message.meta, native_compaction=native_checkpoint_state(items, settings))
 
 
 def _summarizer(

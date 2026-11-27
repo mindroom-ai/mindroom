@@ -95,10 +95,8 @@ def with_native_history(template: ModelRequest, native: NativeHistory | None) ->
 
 def _restored_portable_replay(message: Message | None) -> bool:
     """Return the replay policy the paused request ran with, from the provenance its last response recorded."""
-    data = (message.provider_data or {}) if message is not None else {}
-    saved = data.get("mindroom_portable_replay")
-    if isinstance(saved, bool):
-        return saved
+    if message is not None and message.meta.portable_replay is not None:
+        return message.meta.portable_replay
     # LEGACY_COMPAT: Responses replies stored without their replay policy.
     # Legacy format: an assistant message whose ``provider_data`` has no boolean ``mindroom_portable_replay``; a reply
     # that did not complete is still stored that way.
@@ -108,6 +106,7 @@ def _restored_portable_replay(message: Message | None) -> bool:
     # settings, or it holds encrypted reasoning among its ordered output items, and otherwise continues the stored
     # response.
     # Coverage: tests/test_native_compaction_history.py::test_restore_portable_policy_requires_latest_provenance
+    data = (message.provider_data or {}) if message is not None else {}
     items = data.get("mindroom_response_output")
     has_ordered_reasoning = (
         isinstance(items, list)

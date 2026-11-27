@@ -35,7 +35,7 @@ from mindroom.history.run_checkpoint import (
 )
 from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import TextDelta, ToolCallReady, TurnCompleted, UsageReported
 from mindroom.llm.request_identity import request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
@@ -631,7 +631,7 @@ def test_a_recovered_run_keeps_the_usage_of_a_cut_off_response(tmp_path: Path) -
     run.messages.append(cut_off)
     for message in (run.messages[1], cut_off):
         message.metrics = usage(10, 5)
-        message.provider_data = model_provenance(run.model, run.model_provider)
+        message.meta = MessageMeta(model=ModelProvenance(run.model, run.model_provider))
         run.metrics.add(message.metrics, model_id=run.model, provider=run.model_provider)
     store.save_run(session, run, record_usage=True)
 

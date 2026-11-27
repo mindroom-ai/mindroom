@@ -343,7 +343,7 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
     *_, prompt, transient = turn
     assert prompt.role == transient.role == "user"
     assert "prompt" in str(prompt.content)
-    assert transient.add_to_agent_memory is False
+    assert transient.is_turn_context is True
     assert "Retrieved memory" in str(transient.content)
     assert "Current location: Amsterdam" in str(transient.content)
     storage = create_session_storage("code", config, runtime_paths_for(config), execution_identity=None)
@@ -351,7 +351,7 @@ async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_
     stored_prompt, stored_transient, _answer = run.messages
     assert "Current location: Amsterdam" not in str(stored_prompt.content)
     assert stored_transient.content == transient.content
-    assert stored_transient.add_to_agent_memory is False
+    assert stored_transient.is_turn_context is True
 
 
 def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
@@ -426,7 +426,7 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
     )
 
     [transient] = prepared.turn.transient
-    assert transient.add_to_agent_memory is False
+    assert transient.is_turn_context is True
     assert "Current location" in str(transient.content)
     assert "Current location" not in system_text(spec.leader.system_messages)
 

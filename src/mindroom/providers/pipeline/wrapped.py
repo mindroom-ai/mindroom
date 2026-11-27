@@ -11,10 +11,10 @@ turn's metrics, and a consumer settling a stream that never completed sums them 
 final one replaced.
 
 Once failed attempts reported usage, one rule marks the usage of each later attempt as summing attempts: its reports
-get ``sums_attempts`` and its finished turn ``provider_data[AGGREGATE_USAGE_KEY]``, so a request that completes
+get ``sums_attempts`` and its finished turn ``meta.aggregate_usage``, so a request that completes
 and one cut off before it finished both store the sum as describing no single request. A finished turn whose attempt
 was reissued as another request, such as one without the media a provider rejected, gets
-``provider_data[REWRITTEN_ATTEMPT_KEY]``: its usage describes that other request, not the one the caller sent.
+``meta.attempt_rewritten``: its usage describes that other request, not the one the caller sent.
 
 A stage that rewrites every request it streams the same way, with no state of its own, names that rewrite as its
 ``projection``, so the wrapper sizes and identifies the request its inner provider is sent.
@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import ProviderError, incomplete_stream_error
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, stable_serialize
+from mindroom.llm.messages import stable_serialize
 from mindroom.llm.provider import (
     ReasoningDelta,
     ReportedUsage,
@@ -192,8 +192,7 @@ async def attempts(
                     finished = finished or isinstance(event, TurnCompleted)
                     if isinstance(event, TurnCompleted) and request is not sent:
                         # The attempt was another request than the caller's, so its usage sizes none of the caller's.
-                        message = event.message
-                        message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
+                        event.message.meta = replace(event.message.meta, attempt_rewritten=True)
                     yield with_carried_usage(event, carried)
             if finished:
                 return
@@ -244,6 +243,6 @@ def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> St
         return event
     message = event.message
     if sums_attempts:
-        message.provider_data = {**(message.provider_data or {}), AGGREGATE_USAGE_KEY: True}
+        message.meta = replace(message.meta, aggregate_usage=True)
     message.metrics = carried + message.metrics
     return event

@@ -42,14 +42,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import PROMPT_CACHE_IDLE_SECONDS
 from mindroom.file_locks import advisory_file_lock
-from mindroom.llm.messages import (
-    PROMPT_UPDATE_KEY,
-    REWRITTEN_ATTEMPT_KEY,
-    Message,
-    stable_serialize,
-)
+from mindroom.llm.messages import Message, MessageMeta, stable_serialize
 from mindroom.llm.provider import TurnCompleted
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, message_digest, request_prefixes
+from mindroom.llm.request_identity import message_digest, request_prefixes
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.yaml_io import write_text_atomic
@@ -204,7 +199,7 @@ def _continued(state: _State, route: object, system: Sequence[Message], rest: Se
     ]
     start = 0
     for length, _, text in updates:
-        update = Message(role="user", content=text, add_to_agent_memory=False, provider_data={PROMPT_UPDATE_KEY: True})
+        update = Message(role="user", content=text, is_turn_context=True, meta=MessageMeta(prompt_update=True))
         sent += [*rest[start:length], update]
         start = length
     return (*sent, *rest[start:]), state
@@ -273,7 +268,7 @@ def held_request(inner: ModelProvider, request: ModelRequest, *, pins: bool = Fa
     if pin is not None and not pin:
         # The run it continues may have been sent another prompt than the file holds: only its newest answer tells.
         newest = max((at for at, message in enumerate(request.messages) if message.role == "assistant"), default=-1)
-        recorded = (request.messages[newest].provider_data or {}).get(REQUEST_IDENTITY_KEY) if plan else None
+        recorded = request.messages[newest].meta.request_identity if plan and newest >= 0 else None
         if recorded is None or newest < 0 or recorded != _identities(inner, request, sent)[newest]:
             state, sent = None, replace(request, prompt_hold=None)
         if pins:
@@ -321,7 +316,6 @@ async def prompt_hold_stream(inner: ModelProvider, request: ModelRequest) -> Asy
             if sent is not request and isinstance(event, TurnCompleted):
                 # The identity of the request as it was sent, which reading the hold again would not surely give.
                 identity = (await asyncio.to_thread(_identities, inner, request, sent))[-1]
-                answered = event.message.provider_data or {}
-                if identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
-                    event.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: identity}
+                if identity is not None and not event.message.meta.attempt_rewritten:
+                    event.message.meta = replace(event.message.meta, request_identity=identity)
             yield event

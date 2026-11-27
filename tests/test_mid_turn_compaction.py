@@ -55,14 +55,13 @@ from mindroom.hooks import (
 )
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY as _NOTICE_KEY
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import (
     ModelRequest,
     NativeCompactionReplay,
     TokenCounter,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import request_prefixes
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -215,8 +214,8 @@ def _scoped_agent(
 def _turn(prompt: Sequence[Message] | str) -> TurnMessages:
     """Split a run's input as a reply does: transient context, the prompt (its last other message), context."""
     messages = [Message(role="user", content=prompt)] if isinstance(prompt, str) else list(prompt)
-    transient = tuple(message for message in messages if not message.add_to_agent_memory)
-    conversation = [message for message in messages if message.add_to_agent_memory]
+    transient = tuple(message for message in messages if message.is_turn_context)
+    conversation = [message for message in messages if not message.is_turn_context]
     return TurnMessages(prompt=conversation[-1], context=tuple(conversation[:-1]), transient=transient)
 
 
@@ -551,7 +550,7 @@ def test_aggregate_usage_of_retried_requests_never_anchors_sizing() -> None:
         role="assistant",
         content="done",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=90_000)),
-        provider_data={"mindroom_aggregate_usage": True},
+        meta=MessageMeta(aggregate_usage=True),
     )
 
     assert (
@@ -578,7 +577,7 @@ async def test_unseen_thread_context_is_folded_and_transient_context_kept(
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=4)
     unseen = Message(role="user", content="u" * 6000)
-    transient = Message(role="user", content="transient turn context", add_to_agent_memory=False)
+    transient = Message(role="user", content="transient turn context", is_turn_context=True)
     prompt = Message(role="user", content="Do the task")
 
     await _run(_Agent(model, config, paths), [unseen, transient, prompt])
@@ -599,7 +598,7 @@ async def test_an_earlier_turns_stored_context_folds_as_history_not_as_this_turn
 ) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    earlier_context = Message(role="user", content="earlier turn context", add_to_agent_memory=False)
+    earlier_context = Message(role="user", content="earlier turn context", is_turn_context=True)
     seed_session(
         storage,
         _session(
@@ -617,7 +616,7 @@ async def test_an_earlier_turns_stored_context_folds_as_history_not_as_this_turn
         ),
     )
     model = ToolLoopModel(tool_rounds=5)
-    transient = Message(role="user", content="transient turn context", add_to_agent_memory=False)
+    transient = Message(role="user", content="transient turn context", is_turn_context=True)
 
     await _run(_scoped_agent(model, config, paths, storage), [Message(role="user", content="Do the task"), transient])
 
@@ -1054,7 +1053,7 @@ async def test_folded_request_usage_stays_on_a_run_cancelled_after_compaction(tm
 async def test_queued_notice_survives_mid_turn_compaction(tmp_path: Path, summary_calls: SummaryCalls) -> None:
     config, paths = _config(tmp_path)
     model = ToolLoopModel(tool_rounds=5)
-    notice = Message(role="user", content="A newer message is waiting.", provider_data={_NOTICE_KEY: True})
+    notice = Message(role="user", content="A newer message is waiting.", meta=MessageMeta(queued_message_notice=True))
 
     def add_notice(state: LoopState) -> None:
         if len(model.requests) == 2 and notice not in state.messages:
@@ -1074,7 +1073,7 @@ def test_replayed_queued_notice_is_folded() -> None:
     old_notice = Message(
         role="user",
         content="A newer message is waiting.",
-        provider_data={_NOTICE_KEY: "persisted"},
+        meta=MessageMeta(queued_message_notice="persisted"),
         from_history=True,
     )
     prompt = Message(role="user", content="Do the task")
@@ -1099,7 +1098,7 @@ def test_tool_results_after_an_interleaved_message_fold_with_their_call() -> Non
         tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}],
     )
     # Turn context sits between a call and its result.
-    context = Message(role="user", content="Noted.", add_to_agent_memory=False)
+    context = Message(role="user", content="Noted.", is_turn_context=True)
     result = Message(role="tool", tool_call_id="c1", content="r")
     messages = [Message(role="system", content="Be precise."), prompt, call, context, result]
 
@@ -1289,8 +1288,7 @@ async def test_an_answer_after_a_fold_records_the_request_it_answered(tmp_path: 
     assert _ends_with_prompt_then_summary(_first_compacted(model))
     answer = output.messages[-1]
     assert answer.content == "done"
-    assert answer.provider_data is not None
-    assert answer.provider_data[REQUEST_IDENTITY_KEY] == request_prefixes(model, model.requests[-1].request)[-1]
+    assert answer.meta.request_identity == request_prefixes(model, model.requests[-1].request)[-1]
 
 
 @pytest.mark.asyncio

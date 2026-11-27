@@ -31,7 +31,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Image
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -620,7 +620,7 @@ async def test_usage_attribution_single_and_fallback(tmp_path: Path, monkeypatch
     u1 = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=0))
     u2 = MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=0))
 
-    # Single provider sums attempts and marks AGGREGATE_USAGE_KEY.
+    # Single provider sums attempts and marks meta.aggregate_usage.
     single = _Scripted(
         ModelIdentity(id="gpt-5", provider="openai", endpoint=_CLOUD),
         [[UsageReported(u1, final=False), _net_err()], [_turn("done", inp=100, out=20)]],
@@ -631,7 +631,7 @@ async def test_usage_attribution_single_and_fallback(tmp_path: Path, monkeypatch
         200,
         20,
     )
-    assert (single_turn.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+    assert single_turn.message.meta.aggregate_usage is True
 
     # Fallback chain attributes prior attempts per model without double-counting.
     fallback_stage._COOLDOWN_UNTIL.clear()

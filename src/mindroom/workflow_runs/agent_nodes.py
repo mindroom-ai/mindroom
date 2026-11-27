@@ -32,7 +32,7 @@ from mindroom.delegation.state import (
     SubagentPersona,
 )
 from mindroom.delegation.targets import DelegationTarget, resolve_follow_up_target, resolve_fresh_target
-from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
+from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -566,9 +566,7 @@ def _did_model_work(run: RunRecord, used: RunMetrics | None) -> bool:
     """Return whether *run* shows any model work: usage, tool activity, content, or an answered/cut-off model message."""
     if (used is not None and (used.reported or used.details)) or run.tools or run.content:
         return True
-    return any(
-        is_own_model_message(message) or CUT_OFF_TEXT_KEY in (message.provider_data or {}) for message in run.messages
-    )
+    return any(is_own_model_message(message) or message.meta.cut_off_text is not None for message in run.messages)
 
 
 def _spent(run: RunRecord, used: RunMetrics | None, cost: float | None) -> dict[str, object]:

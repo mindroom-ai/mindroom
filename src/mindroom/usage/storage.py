@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast, get_args
 
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, read_model_provenance, usage_sums_attempts
+from mindroom.llm.messages import InvalidModelStamp, ModelProvenance
 from mindroom.llm.runs import TeamRunRecord
 from mindroom.llm.usage import TOKEN_FIELDS, RequestUsage, TokenCounts
 
@@ -112,18 +112,17 @@ def request_usage(message: Message) -> RequestUsage | None:
     records; a message stored before stamps existed and a stamp of another shape name none alike, which
     ``_message_request_snapshot`` tells apart.
     """
-    provider_data = _provider_data(message)
     if (
         message.role != "assistant"
         or message.from_history
-        or usage_sums_attempts(provider_data)
+        or message.meta.aggregate_usage
         or not message.metrics.reported
     ):
         return None
     return RequestUsage(
         created_at=message.created_at,
         metrics=message.metrics,
-        model=read_model_provenance(provider_data),
+        model=message.meta.model if isinstance(message.meta.model, ModelProvenance) else None,
     )
 
 
@@ -138,14 +137,9 @@ def _message_request_snapshot(message: Message) -> dict[str, object] | None:
         return None
     snapshot = _project_request(request)
     assert snapshot is not None, "a request reported counters, so it projects to a snapshot"
-    if request.model is None and MODEL_PROVENANCE_KEY in (_provider_data(message) or {}):
+    if isinstance(message.meta.model, InvalidModelStamp):
         snapshot["model"] = snapshot["model_provider"] = False
     return snapshot
-
-
-def _provider_data(message: Message) -> dict[str, object] | None:
-    # A message read from a row worker code wrote can hold provider data of any shape.
-    return message.provider_data if isinstance(message.provider_data, dict) else None
 
 
 def _carried_requests(record: AnyRunRecord, metadata: Mapping[str, object]) -> list[dict[str, object]]:
