@@ -4878,16 +4878,16 @@
             "args": {
               "anyOf": [
                 {
+                  "type": "string"
+                },
+                {
                   "type": "array",
                   "items": {
                     "type": "string"
                   }
-                },
-                {
-                  "type": "string"
                 }
               ],
-              "description": "Shell command string or argv list of strings."
+              "description": "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
             },
             "tail": {
               "type": "integer",
