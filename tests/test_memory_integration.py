@@ -115,10 +115,10 @@ class TestMemoryIntegration:
         _stable, _turn, prompt, transient = request.messages
         assert prompt.role == "user"
         assert prompt.content == "What is 2+2?"
-        assert prompt.add_to_agent_memory is True
+        assert prompt.is_turn_context is False
         assert transient.role == "user"
         assert transient.content == render_transient_context(("[Enhanced memory] What is 2+2?",))
-        assert transient.add_to_agent_memory is False
+        assert transient.is_turn_context is True
 
         # Note: Memory storage now happens at the bot level, not in ai_response
 

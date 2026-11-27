@@ -34,7 +34,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
 )
 from mindroom.llm.media import Image
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, read_model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
@@ -109,9 +109,7 @@ async def test_a_text_answer_streams_its_reasoning_and_text_and_reports_usage_on
     assert completed.message.content == "Hello, Alice."
     assert completed.message.reasoning_content == "Greet them."
     assert completed.message.tool_calls is None
-    provenance = read_model_provenance(completed.message.provider_data)
-    assert provenance is not None
-    assert (provenance.model_id, provenance.provider) == ("claude-invented-1", ROUTE_PROVIDERS["claude_code"])
+    assert completed.message.meta.model == ModelProvenance("claude-invented-1", ROUTE_PROVIDERS["claude_code"])
     final = [event for event in events if isinstance(event, UsageReported) and event.final]
     assert len(final) == 1
     tokens = final[0].usage.tokens
@@ -1504,7 +1502,7 @@ async def test_repeated_unoffered_tool_calls_fail_after_the_round_limit(tmp_path
 
 
 def _notice(text: str) -> Message:
-    return Message(role="user", content=text, provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True})
+    return Message(role="user", content=text, meta=MessageMeta(queued_message_notice=True))
 
 
 async def test_a_process_that_read_a_queued_message_notice_is_not_continued_once_the_notice_is_gone(

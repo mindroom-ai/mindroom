@@ -25,14 +25,12 @@ from mindroom.hooks import (
     TranscriptLine,
     hook,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, NativeCompactionReplay, TurnCompleted
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import request_prefixes
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.native_compaction import (
-    ENCRYPTED_REPLAY_RESET_KEY,
-    NATIVE_CHECKPOINT_KEY,
     NativeCheckpoint,
     extract_native_checkpoint,
     native_checkpoint_state,
@@ -82,7 +80,7 @@ def _ckpt_msg(
     metrics: MessageMetrics | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     message_id: str | None = None,
-    extra_provider_data: dict[str, Any] | None = None,
+    encrypted_replay_reset: str | None = None,
 ) -> Message:
     kwargs: dict[str, Any] = {"role": "assistant", "content": content, "tool_calls": tool_calls}
     if message_id is not None:
@@ -90,12 +88,13 @@ def _ckpt_msg(
     if metrics is not None:
         kwargs["metrics"] = metrics
     message = Message(**kwargs)
-    provider_data: dict[str, Any] = dict(extra_provider_data or {})
+    meta = message.meta
     if items is not None or checkpoint_prefix:
         state = native_checkpoint_state(items or [], _NATIVE, checkpoint_prefix=checkpoint_prefix)
-        provider_data[NATIVE_CHECKPOINT_KEY] = state
-    if provider_data:
-        message.provider_data = provider_data
+        meta = replace(meta, native_compaction=state)
+    if encrypted_replay_reset is not None:
+        meta = replace(meta, encrypted_replay_reset=encrypted_replay_reset)
+    message.meta = meta
     return message
 
 
@@ -181,12 +180,12 @@ def test_extract_native_checkpoint_handles_valid_noops_replay_prefix_and_malform
         Message(
             role="user",
             content="hi",
-            provider_data={NATIVE_CHECKPOINT_KEY: {"route": _ROUTE, "items": [{"type": "compaction", "content": "x"}]}},
+            meta=MessageMeta(native_compaction={"route": _ROUTE, "items": [{"type": "compaction", "content": "x"}]}),
         ),
         Message(
             role="assistant",
             content="hi",
-            provider_data={NATIVE_CHECKPOINT_KEY: {"route": "", "items": [{"type": "compaction", "content": "x"}]}},
+            meta=MessageMeta(native_compaction={"route": "", "items": [{"type": "compaction", "content": "x"}]}),
         ),
     ):
         assert extract_native_checkpoint(ignored) is None
@@ -458,7 +457,7 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
         assert len(observed) == 1
         return observed[0]
 
-    # 1. Recovery on the compacting turn itself (response carries ENCRYPTED_REPLAY_RESET_KEY).
+    # 1. Recovery on the compacting turn itself (response carries encrypted_replay_reset).
     anchored_reply = Message(
         role="assistant",
         content="Pre-strip answer",
@@ -474,11 +473,11 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
         Message(role="user", content="Current question"),
     ]
     sent_request = replace(_TEMPLATE, messages=tuple(messages))
-    anchored_reply.provider_data = {REQUEST_IDENTITY_KEY: request_prefixes(probe_model, sent_request)[4]}
+    anchored_reply.meta = MessageMeta(request_identity=request_prefixes(probe_model, sent_request)[4])
     recovered_turn = _ckpt_msg(
         "Recovered answer",
         items=[{"type": "compaction", "id": "cmp_new", "encrypted_content": "fresh-enc"}],
-        extra_provider_data={ENCRYPTED_REPLAY_RESET_KEY: reset_scope},
+        encrypted_replay_reset=reset_scope,
     )
     ctx = await run_openrouter(recovered_turn, messages)
 
@@ -493,12 +492,12 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
     assert ctx.token_count_after < ctx.token_count_before
     assert ctx.transcript[0].text == earliest_text
 
-    # 2. Prior ENCRYPTED_REPLAY_RESET_KEY boundary on reset_scope without a reset on the new compacting turn.
+    # 2. Prior encrypted_replay_reset boundary on reset_scope without a reset on the new compacting turn.
     prior_reset = Message(
         role="assistant",
         content="Prior recovered reply",
         from_history=True,
-        provider_data={ENCRYPTED_REPLAY_RESET_KEY: reset_scope},
+        meta=MessageMeta(encrypted_replay_reset=reset_scope),
         metrics=MessageMetrics(context=TokenCounts(input_tokens=40)),
     )
     messages_after_reset = [
@@ -509,10 +508,10 @@ async def test_openrouter_encrypted_replay_recovery_and_prior_reset_boundary(tmp
         Message(role="user", content="Post-reset question"),
     ]
     post_reset_request = replace(_TEMPLATE, messages=tuple(messages_after_reset))
-    prior_reset.provider_data = {
-        ENCRYPTED_REPLAY_RESET_KEY: reset_scope,
-        REQUEST_IDENTITY_KEY: request_prefixes(probe_model, post_reset_request)[3],
-    }
+    prior_reset.meta = MessageMeta(
+        encrypted_replay_reset=reset_scope,
+        request_identity=request_prefixes(probe_model, post_reset_request)[3],
+    )
     plain_ckpt_turn = _ckpt_msg(
         "Post-reset compacted answer",
         items=[{"type": "compaction", "id": "cmp_post", "encrypted_content": "post-enc"}],

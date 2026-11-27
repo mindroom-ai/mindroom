@@ -19,21 +19,12 @@ from mindroom.history.run_checkpoint import STOPPED_BY_USER_NOTE, is_recovered_r
 from mindroom.history.run_visibility import is_model_history_visible_run
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.hooks.enrichment import strip_enrichment_blocks
-from mindroom.llm.messages import Message, is_media_follow_up, is_queued_notice_message
+from mindroom.llm.messages import Message, MessageMeta, is_media_follow_up, is_queued_notice_message
 from mindroom.prompt_message_tags import parse_msg_tags
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.llm.runs import AnyRunRecord
-
-# The ``provider_data`` key marking a note MindRoom adds to a thread's context: that earlier messages were omitted, that
-# the agent's previous reply is still being delivered, or that reply's unfinished text. The note is stored with its turn.
-_THREAD_CONTEXT_NOTE_KEY = "mindroom_thread_context_note"
-# The ``provider_data`` key marking a thread message the agent itself sent, which a turn's input carries because its
-# scope stores no run that holds it.
-_OWN_THREAD_MESSAGE_KEY = "mindroom_own_thread_message"
 
 
 @dataclass(frozen=True)
@@ -56,26 +47,26 @@ class Utterance:
 
 def thread_context_note(content: str) -> Message:
     """Return a user message holding a note MindRoom adds to a thread's context, marked so no reader quotes it."""
-    return Message(role="user", content=content, provider_data={_THREAD_CONTEXT_NOTE_KEY: True})
+    return Message(role="user", content=content, meta=MessageMeta(thread_context_note=True))
 
 
 def _is_thread_context_note(message: Message) -> bool:
-    return (message.provider_data or {}).get(_THREAD_CONTEXT_NOTE_KEY) is True
+    return message.meta.thread_context_note
 
 
-def own_thread_message(content: str, provider_data: Mapping[str, object] | None = None) -> Message:
+def own_thread_message(content: str, *, media_msgtype: str | None = None) -> Message:
     """Return a user message holding ``content``, the ``<msg>`` tag of a thread message the agent itself sent.
 
     The model reads its own earlier message as a thread message marked ``sent_by_you``, never as an assistant turn:
     providers merge consecutive assistant turns, so one would read as the end of the answer before it, and the model
     then ends its answers the same way. A reader of stored turns still hears the agent (``spoken_message``).
     """
-    return Message(role="user", content=content, provider_data={**(provider_data or {}), _OWN_THREAD_MESSAGE_KEY: True})
+    return Message(role="user", content=content, meta=MessageMeta(own_thread_message=True, media_msgtype=media_msgtype))
 
 
 def is_own_thread_message(message: Message) -> bool:
     """Return whether ``own_thread_message`` built ``message``, which is then no prompt of its turn."""
-    return (message.provider_data or {}).get(_OWN_THREAD_MESSAGE_KEY) is True and isinstance(message.content, str)
+    return message.meta.own_thread_message and isinstance(message.content, str)
 
 
 def _own_thread_message_text(message: Message) -> str | None:
@@ -127,7 +118,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     messages keeps the text its last response showed, without the note of the stop MindRoom ended it with
     (``STOPPED_BY_USER_NOTE``). ``agent_work`` keeps all of these,
     plus tool calls and results, for a reviewer of how the agent worked. The turn context a run stores
-    (``add_to_agent_memory=False``), such as memory results and the approval receipt, is never kept: it is neither
+    (``is_turn_context=True``), such as memory results and the approval receipt, is never kept: it is neither
     what was said nor work the agent did.
     """
     if not is_model_history_visible_run(run):
@@ -143,7 +134,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     said: list[Utterance] = []
     # The agent's own thread message, which its input carried as a tagged message, is a reply of the agent.
     for message in map(spoken_message, run.messages):
-        if not message.add_to_agent_memory:
+        if message.is_turn_context:
             continue
         content = message.content if isinstance(message.content, str) else ""
         if message is stop_ending:

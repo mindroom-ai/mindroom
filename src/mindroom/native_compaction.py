@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.messages import UNSET
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
 
@@ -21,12 +22,6 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
 
 logger = get_logger(__name__)
-
-# The ``provider_data`` key under which a completed assistant response stores its native-compaction state.
-NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
-# The ``provider_data`` key under which the answer to a request resent without provider-encrypted replay state stores
-# its route's ``Capabilities.replay_reset_scope``: a reset, before which that route replays no such state.
-ENCRYPTED_REPLAY_RESET_KEY = "mindroom_encrypted_replay_reset"
 
 
 def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
@@ -40,7 +35,7 @@ def native_checkpoint_state(
     *,
     checkpoint_prefix: bool = False,
 ) -> dict[str, Any] | None:
-    """Return the state a completed response stores under ``NATIVE_CHECKPOINT_KEY``: its settings and latest checkpoint.
+    """Return the native-compaction metadata a completed response stores: its settings and latest checkpoint.
 
     Every completed response records its route, None when native compaction is off, because approval rebuilds and
     signed-thinking replay need it even when the provider did not compact on this request. A checkpoint in ``items``
@@ -69,7 +64,7 @@ def native_checkpoint_state(
 
 def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
     """Read the effective native policy from one completed assistant response."""
-    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
+    state = message.meta.native_compaction
     if message.role != "assistant" or not isinstance(state, dict):
         return None
     route, threshold = state.get("route"), state.get("threshold")
@@ -83,10 +78,9 @@ def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
 
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
     """Compare effective prefix provenance; None means legacy history without it."""
-    data = message.provider_data or {}
-    if NATIVE_CHECKPOINT_KEY not in data:
+    state = message.meta.native_compaction
+    if state is UNSET:
         return None
-    state = data[NATIVE_CHECKPOINT_KEY]
     if state is None:
         return route is None
     if not isinstance(state, dict) or not isinstance(state.get("route"), str):
@@ -107,9 +101,9 @@ def _is_checkpoint(item: dict[str, Any]) -> bool:
 
 def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]]:
     """Read compatible, structurally valid checkpoint data from persisted input."""
-    if route is None or not message.provider_data or message.role != "assistant":
+    if route is None or message.role != "assistant":
         return []
-    checkpoint = message.provider_data.get(NATIVE_CHECKPOINT_KEY)
+    checkpoint = message.meta.native_compaction
     if not isinstance(checkpoint, dict) or checkpoint.get("route") != route:
         return []
     items = checkpoint.get("items")
@@ -130,7 +124,7 @@ class NativeCheckpoint:
 
 def extract_native_checkpoint(message: Message) -> NativeCheckpoint | None:
     """Return the native checkpoint produced on ``message``, or None when ``message`` produced none."""
-    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
+    state = message.meta.native_compaction
     if not isinstance(state, dict) or not isinstance(route := state.get("route"), str) or not route:
         return None
     items = checkpoint_items(message, route)
@@ -163,7 +157,8 @@ def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], rout
     for index in range(len(runs) - 1, -1, -1):
         for message in reversed(runs[index].messages):
             if checkpoint_items(message, route):
-                recorded = (message.provider_data or {})[NATIVE_CHECKPOINT_KEY].get("basis")
+                assert isinstance(message.meta.native_compaction, dict)
+                recorded = message.meta.native_compaction.get("basis")
                 covering = recorded is None or recorded == replay_basis(summary, runs[:index])
                 return replay_basis(summary, runs) if covering else ""
     return replay_basis(summary, runs)
@@ -171,7 +166,7 @@ def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], rout
 
 def _readable_checkpoint_summary(message: Message) -> tuple[str, str] | None:
     """Return ``(basis, summary_text)`` when ``message`` carries a readable checkpoint with a recorded basis."""
-    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
+    state = message.meta.native_compaction
     if not isinstance(state, dict) or not isinstance(basis := state.get("basis"), str):
         return None
     items = checkpoint_items(message, state.get("route"))
@@ -228,7 +223,7 @@ def native_replay(
         if (
             reset_scope is not None
             and message.role == "assistant"
-            and (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
+            and message.meta.encrypted_replay_reset == reset_scope
         ):
             return _NativeReplay(list(messages), encrypted_from=index, boundary=index)
     return _NativeReplay(list(messages))

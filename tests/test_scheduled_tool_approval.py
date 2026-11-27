@@ -27,6 +27,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.custom_tools.serper import SerperTools
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
@@ -122,6 +123,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ScheduledCallRefusal
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
@@ -3061,3 +3063,76 @@ async def test_prepare_scheduled_call_allows_explicit_null_only_for_derived_null
         context=ToolCallContext(run_id="run-1", session_id="session-1", user_id=_REQUESTER),
     )
     assert await binder(call, check) == "ok"
+
+
+class _CompatSlackTools(_SlackTools):
+    """Slack toolkit hiding a legacy compat kwarg from its open offered schema."""
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        properties = {
+            name: schema for name, schema in function.parameters["properties"].items() if name != "legacy_tag"
+        }
+        return replace(
+            function,
+            parameters={**function.parameters, "properties": properties},
+            compat_parameters=frozenset({"legacy_tag"}),
+        )
+
+    def post_slack_message(self, channel: str, text: str = "", legacy_tag: str | None = None) -> object:
+        outcome = super().post_slack_message(channel, text)
+        self.runs[-1]["legacy_tag"] = legacy_tag
+        return outcome
+
+
+@pytest.mark.asyncio
+async def test_compat_parameters_allow_hidden_kwargs_without_reopening_disabled_action_params(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """Only declared compat_parameters pass scheduled validation/replay; disabled-action hidden params stay rejected."""
+    runs: list[dict[str, object]] = []
+    compat_toolkit = _CompatSlackTools(runs)
+    compat_args: dict[str, object] = {**_ARGUMENTS, "legacy_tag": "v1"}
+    functions = {
+        fn.name: fn
+        for tk, key in (
+            (compat_toolkit, _TOOLKIT),
+            (SerperTools(enable_scrape_webpage=False), "serper"),
+            (SchedulerTools(), "scheduler"),
+        )
+        for fn in adapt_toolkit(tk, key=key).functions
+    }
+    (binder,) = bind_live_tools(functions, ())
+
+    async def verify_prepare(_arguments: dict[str, object]) -> object:
+        resolved, parsed = prepare_scheduled_call("post_slack_message", canonical_arguments(compat_args))
+        assert "legacy_tag" not in resolved.function.parameters["properties"]
+        assert parsed == compat_args
+        assert "url" not in functions["serper"].parameters["properties"]
+        with pytest.raises(SchedulingError, match="do not match the tool's current parameters"):
+            prepare_scheduled_call("serper", '{"action": "web", "query": "hi", "url": "https://example.org"}')
+        return "ok"
+
+    call = ToolCall(
+        function=functions["schedule_tool_call"],
+        arguments={},
+        context=ToolCallContext(run_id="run-1", session_id="session-1", user_id=_REQUESTER),
+    )
+    assert await binder(call, verify_prepare) == "ok"
+
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    try:
+        assert await manager.request_scheduled_call_approval(
+            replace(_binding(), arguments_json=canonical_arguments(compat_args)),
+            approver_user_id=_REQUESTER,
+            scheduled_for_text="9:00 AM EDT",
+            any_arguments_offered=False,
+        )
+        assert (await _decide(manager, "approved")).consumed is True
+        assert await _arm(manager) == "armed"
+        assert await _run(manager, _live_agent(toolkit=compat_toolkit)) == "sent"
+        assert [{k: run[k] for k in ("channel", "text", "legacy_tag")} for run in runs] == [compat_args]
+        assert await _binding_column(journal, "outcome") == "completed"
+    finally:
+        await manager.shutdown()

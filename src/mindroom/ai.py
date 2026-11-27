@@ -988,7 +988,7 @@ async def _prepare_agent_and_prompt(
         system_messages=system_messages,
         prompt=current_turn_prompt,
         transient_context_messages=(
-            (Message(role="user", content=transient_turn_context, add_to_agent_memory=False),)
+            (Message(role="user", content=transient_turn_context, is_turn_context=True),)
             if transient_turn_context
             else ()
         ),

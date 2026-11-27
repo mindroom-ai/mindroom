@@ -577,6 +577,7 @@ visibility = [
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
+    "mindroom.thread_auto_reopen",
     "mindroom.tool_jobs.runtime",
     "mindroom.turn_store",
     "mindroom.turns.ingress",
@@ -886,7 +887,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.model_usage"
-depends_on = ["mindroom.llm"]
+depends_on = []
 visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
@@ -3517,7 +3518,6 @@ depends_on = [
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
-    "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.native_compaction_hook",
@@ -3557,7 +3557,6 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.anthropic.legacy_stored_turns"
 depends_on = [
-    "mindroom.native_compaction",
     "mindroom.providers.anthropic.repairs",
     "mindroom.providers.claude_wire_blocks",
 ]
@@ -3911,6 +3910,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_auto_reopen_runtime"
+depends_on = [
+    "mindroom.room_steward",
+    "mindroom.thread_auto_reopen",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
     "mindroom.room_settings",
@@ -4021,6 +4028,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.storage_preparation",
+    "mindroom.orchestration.thread_auto_reopen_runtime",
     "mindroom.orchestration.thread_snooze_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
@@ -5561,6 +5569,14 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.scheduling.tasks",
     "mindroom.thread_tags",
+]
+
+[[modules]]
+path = "mindroom.thread_auto_reopen"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.thread_snooze",
 ]
 
 [[modules]]

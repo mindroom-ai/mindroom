@@ -16,11 +16,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.history.request_size import RequestSize, request_sizer
 from mindroom.llm.media import Audio, File, Image
-from mindroom.llm.messages import (
-    QUEUED_MESSAGE_NOTICE_MARKER_KEY,
-    Message,
-    model_provenance,
-)
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -29,9 +25,8 @@ from mindroom.llm.provider import (
     NativeCompactionReplay,
     ToolSpec,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import request_prefixes
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -60,10 +55,10 @@ def _answered(model: ModelProvider, request: ModelRequest, content: str, *, repo
         role="assistant",
         content=content,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=reported, output_tokens=5)),
-        provider_data=model_provenance(model.identity.id, model.identity.provider),
+        meta=MessageMeta(model=ModelProvenance(model.identity.id, model.identity.provider)),
     )
     stamp_request_identity(answer, model, request)
-    assert REQUEST_IDENTITY_KEY in (answer.provider_data or {})
+    assert answer.meta.request_identity is not None
     return answer
 
 
@@ -147,7 +142,7 @@ def test_a_queued_notice_the_reply_moved_keeps_the_answer_anchoring(tmp_path: Pa
     notice = Message(
         role="user",
         content="A newer message waits.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+        meta=MessageMeta(queued_message_notice=True),
     )
     first = _first(Message(role="user", content="Hi"), notice)
     answer = _answered(model, first, "Hello")
@@ -251,7 +246,7 @@ def test_a_native_checkpoint_bounds_the_answers_that_anchor(tmp_path: Path) -> N
     first = replace(_first(Message(role="user", content="Hi")), native_compaction=native)
     answer = _answered(model, first, "Hello")
     checkpoint = {"route": "route-1", "items": [{"type": "compaction", "content": "Earlier turns."}]}
-    answer.provider_data = {**(answer.provider_data or {}), NATIVE_CHECKPOINT_KEY: checkpoint}
+    answer.meta = replace(answer.meta, native_compaction=checkpoint)
     later = replace(first, messages=(*first.messages, answer, Message(role="user", content="More")))
 
     assert not _sized(tmp_path, model, later).reported
@@ -272,7 +267,7 @@ async def test_the_latest_answer_s_replayed_reasoning_counts_before_the_next_rep
         content="Pack a light rain jacket.",
         reasoning_content=_REASONING,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=_REPORTED, output_tokens=40)),
-        provider_data=model_provenance(kimi.identity.id, kimi.identity.provider),
+        meta=MessageMeta(model=ModelProvenance(kimi.identity.id, kimi.identity.provider)),
     )
     stamp_request_identity(answer, kimi, answered)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)

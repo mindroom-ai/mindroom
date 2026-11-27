@@ -15,7 +15,7 @@ from mindroom.history.types import replayed_summary_text
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest
-from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_digest, message_digest
+from mindroom.llm.request_identity import cache_routing_digest, message_digest
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -234,7 +234,7 @@ def prepare_fork_request(
     ttl = fork.sizer.model.capabilities.prompt_cache_ttl_seconds
     assert ttl is not None
     expected_routing = cache_routing_digest(fork.sizer.model.model_params)
-    recorded_routing = (base.messages[newest_assistant_index].provider_data or {}).get(CACHE_ROUTING_KEY)
+    recorded_routing = base.messages[newest_assistant_index].meta.cache_routing
     dynamic_checks = (
         (not size.reported or size.anchor_index != newest_assistant_index, "prefix_not_anchored"),
         (recorded_routing != expected_routing, "routing_key_mismatch"),

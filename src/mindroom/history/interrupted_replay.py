@@ -60,7 +60,7 @@ def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
     """Return the turn input a run's stored ``messages`` hold around its prompt.
 
     They start with it, after the system messages: the context, the prompt, then the run's own fold summary when a fold
-    made one. The run's turn context (``add_to_agent_memory=False``), a queued-message notice, or the model's first
+    made one. The run's turn context (``is_turn_context=True``), a queued-message notice, or the model's first
     answer follows.
     """
     turn_input = list(takewhile(_is_turn_input, (message for message in messages if message.role != "system")))
@@ -74,11 +74,11 @@ def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
 
 def _is_turn_input(message: Message) -> bool:
     """Return whether a stored message, read in order after the run's system messages, still belongs to its input."""
-    if not message.add_to_agent_memory or is_own_model_message(message) or is_queued_notice_message(message):
+    if message.is_turn_context or is_own_model_message(message) or is_queued_notice_message(message):
         return False
     # LEGACY_COMPAT: Paused rows whose model answers name no model.
     # Legacy format: a paused run's row, or a minimal-mode checkpoint of it, whose assistant answers carry no
-    # ``MODEL_PROVENANCE_KEY`` (``mindroom_model``) in their provider data, so ``is_own_model_message`` reads none.
+    # ``mindroom_model`` in their provider data, so ``is_own_model_message`` reads none.
     # Last legacy release: v2026.9.303; v2026.9.304 stamped every answer the Agno runtime populated with it, and
     # v2026.10.499's owned providers stamp every answer they finish.
     # Handling: a message that calls a tool ends the input instead, since a paused run's first answer calls one, so the

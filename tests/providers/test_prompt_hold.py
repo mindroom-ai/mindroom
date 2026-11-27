@@ -12,12 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.llm.messages import (
-    PROMPT_UPDATE_KEY,
-    QUEUED_MESSAGE_NOTICE_MARKER_KEY,
-    REWRITTEN_ATTEMPT_KEY,
-    Message,
-)
+from mindroom.llm.messages import EMPTY_META, Message, MessageMeta
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -27,7 +22,7 @@ from mindroom.llm.provider import (
     ToolSpec,
     TurnCompleted,
 )
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import request_prefixes
 from mindroom.providers.pipeline import prompt_hold
 from mindroom.providers.pipeline.prompt_hold import held_request, prompt_hold_path, prompt_hold_stream
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
@@ -65,11 +60,11 @@ class _Model(PlainRequestSizing):
     token_counter: TokenCounter = field(default_factory=fake_token_counter)
     model_params: dict[str, object] = field(default_factory=dict)
     requests: list[ModelRequest] = field(default_factory=list)
-    answer_data: dict[str, Any] | None = None
+    answer_meta: MessageMeta = EMPTY_META
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         self.requests.append(request)
-        answer = Message(role="assistant", content="ok", provider_data=self.answer_data)
+        answer = Message(role="assistant", content="ok", meta=self.answer_meta)
         yield TurnCompleted(message=answer, stop_reason="end")
 
 
@@ -99,11 +94,11 @@ def _replayed(messages: Sequence[Message]) -> list[Message]:
 
 def _shape(messages: Sequence[Message]) -> list[str]:
     """Return each message's role, an update as ``update``."""
-    return ["update" if PROMPT_UPDATE_KEY in (message.provider_data or {}) else message.role for message in messages]
+    return ["update" if message.meta.prompt_update else message.role for message in messages]
 
 
 def _updates(messages: Sequence[Message]) -> list[str]:
-    return [str(message.content) for message in messages if PROMPT_UPDATE_KEY in (message.provider_data or {})]
+    return [str(message.content) for message in messages if message.meta.prompt_update]
 
 
 @dataclass
@@ -610,7 +605,7 @@ async def test_a_queued_notice_before_an_update_counts_by_the_text_it_sends(conv
     notice = Message(
         role="user",
         content="A new message waits.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+        meta=MessageMeta(queued_message_notice=True),
     )
     await conversation.send([*_system(_A), _user("one")])
     changed = [*_system(_B), _user("one"), _answer(), notice, _user("two")]
@@ -644,9 +639,9 @@ async def test_a_read_only_request_is_sent_the_hold_it_continues_and_never_write
     # Nor does an earlier answer sent the hold speak for a newer one that records none, such as one whose request
     # held an image at a URL or was answered as another request.
     as_built = request_prefixes(conversation.model, conversation.request(second))[-1]
-    unrecorded = replace(_answer(), provider_data={REWRITTEN_ATTEMPT_KEY: True})
+    unrecorded = replace(_answer(), meta=MessageMeta(attempt_rewritten=True))
     for newest in (
-        [replace(answered, provider_data={REQUEST_IDENTITY_KEY: as_built})],
+        [replace(answered, meta=replace(answered.meta, request_identity=as_built))],
         [_answer()],
         [answered, _user("three"), _answer()],
         [answered, _user("three"), unrecorded, Message(role="tool", content="5", tool_call_id="call_1")],
@@ -738,7 +733,7 @@ async def test_a_request_is_sized_and_identified_as_it_is_sent(conversation: _Co
 
 def _recorded(conversation: _Conversation) -> object:
     """Return the request identity the last answer records."""
-    return (conversation.answer().provider_data or {}).get(REQUEST_IDENTITY_KEY)
+    return conversation.answer().meta.request_identity
 
 
 @pytest.mark.asyncio
@@ -765,7 +760,7 @@ async def test_an_answer_records_the_identity_of_its_request_as_it_was_sent(
     assert request_prefixes(provider, conversation.request(second))[-1] == held
 
     # A run that pinned the hold is sent it after it ran out, when a request that reads the file is sent as built.
-    resumed = [*second, replace(_answer(), provider_data={REQUEST_IDENTITY_KEY: held}), _user("three")]
+    resumed = [*second, replace(_answer(), meta=MessageMeta(request_identity=held)), _user("three")]
     pin: list[dict[str, Any] | None] = []
     await conversation.send(resumed, pin=pin)
     resumed_as = _recorded(conversation)
@@ -775,7 +770,7 @@ async def test_an_answer_records_the_identity_of_its_request_as_it_was_sent(
     assert resumed_as != request_prefixes(provider, conversation.request(resumed))[-1]
 
     # An answer a stage inside got for another request records none: its usage is not this request's.
-    model.answer_data = {REWRITTEN_ATTEMPT_KEY: True}
+    model.answer_meta = MessageMeta(attempt_rewritten=True)
     await conversation.send(resumed, pin=pin)
     assert _recorded(conversation) is None
 

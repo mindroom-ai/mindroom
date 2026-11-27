@@ -14,6 +14,7 @@ import socket
 import stat
 import threading
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -47,6 +48,7 @@ from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.scheduling.scheduled_tool_calls import _invalid_arguments
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
@@ -55,6 +57,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
@@ -462,28 +465,271 @@ async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> N
 
 
 def test_browser_function_schema_documents_actions_and_act_request() -> None:
-    """Tool schemas should make read/control browser actions and act request kinds discoverable."""
-    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    """Offered schemas trim dead fields, hide desktop fields when host-only, and document read/control clearly."""
+    read_always_hidden = {"node", "frame", "labels", "refs", "mode"}
+    read_desktop_only = {"target", "returnAttachment", "element"}
+    control_always_hidden = {"node", "inputRef", "element"}
+    control_desktop_only = {"target"}
 
-    read_props = toolkit_offers(tool, "browser_read").parameters["properties"]
-    control_props = toolkit_offers(tool, "browser_control").parameters["properties"]
+    host_tool = BrowserTools(TEST_RUNTIME_PATHS)
+    host_read = toolkit_offers(host_tool, "browser_read")
+    host_control = toolkit_offers(host_tool, "browser_control")
+    host_read_props = host_read.parameters["properties"]
+    host_control_props = host_control.parameters["properties"]
 
-    assert "help" in read_props["action"]["enum"]
-    assert "actions" in read_props["action"]["enum"]
-    assert "act" not in read_props["action"]["enum"]
-    assert "act" in control_props["action"]["enum"]
-    assert "help" not in control_props["action"]["enum"]
+    assert read_always_hidden.isdisjoint(host_read_props)
+    assert read_desktop_only.isdisjoint(host_read_props)
+    assert control_always_hidden.isdisjoint(host_control_props)
+    assert control_desktop_only.isdisjoint(host_control_props)
 
-    request_description = control_props["request"]["description"]
-    assert "request.kind" in request_description
+    assert "help" in host_read_props["action"]["enum"]
+    assert "actions" in host_read_props["action"]["enum"]
+    assert "act" not in host_read_props["action"]["enum"]
+    assert "screenshot" in (host_read.description or "").lower()
+    assert '{"action":"snapshot"}' in (host_read.description or "")
+    assert host_read_props["ref"]["description"] == "Element ref or CSS selector (for element screenshot)."
+    assert host_read_props["targetId"]["description"] == "Tab ID (defaults to active tab; omit for all-tab console)."
+    assert host_read_props["maxChars"]["description"] == "Snapshot text char limit (0 = no limit)."
+    for field_name in (
+        "compact",
+        "interactive",
+        "limit",
+        "maxChars",
+        "profile",
+        "saveOnly",
+        "snapshotFormat",
+        "targetId",
+    ):
+        assert "Host-target" not in host_read_props[field_name]["description"]
+        assert "desktop" not in host_read_props[field_name]["description"].lower()
+
+    assert "act" in host_control_props["action"]["enum"]
+    assert "help" not in host_control_props["action"]["enum"]
+    assert '{"action":"open","paths":["page.html"]}' in (host_control.description or "")
+    assert '"target":"host"' not in (host_control.description or "")
+    assert "action='act' with request.kind" in host_control_props["action"]["description"]
+    assert host_control_props["targetId"]["description"] == "Tab ID (required for focus; defaults to active tab)."
+    assert host_control_props["ref"]["description"] == "Element ref or CSS selector (required for upload)."
+    assert "upload (requires ref):" in host_control_props["paths"]["description"]
+    assert "relative links don't resolve" in host_control_props["paths"]["description"]
+    assert set(host_control_props["request"]) == {"type", "description"}
+    request_description = host_control_props["request"]["description"]
     assert "click" in request_description
     assert "evaluate" in request_description
-    assert read_props["target"]["enum"] == ["host", "desktop"]
-    assert control_props["target"]["enum"] == ["host", "desktop"]
-    assert "start`, `stop`, `open` only" in (toolkit_offers(tool, "browser_control").description or "")
-    for removed in ("node", "frame", "labels", "refs"):
-        assert removed not in read_props
-    assert "node" not in control_props
+    assert "no bare return" in request_description
+    assert "browser_read(action='snapshot')" in request_description
+    for field_name in ("profile", "targetId", "timeoutMs"):
+        assert "Host-target" not in host_control_props[field_name]["description"]
+        assert "desktop" not in host_control_props[field_name]["description"].lower()
+
+
+def test_browser_desktop_schema_documents_desktop_fields_and_host_examples() -> None:
+    """Desktop-capable schemas keep target/attachment fields and qualify host-only examples."""
+    read_always_hidden = {"node", "frame", "labels", "refs", "mode"}
+    read_desktop_only = {"target", "returnAttachment", "element"}
+    control_always_hidden = {"node", "inputRef", "element"}
+    control_desktop_only = {"target"}
+
+    host_control_props = toolkit_offers(BrowserTools(TEST_RUNTIME_PATHS), "browser_control").parameters["properties"]
+    desktop_tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        device_user_id="@alice:example.org",
+        device_id="DEVICE",
+        device_ed25519="ed25519-key",
+    )
+    desktop_read = toolkit_offers(desktop_tool, "browser_read")
+    desktop_control = toolkit_offers(desktop_tool, "browser_control")
+    desktop_read_props = desktop_read.parameters["properties"]
+    desktop_control_props = desktop_control.parameters["properties"]
+
+    assert read_always_hidden.isdisjoint(desktop_read_props)
+    assert read_desktop_only <= set(desktop_read_props)
+    assert control_always_hidden.isdisjoint(desktop_control_props)
+    assert control_desktop_only <= set(desktop_control_props)
+    assert desktop_read_props["target"]["enum"] == ["host", "desktop"]
+    assert desktop_control_props["target"]["enum"] == ["host", "desktop"]
+    assert "desktop observes active tab only" in desktop_read_props["targetId"]["description"]
+    assert "on host, omit for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
+    assert (
+        desktop_read_props["maxChars"]["description"]
+        == "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."
+    )
+    assert "turn-scoped" in desktop_read_props["returnAttachment"]["description"]
+    assert "required for focus" in desktop_control_props["targetId"]["description"]
+    assert '{"action":"open","target":"host","paths":["page.html"]}' in (desktop_control.description or "")
+    assert '{"action":"act","target":"host","request":{"kind":"click","ref":"e1"}}' in (
+        desktop_control.description or ""
+    )
+    assert "relative links don't resolve" in desktop_control_props["paths"]["description"]
+    assert "start, stop, open" in desktop_control_props["target"]["description"]
+    assert "stable targeting" in desktop_control_props["target"]["description"]
+    assert "reconnecting does not enable it" in desktop_control_props["target"]["description"]
+    assert desktop_control_props["request"]["description"] == host_control_props["request"]["description"]
+    for field_name in ("compact", "interactive", "limit", "snapshotFormat"):
+        assert "Host-target" in desktop_read_props[field_name]["description"]
+
+
+def test_browser_offered_schema_follows_desktop_pairing_and_worker_binding(tmp_path: Path) -> None:
+    """Desktop target fields appear only when paired, statically configured, or scope is unknown; never on workers."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    credentials_manager = get_runtime_credentials_manager(paths)
+    worker_target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="code",
+        execution_identity=ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="code",
+            requester_id="@alice:example.org",
+            room_id="!room:example.org",
+            thread_id=None,
+            resolved_thread_id=None,
+            session_id="session",
+        ),
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+
+    # Unknown scope (e.g. offline catalog/golden capture) keeps desktop fields discoverable.
+    unscoped = BrowserTools(paths, credentials_manager=credentials_manager)
+    assert "target" in toolkit_offers(unscoped, "browser_read").parameters["properties"]
+    assert "target" in toolkit_offers(unscoped, "browser_control").parameters["properties"]
+
+    # Scoped requester without paired Desktop gets the leaner host-only schemas.
+    scoped = BrowserTools(paths, credentials_manager=credentials_manager, worker_target=worker_target)
+    assert "target" not in toolkit_offers(scoped, "browser_read").parameters["properties"]
+    assert "target" not in toolkit_offers(scoped, "browser_control").parameters["properties"]
+
+    # Pairing Desktop for that requester exposes desktop target fields immediately.
+    save_desktop_credentials(
+        credentials_manager,
+        {
+            "device_user_id": "@desktop:example.org",
+            "device_id": "DEV1",
+            "device_ed25519": "ed25519-key",
+        },
+        requester_id="@alice:example.org",
+        agent_name="code",
+    )
+    assert "target" in toolkit_offers(scoped, "browser_read").parameters["properties"]
+    assert "target" in toolkit_offers(scoped, "browser_control").parameters["properties"]
+
+    # Worker-bound browser instances never offer desktop routing, even with static desktop config or default_target.
+    worker_cases = [
+        BrowserTools(paths, credentials_manager=credentials_manager, worker_target=worker_target),
+        BrowserTools(
+            paths,
+            device_user_id="@desktop:example.org",
+            device_id="DEV1",
+            device_ed25519="ed25519-key",
+        ),
+        BrowserTools(paths, default_target="desktop", credentials_manager=credentials_manager),
+    ]
+    for index, worker_browser in enumerate(worker_cases):
+        worker_browser.bind_worker_headless(tmp_path / f"workspace-{index}", {})
+        assert "target" not in toolkit_offers(worker_browser, "browser_read").parameters["properties"]
+        assert "target" not in toolkit_offers(worker_browser, "browser_control").parameters["properties"]
+
+
+@pytest.mark.asyncio
+async def test_browser_open_upload_and_evaluate_actionable_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Common weak-model mistakes produce actionable ValueErrors instead of opaque failures."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "page.html").write_text("<p>hi</p>", encoding="utf-8")
+    tool = BrowserTools(TEST_RUNTIME_PATHS, tool_output_workspace_root=workspace)
+
+    with pytest.raises(ValueError, match=r"not both; omit targetUrl \(including about:blank\)"):
+        await tool.browser_control(action="open", targetUrl="about:blank", paths=["page.html"])
+
+    page = SimpleNamespace(
+        evaluate=AsyncMock(side_effect=PlaywrightError("Page.evaluate: SyntaxError: Illegal return statement")),
+        eval_on_selector=AsyncMock(side_effect=PlaywrightError("ElementHandle.eval: Illegal return statement")),
+        is_closed=lambda: False,
+    )
+    tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#btn"})
+    state = SimpleNamespace(tabs={"tab-1": tab}, active_target_id="tab-1")
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
+
+    with pytest.raises(ValueError, match=r"upload requires ref \(snapshot ref or CSS selector\)"):
+        await tool.browser_control(action="upload", paths=["page.html"])
+
+    for req in (
+        {"kind": "evaluate", "fn": "return document.title"},
+        {"kind": "evaluate", "fn": "return 1", "ref": "e1"},
+    ):
+        with pytest.raises(ValueError, match="not a bare return statement"):
+            await tool.browser_control(action="act", request=req)
+
+    page.evaluate.side_effect = PlaywrightError("ReferenceError: missingVar is not defined")
+    with pytest.raises(PlaywrightError, match="missingVar"):
+        await tool.browser_control(action="act", request={"kind": "evaluate", "fn": "missingVar"})
+
+
+@pytest.mark.asyncio
+async def test_browser_offered_entrypoint_keeps_hidden_legacy_kwargs_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting compat/desktop kwargs from the offered schemas keeps runtime validation and errors intact."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    read_entrypoint = toolkit_offers(tool, "browser_read").entrypoint
+    control_entrypoint = toolkit_offers(tool, "browser_control").entrypoint
+    snapshot = AsyncMock(return_value={"action": "snapshot", "status": "ok"})
+    upload = AsyncMock(return_value={"action": "upload", "status": "ok"})
+    monkeypatch.setattr(tool, "_snapshot", snapshot)
+    monkeypatch.setattr(tool, "_upload", upload)
+
+    payload = json.loads(
+        await read_entrypoint(action="snapshot", mode="efficient", frame="main", labels=True, refs="role"),
+    )
+    assert payload["status"] == "ok"
+    assert snapshot.await_args.kwargs["mode"] == "efficient"
+
+    upload_payload = json.loads(
+        await control_entrypoint(action="upload", paths=["a.txt"], inputRef="e1", element="#file"),
+    )
+    assert upload_payload["status"] == "ok"
+    assert upload.await_args.kwargs["input_ref"] == "e1"
+    assert upload.await_args.kwargs["element"] == "#file"
+
+    with pytest.raises(ValueError, match="node parameter is not supported"):
+        await read_entrypoint(action="status", node="legacy")
+    with pytest.raises(ValueError, match="node parameter is not supported"):
+        await control_entrypoint(action="start", node="legacy")
+    with pytest.raises(ValueError, match="/desktop setup"):
+        await read_entrypoint(action="tabs", target="desktop")
+    with pytest.raises(ValueError, match="/desktop setup"):
+        await control_entrypoint(action="open", targetUrl="https://example.org", target="desktop")
+
+
+def test_browser_scheduled_call_validation_accepts_hidden_compat_kwargs() -> None:
+    """Scheduled-call validation accepts declared hidden compat kwargs while rejecting invalid/closed/typo args."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    host_read = toolkit_offers(tool, "browser_read")
+    host_control = toolkit_offers(tool, "browser_control")
+    assert {"inputRef", "target"} <= host_control.compat_parameters
+    assert {"mode", "target"} <= host_read.compat_parameters
+
+    for fn, valid_args in (
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}),
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": None}),
+        (host_control, {"action": "open", "target": "host", "targetUrl": "https://example.org"}),
+        (host_read, {"action": "snapshot", "mode": "efficient", "target": "host", "element": None}),
+    ):
+        assert _invalid_arguments(fn, valid_args) is None
+
+    closed_control = replace(host_control, parameters=closed_parameters(tool.browser_control, host_control.parameters))
+    for fn, invalid_args in (
+        (host_control, {"action": "open", "target": "bogus", "targetUrl": "https://example.org"}),
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": 123}),
+        (host_control, {"action": "open", "targetUrl": "https://example.org", "bogus": 1}),
+        (host_read, {"action": "snapshot", "returnAttachment": None}),
+        (closed_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}),
+    ):
+        assert _invalid_arguments(fn, invalid_args) is not None
 
 
 @pytest.mark.asyncio
@@ -814,6 +1060,9 @@ async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
     with pytest.raises(ValueError, match="configured Matrix desktop device identity"):
         await tool.browser_read(action="status", target="desktop")
 
+    with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
+        await tool.browser_read(action="status", target="host", node="node-1")
+
     configured_tool = BrowserTools(
         TEST_RUNTIME_PATHS,
         device_user_id="@desktop:example.org",
@@ -942,7 +1191,7 @@ async def test_desktop_target_rejects_page_control_before_any_round_trip(
         ("browser_read", "snapshot", {"targetId": "1"}, "does not support targetId"),
         ("browser_read", "snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
         ("browser_read", "status", {"profile": "chrome"}, "does not support: profile"),
-        ("browser_read", "tabs", {"limit": 5}, "does not support: limit"),
+        ("browser_read", "tabs", {"frame": "main"}, "does not support: frame"),
         ("browser_control", "open", {"timeoutMs": 1000}, "does not support: timeoutMs"),
         ("browser_control", "open", {}, "targetUrl required for action=open"),
     ],
@@ -972,6 +1221,7 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
         ({"depth": 0, "maxChars": 0}, {}),
         ({"interactive": False}, {}),
         ({"compact": False}, {}),
+        ({"labels": False}, {}),
     ],
 )
 async def test_desktop_snapshot_forwards_only_what_the_extension_honors(

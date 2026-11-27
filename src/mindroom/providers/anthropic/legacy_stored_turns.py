@@ -9,9 +9,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
-from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, RebuiltBlock, as_dict
+from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, RebuiltBlock
 
 if TYPE_CHECKING:
     from mindroom.llm.messages import Message
@@ -50,11 +49,12 @@ def current_claude_turn(message: Message) -> Message:
     if data is None or CLAUDE_BLOCKS_KEY in data or not isinstance(blocks, list) or not blocks:
         return message
     current = {**data, CLAUDE_BLOCKS_KEY: replay_safe_blocks(blocks)}
-    checkpoint = as_dict(data.get(NATIVE_CHECKPOINT_KEY))
+    meta = message.meta
+    checkpoint = meta.native_compaction if isinstance(meta.native_compaction, dict) else None
     items = checkpoint.get("items") if checkpoint is not None else None
     if checkpoint is not None and isinstance(items, list) and all(isinstance(item, dict) for item in items):
-        current[NATIVE_CHECKPOINT_KEY] = {**checkpoint, "items": replay_safe_blocks(items)}
-    return replace(message, provider_data=current)
+        meta = replace(meta, native_compaction={**checkpoint, "items": replay_safe_blocks(items)})
+    return replace(message, provider_data=current, meta=meta)
 
 
 # LEGACY_COMPAT: Claude turns stored without their response blocks.

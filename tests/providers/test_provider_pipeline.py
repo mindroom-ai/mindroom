@@ -34,7 +34,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Audio, File, Image, Video, image_format
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -133,7 +133,7 @@ class _ScriptedProvider(PlainRequestSizing):
 
 
 def _turn(text: str = "done", usage: MessageMetrics | None = None) -> TurnCompleted:
-    message = Message(role="assistant", content=text, provider_data={"mindroom_model": {"id": "scripted"}})
+    message = Message(role="assistant", content=text, meta=MessageMeta(model=ModelProvenance("scripted", "Scripted")))
     if usage is not None:
         message.metrics = usage
     return TurnCompleted(message=message, stop_reason="end")
@@ -182,7 +182,7 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.to_dict() == {"input_tokens": 82, "output_tokens": 12, "total_tokens": 94}
-    assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}, "mindroom_aggregate_usage": True}
+    assert finished.message.meta == MessageMeta(model=ModelProvenance("scripted", "Scripted"), aggregate_usage=True)
 
 
 @pytest.mark.asyncio
@@ -272,7 +272,7 @@ async def test_empty_incomplete_turn_retries_uncommitted_with_carried_usage_and_
     assert isinstance(finished, TurnCompleted)
     assert (finished.message.content, len(inner.requests)) == ("Recovered.", 2)
     assert (finished.message.metrics.tokens.input_tokens, finished.message.metrics.tokens.output_tokens) == (100, 13)
-    assert (finished.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+    assert finished.message.meta.aggregate_usage is True
 
     committed_inner = _ScriptedProvider(
         [
@@ -436,7 +436,7 @@ async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked
         "total_tokens": 54,
         "duration": 3.5,
     }
-    assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}}
+    assert finished.message.meta == MessageMeta(model=ModelProvenance("scripted", "Scripted"))
     assert [event.sums_attempts for event in events if isinstance(event, UsageReported)] == [False, False]
 
 
@@ -534,7 +534,7 @@ async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_ro
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.tokens.input_tokens == 5
-    assert finished.message.provider_data["mindroom_aggregate_usage"] is True
+    assert finished.message.meta.aggregate_usage is True
     # The capability gap is learned, so the next request leaves the image out up front.
     await drain(provider, request)
     assert len(inner.requests) == 3
@@ -568,8 +568,8 @@ async def test_input_specific_rejection_retries_without_learning() -> None:
     assert inner.requests[2].messages[0].images == [_image()]
     assert isinstance(retried, TurnCompleted)
     assert isinstance(sent_as_asked, TurnCompleted)
-    assert (retried.message.provider_data or {}).get(REWRITTEN_ATTEMPT_KEY) is True
-    assert REWRITTEN_ATTEMPT_KEY not in (sent_as_asked.message.provider_data or {})
+    assert retried.message.meta.attempt_rewritten is True
+    assert sent_as_asked.message.meta.attempt_rewritten is False
 
 
 @pytest.mark.asyncio
@@ -580,7 +580,7 @@ async def test_a_plain_retry_resends_the_request_and_marks_nothing() -> None:
     finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
 
     assert isinstance(finished, TurnCompleted)
-    assert REWRITTEN_ATTEMPT_KEY not in (finished.message.provider_data or {})
+    assert finished.message.meta.attempt_rewritten is False
 
 
 @pytest.mark.asyncio
@@ -1843,7 +1843,7 @@ async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_req
     finished = events[-1]
     assert isinstance(finished, TurnCompleted)
     assert finished.message.metrics.to_dict() == {"input_tokens": 72, "output_tokens": 12, "total_tokens": 84}
-    assert (finished.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert finished.message.meta.aggregate_usage is True
 
 
 @pytest.mark.asyncio
@@ -2413,7 +2413,7 @@ async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_tu
         "cache_read_tokens": 1840,
         "cache_write_tokens": 40,
     }
-    assert finished.message.provider_data[AGGREGATE_USAGE_KEY] is True
+    assert finished.message.meta.aggregate_usage is True
 
 
 @pytest.mark.asyncio
@@ -2465,7 +2465,7 @@ async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_part
     assert record.status is RunStatus.error
     assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
     # The kept usage sums both attempts, so it reads as no single request's.
-    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert record.messages[-1].meta.aggregate_usage is True
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.cache_read_tokens) == (11, 80)
 
 
@@ -2527,7 +2527,7 @@ async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attem
         "cache_read_tokens": 1840,
         "cache_write_tokens": 40,
     }
-    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert record.messages[-1].meta.aggregate_usage is True
     assert (
         record.metrics.tokens.input_tokens,
         record.metrics.tokens.cache_read_tokens,

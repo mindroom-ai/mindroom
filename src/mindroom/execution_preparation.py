@@ -47,7 +47,7 @@ from mindroom.history.runtime import (
 )
 from mindroom.history.storage import read_scope_seen_event_ids
 from mindroom.history.types import ResolvedReplayPlan
-from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
+from mindroom.llm.messages import EMPTY_META, Message, MessageMeta
 from mindroom.llm.provider import ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import replace_visible_message
@@ -254,9 +254,9 @@ def _context_message_from_visible_message(
     # time prefix an earlier user turn carries.
     unprefixed = strip_user_turn_time_prefix(str(message.content.get("body", "")))
     captioned = isinstance(filename, str) and bool(filename) and filename != unprefixed
-    media = (
-        {MEDIA_MSGTYPE_KEY: msgtype}
-        if msgtype in ("m.image", "m.file", "m.audio", "m.video") and not captioned
+    media_msgtype = (
+        msgtype
+        if isinstance(msgtype, str) and msgtype in ("m.image", "m.file", "m.audio", "m.video") and not captioned
         else None
     )
     own = _is_own_reply(message, response_sender_id)
@@ -285,8 +285,12 @@ def _context_message_from_visible_message(
     if own:
         # The agent's own message is a thread message marked as sent by it, never an assistant turn: providers merge
         # that into the answer before it, and the model then ends its answers with what it sent.
-        return own_thread_message(content, media)
-    return Message(role="user", content=content, provider_data=media)
+        return own_thread_message(content, media_msgtype=media_msgtype)
+    return Message(
+        role="user",
+        content=content,
+        meta=MessageMeta(media_msgtype=media_msgtype) if media_msgtype is not None else EMPTY_META,
+    )
 
 
 def _context_messages_from_visible_messages(

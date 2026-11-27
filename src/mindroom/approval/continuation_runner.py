@@ -53,6 +53,7 @@ from mindroom.attachments.storage import load_attachment, parent_attachment_refs
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
+    RESOLVED_IN_TURN_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -1371,6 +1372,12 @@ class ApprovalContinuationRunner:
                         system_enrichment_items=system_enrichment_items,
                         quiet=request.quiet,
                     )
+        if (
+            isinstance(result, CompletedApprovalRun)
+            and target.resolved_thread_id is not None
+            and target.resolved_thread_id in tool_context.resolved_thread_ids
+        ):
+            result = replace(result, metadata_content={**result.metadata_content, RESOLVED_IN_TURN_KEY: True})
         return result
 
     async def run_owned_approvals(

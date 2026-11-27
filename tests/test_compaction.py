@@ -23,7 +23,7 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedReplayPlan,
 )
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.types import ConversationSession
@@ -255,7 +255,7 @@ def test_ai_run_metadata_bounds_context_cache_split_to_displayed_context(tmp_pat
         role="assistant",
         content="ok",
         metrics=MessageMetrics(tokens=counts),
-        provider_data=model_provenance("test-model", "OpenAI Chat"),
+        meta=MessageMeta(model=ModelProvenance("test-model", "OpenAI Chat")),
     )
 
     metadata = build_ai_run_metadata_content(

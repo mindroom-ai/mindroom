@@ -128,6 +128,20 @@ def test_show_canvas_guidance_places_new_canvases_below_the_reply() -> None:
     assert "below your reply text" in description
 
 
+def test_show_canvas_schema_documents_state_lifecycle_and_update_inputs() -> None:
+    """Canvas schema tells models when to save/restore state and that updates still require html or path."""
+    function = toolkit_offers(ChatUITools(enable_show_canvas=True), "show_canvas")
+    description = function.description or ""
+    props = function.parameters["properties"]
+
+    assert "saveState(v) on change" in description
+    assert "restore from window.mindroom.state on load" in description
+    assert "(one required on update)" in props["html"]["description"]
+    assert "(one required on update)" in props["path"]["description"]
+    assert "in this conversation" in props["canvas_event_id"]["description"]
+    assert "still needs html or path, cannot reopen unchanged" in props["canvas_event_id"]["description"]
+
+
 def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
     """``show_canvas`` is declared but off by default, so excluding it keeps the toolkit and its other functions."""
     context = _context(tmp_path)
@@ -1122,6 +1136,30 @@ async def test_canvas_needs_exactly_one_page_source(tmp_path: Path, html: str | 
         result = json.loads(await ChatUITools().show_canvas(title="Deck", html=html, path=path))
 
     assert result["message"] == "Give exactly one of html or path."
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("html", "path"), [(None, None), ("", "")])
+async def test_canvas_update_without_page_source_explains_cannot_reopen_unchanged(
+    tmp_path: Path,
+    html: str | None,
+    path: str | None,
+) -> None:
+    """Passing canvas_event_id alone tells the model it cannot reopen an unchanged canvas."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        missing = json.loads(await ChatUITools().show_canvas(canvas_event_id="$canvas", html=html, path=path))
+        both = json.loads(
+            await ChatUITools().show_canvas(canvas_event_id="$canvas", html="<p>1</p>", path="deck.html"),
+        )
+
+    assert missing["message"] == (
+        "Give exactly one of html or path. canvas_event_id replaces content in place and cannot reopen an "
+        "unchanged canvas; pass html or path to update it, or tell the user to select it in the room header."
+    )
+    assert both["message"] == "Give exactly one of html or path."
     context.client.room_send.assert_not_awaited()
 
 

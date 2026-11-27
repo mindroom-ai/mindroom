@@ -30,7 +30,7 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.media import Audio, File
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
@@ -214,9 +214,11 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             {"type": "text", "text": "Looking it up."},
             {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
         ],
-        "mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"},
-        "mindroom_native_compaction": None,
     }
+    assert message.meta == MessageMeta(
+        model=ModelProvenance("claude-sonnet-5-5", "Anthropic"),
+        native_compaction=None,
+    )
     assert wire.body()["thinking"] == {"type": "adaptive", "block_binding": _DROP_STALE}
 
 
@@ -671,7 +673,7 @@ async def test_an_assistant_turn_with_nothing_to_replay_is_left_out(tmp_path: Pa
     provider = route_provider("anthropic", tmp_path, wire)
     cut_off = Message(
         role="assistant",
-        provider_data={"mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"}},
+        meta=MessageMeta(model=ModelProvenance("claude-sonnet-5-5", "Anthropic")),
     )
     messages = [*_user("Summarize the report."), cut_off, Message(role="user", content="Try again.")]
     await claude_turn(provider, ModelRequest(messages=messages))
@@ -1547,7 +1549,8 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         {"type": "input_tokens", "value": 60000},
         False,
     )
-    state = (first.message.provider_data or {})["mindroom_native_compaction"]
+    state = first.message.meta.native_compaction
+    assert isinstance(state, dict)
     assert (state["route"], state["threshold"], state["checkpoint_prefix"]) == (replay.route, 60000, True)
     assert state["items"] == [checkpoint, {"type": "text", "text": "Done."}]
     metrics = first.message.metrics
@@ -1563,7 +1566,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     turns = wire.body(1)["messages"]
     assert [turn["role"] for turn in turns] == ["assistant", "user"], "the checkpoint replaces the earlier user prefix"
     assert turns[0]["content"][0] == checkpoint
-    assert (second.message.provider_data or {})["mindroom_native_compaction"] == {
+    assert second.message.meta.native_compaction == {
         "route": replay.route,
         "threshold": 60000,
         "checkpoint_prefix": True,

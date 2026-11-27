@@ -35,7 +35,7 @@ from mindroom.knowledge.utils import (
 )
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import Message, MessageMeta, system_text
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, TeamRunRecord
@@ -847,10 +847,7 @@ def _notice(response_turn_id: str) -> Message:
     return Message(
         role="user",
         content=QUEUED_MESSAGE_NOTICE_TEXT,
-        provider_data={
-            "mindroom_queued_message_notice": True,
-            "mindroom_queued_message_notice_response_turn_id": response_turn_id,
-        },
+        meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_turn_id),
     )
 
 
@@ -859,11 +856,10 @@ def _notices(team: TeamTurn, response_turn_id: str) -> list[tuple[str, object, s
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     return [
-        (run.run_id, message.provider_data["mindroom_queued_message_notice"], str(message.content))
+        (run.run_id, message.meta.queued_message_notice, str(message.content))
         for run in session.runs
         for message in run.messages
-        if message.provider_data
-        and message.provider_data.get("mindroom_queued_message_notice_response_turn_id") == response_turn_id
+        if message.meta.queued_notice_turn_id == response_turn_id
     ]
 
 

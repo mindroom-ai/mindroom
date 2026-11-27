@@ -537,6 +537,7 @@ class StreamingDeliveryRequest:
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None
     allow_new_terminal_message: Callable[[], bool] | None = None
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None
+    resolved_in_turn: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -2208,6 +2209,7 @@ class DeliveryGateway:
             allow_new_terminal_message=request.allow_new_terminal_message,
             placeholder_ready=request.placeholder_ready,
             suppress_final_push=lambda: self._should_suppress_final_push(request.target, request.identity),
+            resolved_in_turn=request.resolved_in_turn,
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
             initial_send=reply_hooks.initial_send,

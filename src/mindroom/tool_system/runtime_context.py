@@ -102,6 +102,7 @@ class ToolRuntimeContext:
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
+    resolved_thread_ids: set[str] = field(default_factory=set)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)

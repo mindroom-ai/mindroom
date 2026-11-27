@@ -947,7 +947,7 @@
     "functions": [
       {
         "name": "browser_read",
-        "description": "Inspect Chromium without mutating pages: status/profiles/tabs, snapshots (refs for browser_control), screenshots, console, or help/actions.\n`tabs`/`console` work when stopped; `snapshot`/`screenshot` need a page opened via `browser_control(action='open')` and never launch Chromium or switch the active tab. `target='host'` uses the worker browser; `target='desktop'` (when configured) observes the user's browser (active tab only).",
+        "description": "Inspect Chromium without mutating pages: check status/profiles/tabs, snapshot element refs (for browser_control), take a screenshot, read console logs, or fetch help/actions.\nExamples: {\"action\":\"snapshot\"} | {\"action\":\"screenshot\",\"fullPage\":true}.\ntarget=host uses MindRoom's worker browser (tabs returns empty when stopped without launching Chromium). target=desktop observes the user's browser.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -963,7 +963,7 @@
                 "help",
                 "actions"
               ],
-              "description": "Read action."
+              "description": "Read action (help for full table)."
             },
             "target": {
               "type": "string",
@@ -971,43 +971,39 @@
                 "host",
                 "desktop"
               ],
-              "description": "Target browser (`host` or `desktop`)."
+              "description": "host (worker browser) or desktop (user's browser)."
             },
             "profile": {
               "type": "string",
-              "description": "Profile name (default `mindroom`; host only)."
+              "description": "Host-target profile (default mindroom)."
             },
             "targetId": {
               "type": "string",
-              "description": "Host tab ID (does not switch active tab for `browser_control`; unsupported on desktop)."
+              "description": "Host tab ID (rejected by desktop; desktop observes active tab only; on host, omit for active tab or all-tab console)."
             },
             "limit": {
               "type": "integer",
-              "description": "Snapshot item limit."
+              "description": "Host-target snapshot item limit."
             },
             "maxChars": {
               "type": "integer",
-              "description": "Snapshot text limit."
-            },
-            "mode": {
-              "type": "string",
-              "description": "Snapshot mode (`efficient` removes default 12k char cap)."
+              "description": "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."
             },
             "snapshotFormat": {
               "type": "string",
-              "description": "Snapshot format (`ai`/`aria`)."
+              "description": "Host-target snapshot format (ai/aria)."
             },
             "interactive": {
               "type": "boolean",
-              "description": "Interactive-only snapshot filter."
+              "description": "Host-target interactive-only snapshot filter."
             },
             "compact": {
               "type": "boolean",
-              "description": "Compact snapshot output."
+              "description": "Host-target compact snapshot output."
             },
             "depth": {
               "type": "integer",
-              "description": "Snapshot traversal depth."
+              "description": "Snapshot depth."
             },
             "selector": {
               "type": "string",
@@ -1019,15 +1015,15 @@
             },
             "ref": {
               "type": "string",
-              "description": "Snapshot ref or CSS selector."
+              "description": "Element ref or CSS selector (for element screenshot)."
             },
             "element": {
               "type": "string",
-              "description": "Element screenshot CSS selector."
+              "description": "CSS selector for element screenshot."
             },
             "type": {
               "type": "string",
-              "description": "Screenshot format (`png`/`jpeg`)."
+              "description": "Screenshot format (png/jpeg)."
             },
             "saveOnly": {
               "type": "boolean",
@@ -1035,7 +1031,7 @@
             },
             "returnAttachment": {
               "type": "boolean",
-              "description": "Desktop screenshot: return att_* handle for matrix_message (no plaintext saved)."
+              "description": "Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk."
             },
             "level": {
               "type": "string",
@@ -1062,7 +1058,7 @@
       },
       {
         "name": "browser_control",
-        "description": "Drive Chromium: start/stop profiles, open URLs or local HTML (`paths`), focus/close tabs, navigate, `act`, save PDFs, upload files, arm dialogs. Use `browser_read` for status/tabs/snapshot/screenshot/console/help.\n`target='host'` uses the worker browser (auto-shows Computer panel with `chat_ui`; use `chat_ui.open_panel(panel='computer')` only to reopen). `target='desktop'` (when configured) supports `start`, `stop`, `open` only (no existing-page control).",
+        "description": "Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.\nExamples: {\"action\":\"open\",\"targetUrl\":\"https://example.org\"} | {\"action\":\"open\",\"target\":\"host\",\"paths\":[\"page.html\"]} (omit targetUrl, incl. about:blank) | {\"action\":\"act\",\"target\":\"host\",\"request\":{\"kind\":\"click\",\"ref\":\"e1\"}}.\nopen takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1080,7 +1076,7 @@
                 "dialog",
                 "act"
               ],
-              "description": "Control action."
+              "description": "Control action; page interactions use action='act' with request.kind."
             },
             "target": {
               "type": "string",
@@ -1088,46 +1084,38 @@
                 "host",
                 "desktop"
               ],
-              "description": "Target browser (`host` or `desktop`)."
+              "description": "host (worker browser) or desktop (user's browser: start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it)."
             },
             "profile": {
               "type": "string",
-              "description": "Profile name (default `mindroom`; host only)."
+              "description": "Host-target profile (default mindroom)."
             },
             "targetUrl": {
               "type": "string",
-              "description": "URL for `open`/`navigate`."
+              "description": "URL for open/navigate (omit when using paths)."
             },
             "targetId": {
               "type": "string",
-              "description": "Host tab ID (unsupported on desktop)."
+              "description": "Host tab ID (rejected by desktop; required for focus)."
             },
             "paths": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "Upload files (artifact/workspace paths or att_* IDs; `./att_*` for workspace files named att_*), or one local HTML file for `open` (no relative links/local loads)."
+              "description": "upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local files; relative links don't resolve)."
             },
             "ref": {
               "type": "string",
-              "description": "Snapshot ref or CSS selector (upload)."
-            },
-            "inputRef": {
-              "type": "string",
-              "description": "Upload input selector/ref."
-            },
-            "element": {
-              "type": "string",
-              "description": "Upload element CSS selector."
+              "description": "Element ref or CSS selector (required for upload)."
             },
             "timeoutMs": {
               "type": "integer",
-              "description": "Upload timeout in ms."
+              "description": "Host-target upload/dialog timeout (ms)."
             },
             "accept": {
               "type": "boolean",
-              "description": "Accept dialog."
+              "description": "Accept next dialog."
             },
             "promptText": {
               "type": "string",
@@ -1135,11 +1123,7 @@
             },
             "request": {
               "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "For action='act', set request.kind: click {ref, doubleClick?, button?, modifiers?}; type {ref, text, submit?, slowly?}; press {key}; hover {ref}; drag {startRef, endRef}; select {ref, values}; fill {fields:[{ref|selector,value}]}; resize {width, height}; wait {timeMs?|text?|textGone?}; evaluate {fn, ref?}; close {}. Refs from browser_read(action='snapshot')."
+              "description": "For action=act only: {\"kind\":\"click\",\"ref\":\"e1\"}. Kinds: click{ref,doubleClick?,button?,modifiers?}; type{ref,text,submit?,slowly?}; press{key}; hover{ref}; drag{startRef,endRef}; select{ref,values}; fill{fields:[{ref|selector,value}]}; resize{width,height}; wait{timeMs?|text?|textGone?}; evaluate{fn:\"JS expr or arrow (()=>... or el=>...), no bare return\",ref?}; close{}. Refs from browser_read(action='snapshot')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2714,12 +2698,12 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).",
-    "guidance": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).",
+    "instructions": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.",
+    "guidance": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.",
     "functions": [
       {
         "name": "open_settings",
-        "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
+        "description": "Open MindRoom Chat Settings at one section. Changes no setting (user decides). Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -2744,7 +2728,7 @@
       },
       {
         "name": "open_panel",
-        "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first live worker browser call (`browser_control` or `browser_read` snapshot/screenshot with target='host', or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+        "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First live host call (browser_control, browser_read page view, or browser_mcp) auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -2754,7 +2738,7 @@
                 "members",
                 "computer"
               ],
-              "description": "'computer' (worker browser) or 'members' (default; room members)."
+              "description": "computer (worker browser) or members (default)."
             }
           },
           "required": []

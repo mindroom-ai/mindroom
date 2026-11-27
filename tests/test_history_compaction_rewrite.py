@@ -53,7 +53,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
@@ -1132,7 +1132,7 @@ async def test_compaction_hooks_see_who_said_each_line_without_what_mindroom_add
             Message(
                 role="user",
                 content="A newer message is waiting.",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+                meta=MessageMeta(queued_message_notice=True),
             ),
             Message(role="assistant", content="Noted: next Friday."),
         ],

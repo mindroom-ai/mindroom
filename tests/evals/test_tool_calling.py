@@ -17,7 +17,7 @@ from evals.tool_calling.harness import CaseResult, _collect_traces, evaluate_cas
 from evals.tool_calling.run import resolve_provider, run_cli
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -102,12 +102,12 @@ class _ScriptedProvider:
             yield step
             return
         metrics = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=25, total_tokens=125))
-        prov = model_provenance(self.identity.id, self.identity.provider)
+        meta = MessageMeta(model=ModelProvenance(self.identity.id, self.identity.provider))
         if isinstance(step, str):
-            msg = Message(role="assistant", content=step, metrics=metrics, provider_data=prov)
+            msg = Message(role="assistant", content=step, metrics=metrics, meta=meta)
             yield TurnCompleted(message=msg, stop_reason="end")
         else:
-            msg = Message(role="assistant", content="", tool_calls=step, metrics=metrics, provider_data=prov)
+            msg = Message(role="assistant", content="", tool_calls=step, metrics=metrics, meta=meta)
             yield TurnCompleted(message=msg, stop_reason="tool_use")
 
 
@@ -474,8 +474,8 @@ async def test_run_cli_end_to_end_and_output_limit_resilience(
             turns: list[_Step] = [[_ct("show_canvas", title="Deploy", html="<div>ok</div>")], "Done."]
         elif model == "oom":
             tok = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=200, total_tokens=300))
-            prov = model_provenance("oom", "openai")
-            msg = Message(role="assistant", content="", reasoning_content="x", metrics=tok, provider_data=prov)
+            meta = MessageMeta(model=ModelProvenance("oom", "openai"))
+            msg = Message(role="assistant", content="", reasoning_content="x", metrics=tok, meta=meta)
             turns = [TurnCompleted(message=msg, stop_reason="output_limit")]
         else:
             turns = [

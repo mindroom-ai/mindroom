@@ -7,7 +7,7 @@ resume a stored paused run; the team case pauses a ``squad`` turn on its checker
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -19,10 +19,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import Capabilities, NativeCompactionReplay, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
+from mindroom.native_compaction import replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -75,7 +75,7 @@ class _RecordingModel(ScriptedModel):
         """Yield the next scripted turn, its completed response carrying the request's native settings."""
         async for event in super().stream(request):
             if isinstance(event, TurnCompleted):
-                event.message.provider_data = {"mindroom_portable_replay": request.portable_replay}
+                event.message.meta = replace(event.message.meta, portable_replay=request.portable_replay)
                 record_native_checkpoint(event.message, [], request.native_compaction)
             yield event
 
@@ -96,7 +96,7 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
     """Return a run paused on ``lookup`` whose last response recorded the given native provenance."""
     provider_data: dict[str, object] = {}
     if saved is not None:
-        provider_data[NATIVE_CHECKPOINT_KEY] = saved
+        provider_data["mindroom_native_compaction"] = saved
     if portable is not None:
         provider_data["mindroom_portable_replay"] = portable
     tool = ToolExecution(tool_call_id="call-1", tool_name="lookup", tool_args={}, requires_confirmation=True)
@@ -107,10 +107,14 @@ def _paused_record(*, saved: dict[str, object] | None, portable: object = None) 
         messages=[
             Message(role="system", content="You are General."),
             Message(role="user", content="Look up the port"),
-            Message(
-                role="assistant",
-                tool_calls=[{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
-                provider_data=provider_data,
+            Message.from_dict(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}},
+                    ],
+                    "provider_data": provider_data,
+                },
             ),
         ],
         tools=[tool],
@@ -122,7 +126,7 @@ def _checkpointed_messages() -> list[Message]:
     checkpoint = {"route": "route-a", "threshold": 1024, "checkpoint_prefix": True, "items": [_CHECKPOINT]}
     return [
         Message(role="user", content=_TRANSCRIPT),
-        Message(role="assistant", content="Noted.", provider_data={NATIVE_CHECKPOINT_KEY: checkpoint}),
+        Message(role="assistant", content="Noted.", meta=MessageMeta(native_compaction=checkpoint)),
     ]
 
 

@@ -60,7 +60,7 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.events import RunFinished
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     Capabilities,
     ModelIdentity,
@@ -73,7 +73,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
-from mindroom.llm.request_identity import CACHE_ROUTING_KEY, cache_routing_digest
+from mindroom.llm.request_identity import cache_routing_digest
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -149,7 +149,7 @@ def _answered(
         content=text,
         created_at=ts,
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=reported, output_tokens=10)),
-        provider_data=model_provenance(model.identity.id, model.identity.provider),
+        meta=MessageMeta(model=ModelProvenance(model.identity.id, model.identity.provider)),
     )
     stamp_request_identity(reply, model, req)
     return reply
@@ -534,9 +534,7 @@ def test_prepare_fork_request_gates() -> None:
     unbound_against_alice = replace(alice_fork, sizer=RequestSizer(ScriptedModel([]), "openai"))
     legacy_answer = replace(
         alice_fork.request.messages[-1],
-        provider_data={
-            k: v for k, v in (alice_fork.request.messages[-1].provider_data or {}).items() if k != CACHE_ROUTING_KEY
-        },
+        meta=replace(alice_fork.request.messages[-1].meta, cache_routing=None),
     )
     routed_against_legacy = replace(
         alice_fork,
@@ -798,7 +796,7 @@ async def test_wire_codex_fork_preserves_prompt_cache_key_and_session_id(tmp_pat
     live = ModelRequest(messages=(*_SYS, _msg("user", "Explain caching.")))
     turn = await complete(active, live)
     stamp_request_identity(turn.message, active, live)
-    assert (turn.message.provider_data or {}).get(CACHE_ROUTING_KEY) == cache_routing_digest(active.model_params)
+    assert turn.message.meta.cache_routing == cache_routing_digest(active.model_params)
 
     fork = SummaryFork(
         RequestSizer(active, "codex"),
@@ -851,7 +849,7 @@ async def test_wire_gemini_mid_turn_fork_preserves_tools_and_function_response_o
         tool_calls=[tool_call("get_weather", "call_1", city="Paris")],
         created_at=int(time.time()),
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=600, output_tokens=15)),
-        provider_data=model_provenance(model.identity.id, model.identity.provider),
+        meta=MessageMeta(model=ModelProvenance(model.identity.id, model.identity.provider)),
     )
     stamp_request_identity(call_msg, model, prefix)
     tool_msg = Message(role="tool", content="Sunny 22C", tool_call_id="call_1", tool_name="get_weather")
@@ -1054,9 +1052,7 @@ async def test_pre_reply_auto_compaction_skips_fork_for_different_requester_rout
     assert isinstance(finished, RunFinished)
     assert isinstance(finished.record, RunRecord)
     alice_answer = finished.record.messages[-1]
-    assert (alice_answer.provider_data or {}).get(CACHE_ROUTING_KEY) == cache_routing_digest(
-        alice_model.model_params,
-    )
+    assert alice_answer.meta.cache_routing == cache_routing_digest(alice_model.model_params)
 
     stored_run = _completed_run("r-alice", messages=[turn.prompt, alice_answer])
     xml_calls = SummaryCalls(summary="xml-for-bob-pre-reply")
@@ -1651,7 +1647,7 @@ async def test_scope_fork_fails_fast_when_native_compaction_active(
 ) -> None:
     """Native prior answers fail fast in O(1); canonical prior answers on the same native-capable model still fork."""
     from mindroom.history import runtime as history_runtime  # noqa: PLC0415
-    from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state  # noqa: PLC0415
+    from mindroom.native_compaction import native_checkpoint_state  # noqa: PLC0415
 
     config, paths, storage = _fork_config(tmp_path, reserve_tokens=1_000, replay_window_tokens=20_000)
     inputs = _inputs(config)
@@ -1702,10 +1698,10 @@ async def test_scope_fork_fails_fast_when_native_compaction_active(
         4_000,
         run_id="r-nat",
     )
-    native_run.messages[-1].provider_data = {
-        **(native_run.messages[-1].provider_data or {}),
-        NATIVE_CHECKPOINT_KEY: native_checkpoint_state([], native_settings),
-    }
+    native_run.messages[-1].meta = replace(
+        native_run.messages[-1].meta,
+        native_compaction=native_checkpoint_state([], native_settings),
+    )
     with capture_logs() as pre_logs:
         prepared_n = await prepare_scope_history(
             sizer=RequestSizer(fork_model, "anthropic"),

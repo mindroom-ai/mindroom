@@ -48,7 +48,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Show MindRoom Chat UI: Computer/Members panels, Settings, or interactive HTML/chart/diagram Canvases with live state (when enabled); never controls the user's browser",
+      "description": "Show MindRoom Chat UI: Computer/Members panels, Settings, or interactive HTML/chart/diagram Canvases with live state (when enabled)",
       "display_name": "Chat UI",
       "docs_url": "https://docs.mindroom.chat/tools/chat-ui/",
       "executes_code": false,

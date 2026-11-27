@@ -343,7 +343,7 @@ async def test_an_external_decider_never_reads_a_turns_stored_context() -> None:
     decider = AsyncMock(return_value=ParticipationDecision(action="respond", reason="Open question."))
     model = ScriptedModel([answer("Useful answer")])
     messages = [
-        Message(role="user", content="Approval receipt: operate was approved.", add_to_agent_memory=False),
+        Message(role="user", content="Approval receipt: operate was approved.", is_turn_context=True),
         Message(role="assistant", content="Done."),
         Message(role="user", content="Can anyone explain this?"),
     ]
