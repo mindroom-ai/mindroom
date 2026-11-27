@@ -446,7 +446,7 @@ Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`)
 Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model.
 An override's own length rules still meet the six-word limit: retries accumulate prior rejections across up to 3 attempts, and for an untitled thread if no attempt passes validation the shortest complete title within 80 characters is used instead of leaving the thread untitled (while an already-titled thread keeps its current title and posts nothing).
 Explicit retitles never change tags, so tags someone removed are not re-added.
-These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; the tagging pass retries after another interval once the power level allows it.
+Automatic tags are best-effort on that final pass: these tags are room state, so when the agent's power level is too low to send state events (logged once per room) or a tag write fails (logged once for the summary), the thread still finishes without tags and automatic retitling does not retry later.
 
 ## Related Docs
 

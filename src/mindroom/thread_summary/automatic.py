@@ -321,11 +321,11 @@ async def _apply_initial_tags(
     room_id: str,
     thread_id: str,
     tags: Sequence[str],
-) -> bool:
-    """Apply generated tags only when no manual or concurrent tags exist."""
+) -> None:
+    """Best-effort apply generated tags only when no manual or concurrent tags exist."""
     set_by = client.user_id
     if not set_by:
-        return False
+        return
     try:
         result = await set_thread_tags_if_empty(
             client,
@@ -335,32 +335,32 @@ async def _apply_initial_tags(
             set_by=set_by,
         )
     except ThreadTagsPermissionError as exc:
-        # A room setting, not a fault: warn once per room, and a later summary tags once the power levels allow it.
+        # A room setting, not a fault: warn once per room; automatic tags are best-effort on Pass 2.
         if room_id not in _rooms_refusing_automatic_tags:
             _rooms_refusing_automatic_tags.add(room_id)
             logger.warning("Automatic thread tags need a higher power level", room_id=room_id, reason=str(exc))
-        return False
+        return
     except Exception:
         logger.exception(
             "Failed to apply automatic thread tags",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return False
+        return
     if result.skipped_due_to_prior_mutation:
         logger.info(
             "Skipping automatic tags because another tag mutation completed first",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return True
+        return
     if result.had_existing_tags:
         logger.info(
             "Skipping automatic tags because the thread already has tags",
             room_id=room_id,
             thread_id=thread_id,
         )
-        return True
+        return
     if result.applied_tags:
         logger.info(
             "Automatically tagged thread",
@@ -368,7 +368,6 @@ async def _apply_initial_tags(
             thread_id=thread_id,
             tags=result.applied_tags,
         )
-    return bool(result.applied_tags)
 
 
 async def _refresh_tag_vocabulary(
@@ -406,7 +405,7 @@ async def _deliver_generated_summary(
     trusted_sender_ids: Collection[str],
     authorize_human: Callable[[str], bool],
     projected_state: SummaryState,
-    is_enrichment_pass: bool = False,
+    is_enrichment_pass: bool,
 ) -> bool:
     """Apply initial tags, then independently deliver the generated summary.
 
@@ -435,12 +434,10 @@ async def _deliver_generated_summary(
         )
         return False
 
-    initial_enrichment_complete: bool | None = None
-    if generated.tags:
-        initial_enrichment_complete = await _apply_initial_tags(client, room_id, thread_id, generated.tags)
-    elif is_enrichment_pass:
-        # The model ran Pass 2 but produced no usable tags after coercion; record enrichment complete so Pass 2 stops.
-        initial_enrichment_complete = True
+    if is_enrichment_pass and generated.tags:
+        await _apply_initial_tags(client, room_id, thread_id, generated.tags)
+    # Pass 2 always finalizes title stability regardless of best-effort tag-write outcome.
+    initial_enrichment_complete: bool | None = True if is_enrichment_pass else None
 
     try:
         event_id = await send_thread_summary_notice(
@@ -457,7 +454,7 @@ async def _deliver_generated_summary(
     except Exception:
         logger.exception("Thread summary send failed", room_id=room_id, thread_id=thread_id)
         return False
-    return event_id is not None and initial_enrichment_complete is True
+    return event_id is not None and is_enrichment_pass
 
 
 async def _countable_thread_history(
@@ -761,7 +758,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
             baselines.record(room_id, thread_id, message_count)
             return
 
-        is_enrichment_pass = state.last_summary_count > 0 and not state.initial_enrichment_complete
+        is_enrichment_pass = not retitle and state.last_summary_count > 0 and not state.initial_enrichment_complete
         tag_vocabulary = None
         if is_enrichment_pass:
             tag_vocabulary = refreshed_tag_vocabulary or format_tag_vocabulary_with_counts(

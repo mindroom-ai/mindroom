@@ -983,17 +983,31 @@ class TestMaybeGenerateThreadSummary:
         install_model_providers(monkeypatch, self.models)
         self.monkeypatch = monkeypatch
 
-    def _history(self, messages: Sequence[ResolvedVisibleMessage]) -> None:
-        serve_conversation_reader(self.conversation_reader, messages, room_id=_ROOM, thread_id=_THREAD)
+    def _history(self, messages: Sequence[ResolvedVisibleMessage], *, thread_id: str = _THREAD) -> None:
+        serve_conversation_reader(self.conversation_reader, messages, room_id=_ROOM, thread_id=thread_id)
 
     def _summarizer(self, *contents: BaseModel | str | Await, model_name: str = "default") -> ScriptedModel:
         model = _summary_model(*contents)
         self.models[model_name] = model
         return model
 
-    async def _maybe_generate(self, config: Config, *, client: AsyncMock | None = None, retitle: bool = False) -> None:
+    async def _maybe_generate(
+        self,
+        config: Config,
+        *,
+        client: AsyncMock | None = None,
+        thread_id: str = _THREAD,
+        retitle: bool = False,
+    ) -> None:
         """Run the production helper through the explicit access seam."""
-        await _summary_pass(client or self.client, config, self.rp, self.conversation_reader, retitle=retitle)
+        await _summary_pass(
+            client or self.client,
+            config,
+            self.rp,
+            self.conversation_reader,
+            thread_id=thread_id,
+            retitle=retitle,
+        )
 
     def _count(self) -> int:
         return self.baselines.count(_ROOM, _THREAD)
@@ -2353,32 +2367,41 @@ class TestMaybeGenerateThreadSummary:
         failure: str,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Power levels that refuse the agent's tags log one warning for the room, no error, and attempt no write.
-
-        A later summary tags the thread once the power levels allow it. Any other failure to write the tags logs one error per summary, not one per tag. Both summaries are delivered.
-        """
+        """Power-level refusal warns once per room, write errors log once per summary, and Pass 2 still finalizes."""
         monkeypatch.setattr(automatic, "_rooms_refusing_automatic_tags", set())
         if failure == "insufficient_power":
             self.room_state.power_level = 0
         else:
             self.room_state.failing_tags = frozenset({"bug", "authentication"})
-        config = _mock_config(first_threshold=1)
-        histories = [
-            _make_due_second_summary_history(),
-            [
-                *_make_thread_history(25),
-                _make_summary_notice_message(_THREAD, message_count=12, initial_enrichment_complete=False),
-            ],
+        config = Config()
+        second_thread = "$thread2"
+        threads = [
+            (
+                _THREAD,
+                [
+                    *_make_thread_history(6),
+                    _make_summary_notice_message(_THREAD, message_count=2, initial_enrichment_complete=None),
+                ],
+            ),
+            (
+                second_thread,
+                [
+                    *_make_thread_history(6),
+                    _make_summary_notice_message(second_thread, message_count=2, initial_enrichment_complete=None),
+                ],
+            ),
         ]
         with capture_logs() as logs:
-            for history in histories:
+            for tid, history in threads:
                 self._summarizer(
                     _ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug", "authentication"]),
                 )
-                self._history(history)
-                await self._maybe_generate(config)
+                self._history(history, thread_id=tid)
+                await self._maybe_generate(config, thread_id=tid)
 
-        assert [sent["initial_enrichment_complete"] for sent in _sent_summaries(self.client)] == [False, False]
+        assert [sent["initial_enrichment_complete"] for sent in _sent_summaries(self.client)] == [True, True]
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+        assert self.baselines.is_finalized(_ROOM, second_thread)
         errors = [log for log in logs if log["log_level"] == "error"]
         warnings = [log for log in logs if log["log_level"] == "warning"]
         if failure == "insufficient_power":
@@ -2388,46 +2411,161 @@ class TestMaybeGenerateThreadSummary:
             ]
             assert "exc_info" not in warnings[0]
             self.client.room_put_state.assert_not_awaited()
-            # Once the power levels allow it, a later summary tags the thread.
-            self.room_state.power_level = 100
-            self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
-            self._history(
-                [
-                    *_make_thread_history(40),
-                    _make_summary_notice_message(_THREAD, message_count=25, initial_enrichment_complete=False),
-                ],
-            )
-            await self._maybe_generate(config)
-            assert self.room_state.tags(_THREAD) == ["bug"]
-            assert _sent_summaries(self.client)[-1]["initial_enrichment_complete"] is True
         else:
             assert [(log["event"], log["tags"]) for log in errors] == [
                 ("Failed to write automatic thread tags", ["bug", "authentication"]),
             ] * 2
             assert warnings == []
 
-    async def test_tag_read_failure_marks_enrichment_retryable(self) -> None:
-        """A transient tag-state read failure must not durably suppress later retries."""
+        # Follow-up turns at +4 messages (even after restart) never call the model or overwrite the title.
+        follow_up_model = self._summarizer(_ThreadEnrichment(title="🔧 Drifted title", tags=["other"]))
+        finalized_history = [
+            *_make_thread_history(10),
+            _make_summary_notice_message(
+                _THREAD,
+                message_count=6,
+                summary="🧵 Login failure investigation",
+                initial_enrichment_complete=True,
+            ),
+        ]
+        self._history(finalized_history)
+        await self._maybe_generate(config)
+        self._restart()
+        self._history(finalized_history)
+        await self._maybe_generate(config)
+        assert not follow_up_model.requests
+        assert len(_sent_summaries(self.client)) == 2
+
+    async def test_tag_read_failure_still_finalizes_pass2_title(self) -> None:
+        """A transient tag-state read failure logs and still finalizes Pass 2 so later turns do not retitle."""
         # Reads 1 and 2 are the vocabulary rebuild and the resolved check; read 3 is the conditional tag write's.
         self.room_state.failing_reads = frozenset({3})
-        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
-        self._history(_make_due_second_summary_history())
+        config = Config()
+        model = self._summarizer(
+            _ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]),
+            _ThreadEnrichment(title="🔧 Drifted title", tags=["other"]),
+        )
+        self._history(
+            [
+                *_make_thread_history(6),
+                _make_summary_notice_message(_THREAD, message_count=2, initial_enrichment_complete=None),
+            ],
+        )
 
-        await self._maybe_generate(_mock_config(first_threshold=1))
+        with capture_logs() as logs:
+            await self._maybe_generate(config)
 
         assert self.room_state.reads == 3
         assert self.room_state.tags(_THREAD) == []
-        assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is False
+        assert any(log["log_level"] == "error" for log in logs)
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Login failure investigation"
+        assert sent["initial_enrichment_complete"] is True
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
 
-    async def test_all_tag_write_failures_mark_enrichment_retryable(self) -> None:
-        """A summary may survive failed tag writes without claiming enrichment completed."""
+        # At +4 more messages, automatic retitling stays stopped and preserves the title.
+        self._history(
+            [
+                *_make_thread_history(10),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=6,
+                    summary="🧵 Login failure investigation",
+                    initial_enrichment_complete=True,
+                ),
+            ],
+        )
+        await self._maybe_generate(config)
+        assert len(model.requests) == 1
+        assert len(_sent_summaries(self.client)) == 1
+
+    async def test_all_tag_write_failures_still_finalize_pass2_title(self) -> None:
+        """When all tag writes fail, Pass 2 logs the error, delivers the title, and stops automatic retitling."""
         self.room_state.failing_tags = frozenset({"bug"})
-        self._summarizer(_ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]))
-        self._history(_make_due_second_summary_history())
+        config = Config()
+        model = self._summarizer(
+            _ThreadEnrichment(title="🧵 Login failure investigation", tags=["bug"]),
+            _ThreadEnrichment(title="🔧 Drifted title", tags=["other"]),
+        )
+        self._history(
+            [
+                *_make_thread_history(6),
+                _make_summary_notice_message(_THREAD, message_count=2, initial_enrichment_complete=None),
+            ],
+        )
 
-        await self._maybe_generate(_mock_config(first_threshold=1))
+        with capture_logs() as logs:
+            await self._maybe_generate(config)
 
-        assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is False
+        assert any(log["log_level"] == "error" for log in logs)
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Login failure investigation"
+        assert sent["initial_enrichment_complete"] is True
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+
+        # At +4 more messages, automatic retitling stays stopped and preserves the title.
+        self._history(
+            [
+                *_make_thread_history(10),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=6,
+                    summary="🧵 Login failure investigation",
+                    initial_enrichment_complete=True,
+                ),
+            ],
+        )
+        await self._maybe_generate(config)
+        assert len(model.requests) == 1
+        assert len(_sent_summaries(self.client)) == 1
+
+    async def test_retitle_before_pass2_is_title_only_and_leaves_pass2_scheduled(self) -> None:
+        """An explicit retitle before Pass 2 writes a title only and lets the scheduled Pass 2 tag later."""
+        config = Config()
+        model = self._summarizer(
+            _title("📞 Launch review call notes"),
+            _ThreadEnrichment(keep_current=True, title="📞 Ignored", tags=["launch"]),
+        )
+        pass1 = _make_summary_notice_message(
+            _THREAD,
+            message_count=2,
+            event_id="$pass1",
+            summary="🧵 Initial title",
+            initial_enrichment_complete=None,
+        )
+        self._history([*_make_thread_history(3), pass1])
+
+        await self._maybe_generate(config, retitle=True)
+
+        assert len(model.requests) == 1
+        assert model.requests[0].output_schema is _ThreadSummary
+        assert "<current_title>" not in _prompt(model.requests[0])
+        assert "(tags are not requested for this summary refresh)" in _prompt(model.requests[0])
+        retitle_sent = _sent_summaries(self.client)[0]
+        assert (retitle_sent["summary"], retitle_sent["message_count"]) == ("📞 Launch review call notes", 3)
+        assert "initial_enrichment_complete" not in retitle_sent
+        assert not self.baselines.is_finalized(_ROOM, _THREAD)
+        self.client.room_put_state.assert_not_awaited()
+
+        # Scheduled Pass 2 still runs after +4 more ordinary messages, offers the retitle, tags, and finalizes.
+        retitle_notice = _make_summary_notice_message(
+            _THREAD,
+            message_count=3,
+            event_id="$retitle",
+            summary="📞 Launch review call notes",
+            initial_enrichment_complete=None,
+        )
+        self._history([*_make_thread_history(7), pass1, retitle_notice])
+        await self._maybe_generate(config)
+
+        assert len(model.requests) == 2
+        assert model.requests[1].output_schema is _ThreadEnrichment
+        assert "<current_title>\n📞 Launch review call notes\n</current_title>" in _prompt(model.requests[1])
+        pass2_sent = _sent_summaries(self.client)[1]
+        assert pass2_sent["summary"] == "📞 Launch review call notes"
+        assert pass2_sent["initial_enrichment_complete"] is True
+        assert self.room_state.tags(_THREAD) == ["launch"]
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
 
     async def test_refreshed_vocabulary_snapshot_is_reused_for_initial_enrichment(self) -> None:
         """The vocabulary the freshness upkeep rebuilt is what the initial enrichment offers."""
