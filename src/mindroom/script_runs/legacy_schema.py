@@ -20,6 +20,12 @@ _SCRIPT_RUN_COLUMN_MIGRATIONS = (
     # Handling: Add the absent column in place; old rows read it as null, so they stay plain script runs.
     # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_without_workflow_run_id.
     ("workflow_run_id", "ALTER TABLE script_runs ADD COLUMN workflow_run_id TEXT"),
+    # LEGACY_COMPAT: Script-run rows without a script_check rule UID column.
+    # Legacy format: Script-run rows lacked script_check_rule_uid.
+    # Last legacy release: v2026.11.476; replacement: the next release adds script_check_rule_uid for script_check ticks.
+    # Handling: Add the absent column in place; old rows read it as null, so they stay plain scripts or workflow runs.
+    # Coverage: tests/test_script_check_triggers.py::test_script_runs_store_migrates_script_check_rule_uid.
+    ("script_check_rule_uid", "ALTER TABLE script_runs ADD COLUMN script_check_rule_uid TEXT"),
     # LEGACY_COMPAT: Script-run rows without resource snapshot columns.
     # Legacy format: Script-run rows lacked resource_profile, resource_requests_json, and resource_limits_json.
     # Last legacy release: v2026.8.96; replacement: v2026.8.97 added all three resource snapshot columns.

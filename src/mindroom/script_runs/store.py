@@ -122,8 +122,8 @@ class ScriptRunStore:
                         resource_profile, resource_requests_json, resource_limits_json,
                         max_tool_calls_per_minute, max_runtime_seconds, state, created_at,
                         started_at, finished_at, exit_code, error, output,
-                        cancel_requested_at, cancellation_reason, workflow_run_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        cancel_requested_at, cancellation_reason, workflow_run_id, script_check_rule_uid
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _run_values(run),
                 )
@@ -594,7 +594,8 @@ _SCHEMA_STATEMENTS = (
                     output TEXT NOT NULL,
                     cancel_requested_at TEXT,
                     cancellation_reason TEXT,
-                    workflow_run_id TEXT
+                    workflow_run_id TEXT,
+                    script_check_rule_uid TEXT
                 )
                 """,
     """
@@ -692,6 +693,7 @@ def _run_values(run: ScriptRunRecord) -> tuple[object, ...]:
         run.cancel_requested_at,
         run.cancellation_reason,
         run.workflow_run_id,
+        run.script_check_rule_uid,
     )
 
 
@@ -714,6 +716,7 @@ def _run_from_row(row: sqlite3.Row) -> ScriptRunRecord:
         snapshot_locator=_nullable_string(row["snapshot_locator"]),
         recovery_signature=_nullable_string(row["recovery_signature"]),
         workflow_run_id=_nullable_string(row["workflow_run_id"]),
+        script_check_rule_uid=_nullable_string(row["script_check_rule_uid"]),
         name=_nullable_string(row["name"]),
         local_unsafe=bool(row["local_unsafe"]),
         resource_profile=_nullable_string(row["resource_profile"]),
