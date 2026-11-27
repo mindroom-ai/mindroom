@@ -65,6 +65,7 @@ from mindroom.event_journal import (
     reads,
     replacement_target,
     reply_messages,
+    reply_spans,
     room_claims,
     sqlite_backend,
     turn_rows,
@@ -9775,8 +9776,92 @@ class TestHotQueriesAreIndexCovered:
 
         assert len(plans) == 4
         for plan in plans:
-            assert "held_source USING INDEX reply_span_sources_event (principal_id=? AND event_id=?)" in plan, plan
+            assert (
+                "held_source USING INDEX reply_span_sources_event_lookup (principal_id=? AND event_id=? AND role=?)"
+                in plan
+            ), plan
             assert not any(step in plan for step in ("SCAN ", "TEMP B-TREE", "AUTOMATIC", "MATERIALIZE")), plan
+
+    async def test_newest_reply_id_for_sources_uses_covering_lookup_index_without_stat1(self, tmp_path: Path) -> None:
+        """Without sqlite_stat1, newest_reply_id_for_sources uses the covering lookup index and drops the old index."""
+        db_path = tmp_path / "reply-sources-plan.db"
+        with sqlite3.connect(db_path) as raw:
+            for statement in schema_statements(SQLITE_DIALECT):
+                if "reply_span_sources_event_lookup" not in statement:
+                    raw.execute(statement)
+            raw.execute("CREATE INDEX reply_span_sources_event ON reply_span_sources (principal_id, event_id)")
+            raw.commit()
+
+        backend = SqliteBackend.open(db_path, publish=ApprovalSignals().publish)
+        try:
+            for i in range(25):
+                reply_id = f"reply-{i:02d}"
+                span_id = f"span-{i:02d}"
+                source_id = "$shared" if i in (2, 20) else f"$ev-{i:02d}"
+                ts = 1_000 + i
+                await backend.write(
+                    lambda tx, rid=reply_id, sid=span_id, src=source_id, now=ts: (
+                        tx.execute(
+                            "INSERT INTO reply_messages (principal_id, reply_id, entity_name, room_id, "
+                            "membership_epoch, state, last_span_id, presentation_json, confirmed_seq, revision, "
+                            "placeholder_only, reply_sequence, created_at_ns, updated_at_ns) "
+                            "VALUES (?, ?, 'agent', ?, 1, 'completed', ?, '{}', 1, 1, FALSE, 1, ?, ?)",
+                            ("principal", rid, ROOM, sid, now, now),
+                        ),
+                        tx.execute(
+                            "INSERT INTO reply_spans (principal_id, span_id, reply_id, kind, delivery_id, "
+                            "bot_generation, base_sequence, claimed_at_ns) "
+                            "VALUES (?, ?, ?, 'turn', ?, 'gen', 0, ?)",
+                            ("principal", sid, rid, src, now),
+                        ),
+                        tx.execute(
+                            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+                            "VALUES (?, ?, ?, 'pending', 0)",
+                            ("principal", sid, src),
+                        ),
+                        tx.execute(
+                            "INSERT INTO reply_span_sources (principal_id, span_id, event_id, role, ordinal) "
+                            "VALUES (?, ?, ?, 'logical', 0)",
+                            ("principal", sid, src),
+                        ),
+                    ),
+                )
+            newest = await backend.read(
+                lambda tx: reply_spans.newest_reply_id_for_sources(tx, "principal", ("$missing", "$shared")),
+            )
+            assert newest == "reply-20"
+            assert (
+                await backend.read(
+                    lambda tx: reply_spans.newest_reply_id_for_sources(tx, "principal", ("$missing",)),
+                )
+                is None
+            )
+        finally:
+            await backend.close()
+
+        with sqlite3.connect(db_path) as database:
+            assert database.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone() is None
+            indexes = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+            assert "reply_span_sources_event_lookup" in indexes
+            assert "reply_span_sources_event" not in indexes
+            plans: list[str] = []
+
+            class _PlanRecorder:
+                def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
+                    rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                    plans.append(" | ".join(row[-1] for row in rows))
+                    return None
+
+            for event_ids in (("$shared",), ("$missing", "$shared")):
+                reply_spans.newest_reply_id_for_sources(cast("Transaction", _PlanRecorder()), "principal", event_ids)
+
+        assert len(plans) == 2
+        for plan in plans:
+            assert (
+                "SEARCH source USING COVERING INDEX reply_span_sources_event_lookup "
+                "(principal_id=? AND event_id=? AND role=?)" in plan
+            ), plan
+            assert "SCAN " not in plan, plan
 
     @pytest.mark.skipif(sqlite3.sqlite_version_info < (3, 43), reason="octet_length arrived in SQLite 3.43")
     async def test_a_page_is_sized_without_loading_its_content(self, tmp_path: Path) -> None:

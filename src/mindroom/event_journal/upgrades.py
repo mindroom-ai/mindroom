@@ -17,7 +17,7 @@ from .legacy_approval_records import upgrade_approval_records
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import upgrade_hydration_walk_version, upgrade_legacy_journal, upgrade_outbox_reply_rows
 from .legacy_turn_rows import drop_dense_turn_source_indexes, upgrade_turn_records_to_rows
-from .schema import schema_statements
+from .schema import SQLITE_DIALECT, schema_statements
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -43,6 +43,18 @@ class SchemaInspector(Protocol):
         ...
 
 
+def _drop_subsumed_reply_span_sources_index(transaction: Transaction, inspector: SchemaInspector) -> None:
+    """Drop ``reply_span_sources_event``, which ``reply_span_sources_event_lookup`` strictly subsumes."""
+    if inspector.dialect is SQLITE_DIALECT:
+        transaction.execute("DROP INDEX IF EXISTS reply_span_sources_event")
+    # A PostgreSQL name resolves through the search path, which can reach another journal's schema.
+    elif transaction.fetchone(
+        "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = ?",
+        ("reply_span_sources_event",),
+    ):
+        transaction.execute("DROP INDEX reply_span_sources_event")
+
+
 type _JournalUpgrade = Callable[[Transaction, SchemaInspector], None]
 
 _JOURNAL_UPGRADES: tuple[_JournalUpgrade, ...] = (
@@ -53,6 +65,7 @@ _JOURNAL_UPGRADES: tuple[_JournalUpgrade, ...] = (
     upgrade_failure_kind,
     upgrade_approval_records,
     drop_dense_turn_source_indexes,
+    _drop_subsumed_reply_span_sources_index,
 )
 
 

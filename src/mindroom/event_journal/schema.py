@@ -828,7 +828,9 @@ _INDEXES = (
     CREATE INDEX IF NOT EXISTS reply_spans_delivery ON reply_spans (principal_id, delivery_id/*bytes*/, claimed_at_ns)
     """,
     """
-    CREATE INDEX IF NOT EXISTS reply_span_sources_event ON reply_span_sources (principal_id, event_id)
+    -- Covering so SQLite seeks by (principal_id, event_id, role) without sqlite_stat1 instead of scanning UNIQUE.
+    CREATE INDEX IF NOT EXISTS reply_span_sources_event_lookup
+    ON reply_span_sources (principal_id, event_id, role, span_id)
     """,
     """
     CREATE INDEX IF NOT EXISTS reply_messages_room ON reply_messages (principal_id, room_id, state)
