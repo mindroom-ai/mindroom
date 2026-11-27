@@ -40,11 +40,8 @@ if TYPE_CHECKING:
         "Each user connects their own Microsoft account. "
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
-    function_names=(
-        "microsoft_meetings_find",
-        "microsoft_meetings_list_transcripts",
-        "microsoft_meetings_get_transcript",
-    ),
+    function_names=("microsoft_meetings_read",),
+    action_scoped_grants=("microsoft_meetings_read",),
 )
 def microsoft_meetings_tools() -> type[MicrosoftMeetingsTools]:
     """Return Microsoft Teams meeting transcript tools that act as the requester."""

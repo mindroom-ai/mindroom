@@ -22,6 +22,8 @@ from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
+    ScriptCheckCheckpoint,
+    ScriptCheckSourceSpec,
     SourceType,
     ThreadCheckpoint,
     ThreadTagSourceSpec,
@@ -36,11 +38,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _DB_FILENAME = "reactive_triggers.db"
 _TRIGGER_ID_LOCK_FILENAME = ".trigger_id_creation.lock"
 _FINISHED_FIRING_STATUSES = ("triaged_no", "delivered", "failed", "skipped")
 type _PrDue = tuple[ReactiveTriggerRecord, GitHubPRCheckpoint | None]
+type _ScriptCheckDue = tuple[ReactiveTriggerRecord, ScriptCheckCheckpoint]
 _ONE_HOUR_SECONDS = 3600.0
 _MAX_BACKOFF_SECONDS = 300.0
 _BASE_BACKOFF_SECONDS = 5.0
@@ -154,6 +157,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE TABLE IF NOT EXISTS github_pr_checkpoints (trigger_id TEXT PRIMARY KEY "
     "REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE, pr_state TEXT NOT NULL DEFAULT 'open', "
     "seeded INTEGER NOT NULL DEFAULT 0, next_poll_at REAL, checkpoint_json TEXT NOT NULL, updated_at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS script_check_checkpoints (trigger_id TEXT PRIMARY KEY "
+    "REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE, revision INTEGER NOT NULL DEFAULT 1, "
+    "source_utf8 TEXT NOT NULL, identity_json TEXT NOT NULL, state_json TEXT NOT NULL, next_poll_at REAL, "
+    "consecutive_errors INTEGER NOT NULL DEFAULT 0, last_error_code TEXT, last_run_at REAL, updated_at REAL NOT NULL)",
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_owner ON reactive_triggers(owner_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_source_type ON reactive_triggers(source_type, enabled)",
     "CREATE INDEX IF NOT EXISTS idx_reactive_triggers_source_room ON reactive_triggers(source_room_id)",
@@ -172,6 +179,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_trigger_firings_updated ON trigger_firings(updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_trigger_thread_keys_updated ON trigger_thread_keys(updated_at)",
     "CREATE INDEX IF NOT EXISTS idx_github_pr_checkpoints_due ON github_pr_checkpoints(next_poll_at)",
+    "CREATE INDEX IF NOT EXISTS idx_script_check_checkpoints_due ON script_check_checkpoints(next_poll_at)",
 )
 
 
@@ -200,8 +208,10 @@ class ReactiveTriggerStore:
         initial_cursor: RoomCursor | None = None,
         initial_checkpoint: ThreadCheckpoint | None = None,
         initial_github_pr_checkpoint: GitHubPRCheckpoint | None = None,
+        initial_script_check_checkpoint: ScriptCheckCheckpoint | None = None,
         max_per_owner: int | None = None,
         max_github_pr_per_owner: int | None = None,
+        max_script_check_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord:
         """Atomically enforce quota, insert a trigger, and optionally initialize cursor or checkpoint."""
         with self._write_transaction() as conn:
@@ -216,6 +226,12 @@ class ReactiveTriggerStore:
             _check_owner_quota(conn, record.owner_user_id, max_per_owner)
             if record.source.source_type == "github_pr":
                 _check_pr_quota(conn, record.owner_user_id, max_github_pr_per_owner, record.created_at)
+            if (
+                record.source.source_type == "script_check"
+                and record.enabled
+                and (record.expires_at is None or record.expires_at > record.created_at)
+            ):
+                _check_script_check_quota(conn, record.owner_user_id, max_script_check_per_owner, record.created_at)
 
             _insert_trigger_row(conn, record)
 
@@ -232,6 +248,8 @@ class ReactiveTriggerStore:
                 )
             if initial_github_pr_checkpoint is not None:
                 _upsert_github_pr_checkpoint(conn, record.trigger_id, initial_github_pr_checkpoint)
+            if initial_script_check_checkpoint is not None:
+                _upsert_script_check_checkpoint(conn, record.trigger_id, initial_script_check_checkpoint)
         return record
 
     def get_trigger(self, trigger_id: str) -> ReactiveTriggerRecord | None:
@@ -302,6 +320,7 @@ class ReactiveTriggerStore:
         update_enabled: bool = False,
         max_per_owner: int | None = None,
         max_github_pr_per_owner: int | None = None,
+        max_script_check_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints.
 
@@ -311,8 +330,8 @@ class ReactiveTriggerStore:
         """
         with self._write_transaction() as conn:
             existing = conn.execute(
-                "SELECT rule_uid, owner_user_id, source_type, enabled, disabled_reason, expires_at, fire_count, last_fired_at "
-                "FROM reactive_triggers WHERE trigger_id = ?",
+                "SELECT rule_uid, owner_user_id, source_type, enabled, disabled_reason, expires_at, "
+                "fire_count, last_fired_at, spec_json FROM reactive_triggers WHERE trigger_id = ?",
                 (record.trigger_id,),
             ).fetchone()
             if existing is None:
@@ -344,6 +363,8 @@ class ReactiveTriggerStore:
             now_on = persisted.enabled and (persisted.expires_at is None or persisted.expires_at > ts)
             if str(existing["source_type"]) == "github_pr" and not was_on and now_on:
                 _check_pr_quota(conn, owner, max_github_pr_per_owner, ts, persisted.trigger_id)
+            if str(existing["source_type"]) == "script_check" and not was_on and now_on:
+                _check_script_check_quota(conn, owner, max_script_check_per_owner, ts, persisted.trigger_id)
             cursor = conn.execute(
                 """
                 UPDATE reactive_triggers
@@ -372,6 +393,15 @@ class ReactiveTriggerStore:
             )
             if cursor.rowcount == 0:
                 return None
+            if str(existing["source_type"]) == "script_check" and isinstance(persisted.source, ScriptCheckSourceSpec):
+                _sync_script_check_checkpoint_on_update(
+                    conn,
+                    trigger_id=persisted.trigger_id,
+                    existing_spec_json=str(existing["spec_json"]),
+                    new_poll_interval_seconds=persisted.source.poll_interval_seconds,
+                    reenabling=not bool(existing["enabled"]) and effective_enabled,
+                    now=ts,
+                )
             row = conn.execute(
                 "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (persisted.trigger_id,),
@@ -386,6 +416,7 @@ class ReactiveTriggerStore:
         expected_rule_uid: str | None = None,
         max_per_owner: int | None = None,
         max_github_pr_per_owner: int | None = None,
+        max_script_check_per_owner: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Enable or disable a reactive trigger and return the updated record, or None if missing/replaced."""
         now = time.time()
@@ -399,12 +430,17 @@ class ReactiveTriggerStore:
             if enabled and ex["disabled_reason"] == "pr_closed":
                 _check_owner_quota(conn, owner, max_per_owner, trigger_id)
             unexp = ex["expires_at"] is None or float(ex["expires_at"]) > now
-            if enabled and not bool(ex["enabled"]) and str(ex["source_type"]) == "github_pr" and unexp:
+            reenabling = enabled and not bool(ex["enabled"])
+            if reenabling and str(ex["source_type"]) == "github_pr" and unexp:
                 _check_pr_quota(conn, owner, max_github_pr_per_owner, now, trigger_id)
+            if reenabling and str(ex["source_type"]) == "script_check" and unexp:
+                _check_script_check_quota(conn, owner, max_script_check_per_owner, now, trigger_id)
             u_q = "UPDATE reactive_triggers SET enabled=?,disabled_reason=?,updated_at=? WHERE trigger_id=? AND rule_uid=?"
             cursor = conn.execute(u_q, (int(enabled), reason, now, trigger_id, str(ex["rule_uid"])))
             if cursor.rowcount == 0:
                 return None
+            if reenabling and str(ex["source_type"]) == "script_check":
+                _reset_script_check_checkpoint_on_reenable(conn, trigger_id=trigger_id, now=now)
             row = conn.execute(
                 "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (trigger_id,),
@@ -623,6 +659,131 @@ class ReactiveTriggerStore:
             for r in rows
             if isinstance((rec := _record_from_row(r)).source, GitHubPRSourceSpec)
         ]
+
+    def get_script_check_checkpoint(self, trigger_id: str) -> ScriptCheckCheckpoint | None:
+        """Return the persisted script_check checkpoint for a trigger, or None."""
+        with self._read_connection() as conn:
+            row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
+        return _script_check_checkpoint_from_row(row) if row is not None else None
+
+    def upsert_script_check_checkpoint(
+        self,
+        trigger_id: str,
+        checkpoint: ScriptCheckCheckpoint,
+        *,
+        expected_rule_uid: str | None = None,
+        expected_revision: int | None = None,
+        require_enabled: bool = False,
+    ) -> bool:
+        """Upsert a script_check checkpoint; return False if rule_uid, enabled, or revision guards fail."""
+        with self._write_transaction() as conn:
+            if expected_rule_uid is not None or require_enabled:
+                row = conn.execute(
+                    "SELECT rule_uid, enabled FROM reactive_triggers WHERE trigger_id=?",
+                    (trigger_id,),
+                ).fetchone()
+                uid_bad = expected_rule_uid is not None and str(row["rule_uid"]) != expected_rule_uid if row else True
+                if row is None or uid_bad or (require_enabled and not bool(row["enabled"])):
+                    return False
+            if expected_revision is not None:
+                cp = conn.execute(
+                    "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?",
+                    (trigger_id,),
+                ).fetchone()
+                if cp is None or int(cp["revision"]) != expected_revision:
+                    return False
+            try:
+                _upsert_script_check_checkpoint(conn, trigger_id, checkpoint)
+            except sqlite3.IntegrityError as exc:
+                msg = f"Cannot update script_check checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg) from exc
+            return True
+
+    def list_due_script_check_triggers(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 20,
+        exclude_owners: Collection[str] = (),
+    ) -> list[_ScriptCheckDue]:
+        """Return at most one earliest due enabled, unexpired script_check trigger per eligible owner."""
+        if limit <= 0:
+            return []
+        ts = time.time() if now is None else now
+        excluded_json = json.dumps(sorted(set(exclude_owners)))
+        sql = (
+            "SELECT * FROM ("
+            "SELECT rt.*, cp.revision AS cp_revision, cp.source_utf8 AS cp_source_utf8, "
+            "cp.identity_json AS cp_identity_json, cp.state_json AS cp_state_json, "
+            "cp.next_poll_at AS cp_next_poll_at, cp.consecutive_errors AS cp_consecutive_errors, "
+            "cp.last_error_code AS cp_last_error_code, cp.last_run_at AS cp_last_run_at, "
+            "cp.updated_at AS cp_updated_at, "
+            "ROW_NUMBER() OVER ("
+            "PARTITION BY rt.owner_user_id ORDER BY cp.next_poll_at ASC, rt.created_at ASC, rt.trigger_id ASC"
+            ") AS owner_rank "
+            "FROM reactive_triggers rt "
+            "JOIN script_check_checkpoints cp ON cp.trigger_id = rt.trigger_id "
+            "WHERE rt.source_type='script_check' AND rt.enabled=1 AND (rt.expires_at IS NULL OR rt.expires_at>?) "
+            "AND cp.next_poll_at IS NOT NULL AND cp.next_poll_at<=? "
+            "AND rt.owner_user_id NOT IN (SELECT value FROM json_each(?))"
+            ") ranked "
+            "WHERE owner_rank = 1 "
+            "ORDER BY cp_next_poll_at ASC, created_at ASC, trigger_id ASC LIMIT ?"
+        )
+        with self._read_connection() as conn:
+            rows = conn.execute(sql, (ts, ts, excluded_json, limit)).fetchall()
+        return [
+            (rec, _script_check_checkpoint_from_row(r, prefix="cp_"))
+            for r in rows
+            if isinstance((rec := _record_from_row(r)).source, ScriptCheckSourceSpec)
+        ]
+
+    def update_script_check_checkpoint_and_enqueue(
+        self,
+        trigger_id: str,
+        checkpoint: ScriptCheckCheckpoint,
+        *,
+        event: TriggerEvent | None = None,
+        expected_rule_uid: str | None = None,
+        expected_revision: int | None = None,
+    ) -> bool:
+        """Atomically verify active/uid/revision, increment revision, upsert checkpoint, and optionally enqueue."""
+        ts = checkpoint.updated_at
+        with self._write_transaction() as conn:
+            tr = conn.execute(
+                "SELECT rule_uid, enabled, expires_at FROM reactive_triggers WHERE trigger_id=?",
+                (trigger_id,),
+            ).fetchone()
+            if tr is None:
+                if expected_rule_uid is not None:
+                    return False
+                msg = f"Cannot update script_check checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg)
+            uid, exp = str(tr["rule_uid"]), tr["expires_at"]
+            cp = conn.execute(
+                "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?",
+                (trigger_id,),
+            ).fetchone()
+            ok = (
+                bool(tr["enabled"])
+                and (exp is None or float(exp) > ts)
+                and (expected_rule_uid is None or uid == expected_rule_uid)
+                and (expected_revision is None or (cp is not None and int(cp["revision"]) == expected_revision))
+            )
+            if not ok:
+                return False
+            next_rev = (int(cp["revision"]) + 1) if cp is not None else max(1, checkpoint.revision)
+            _upsert_script_check_checkpoint(conn, trigger_id, checkpoint.model_copy(update={"revision": next_rev}))
+            if event is None:
+                return False
+            return _insert_pending_firing(
+                conn,
+                trigger_id=trigger_id,
+                rule_uid=uid,
+                dedupe_key=event.event_id,
+                event=event,
+                now=ts,
+            )
 
     def enqueue_firing(
         self,
@@ -1218,7 +1379,7 @@ class ReactiveTriggerStore:
             row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_version (version) VALUES (?)", (_SCHEMA_VERSION,))
-            elif int(row["version"]) in (1, 2):
+            elif int(row["version"]) in (1, 2, 3):
                 conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
             elif int(row["version"]) != _SCHEMA_VERSION:
                 msg = f"Unsupported reactive triggers schema version: {row['version']}"
@@ -1331,6 +1492,8 @@ def _source_index_fields(record: ReactiveTriggerRecord) -> tuple[str | None, str
         return None, source.source_id
     if isinstance(source, GitHubPRSourceSpec):
         return None, source.repo.lower()
+    if isinstance(source, ScriptCheckSourceSpec):
+        return None, source.agent
     return None, None
 
 
@@ -1489,6 +1652,113 @@ def _check_pr_quota(conn: sqlite3.Connection, owner: str, limit: int | None, now
     if limit is not None and int(conn.execute(sql, (owner, now, skip)).fetchone()[0]) >= limit:
         msg = f"Owner {owner} reached GitHub PR watch limit ({limit})"
         raise ReactiveTriggerLimitError(msg)
+
+
+def _check_script_check_quota(
+    conn: sqlite3.Connection,
+    owner: str,
+    limit: int | None,
+    now: float,
+    skip: str = "",
+) -> None:
+    sql = (
+        "SELECT COUNT(*) FROM reactive_triggers WHERE owner_user_id=? AND source_type='script_check' "
+        "AND enabled=1 AND (expires_at IS NULL OR expires_at>?) AND trigger_id!=?"
+    )
+    if limit is not None and int(conn.execute(sql, (owner, now, skip)).fetchone()[0]) >= limit:
+        msg = f"Owner {owner} reached script_check trigger limit ({limit})"
+        raise ReactiveTriggerLimitError(msg)
+
+
+def _reset_script_check_checkpoint_on_reenable(
+    conn: sqlite3.Connection,
+    *,
+    trigger_id: str,
+    now: float,
+) -> None:
+    cp_row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
+    if cp_row is None:
+        msg = f"Script check checkpoint not found: {trigger_id}"
+        raise ReactiveTriggerStoreError(msg)
+    live_cp = _script_check_checkpoint_from_row(cp_row)
+    updated_cp = live_cp.model_copy(
+        update={
+            "revision": live_cp.revision + 1,
+            "consecutive_errors": 0,
+            "last_error_code": None,
+            "next_poll_at": now,
+            "updated_at": now,
+        },
+    )
+    _upsert_script_check_checkpoint(conn, trigger_id, updated_cp)
+
+
+def _sync_script_check_checkpoint_on_update(
+    conn: sqlite3.Connection,
+    *,
+    trigger_id: str,
+    existing_spec_json: str,
+    new_poll_interval_seconds: int,
+    reenabling: bool,
+    now: float,
+) -> None:
+    if reenabling:
+        _reset_script_check_checkpoint_on_reenable(conn, trigger_id=trigger_id, now=now)
+        return
+    old_poll = int(json.loads(existing_spec_json)["source"]["poll_interval_seconds"])
+    if new_poll_interval_seconds == old_poll:
+        return
+    cp_row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
+    if cp_row is None:
+        msg = f"Script check checkpoint not found: {trigger_id}"
+        raise ReactiveTriggerStoreError(msg)
+    live_cp = _script_check_checkpoint_from_row(cp_row)
+    interval = float(new_poll_interval_seconds)
+    next_poll_at = max(
+        now,
+        (live_cp.last_run_at + interval) if live_cp.last_run_at is not None else (now + interval),
+    )
+    updated_cp = live_cp.model_copy(
+        update={
+            "revision": live_cp.revision + 1,
+            "next_poll_at": next_poll_at,
+            "updated_at": now,
+        },
+    )
+    _upsert_script_check_checkpoint(conn, trigger_id, updated_cp)
+
+
+def _upsert_script_check_checkpoint(conn: sqlite3.Connection, trigger_id: str, cp: ScriptCheckCheckpoint) -> None:
+    sql = "INSERT OR REPLACE INTO script_check_checkpoints VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    vals = (
+        trigger_id,
+        cp.revision,
+        cp.source_utf8,
+        json.dumps(cp.identity_json, allow_nan=False),
+        json.dumps(cp.state, allow_nan=False),
+        cp.next_poll_at,
+        cp.consecutive_errors,
+        cp.last_error_code,
+        cp.last_run_at,
+        cp.updated_at,
+    )
+    conn.execute(sql, vals)
+
+
+def _script_check_checkpoint_from_row(row: sqlite3.Row, *, prefix: str = "") -> ScriptCheckCheckpoint:
+    nxt = row[f"{prefix}next_poll_at"]
+    last_run = row[f"{prefix}last_run_at"]
+    return ScriptCheckCheckpoint(
+        revision=int(row[f"{prefix}revision"]),
+        source_utf8=str(row[f"{prefix}source_utf8"]),
+        identity_json=json.loads(str(row[f"{prefix}identity_json"])),
+        state=json.loads(str(row[f"{prefix}state_json"])),
+        next_poll_at=None if nxt is None else float(nxt),
+        consecutive_errors=int(row[f"{prefix}consecutive_errors"]),
+        last_error_code=row[f"{prefix}last_error_code"],
+        last_run_at=None if last_run is None else float(last_run),
+        updated_at=float(row[f"{prefix}updated_at"]),
+    )
 
 
 def _upsert_github_pr_checkpoint(conn: sqlite3.Connection, trigger_id: str, cp: GitHubPRCheckpoint) -> None:

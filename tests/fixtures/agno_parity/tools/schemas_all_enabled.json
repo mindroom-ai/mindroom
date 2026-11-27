@@ -440,125 +440,48 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_as_markdown",
-        "description": "Scrape a webpage and return content in Markdown format.",
+        "name": "brightdata",
+        "description": "Scrape pages, capture screenshots, run SERP searches, or query structured datasets via Bright Data.\n- `scrape_markdown`: Scrape `url` as Markdown.\n- `screenshot`: Capture PNG screenshot of `url` as an image artifact.\n- `search_engine`: Search `query` on `engine` (google, bing, yandex, default \"google\"; optional `num_results`, default 10, `language`, `country_code`).\n- `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "URL to scrape."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "scrape_markdown",
+                "screenshot",
+                "search_engine",
+                "web_data_feed"
               ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_screenshot",
-        "description": "Capture a screenshot of a webpage.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+            },
             "url": {
-              "type": "string",
-              "description": "URL to screenshot."
+              "type": "string"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_engine",
-        "description": "Search using Google, Bing, or Yandex and return results in Markdown.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "query": {
-              "type": "string",
-              "description": "Search query."
+              "type": "string"
             },
             "engine": {
               "type": "string",
-              "description": "Search engine - 'google', 'bing', or 'yandex'."
+              "enum": [
+                "google",
+                "bing",
+                "yandex"
+              ]
             },
             "num_results": {
-              "type": "integer",
-              "description": "Number of results to return."
+              "type": "integer"
             },
             "language": {
-              "type": "string",
-              "description": "Two-letter language code."
+              "type": "string"
             },
             "country_code": {
-              "type": "string",
-              "description": "Two-letter country code."
+              "type": "string"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "web_data_feed",
-        "description": "Retrieve structured web data from various sources like LinkedIn, Amazon, Instagram, etc.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "source_type": {
-              "type": "string",
-              "description": "Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')."
-            },
-            "url": {
-              "type": "string",
-              "description": "URL of the web resource to retrieve data from."
+              "type": "string"
             },
             "num_of_reviews": {
-              "type": "integer",
-              "description": "Number of reviews to retrieve."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -572,8 +495,7 @@
             }
           },
           "required": [
-            "source_type",
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -594,18 +516,24 @@
     "guidance": null,
     "functions": [
       {
-        "name": "navigate_to",
-        "description": "Navigates to a URL asynchronously.",
+        "name": "browserbase",
+        "description": "Control a remote Browserbase headless browser session.\n- `navigate`: Open `url` (optional `connect_url`).\n- `get_page_content`: Return current page text or HTML (optional `connect_url`).\n- `close_session`: Close and clean up the active browser session.",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL to navigate to."
+              "enum": [
+                "navigate",
+                "get_page_content",
+                "close_session"
+              ]
+            },
+            "url": {
+              "type": "string"
             },
             "connect_url": {
-              "type": "string",
-              "description": "The connection URL from an existing session."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -619,7 +547,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -628,21 +556,18 @@
       },
       {
         "name": "screenshot",
-        "description": "Takes a screenshot of the current page asynchronously.",
+        "description": "Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`).",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
-              "type": "string",
-              "description": "Where to save the screenshot."
+              "type": "string"
             },
             "full_page": {
-              "type": "boolean",
-              "description": "Whether to capture the full page."
+              "type": "boolean"
             },
             "connect_url": {
-              "type": "string",
-              "description": "The connection URL from an existing session."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -658,56 +583,6 @@
           "required": [
             "path"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_page_content",
-        "description": "Gets the content of the current page asynchronously.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "connect_url": {
-              "type": "string",
-              "description": "The connection URL from an existing session."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "close_session",
-        "description": "Closes a browser session asynchronously.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -1314,7 +1189,7 @@
     "functions": [
       {
         "name": "discord_read",
-        "description": "Read Discord channels or channel message history.\n- `list_channels`: `guild_id`\n- `get_channel_info`: `channel_id`\n- `get_channel_messages`: `channel_id`",
+        "description": "Read Discord channels or channel messages.\n- `list_channels`: `guild_id`\n- `get_channel_info`: `channel_id`\n- `get_channel_messages`: `channel_id` (`limit` 1-100)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1324,20 +1199,16 @@
                 "list_channels",
                 "get_channel_info",
                 "get_channel_messages"
-              ],
-              "description": "Read operation."
+              ]
             },
             "guild_id": {
-              "type": "string",
-              "description": "Discord server ID."
+              "type": "string"
             },
             "channel_id": {
-              "type": "string",
-              "description": "Discord channel ID."
+              "type": "string"
             },
             "limit": {
-              "type": "integer",
-              "description": "Maximum messages (1-100)."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1360,17 +1231,15 @@
       },
       {
         "name": "discord_send",
-        "description": "Send a text message to a Discord channel.",
+        "description": "Send `message` to Discord `channel_id`.",
         "parameters": {
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string",
-              "description": "Target Discord channel ID."
+              "type": "string"
             },
             "message": {
-              "type": "string",
-              "description": "Message text to send."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1435,18 +1304,23 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search",
-        "description": "Use this function to search the web for a query.",
+        "name": "duckduckgo_search",
+        "description": "Search DuckDuckGo for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "enum": [
+                "web",
+                "news"
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1460,40 +1334,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Use this function to get the latest news from the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -1654,120 +1496,40 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_exa",
-        "description": "Use this function to search the web using Exa for a query.",
+        "name": "exa_lookup",
+        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text`, default False, to include citation full text).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The query to search for."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "Number of results to return. Defaults to 5."
-            },
-            "category": {
-              "type": "string",
-              "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
+              "enum": [
+                "search",
+                "contents",
+                "similar",
+                "answer"
               ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_contents",
-        "description": "Retrieve detailed content from specific URLs using the Exa API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+            },
+            "query": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
             "urls": {
               "type": "array",
               "items": {
                 "type": "string"
-              },
-              "description": "A list of URLs from which to fetch content."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "urls"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "find_similar",
-        "description": "Find similar links to a given URL using the Exa API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL for which to find similar links."
+              }
             },
             "num_results": {
-              "type": "integer",
-              "description": "The number of similar links to return. Defaults to 5."
+              "type": "integer"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "exa_answer",
-        "description": "Get an LLM answer to a question informed by Exa search results.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The question or query to answer."
+            "category": {
+              "type": "string"
             },
             "text": {
-              "type": "boolean",
-              "description": "Include full text from citation. Default is False."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1781,7 +1543,7 @@
             }
           },
           "required": [
-            "query"
+            "action"
           ]
         },
         "strict": false,
@@ -1790,21 +1552,19 @@
       },
       {
         "name": "research",
-        "description": "Perform deep research on a topic.",
+        "description": "Perform deep research on `instructions` with optional `output_schema` JSON schema and return JSON data and citations.",
         "parameters": {
           "type": "object",
           "properties": {
             "instructions": {
-              "type": "string",
-              "description": "Research instructions."
+              "type": "string"
             },
             "output_schema": {
               "type": "object",
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {},
-              "description": "JSON schema for structured output. If not provided, the API will auto-infer a schema."
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2573,18 +2333,23 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search",
-        "description": "Use this function to search the web for a query.",
+        "name": "google_search",
+        "description": "Search Google for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "enum": [
+                "web",
+                "news"
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2598,40 +2363,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Use this function to get the latest news from the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -4294,18 +4027,24 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_web",
-        "description": "Searches Google for the provided query using the Serper API.",
+        "name": "serper_search",
+        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search.\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The search query to search for on Google."
+              "enum": [
+                "web",
+                "news",
+                "scholar"
+              ]
             },
             "num_results": {
-              "type": "integer",
-              "description": "(int) Number of search results to retrieve."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4319,73 +4058,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Searches for news articles using the Serper News API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The search query for news articles."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "(int) Number of news results to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_scholar",
-        "description": "Searches for academic papers using Google Scholar via Serper API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The search query for academic papers."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "(int) Number of academic papers to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -4524,80 +4198,30 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_web",
-        "description": "Use this function to search the web.",
+        "name": "spider",
+        "description": "Search, scrape, or crawl the web via Spider and return JSON results.\n- `search`: Search for `query` (optional `max_results`, default toolkit setting or 5).\n- `scrape`: Scrape `url` as Markdown.\n- `crawl`: Crawl `url` as Markdown (optional `limit`, default 10).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The query to search the web with."
+              "enum": [
+                "search",
+                "scrape",
+                "crawl"
+              ]
+            },
+            "query": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
             },
             "max_results": {
-              "type": "integer",
-              "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "scrape",
-        "description": "Use this function to scrape the content of a webpage.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the webpage to scrape."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "crawl",
-        "description": "Use this function to crawl the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the webpage to crawl."
+              "type": "integer"
             },
             "limit": {
-              "type": "integer",
-              "description": "The maximum number of pages to crawl. Defaults to 10."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4611,7 +4235,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -4797,7 +4421,7 @@
     "functions": [
       {
         "name": "telegram_read",
-        "description": "Read Telegram chat metadata or fetch a file (base64 or an operator-configured download).\n- `get_chat`: none\n- `get_file`: `file_id`",
+        "description": "Read Telegram chat metadata or fetch a file (base64 or operator-configured download).\n- `get_chat`: chat info\n- `get_file`: `file_id`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4806,12 +4430,10 @@
               "enum": [
                 "get_chat",
                 "get_file"
-              ],
-              "description": "Read operation."
+              ]
             },
             "file_id": {
-              "type": "string",
-              "description": "Telegram file ID for `get_file`."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4834,7 +4456,7 @@
       },
       {
         "name": "telegram_send",
-        "description": "Send to the configured Telegram chat.\n- `message`: `message`\n- `photo`: `media_base64`\n- `video`: `media_base64`\n- `animation`: `media_base64`\n- `document`: `media_base64`, `filename`\n- `audio`: `media_base64`\n- `sticker`: `media_base64`",
+        "description": "Send to the configured Telegram chat.\n- `message`: `message`\n- `photo`: base64 `media_base64` (`caption`)\n- `video`: base64 `media_base64` (`caption`)\n- `animation`: base64 `media_base64` (`caption`)\n- `document`: base64 `media_base64`, `filename` (`caption`)\n- `audio`: base64 `media_base64` (`caption`, `title`)\n- `sticker`: base64 `media_base64`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4848,28 +4470,22 @@
                 "audio",
                 "animation",
                 "sticker"
-              ],
-              "description": "Send operation."
+              ]
             },
             "message": {
-              "type": "string",
-              "description": "Text content for `message`."
+              "type": "string"
             },
             "media_base64": {
-              "type": "string",
-              "description": "Base64-encoded media bytes for non-text actions (local paths are not supported)."
+              "type": "string"
             },
             "filename": {
-              "type": "string",
-              "description": "Display filename for `document`."
+              "type": "string"
             },
             "caption": {
-              "type": "string",
-              "description": "Optional caption for `photo`, `document`, `video`, `audio`, or `animation`."
+              "type": "string"
             },
             "title": {
-              "type": "string",
-              "description": "Optional track title for `audio`."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4892,7 +4508,7 @@
       },
       {
         "name": "telegram_manage",
-        "description": "Edit, delete, react to, or pin a message in the configured Telegram chat.\n- `edit`: `message_id`, `text`\n- `delete`: `message_id`\n- `react`: `message_id`, `emoji`\n- `pin`: `message_id`",
+        "description": "Manage a message (`message_id`) in the configured Telegram chat.\n- `edit`: `text`\n- `delete`: delete message\n- `react`: `emoji`\n- `pin`: pin (`disable_notification`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4903,24 +4519,19 @@
                 "delete",
                 "react",
                 "pin"
-              ],
-              "description": "Management operation."
+              ]
             },
             "message_id": {
-              "type": "integer",
-              "description": "Target Telegram message ID."
+              "type": "integer"
             },
             "text": {
-              "type": "string",
-              "description": "Replacement text for `edit`."
+              "type": "string"
             },
             "emoji": {
-              "type": "string",
-              "description": "Reaction emoji for `react`."
+              "type": "string"
             },
             "disable_notification": {
-              "type": "boolean",
-              "description": "Suppress chat notification on `pin`."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4957,51 +4568,33 @@
     "guidance": null,
     "functions": [
       {
-        "name": "extract_text",
-        "description": "Extract main text content from a web page URL using Trafilatura.",
+        "name": "trafilatura_extract",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL to extract content from."
+              "enum": [
+                "text",
+                "metadata",
+                "batch"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "urls": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             "output_format": {
-              "type": "string",
-              "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "extract_metadata_only",
-        "description": "Extract only metadata from a web page URL.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL to extract metadata from."
+              "type": "string"
             },
             "as_json": {
-              "type": "boolean",
-              "description": "Whether to return metadata as JSON string."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5015,7 +4608,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -5024,17 +4617,15 @@
       },
       {
         "name": "html_to_text",
-        "description": "Convert HTML content to plain text using Trafilatura's html2txt function.",
+        "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
           "properties": {
             "html_content": {
-              "type": "string",
-              "description": "The HTML content to convert."
+              "type": "string"
             },
             "clean": {
-              "type": "boolean",
-              "description": "Whether to remove potentially undesirable elements."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5056,50 +4647,16 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "extract_batch",
-        "description": "Extract content from multiple URLs in batch.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "urls": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of URLs to extract content from."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "urls"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
         "name": "crawl_website",
-        "description": "Crawl a website and optionally extract content from discovered pages.",
+        "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
           "properties": {
             "homepage_url": {
-              "type": "string",
-              "description": "The starting URL (preferably homepage) to crawl from."
+              "type": "string"
             },
             "extract_content": {
-              "type": "boolean",
-              "description": "Whether to extract content from discovered URLs."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5621,7 +5178,7 @@
     "functions": [
       {
         "name": "whatsapp_send",
-        "description": "Send a WhatsApp Business API message.\nRequires `recipient` unless configured.\n- `text`: `text`\n- `template`: `template_name`\n- `reply_buttons`: `text`, `buttons`\n- `list`: `text`, `button_text`, `sections`\n- `image`: `media_url` or `media_id`\n- `document`: `media_url` or `media_id`\n- `location`: `latitude`, `longitude`\n- `reaction`: `message_id`, `emoji`",
+        "description": "Send a WhatsApp Business message (`recipient` defaults to configured `recipient_waid`).\n- `text`: `text` (`preview_url`)\n- `template`: `template_name` (`language_code`, `components`)\n- `reply_buttons`: `text`, 1-3 `buttons` (`header`, `footer`)\n- `list`: `text`, `button_text` (max 20 chars), 1-10 `sections` (<=10 total rows; `header`, `footer`)\n- `image`: `media_url` or `media_id` (`caption`)\n- `document`: `media_url` or `media_id` (`filename`, `caption`)\n- `location`: `latitude`, `longitude` (`name`, `address`)\n- `reaction`: `message_id`, `emoji` (empty string removes reaction)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5636,28 +5193,22 @@
                 "document",
                 "location",
                 "reaction"
-              ],
-              "description": "Message type to send."
+              ]
             },
             "recipient": {
-              "type": "string",
-              "description": "Recipient WhatsApp ID or phone number; defaults to configured `recipient_waid`."
+              "type": "string"
             },
             "text": {
-              "type": "string",
-              "description": "Message text."
+              "type": "string"
             },
             "preview_url": {
-              "type": "boolean",
-              "description": "Show link previews (`text`)."
+              "type": "boolean"
             },
             "template_name": {
-              "type": "string",
-              "description": "Approved template name (`template`)."
+              "type": "string"
             },
             "language_code": {
-              "type": "string",
-              "description": "Template locale, e.g. `en_US`."
+              "type": "string"
             },
             "components": {
               "type": "array",
@@ -5667,21 +5218,19 @@
                   "type": "string"
                 },
                 "additionalProperties": {}
-              },
-              "description": "Optional template components (`template`)."
+              }
             },
             "buttons": {
               "type": "array",
               "items": {
-                "description": "A quick-reply button.",
+                "description": "Quick-reply button.",
                 "properties": {
                   "id": {
-                    "description": "Unique button identifier (e.g. 'yes', 'no').",
                     "title": "Id",
                     "type": "string"
                   },
                   "title": {
-                    "description": "Button display text, max 20 characters.",
+                    "description": "Max 20 chars.",
                     "title": "Title",
                     "type": "string"
                   }
@@ -5692,35 +5241,29 @@
                 ],
                 "title": "ReplyButton",
                 "type": "object"
-              },
-              "description": "1-3 quick-reply buttons (`reply_buttons`)."
+              }
             },
             "button_text": {
-              "type": "string",
-              "description": "List button label, max 20 chars (`list`)."
+              "type": "string"
             },
             "sections": {
               "type": "array",
               "items": {
-                "description": "A titled section containing selectable rows.",
+                "description": "Titled list section.",
                 "properties": {
                   "title": {
-                    "description": "Section heading.",
                     "title": "Title",
                     "type": "string"
                   },
                   "rows": {
-                    "description": "Selectable rows in this section.",
                     "items": {
-                      "description": "A selectable row inside a list section.",
+                      "description": "Selectable list row.",
                       "properties": {
                         "id": {
-                          "description": "Unique row identifier.",
                           "title": "Id",
                           "type": "string"
                         },
                         "title": {
-                          "description": "Row title text.",
                           "title": "Title",
                           "type": "string"
                         },
@@ -5734,7 +5277,6 @@
                             }
                           ],
                           "default": null,
-                          "description": "Optional row description.",
                           "title": "Description"
                         }
                       },
@@ -5755,32 +5297,25 @@
                 ],
                 "title": "ListSection",
                 "type": "object"
-              },
-              "description": "1-10 list sections with <=10 total rows (`list`)."
+              }
             },
             "header": {
-              "type": "string",
-              "description": "Optional interactive header text (`reply_buttons`, `list`)."
+              "type": "string"
             },
             "footer": {
-              "type": "string",
-              "description": "Optional interactive footer text (`reply_buttons`, `list`)."
+              "type": "string"
             },
             "media_url": {
-              "type": "string",
-              "description": "Public URL for `image` or `document`."
+              "type": "string"
             },
             "media_id": {
-              "type": "string",
-              "description": "WhatsApp media ID for `image` or `document`."
+              "type": "string"
             },
             "filename": {
-              "type": "string",
-              "description": "Display filename for `document`."
+              "type": "string"
             },
             "caption": {
-              "type": "string",
-              "description": "Optional caption for `image` or `document`."
+              "type": "string"
             },
             "latitude": {
               "anyOf": [
@@ -5793,8 +5328,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Location latitude (`location`)."
+              ]
             },
             "longitude": {
               "anyOf": [
@@ -5807,24 +5341,19 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Location longitude (`location`)."
+              ]
             },
             "name": {
-              "type": "string",
-              "description": "Optional location name (`location`)."
+              "type": "string"
             },
             "address": {
-              "type": "string",
-              "description": "Optional location address (`location`)."
+              "type": "string"
             },
             "message_id": {
-              "type": "string",
-              "description": "Target WhatsApp message ID (`reaction`)."
+              "type": "string"
             },
             "emoji": {
-              "type": "string",
-              "description": "Reaction emoji; an empty string removes the reaction."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5966,14 +5495,27 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_youtube_video_captions",
-        "description": "Use this function to get captions from a YouTube video.",
+        "name": "youtube_video",
+        "description": "Extract info for YouTube `url`.\n- `captions`: Plain transcript text (optional `languages` override).\n- `data`: JSON oEmbed metadata (`title`, `author_name`, `thumbnail_url`, etc.).\n- `timestamps`: Timestamped `M:SS - text` lines (optional `languages` override).",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL of the YouTube video."
+              "enum": [
+                "captions",
+                "data",
+                "timestamps"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "languages": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5987,64 +5529,7 @@
             }
           },
           "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_youtube_video_data",
-        "description": "Function to get video data from a YouTube URL.\nData returned includes {title, author_name, author_url, type, height, width, version, provider_name, provider_url, thumbnail_url}",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the YouTube video."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_video_timestamps",
-        "description": "Generate timestamps for a YouTube video based on captions.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the YouTube video."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
+            "action",
             "url"
           ]
         },

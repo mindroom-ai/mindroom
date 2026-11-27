@@ -592,10 +592,10 @@ async def test_offer_background_after_false_hides_schema_while_keeping_job_gate_
         **toolkit_job_tools(shell, authored_name="shell"),
     }
     # Opting out of schema projection must never disable ToolGate.JOB async approvals or managed execution.
-    assert approval_can_run_as_job(job_tools["add"].function, calc)
+    assert approval_can_run_as_job(job_tools["calculate"].function, calc)
     assert approval_can_run_as_job(job_tools["write_file"].function, fs)
-    gated_add = replace(job_tools["add"], function=replace(job_tools["add"].function, gate=ToolGate.JOB))
-    job_tools["add"] = gated_add
+    gated_add = replace(job_tools["calculate"], function=replace(job_tools["calculate"].function, gate=ToolGate.JOB))
+    job_tools["calculate"] = gated_add
 
     actor = job_actor(*job_tools.values())
     raw_defs = tuple(tool.function.definition() for tool in job_tools.values())
@@ -604,7 +604,7 @@ async def test_offer_background_after_false_hides_schema_while_keeping_job_gate_
             with tool_runtime_context(context):
                 projected = {defn.name: defn for defn in offered_definitions(actor, raw_defs)}
                 assert wait_mode(gated_add, depth=0, context=context) == "managed"
-        for hidden in ("add", "write_file", "read_file", "tool_search", "view_file"):
+        for hidden in ("calculate", "write_file", "read_file", "tool_search", "view_file"):
             assert "background_after" not in projected[hidden].parameters["properties"]
         for shown in ("grep", "find_files", "call_tool", "attachment", "run_shell_command"):
             assert "background_after" in projected[shown].parameters["properties"]
@@ -617,7 +617,7 @@ async def test_offer_background_after_false_hides_schema_while_keeping_job_gate_
             return True, None
 
         monkeypatch.setattr("mindroom.tool_jobs.execution.ask_tool_call_approval", approve)
-        model = ScriptedModel([calls(tool_call("add", "gated-add", a=2, b=3)), answer("done")])
+        model = ScriptedModel([calls(tool_call("calculate", "gated-add", action="add", a=2, b=3)), answer("done")])
         async with execution_resources():
             with tool_runtime_context(context):
                 record = await run_job_turn(actor, model)

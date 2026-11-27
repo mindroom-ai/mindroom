@@ -80,7 +80,7 @@ def _config(paths: RuntimePaths) -> Config:
             },
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
-            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="multiply", action="require_approval")]),
+            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="calculate", action="require_approval")]),
             # These turns pause for approval and delegate through the native delegation driver.
             background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
@@ -241,7 +241,7 @@ async def test_an_approval_resume_leaves_its_loaded_session_as_the_store_holds_i
     """The resumed run moves after the turn that finished while it waited, in the session as in the store."""
     paths = _runtime_paths(tmp_path)
     config = _config(paths)
-    model = ScriptedModel([calls(tool_call("multiply", "call-1", a=6, b=7)), answer("42.")])
+    model = ScriptedModel([calls(tool_call("calculate", "call-1", action="multiply", a=6, b=7)), answer("42.")])
     ScriptedAgents({"code": model}).install(monkeypatch)
     identity = _identity("code")
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="code")):
@@ -280,7 +280,11 @@ async def test_an_approval_resume_whose_run_a_cut_removed_leaves_it_out_of_its_l
         _cut(store, "parent-run")
 
     ScriptedAgents(
-        {"code": ScriptedModel([calls(tool_call("multiply", "call-1", a=6, b=7)), [Await(redact), *answer("42.")]])},
+        {
+            "code": ScriptedModel(
+                [calls(tool_call("calculate", "call-1", action="multiply", a=6, b=7)), [Await(redact), *answer("42.")]],
+            ),
+        },
     ).install(monkeypatch)
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="code")):
         paused = await pause_parent("code", "Multiply", config=config, runtime_paths=paths, identity=identity)

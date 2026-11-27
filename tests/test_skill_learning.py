@@ -1924,7 +1924,7 @@ def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
 
     # 7. When an eager tool shadows every function of the only deferred tool, skill_manage stays eager and
     # dynamic_tools is not offered.
-    shadowed = build_agent(tools=["duckduckgo", {"googlesearch": {"defer": True}}], native_tool_search=False)
+    shadowed = build_agent(tools=["website", {"jina": {"defer": True}}], native_tool_search=False)
     assert shadowed.request_template.deferred_tools.names == frozenset()
     shadowed_fn_names = {fn.name for tk in shadowed.spec.toolkits for fn in tk.functions}
     assert "skill_manage" in shadowed_fn_names

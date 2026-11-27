@@ -173,6 +173,7 @@ def _origin_to_dict(origin: TurnOrigin) -> dict[str, object]:
         "source_kind": origin.source_kind,
         "trust": origin.trust.value,
         "acts_for_requester": origin.acts_for_requester,
+        "automation_origin": origin.automation_origin,
     }
 
 
@@ -197,6 +198,7 @@ def _origin_from_dict(stored: Mapping[str, object]) -> TurnOrigin:
         #   continuation paused before contact turns let another sender's message run for an agent's owner.
         # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_origin_without_the_acts_for_requester_flag_loads_with_it_unset.
         acts_for_requester=stored.get("acts_for_requester") is True,
+        automation_origin=(raw_origin if isinstance(raw_origin := stored.get("automation_origin"), str) else None),
     )
 
 

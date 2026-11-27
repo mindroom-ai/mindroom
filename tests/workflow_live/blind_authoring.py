@@ -47,7 +47,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="scatter_join",
         prompt=(
-            "Write a workflow script for start_workflow that takes args['topics'] (a list of short topics), "
+            "Write a workflow script for workflow(action='start') that takes args['topics'] (a list of short topics), "
             "researches every topic in parallel with an agent, keeps the surviving notes if any topic fails, "
             "and has a final agent synthesize those notes into a concise report string."
         ),
@@ -56,7 +56,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="bounded_check",
         prompt=(
-            "Write a workflow script for start_workflow that takes args['prompt'], drafts an answer with one agent, "
+            "Write a workflow script for workflow(action='start') that takes args['prompt'], drafts an answer with one agent, "
             "then runs at most 3 rounds of an independent checker agent with a JSON schema "
             "{ok: boolean, issues: array of strings} and a fixer agent when ok is false, returning the final draft."
         ),
@@ -65,7 +65,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="negotiate",
         prompt=(
-            "Write a workflow script for start_workflow that takes args['feature'], runs two named agents in parallel "
+            "Write a workflow script for workflow(action='start') that takes args['feature'], runs two named agents in parallel "
             "('backend' and 'frontend') that negotiate a JSON API contract directly using peer messages and save the "
             "agreed contract in shared state under 'contract', then has an integrator agent read the contract from "
             "shared state and summarize how backend and frontend fit together."
@@ -75,7 +75,7 @@ TASKS: tuple[AuthoringTask, ...] = (
 )
 
 _SYSTEM_PROMPT = (
-    "You are authoring a Python workflow script for MindRoom's `start_workflow` tool. "
+    "You are authoring a Python workflow script for MindRoom's `workflow` tool. "
     "You have ONLY the tool description below. Return ONLY valid Python code for the workflow file "
     "(no prose outside a single ```python ... ``` block)."
 )
@@ -96,7 +96,7 @@ def _build_start_workflow_description(deployment: Deployment) -> tuple[Config, R
     room_id = str(deployment.live["lobby"]["roomId"])
     toolkit = WorkflowTools(config, agent_name, room_id, runtime_paths)
     functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
-    description = functions["start_workflow"].description or ""
+    description = functions["workflow"].description or ""
     return config, runtime_paths, description
 
 
@@ -110,7 +110,7 @@ async def _author_script(
     turn_model = resolve_turn_model(config, runtime_paths, ModelScope(entity=None, explicit=model_name), None)
     provider = build_model_provider(config, runtime_paths, turn_model.model_name)
     user_prompt = (
-        f"Tool description for `start_workflow`:\n\n{description}\n\n"
+        f"Tool description for `workflow`:\n\n{description}\n\n"
         f"Task:\n{task.prompt}\n\n"
         f"Your script will be called with args = {json.dumps(task.args)}."
     )
@@ -205,7 +205,7 @@ def _start_with_args(
     marked_source = f"# blind_token={token}\n{source}"
     (deployment.workspace / name).write_text(marked_source, encoding="utf-8")
     deployment.ask(
-        f'Call the tool start_workflow with path="{name}" and args={json.dumps(task_args)}. '
+        f'Call the tool workflow with action="start", path="{name}", and args={json.dumps(task_args)}. '
         "Call it once and only once. Reply with the run ID it returns.",
         dev,
     )

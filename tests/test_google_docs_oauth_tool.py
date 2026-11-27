@@ -21,6 +21,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_docs import GoogleDocsTools
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.tool_access import validate_tool_arguments
+from mindroom.tool_system.toolkits import rename_toolkit_functions
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -143,12 +144,13 @@ def _worker_target() -> ResolvedWorkerTarget:
     return resolve_worker_target("user_agent", "general", execution_identity=identity)
 
 
-def _connected_tool(tmp_path: Path) -> tuple[GoogleDocsTools, _FakeDocsService]:
+def _connected_tool(tmp_path: Path, **kwargs: object) -> tuple[GoogleDocsTools, _FakeDocsService]:
     tool = GoogleDocsTools(
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
         creds=_valid_credentials(),
+        **kwargs,
     )
     service = _FakeDocsService()
     tool.service = service
@@ -195,7 +197,7 @@ def test_google_docs_tokens_stay_separate_from_dashboard_settings(tmp_path: Path
 def test_google_docs_create_document_can_insert_initial_text(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_docs_create_document("Launch plan", "First draft"))
+    result = json.loads(tool.google_docs_write(action="create", title="Launch plan", initial_text="First draft"))
 
     assert service.documents_resource.create_bodies == [{"title": "Launch plan"}]
     assert service.documents_resource.batch_update_calls == [
@@ -225,7 +227,7 @@ def test_google_docs_create_document_preserves_id_when_initial_text_fails(tmp_pa
         b'{"error":{"message":"bad request"}}',
     )
 
-    result = json.loads(tool.google_docs_create_document("Launch plan", "First draft"))
+    result = json.loads(tool.google_docs_write(action="create", title="Launch plan", initial_text="First draft"))
 
     assert result["document"]["documentId"] == "created-doc"
     assert result["documentUrl"] == "https://docs.google.com/document/d/created-doc/edit"
@@ -237,7 +239,7 @@ def test_google_docs_create_document_preserves_id_after_initial_text_transport_f
     sentinel = "provider-controlled-transport-secret"
     service.documents_resource.batch_update_error = TimeoutError(sentinel)
 
-    result = json.loads(tool.google_docs_create_document("Launch plan", "First draft"))
+    result = json.loads(tool.google_docs_write(action="create", title="Launch plan", initial_text="First draft"))
 
     assert result["document"]["documentId"] == "created-doc"
     assert result["documentUrl"] == "https://docs.google.com/document/d/created-doc/edit"
@@ -285,7 +287,15 @@ def test_google_docs_get_document_accepts_full_edit_url(tmp_path: Path) -> None:
 def test_google_docs_insert_text_supports_index_and_tab(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_docs_insert_text("document-id", "new text", index=6, tab_id="tab-2"))
+    result = json.loads(
+        tool.google_docs_write(
+            action="insert_text",
+            document_id="document-id",
+            text="new text",
+            index=6,
+            tab_id="tab-2",
+        ),
+    )
 
     assert service.documents_resource.batch_update_calls == [
         {
@@ -308,7 +318,7 @@ def test_google_docs_insert_text_supports_index_and_tab(tmp_path: Path) -> None:
 def test_google_docs_insert_text_appends_when_index_is_omitted(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_docs_insert_text("document-id", "append", tab_id="tab-2")
+    tool.google_docs_write(action="insert_text", document_id="document-id", text="append", tab_id="tab-2")
 
     assert service.documents_resource.batch_update_calls[0]["body"] == {
         "requests": [
@@ -326,10 +336,11 @@ def test_google_docs_replace_text_can_target_selected_tabs(tmp_path: Path) -> No
     tool, service = _connected_tool(tmp_path)
 
     result = json.loads(
-        tool.google_docs_replace_text(
-            "document-id",
-            "DRAFT",
-            "Final",
+        tool.google_docs_write(
+            action="replace_text",
+            document_id="document-id",
+            find_text="DRAFT",
+            replace_text="Final",
             match_case=True,
             tab_ids=["tab-1", "tab-2"],
         ),
@@ -354,6 +365,19 @@ def test_google_docs_replace_text_can_target_selected_tabs(tmp_path: Path) -> No
     assert result["update"]["replies"][0]["replaceAllText"]["occurrencesChanged"] == 2
 
 
+def test_google_docs_replace_text_accepts_empty_string_to_delete_and_rejects_omitted(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    omitted = json.loads(tool.google_docs_write(action="replace_text", document_id="document-id", find_text="DRAFT"))
+    assert "replace_text" in omitted["error"]
+    assert service.documents_resource.batch_update_calls == []
+
+    tool.google_docs_write(action="replace_text", document_id="document-id", find_text="DRAFT", replace_text="")
+    assert (
+        service.documents_resource.batch_update_calls[0]["body"]["requests"][0]["replaceAllText"]["replaceText"] == ""
+    )
+
+
 _RICH_REQUESTS: list[dict[str, object]] = [
     {"insertTable": {"rows": 2, "columns": 3, "endOfSegmentLocation": {}}},
     {
@@ -371,9 +395,10 @@ def test_google_docs_batch_update_sends_docs_api_requests_in_order(tmp_path: Pat
 
     # A copy goes in, so that a tool reordering or changing the list it was given cannot change what is expected.
     result = json.loads(
-        tool.google_docs_batch_update(
-            "https://docs.google.com/document/d/document-id/edit",
-            copy.deepcopy(_RICH_REQUESTS),
+        tool.google_docs_write(
+            action="batch_update",
+            document_id="https://docs.google.com/document/d/document-id/edit",
+            requests=copy.deepcopy(_RICH_REQUESTS),
         ),
     )
 
@@ -388,15 +413,15 @@ def test_google_docs_batch_update_schema_accepts_docs_api_requests(tmp_path: Pat
     tool, _service = _connected_tool(tmp_path)
 
     validate_tool_arguments(
-        dict(toolkit_offers(tool, "google_docs_batch_update").parameters),
-        {"document_id": "document-id", "requests": _RICH_REQUESTS},
+        dict(toolkit_offers(tool, "google_docs_write").parameters),
+        {"action": "batch_update", "document_id": "document-id", "requests": _RICH_REQUESTS},
     )
 
 
 def test_google_docs_batch_update_refuses_an_empty_request_list(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_docs_batch_update("document-id", []))
+    result = json.loads(tool.google_docs_write(action="batch_update", document_id="document-id", requests=[]))
 
     assert result == {"error": "Google Docs requests must not be empty"}
     assert service.documents_resource.batch_update_calls == []
@@ -409,23 +434,31 @@ def test_google_docs_batch_update_returns_sanitized_http_error(tmp_path: Path) -
         b'{"error":{"message":"provider detail"}}',
     )
 
-    result = json.loads(tool.google_docs_batch_update("document-id", _RICH_REQUESTS))
+    result = json.loads(
+        tool.google_docs_write(action="batch_update", document_id="document-id", requests=_RICH_REQUESTS),
+    )
 
     assert result == {"error": "Google Docs request failed (HTTP 400)"}
 
 
 def test_google_docs_batch_update_omits_write_control_when_required_revision_id_is_none(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
-    offered = toolkit_offers(tool, "google_docs_batch_update")
+    offered = toolkit_offers(tool, "google_docs_write")
     assert offered.parameters["properties"]["required_revision_id"]["type"] == "string"
     assert "anyOf" not in offered.parameters["properties"]["required_revision_id"]
     validate_tool_arguments(
         offered,
-        {"document_id": "document-id", "requests": _RICH_REQUESTS, "required_revision_id": None},
+        {
+            "action": "batch_update",
+            "document_id": "document-id",
+            "requests": _RICH_REQUESTS,
+            "required_revision_id": None,
+        },
     )
 
     result = json.loads(
         offered.entrypoint(
+            action="batch_update",
             document_id="document-id",
             requests=copy.deepcopy(_RICH_REQUESTS),
             required_revision_id=None,
@@ -440,14 +473,20 @@ def test_google_docs_batch_update_omits_write_control_when_required_revision_id_
 
 def test_google_docs_batch_update_with_required_revision_id_sends_write_control(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
-    offered = toolkit_offers(tool, "google_docs_batch_update")
+    offered = toolkit_offers(tool, "google_docs_write")
     validate_tool_arguments(
         dict(offered.parameters),
-        {"document_id": "document-id", "requests": _RICH_REQUESTS, "required_revision_id": "rev-123"},
+        {
+            "action": "batch_update",
+            "document_id": "document-id",
+            "requests": _RICH_REQUESTS,
+            "required_revision_id": "rev-123",
+        },
     )
 
     result = json.loads(
         offered.entrypoint(
+            action="batch_update",
             document_id="document-id",
             requests=copy.deepcopy(_RICH_REQUESTS),
             required_revision_id="  rev-123  ",
@@ -467,10 +506,15 @@ def test_google_docs_batch_update_with_required_revision_id_sends_write_control(
 @pytest.mark.parametrize("blank_revision_id", ["", "   ", "\t\n"])
 def test_google_docs_batch_update_rejects_blank_required_revision_id(tmp_path: Path, blank_revision_id: str) -> None:
     tool, service = _connected_tool(tmp_path)
-    offered = toolkit_offers(tool, "google_docs_batch_update")
+    offered = toolkit_offers(tool, "google_docs_write")
 
     result = json.loads(
-        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id=blank_revision_id),
+        offered.entrypoint(
+            action="batch_update",
+            document_id="document-id",
+            requests=_RICH_REQUESTS,
+            required_revision_id=blank_revision_id,
+        ),
     )
 
     assert result == {"error": "Google Docs required_revision_id must not be empty when provided"}
@@ -483,10 +527,15 @@ def test_google_docs_batch_update_http_400_with_required_revision_id_returns_rec
         Response({"status": "400", "reason": "Bad Request"}),
         b'{"error":{"message":"provider detail"}}',
     )
-    offered = toolkit_offers(tool, "google_docs_batch_update")
+    offered = toolkit_offers(tool, "google_docs_write")
 
     result = json.loads(
-        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id="rev-stale"),
+        offered.entrypoint(
+            action="batch_update",
+            document_id="document-id",
+            requests=_RICH_REQUESTS,
+            required_revision_id="rev-stale",
+        ),
     )
 
     error = result["error"]
@@ -506,27 +555,143 @@ def test_google_docs_batch_update_non_400_http_error_with_required_revision_id_k
         Response({"status": "500", "reason": "Internal Server Error"}),
         b'{"error":{"message":"provider detail"}}',
     )
-    offered = toolkit_offers(tool, "google_docs_batch_update")
+    offered = toolkit_offers(tool, "google_docs_write")
 
     result = json.loads(
-        offered.entrypoint(document_id="document-id", requests=_RICH_REQUESTS, required_revision_id="rev-123"),
+        offered.entrypoint(
+            action="batch_update",
+            document_id="document-id",
+            requests=_RICH_REQUESTS,
+            required_revision_id="rev-123",
+        ),
     )
 
     assert result == {"error": "Google Docs request failed (HTTP 500)"}
 
 
-def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -> None:
-    tool = GoogleDocsTools(
-        runtime_paths=_runtime_paths(tmp_path),
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        worker_target=None,
-        creds=_valid_credentials(),
-        create_document=False,
+@pytest.mark.parametrize(
+    ("kwargs", "expected_hint"),
+    [
+        ({"action": "create", "title": "Minutes", "text": "Keep this text"}, "initial_text"),
+        (
+            {
+                "action": "replace_text",
+                "document_id": "document-id",
+                "find_text": "DRAFT",
+                "replace_text": "Final",
+                "tab_id": "tab-2",
+            },
+            "tab_ids",
+        ),
+        ({"action": "insert_text", "document_id": "document-id", "text": "hello", "tab_ids": ["tab-2"]}, "tab_id"),
+        (
+            {"action": "batch_update", "document_id": "document-id", "requests": _RICH_REQUESTS, "tab_id": "tab-2"},
+            "tabId",
+        ),
+        (
+            {"action": "batch_update", "document_id": "document-id", "requests": _RICH_REQUESTS, "tab_ids": ["tab-2"]},
+            "tabsCriteria",
+        ),
+        ({"action": "create", "title": "Plan", "required_revision_id": "rev-1"}, "batch_update"),
+        (
+            {"action": "insert_text", "document_id": "document-id", "text": "hello", "required_revision_id": "rev-1"},
+            "batch_update",
+        ),
+        (
+            {
+                "action": "replace_text",
+                "document_id": "document-id",
+                "find_text": "DRAFT",
+                "replace_text": "Final",
+                "required_revision_id": "rev-1",
+            },
+            "batch_update",
+        ),
+    ],
+)
+def test_google_docs_write_rejects_mismatched_action_params_without_api_call(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+    expected_hint: str,
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(tool.google_docs_write(**kwargs))
+
+    assert expected_hint in result["error"]
+    assert service.documents_resource.create_bodies == []
+    assert service.documents_resource.batch_update_calls == []
+
+
+def test_google_docs_config_flags_control_registered_functions_and_narrow_write_actions(tmp_path: Path) -> None:
+    read_only, _ = _connected_tool(tmp_path, create_document=False, read_document=True, edit_document=False)
+    assert set(read_only.functions) == {"google_docs_get_document"}
+
+    create_only, create_service = _connected_tool(
+        tmp_path,
+        create_document=True,
         read_document=True,
         edit_document=False,
     )
+    assert set(create_only.functions) == {"google_docs_get_document", "google_docs_write"}
+    create_offered = toolkit_offers(create_only, "google_docs_write")
+    assert create_offered.parameters["properties"]["action"]["enum"] == ["create"]
+    assert set(create_offered.parameters["properties"]) == {"action", "title", "initial_text"}
+    assert create_offered.parameters["required"] == ["action"]
+    assert create_offered.description is not None
+    assert "- `create`:" in create_offered.description
+    assert "- `insert_text`:" not in create_offered.description
+    assert "- `batch_update`:" not in create_offered.description
+    denied_edit = json.loads(create_only.google_docs_write(action="insert_text", document_id="doc-1", text="hi"))
+    assert "disabled" in denied_edit["error"]
+    assert create_service.documents_resource.batch_update_calls == []
 
-    assert set(tool.functions) == {"google_docs_get_document"}
+    edit_only, edit_service = _connected_tool(
+        tmp_path,
+        create_document=False,
+        read_document=False,
+        edit_document=True,
+    )
+    assert set(edit_only.functions) == {"google_docs_write"}
+    edit_offered = toolkit_offers(edit_only, "google_docs_write")
+    assert edit_offered.parameters["properties"]["action"]["enum"] == ["insert_text", "replace_text", "batch_update"]
+    assert "title" not in edit_offered.parameters["properties"]
+    assert "initial_text" not in edit_offered.parameters["properties"]
+    assert {"action", "document_id", "text", "find_text", "requests", "required_revision_id"} <= set(
+        edit_offered.parameters["properties"],
+    )
+    assert edit_offered.parameters["required"] == ["action"]
+    assert edit_offered.description is not None
+    assert "- `create`:" not in edit_offered.description
+    assert "- `batch_update`:" in edit_offered.description
+    denied_create = json.loads(edit_only.google_docs_write(action="create", title="Plan"))
+    assert "disabled" in denied_create["error"]
+    assert edit_service.documents_resource.create_bodies == []
+
+    # Workspace-prefixed clones also narrow their offered schema.
+    rename_toolkit_functions(edit_only, {"google_docs_write": "work_google_docs_write"})
+    prefixed_offered = toolkit_offers(edit_only, "work_google_docs_write")
+    assert prefixed_offered.parameters["properties"]["action"]["enum"] == [
+        "insert_text",
+        "replace_text",
+        "batch_update",
+    ]
+    assert "title" not in prefixed_offered.parameters["properties"]
+
+
+@pytest.mark.parametrize(
+    "retired_name",
+    [
+        "google_docs_create_document",
+        "google_docs_insert_text",
+        "google_docs_replace_text",
+        "google_docs_batch_update",
+    ],
+)
+def test_google_docs_filters_fail_closed_on_retired_names(tmp_path: Path, retired_name: str) -> None:
+    for param in ("include_tools", "exclude_tools"):
+        with pytest.raises(ValueError, match="google_docs_write"):
+            _connected_tool(tmp_path, **{param: [retired_name]})
 
 
 def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:

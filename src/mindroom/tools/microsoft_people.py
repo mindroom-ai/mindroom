@@ -41,11 +41,8 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service. "
         "An administrator must grant consent for User.Read.All."
     ),
-    function_names=(
-        "microsoft_people_search",
-        "microsoft_people_get_profile",
-        "microsoft_people_list_direct_reports",
-    ),
+    function_names=("microsoft_people_read",),
+    action_scoped_grants=("microsoft_people_read",),
 )
 def microsoft_people_tools() -> type[MicrosoftPeopleTools]:
     """Return Microsoft 365 People tools that act as the requester."""

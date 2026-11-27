@@ -2776,6 +2776,55 @@
           "minimum": 1,
           "title": "Max Github Pr Watches Per Owner",
           "type": "integer"
+        },
+        "script_check_enabled": {
+          "default": true,
+          "description": "Enable scheduled script_check triggers",
+          "title": "Script Check Enabled",
+          "type": "boolean"
+        },
+        "min_script_check_poll_interval_seconds": {
+          "default": 60,
+          "description": "Min script_check poll (s)",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Min Script Check Poll Interval Seconds",
+          "type": "integer"
+        },
+        "max_script_checks_per_owner": {
+          "default": 10,
+          "description": "Max active script_check triggers/owner",
+          "maximum": 200,
+          "minimum": 1,
+          "title": "Max Script Checks Per Owner",
+          "type": "integer"
+        },
+        "script_check_timeout_seconds": {
+          "default": 30,
+          "description": "Max runtime per script_check tick (s)",
+          "maximum": 120,
+          "minimum": 5,
+          "title": "Script Check Timeout Seconds",
+          "type": "integer"
+        },
+        "script_check_allowed_tools": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional toolkit allowlist for ticks",
+          "title": "Script Check Allowed Tools",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         }
       },
       "title": "ExternalTriggerPolicyConfig",
@@ -6734,7 +6783,12 @@
         "event_sources": {},
         "github_pr_polling_enabled": true,
         "min_github_pr_poll_interval_seconds": 60,
-        "max_github_pr_watches_per_owner": 20
+        "max_github_pr_watches_per_owner": 20,
+        "script_check_enabled": true,
+        "min_script_check_poll_interval_seconds": 60,
+        "max_script_checks_per_owner": 10,
+        "script_check_timeout_seconds": 30,
+        "script_check_allowed_tools": null
       },
       "description": "Global policy for tool-managed signed external triggers"
     },

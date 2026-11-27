@@ -94,7 +94,7 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
     ids = {"job_id": job.job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
     # With the agent and the model the call resolved to, which its arguments need not name.
     assert node.links == ids | {"agent": "watcher", "model": "default"}
-    listed = json.loads(await stack.call("get_workflow", run_id=stack.run_id, nodes="all"))["nodes"]
+    listed = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id, nodes="all"))["nodes"]
     assert [shown["links"] for shown in listed] == [node.links]
     totals = stack.store.usage_summary(stack.run_id).totals
     assert (totals["input_tokens"], totals["output_tokens"]) == (11, 3)
@@ -990,7 +990,7 @@ async def test_plain_copy_inherits_the_owners_tools(stack: WorkflowStack) -> Non
 
     await stack.result("@0", "agent", _PROMPT)
 
-    assert {"append", "run_shell_command", "start_workflow", "resume_workflow"} <= set(offered_tools(model)[0])
+    assert {"append", "run_shell_command", "workflow"} <= set(offered_tools(model)[0])
 
 
 @pytest.mark.asyncio
@@ -1008,7 +1008,7 @@ async def test_narrowed_copy_is_offered_the_tools_its_call_lists_and_no_other(
     persona = delegation_child(stack.node_job("@0")).persona
     assert persona is not None
     assert (list(persona.tools or ()), persona.tools is not None) == (tools, True)
-    assert [name for name in offered_tools(model)[0] if name in ("append", "run_shell_command", "start_workflow")] == (
+    assert [name for name in offered_tools(model)[0] if name in ("append", "run_shell_command", "workflow")] == (
         offered
     )
 
@@ -1075,7 +1075,7 @@ async def test_another_agent_runs_as_configured_when_the_run_may_run_it(
             "watcher",
             target,
         )
-        assert "start_workflow" not in offered_tools(model)[0]
+        assert "workflow" not in offered_tools(model)[0]
         await stack.close()
 
 

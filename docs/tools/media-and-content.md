@@ -96,20 +96,22 @@ agents:
 
 `youtube` works on one YouTube video URL; it cannot search YouTube by keyword, so use a search tool such as `serpapi` for discovery.
 
-- `get_youtube_video_data(url)` returns title, author, thumbnail, size, and provider fields.
-- `get_youtube_video_captions(url)` returns the video's transcript text.
-- `get_video_timestamps(url)` returns transcript lines with timestamps.
+It exposes `youtube_video(action, url, languages=None)` with three actions:
+
+- `data` returns title, author, thumbnail, size, and provider fields.
+- `captions` returns the video's transcript text.
+- `timestamps` returns transcript lines with timestamps.
 
 Invalid or unsupported URLs return an error message.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_get_video_captions` | `boolean` | `true` | Enable `get_youtube_video_captions()`. |
-| `enable_get_video_data` | `boolean` | `true` | Enable `get_youtube_video_data()`. |
-| `enable_get_video_timestamps` | `boolean` | `true` | Enable `get_video_timestamps()`. |
-| `all` | `boolean` | `false` | Enable all functions. |
-| `languages` | `string[]` | `null` | Preferred transcript languages, for example `["en", "es"]`; affects only the caption and timestamp functions. |
-| `timeout` | `number` | `30` | Timeout in seconds for `get_youtube_video_data()`; caption and timestamp requests do not use it. |
+| `enable_get_video_captions` | `boolean` | `true` | Enable `action="captions"`. |
+| `enable_get_video_data` | `boolean` | `true` | Enable `action="data"`. |
+| `enable_get_video_timestamps` | `boolean` | `true` | Enable `action="timestamps"`. |
+| `all` | `boolean` | `false` | Enable all actions. |
+| `languages` | `string[]` | `null` | Preferred transcript languages, for example `["en", "es"]`; affects only `captions` and `timestamps`. |
+| `timeout` | `number` | `30` | Timeout in seconds for `action="data"`; caption and timestamp requests do not use it. |
 
 Proxy settings are not configurable.
 

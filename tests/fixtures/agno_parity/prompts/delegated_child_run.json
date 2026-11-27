@@ -97,23 +97,34 @@
       ],
       "tools": [
         {
-          "name": "add",
-          "description": "Add two numbers and return the result.",
+          "name": "calculate",
+          "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "exponentiate",
+                  "factorial",
+                  "is_prime",
+                  "square_root"
+                ]
+              },
               "a": {
-                "type": "number",
-                "description": "(float) First number."
+                "type": "number"
               },
               "b": {
-                "type": "number",
-                "description": "(float) Second number."
+                "type": "number"
               }
             },
             "required": [
-              "a",
-              "b"
+              "action",
+              "a"
             ]
           }
         },
@@ -145,101 +156,6 @@
             "required": [
               "subagent_id",
               "message"
-            ]
-          }
-        },
-        {
-          "name": "divide",
-          "description": "Divide first number by second and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Numerator."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Denominator."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "exponentiate",
-          "description": "Raise first number to the power of the second number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Base."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Exponent."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "factorial",
-          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to calculate the factorial of, at most 1558."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "is_prime",
-          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to check if prime, at most 10**12."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "multiply",
-          "description": "Multiply two numbers and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
             ]
           }
         },
@@ -310,43 +226,6 @@
               "title"
             ],
             "additionalProperties": false
-          }
-        },
-        {
-          "name": "square_root",
-          "description": "Calculate the square root of a number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "number",
-                "description": "(float) Number to calculate the square root of."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "subtract",
-          "description": "Subtract second number from first and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
           }
         }
       ],
@@ -409,23 +288,34 @@
       ],
       "tools": [
         {
-          "name": "add",
-          "description": "Add two numbers and return the result.",
+          "name": "calculate",
+          "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "exponentiate",
+                  "factorial",
+                  "is_prime",
+                  "square_root"
+                ]
+              },
               "a": {
-                "type": "number",
-                "description": "(float) First number."
+                "type": "number"
               },
               "b": {
-                "type": "number",
-                "description": "(float) Second number."
+                "type": "number"
               }
             },
             "required": [
-              "a",
-              "b"
+              "action",
+              "a"
             ]
           }
         },
@@ -457,101 +347,6 @@
             "required": [
               "subagent_id",
               "message"
-            ]
-          }
-        },
-        {
-          "name": "divide",
-          "description": "Divide first number by second and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Numerator."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Denominator."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "exponentiate",
-          "description": "Raise first number to the power of the second number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Base."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Exponent."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "factorial",
-          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to calculate the factorial of, at most 1558."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "is_prime",
-          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to check if prime, at most 10**12."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "multiply",
-          "description": "Multiply two numbers and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
             ]
           }
         },
@@ -622,43 +417,6 @@
               "title"
             ],
             "additionalProperties": false
-          }
-        },
-        {
-          "name": "square_root",
-          "description": "Calculate the square root of a number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "number",
-                "description": "(float) Number to calculate the square root of."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "subtract",
-          "description": "Subtract second number from first and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
           }
         }
       ],
@@ -751,23 +509,34 @@
       ],
       "tools": [
         {
-          "name": "add",
-          "description": "Add two numbers and return the result.",
+          "name": "calculate",
+          "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "exponentiate",
+                  "factorial",
+                  "is_prime",
+                  "square_root"
+                ]
+              },
               "a": {
-                "type": "number",
-                "description": "(float) First number."
+                "type": "number"
               },
               "b": {
-                "type": "number",
-                "description": "(float) Second number."
+                "type": "number"
               }
             },
             "required": [
-              "a",
-              "b"
+              "action",
+              "a"
             ]
           }
         },
@@ -799,101 +568,6 @@
             "required": [
               "subagent_id",
               "message"
-            ]
-          }
-        },
-        {
-          "name": "divide",
-          "description": "Divide first number by second and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Numerator."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Denominator."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "exponentiate",
-          "description": "Raise first number to the power of the second number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Base."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Exponent."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "factorial",
-          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to calculate the factorial of, at most 1558."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "is_prime",
-          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to check if prime, at most 10**12."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "multiply",
-          "description": "Multiply two numbers and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
             ]
           }
         },
@@ -965,43 +639,6 @@
             ],
             "additionalProperties": false
           }
-        },
-        {
-          "name": "square_root",
-          "description": "Calculate the square root of a number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "number",
-                "description": "(float) Number to calculate the square root of."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "subtract",
-          "description": "Subtract second number from first and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
         }
       ],
       "tool_choice": null,
@@ -1029,155 +666,34 @@
       ],
       "tools": [
         {
-          "name": "add",
-          "description": "Add two numbers and return the result.",
+          "name": "calculate",
+          "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "exponentiate",
+                  "factorial",
+                  "is_prime",
+                  "square_root"
+                ]
+              },
               "a": {
-                "type": "number",
-                "description": "(float) First number."
+                "type": "number"
               },
               "b": {
-                "type": "number",
-                "description": "(float) Second number."
+                "type": "number"
               }
             },
             "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "divide",
-          "description": "Divide first number by second and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Numerator."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Denominator."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "exponentiate",
-          "description": "Raise first number to the power of the second number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Base."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Exponent."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "factorial",
-          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to calculate the factorial of, at most 1558."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "is_prime",
-          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to check if prime, at most 10**12."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "multiply",
-          "description": "Multiply two numbers and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "square_root",
-          "description": "Calculate the square root of a number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "number",
-                "description": "(float) Number to calculate the square root of."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "subtract",
-          "description": "Subtract second number from first and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
+              "action",
+              "a"
             ]
           }
         }
@@ -1207,155 +723,34 @@
       ],
       "tools": [
         {
-          "name": "add",
-          "description": "Add two numbers and return the result.",
+          "name": "calculate",
+          "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
           "parameters": {
             "type": "object",
             "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "exponentiate",
+                  "factorial",
+                  "is_prime",
+                  "square_root"
+                ]
+              },
               "a": {
-                "type": "number",
-                "description": "(float) First number."
+                "type": "number"
               },
               "b": {
-                "type": "number",
-                "description": "(float) Second number."
+                "type": "number"
               }
             },
             "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "divide",
-          "description": "Divide first number by second and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Numerator."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Denominator."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "exponentiate",
-          "description": "Raise first number to the power of the second number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) Base."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Exponent."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "factorial",
-          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to calculate the factorial of, at most 1558."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "is_prime",
-          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "integer",
-                "description": "(int) Number to check if prime, at most 10**12."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "multiply",
-          "description": "Multiply two numbers and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
-            ]
-          }
-        },
-        {
-          "name": "square_root",
-          "description": "Calculate the square root of a number and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "n": {
-                "type": "number",
-                "description": "(float) Number to calculate the square root of."
-              }
-            },
-            "required": [
-              "n"
-            ]
-          }
-        },
-        {
-          "name": "subtract",
-          "description": "Subtract second number from first and return the result.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "a": {
-                "type": "number",
-                "description": "(float) First number."
-              },
-              "b": {
-                "type": "number",
-                "description": "(float) Second number."
-              }
-            },
-            "required": [
-              "a",
-              "b"
+              "action",
+              "a"
             ]
           }
         }

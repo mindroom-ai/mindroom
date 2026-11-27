@@ -250,10 +250,10 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
     )
     assert (build.tool_jobs is not None) is enabled
     if build.tool_jobs is not None:
-        assert "add" in build.tool_jobs.tools
+        assert "calculate" in build.tool_jobs.tools
     await run_built_turn(build, config=config, runtime_paths=paths)
     [request] = model.requests
-    assert "add" in {tool.name for tool in request.tools}
+    assert "calculate" in {tool.name for tool in request.tools}
     assert all(tool.name != "job" for tool in request.tools)
     assert all("background_after" not in tool.parameters.get("properties", {}) for tool in request.tools)
 

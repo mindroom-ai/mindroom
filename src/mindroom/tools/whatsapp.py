@@ -50,25 +50,25 @@ _SEND_FIELDS = {
 
 
 class ReplyButton(BaseModel):
-    """A quick-reply button."""
+    """Quick-reply button."""
 
-    id: str = Field(..., description="Unique button identifier (e.g. 'yes', 'no').")
-    title: str = Field(..., description="Button display text, max 20 characters.")
+    id: str
+    title: str = Field(..., description="Max 20 chars.")
 
 
 class ListRow(BaseModel):
-    """A selectable row inside a list section."""
+    """Selectable list row."""
 
-    id: str = Field(..., description="Unique row identifier.")
-    title: str = Field(..., description="Row title text.")
-    description: str | None = Field(None, description="Optional row description.")
+    id: str
+    title: str
+    description: str | None = None
 
 
 class ListSection(BaseModel):
-    """A titled section containing selectable rows."""
+    """Titled list section."""
 
-    title: str = Field(..., description="Section heading.")
-    rows: list[ListRow] = Field(..., description="Selectable rows in this section.")
+    title: str
+    rows: list[ListRow]
 
 
 def _interactive_envelope(
@@ -344,42 +344,16 @@ class _WhatsAppTools(Toolkit):
         message_id: str | None = None,
         emoji: str | None = None,
     ) -> str:
-        """Send a WhatsApp Business API message.
+        """Send a WhatsApp Business message (`recipient` defaults to configured `recipient_waid`).
 
-        Requires `recipient` unless configured.
-        - `text`: `text`
-        - `template`: `template_name`
-        - `reply_buttons`: `text`, `buttons`
-        - `list`: `text`, `button_text`, `sections`
-        - `image`: `media_url` or `media_id`
-        - `document`: `media_url` or `media_id`
-        - `location`: `latitude`, `longitude`
-        - `reaction`: `message_id`, `emoji`
-
-        Args:
-            action: Message type to send.
-            recipient: Recipient WhatsApp ID or phone number; defaults to configured `recipient_waid`.
-            text: Message text.
-            preview_url: Show link previews (`text`).
-            template_name: Approved template name (`template`).
-            language_code: Template locale, e.g. `en_US`.
-            components: Optional template components (`template`).
-            buttons: 1-3 quick-reply buttons (`reply_buttons`).
-            button_text: List button label, max 20 chars (`list`).
-            sections: 1-10 list sections with <=10 total rows (`list`).
-            header: Optional interactive header text (`reply_buttons`, `list`).
-            footer: Optional interactive footer text (`reply_buttons`, `list`).
-            media_url: Public URL for `image` or `document`.
-            media_id: WhatsApp media ID for `image` or `document`.
-            filename: Display filename for `document`.
-            caption: Optional caption for `image` or `document`.
-            latitude: Location latitude (`location`).
-            longitude: Location longitude (`location`).
-            name: Optional location name (`location`).
-            address: Optional location address (`location`).
-            message_id: Target WhatsApp message ID (`reaction`).
-            emoji: Reaction emoji; an empty string removes the reaction.
-
+        - `text`: `text` (`preview_url`)
+        - `template`: `template_name` (`language_code`, `components`)
+        - `reply_buttons`: `text`, 1-3 `buttons` (`header`, `footer`)
+        - `list`: `text`, `button_text` (max 20 chars), 1-10 `sections` (<=10 total rows; `header`, `footer`)
+        - `image`: `media_url` or `media_id` (`caption`)
+        - `document`: `media_url` or `media_id` (`filename`, `caption`)
+        - `location`: `latitude`, `longitude` (`name`, `address`)
+        - `reaction`: `message_id`, `emoji` (empty string removes reaction)
         """
         if action not in self._enabled_actions:
             return json.dumps({"error": f"Action '{action}' is disabled."})

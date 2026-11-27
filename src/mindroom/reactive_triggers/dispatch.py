@@ -26,11 +26,15 @@ from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     GitHubPRSourceSpec,
     RoomMessageSourceSpec,
+    ScriptCheckSourceSpec,
     ThreadTagSourceSpec,
+)
+from mindroom.reactive_triggers.script_check import (
+    check_script_check_access,
+    is_owner_joined_in_state,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.requester_identity import (
-    equivalent_requester_ids,
     is_human_requester_id,
     is_persisted_managed_entity_id,
     managed_entity_user_ids,
@@ -148,6 +152,17 @@ async def check_reactive_source_access(
         r = fn(owner_user_id=rule.owner_user_id, source_spec=source, config=config, runtime_paths=runtime_paths)
         return DispatchResult(status="skipped", reason=r) if r is not None else None
 
+    if isinstance(source, ScriptCheckSourceSpec):
+        return await _check_script_check_source_access(
+            rule=rule,
+            source=source,
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states=known_room_states,
+        )
+
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
         return await _check_room_source_access(
             rule=rule,
@@ -160,6 +175,55 @@ async def check_reactive_source_access(
             known_room_states=known_room_states,
         )
     return None
+
+
+async def _check_script_check_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    source: ScriptCheckSourceSpec,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None,
+) -> DispatchResult | None:
+    if failure := check_script_check_access(
+        config,
+        runtime_paths,
+        source.agent,
+        owner_user_id=rule.owner_user_id,
+        require_placement=True,
+    ):
+        return DispatchResult(status="skipped", reason=failure.code)
+    room_state = await _resolve_source_room_state(
+        source.room_id,
+        source_bot=source_bot,
+        known_room_states=known_room_states,
+    )
+    if room_state is None:
+        return DispatchResult(status="retry", reason="source_room_state_unreadable")
+    if not is_owner_joined_in_state(
+        room_state,
+        owner_user_id=rule.owner_user_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        return DispatchResult(status="skipped", reason="source_room_not_joined")
+    observed_room = _observed_room_for_bot(source_bot, source.room_id)
+    try:
+        allowed = is_sender_allowed_for_agent_reply_in_room(
+            rule.owner_user_id,
+            source.agent,
+            config,
+            source.room_id,
+            runtime_paths,
+            memberships,
+            require_resolved_membership=True,
+            observed_room=observed_room,
+        )
+    except ReplyMembershipPendingError:
+        return DispatchResult(status="retry", reason="source_membership_pending")
+    return None if allowed else DispatchResult(status="skipped", reason="source_room_not_authorized")
 
 
 async def _check_external_source_access(
@@ -238,7 +302,7 @@ async def _check_room_source_access(
     if room_state is None:
         return DispatchResult(status="retry", reason="source_room_state_unreadable")
 
-    if not _is_owner_joined_in_state(
+    if not is_owner_joined_in_state(
         room_state,
         owner_user_id=rule.owner_user_id,
         config=config,
@@ -487,7 +551,7 @@ async def check_reactive_target_access(
         room_states[rule.target.room_id] = target_room_state
     return (
         None
-        if _is_owner_joined_in_state(
+        if is_owner_joined_in_state(
             target_room_state,
             owner_user_id=rule.owner_user_id,
             config=config,
@@ -634,19 +698,6 @@ def _persist_thread_key_binding(
             matrix_event_id=matrix_event_id,
             exc_info=True,
         )
-
-
-def _is_owner_joined_in_state(
-    room_state: RoomStateSnapshot,
-    *,
-    owner_user_id: str,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    return any(
-        room_state.events.get(("m.room.member", user_id), {}).get("membership") == "join"
-        for user_id in equivalent_requester_ids(owner_user_id, config, runtime_paths)
-    )
 
 
 def _resolve_target_thread(

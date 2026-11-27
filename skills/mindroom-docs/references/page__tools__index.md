@@ -118,9 +118,7 @@ agents:
     tools:
       - serper:
           include_tools:
-            - search_web
-            - search_news
-            - scrape_webpage
+            - serper_search
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
