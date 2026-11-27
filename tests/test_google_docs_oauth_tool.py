@@ -567,6 +567,89 @@ def test_google_docs_batch_update_non_400_http_error_with_required_revision_id_k
     assert result == {"error": "Google Docs request failed (HTTP 500)"}
 
 
+def test_google_docs_replace_text_rejects_tab_id_without_api_call(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_write(
+            action="replace_text",
+            document_id="document-id",
+            find_text="DRAFT",
+            replace_text="Final",
+            tab_id="tab-2",
+        ),
+    )
+
+    assert "tab_ids" in result["error"]
+    assert "tab_id" in result["error"]
+    assert service.documents_resource.batch_update_calls == []
+
+
+def test_google_docs_insert_text_rejects_tab_ids_without_api_call(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_write(
+            action="insert_text",
+            document_id="document-id",
+            text="hello",
+            tab_ids=["tab-2"],
+        ),
+    )
+
+    assert "tab_id" in result["error"]
+    assert "tab_ids" in result["error"]
+    assert service.documents_resource.batch_update_calls == []
+
+
+@pytest.mark.parametrize("extra_kwargs", [{"tab_id": "tab-2"}, {"tab_ids": ["tab-2"]}])
+def test_google_docs_batch_update_rejects_top_level_tab_args_without_api_call(
+    tmp_path: Path,
+    extra_kwargs: dict[str, object],
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_write(
+            action="batch_update",
+            document_id="document-id",
+            requests=_RICH_REQUESTS,
+            **extra_kwargs,
+        ),
+    )
+
+    assert "tabId" in result["error"]
+    assert service.documents_resource.batch_update_calls == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "create", "title": "Plan", "required_revision_id": "rev-1"},
+        {"action": "insert_text", "document_id": "document-id", "text": "hello", "required_revision_id": "rev-1"},
+        {
+            "action": "replace_text",
+            "document_id": "document-id",
+            "find_text": "DRAFT",
+            "replace_text": "Final",
+            "required_revision_id": "rev-1",
+        },
+    ],
+)
+def test_google_docs_rejects_required_revision_id_outside_batch_update(
+    tmp_path: Path,
+    kwargs: dict[str, object],
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(tool.google_docs_write(**kwargs))
+
+    assert "required_revision_id" in result["error"]
+    assert "batch_update" in result["error"]
+    assert service.documents_resource.create_bodies == []
+    assert service.documents_resource.batch_update_calls == []
+
+
 def test_google_docs_config_flags_control_registered_functions_and_narrow_write_actions(tmp_path: Path) -> None:
     read_only, _ = _connected_tool(tmp_path, create_document=False, read_document=True, edit_document=False)
     assert set(read_only.functions) == {"google_docs_get_document"}

@@ -355,14 +355,15 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 3b native toolkits (gmail, google_calendar, github,
-#   google_drive, google_docs, google_sheets, google_tasks, homeassistant, including prefixed secondary Google Workspace plugin copies),
-#   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
-#   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
-#   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
-#   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep) previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625 / unreleased); replacement: unreleased;
+#   google_drive, google_sheets, homeassistant), Wave 5 native toolkits (file_generation, visualization, unsplash),
+#   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
+#   zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify,
+#   reddit, google_maps, brandfetch, mem0, zep), and Google Docs / Google Tasks (google_docs, google_tasks, including
+#   prefixed secondary Google Workspace plugin copies for all Google Workspace toolkits) previously exposed individual
+#   per-operation function names that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; google_docs/google_tasks:
+#   v2026.11.659); replacement: unreleased;
 #   consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone), allow configs with
 #   an explicit exact rule deciding the replacement function, and otherwise reject tool_approval.rules when any

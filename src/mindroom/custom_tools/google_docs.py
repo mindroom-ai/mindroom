@@ -272,6 +272,29 @@ class GoogleDocsTools(GoogleApiToolkit):
             )
             return google_http_error_result("Google Docs", "batch_update", exc, guidance=guidance)
 
+    def _write_guard_error(
+        self,
+        action: str,
+        *,
+        tab_id: str | None,
+        tab_ids: list[str] | None,
+        required_revision_id: str | None,
+    ) -> str | None:
+        if action not in self._write_actions:
+            return f"Google Docs action {action!r} is disabled"
+        if action != "batch_update" and required_revision_id is not None:
+            return "Google Docs required_revision_id is only supported with action='batch_update'"
+        if action == "replace_text" and tab_id is not None:
+            return "Google Docs replace_text does not accept tab_id; use tab_ids=[...] instead"
+        if action == "insert_text" and tab_ids is not None:
+            return "Google Docs insert_text does not accept tab_ids; use tab_id instead"
+        if action == "batch_update" and (tab_id is not None or tab_ids is not None):
+            return (
+                "Google Docs batch_update does not accept top-level tab_id or tab_ids; "
+                "specify tabId or tabsCriteria inside each request"
+            )
+        return None
+
     def google_docs_write(
         self,
         action: _WriteAction,
@@ -295,8 +318,15 @@ class GoogleDocsTools(GoogleApiToolkit):
         - `replace_text`: replace `find_text` with `replace_text` (empty string deletes; optional `match_case`, `tab_ids` or all tabs) in `document_id` (ID or URL)
         - `batch_update`: apply Docs API `requests` atomically in order to `document_id` (ID or URL) for tables, headings, styles, lists, links, images, or deletes (UTF-16 tab indexes, default first tab; edit end-to-start); pass `required_revision_id` (from `google_docs_get_document`) for optimistic concurrency (`writeControl.requiredRevisionId`), re-reading and recomputing ranges on conflict
         """
-        if action not in self._write_actions:
-            return _error(f"Google Docs action {action!r} is disabled")
+        if (
+            guard_error := self._write_guard_error(
+                action,
+                tab_id=tab_id,
+                tab_ids=tab_ids,
+                required_revision_id=required_revision_id,
+            )
+        ) is not None:
+            return _error(guard_error)
         if action == "create":
             return self._create_document(title, initial_text)
         if action == "insert_text":
