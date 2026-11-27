@@ -1,144 +1,18 @@
-"""Only the vendor-toolkit boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
-
-Agno stays MindRoom's library of vendor toolkits: MindRoom's own tools use the owned authoring API
-(``tool_system/authoring.py``), tools return text or MindRoom's ``ToolValue``, and the toolkit adapter alone looks
-inside an Agno toolkit, reads a vendor toolkit's ``ToolResult`` as a ``ToolValue``, and hands its entrypoints what
-Agno would. MindRoom owns its knowledge readers and chunkers natively. The built-in and custom tool packages, which
-register and extend vendor toolkits, and the toolkit adapter may import Agno; ``logging_config`` may too, because it
-routes Agno's loggers, which vendor toolkits log through. No other module takes an Agno type, not even through the
-adapter's re-export.
-
-The ratchet below lists the test modules that import Agno. It must match the code exactly, so a module that stops
-leaves the list in the same change, and no module may join it. No source comment or docstring may justify code by
-the retired Agno runtime, as "kept as main behaves" did: each states the outcome it protects, or marks behavior kept
-only for parity ``TODO(simplify)``.
-"""
+"""Enforce the zero-Agno boundary across ``src/``, ``tests/``, and ``pyproject.toml``."""
 
 from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
-SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
-# Paths under ``src/mindroom`` that may import Agno: whole packages, then single modules.
-ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
-ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "logging_config.py"})
-REEXPORT = "tool_system/agno_toolkits.py"
-# Once a builtin goes native, neither its registration nor its implementation can import Agno again.
-NATIVE_WAVE_2 = {
-    "arxiv": "arxiv",
-    "baidusearch": "baidusearch",
-    "calculator": "calculator",
-    "custom_api": None,
-    "duckduckgo": "ddgs_search",
-    "googlesearch": "ddgs_search",
-    "hackernews": "hackernews",
-    "pubmed": "pubmed",
-    "reasoning": "reasoning",
-    "serpapi": "serpapi",
-    "serper": "serper",
-    "sleep": "sleep",
-    "wikipedia": "wikipedia",
-    "youtube": "youtube",
-}
-TESTS_ROOT = Path(__file__).resolve().parent
-# The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
-# MindRoom's seams (#3120).
-TEST_AGNO_IMPORTERS = frozenset(
-    {
-        "agent_loop/helpers.py",
-        "agent_loop/test_agent_build.py",
-        "agent_loop/test_model_loop.py",
-        "agent_loop/test_run.py",
-        "agent_loop/test_tools.py",
-        "api/test_agent_cli_api.py",
-        "api/test_computer_browser_binding.py",
-        "api/test_mcp_external_auth.py",
-        "api/test_mcp_gateway_api.py",
-        "api/test_sandbox_runner_api.py",
-        "api/test_sandbox_runner_streaming.py",
-        "conftest.py",
-        "delegation_helpers.py",
-        "scripted_agent_helpers.py",
-        "team_turn_helpers.py",
-        "teams/test_continue_team.py",
-        "test_agent_cli_control_tools.py",
-        "test_agent_cli_media.py",
-        "test_agent_cli_standard_mode.py",
-        "test_agent_cli_turn.py",
-        "test_agent_personas.py",
-        "test_agent_tool_calls.py",
-        "test_agent_turn_runtime.py",
-        "test_agents.py",
-        "test_agno_tool_wrapping.py",
-        "test_ai_provider_retry.py",
-        "test_approval_dynamic_tools.py",
-        "test_background_subagents.py",
-        "test_bot_media_dispatch.py",
-        "test_browser_mcp_outputs.py",
-        "test_cli_approval_recovery.py",
-        "test_computer_announcement.py",
-        "test_delegation_execution.py",
-        "test_dynamic_toolkits.py",
-        "test_issue_154_logging_integration.py",
-        "test_logging_config.py",
-        "test_matrix_rtc_call_tools.py",
-        "test_mcp_gateway_execution.py",
-        "test_mcp_gateway_tools.py",
-        "test_mcp_manager.py",
-        "test_mcp_toolkit.py",
-        "test_mid_turn.py",
-        "test_mid_turn_compaction.py",
-        "test_mid_turn_compaction_resume_and_team.py",
-        "test_minimal_agent_parity.py",
-        "test_openai_compat.py",
-        "test_queued_message_notify.py",
-        "test_response_runner_focused.py",
-        "test_sandbox_proxy.py",
-        "test_scheduled_tool_approval.py",
-        "test_script_run_policy.py",
-        "test_script_tool_broker.py",
-        "test_skill_learning.py",
-        "test_subagent_runtime.py",
-        "test_team_turn_runtime.py",
-        "test_tool_access.py",
-        "test_tool_config_sync.py",
-        "test_tool_hooks.py",
-        "test_tool_job_approved_work.py",
-        "test_tool_job_execution.py",
-        "test_tool_output_files.py",
-        "test_toolkit_aliases.py",
-        "test_tools_metadata.py",
-        "test_worker_media.py",
-        "test_worker_tool_transport.py",
-        "tool_system/agno_parity_support.py",
-        "tool_system/test_agno_toolkits.py",
-        "tool_system/test_string_tool_arguments.py",
-        "tool_system/test_tool_hook_middleware.py",
-        "tool_system/test_tool_invocation.py",
-        "tool_system/test_toolkit_connections.py",
-    },
-)
-AGNO_RUNTIME_MODULES = ("agno.agent", "agno.run", "agno.models", "agno.team", "agno.session")
-TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
-    {
-        "agent_loop/test_run.py",
-        "teams/test_continue_team.py",
-        "test_agent_cli_standard_mode.py",
-        "test_agent_cli_turn.py",
-        "test_agent_tool_calls.py",
-        "test_agent_turn_runtime.py",
-        "test_cli_approval_recovery.py",
-        "test_mcp_gateway_tools.py",
-        "test_minimal_agent_parity.py",
-        "test_openai_compat.py",
-        "test_tool_job_execution.py",
-        "test_worker_tool_transport.py",
-        "tool_system/test_agno_toolkits.py",
-        "tool_system/test_tool_invocation.py",
-    },
-)
+from packaging.requirements import Requirement
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SOURCE_ROOT = REPO_ROOT / "src" / "mindroom"
+TESTS_ROOT = REPO_ROOT / "tests"
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 _WORD_GAP = r"(?:\s|#)+"
 # Phrases that justify behavior by the retired Agno runtime instead of the outcome it protects, each matched across
@@ -171,43 +45,6 @@ def agno_imports(source: str) -> set[str]:
     return {module for module in modules if module == "agno" or module.startswith("agno.")}
 
 
-def reexported_agno_names(source: str) -> set[str]:
-    """Return the names ``source`` binds at module level from Agno, which importers of it reach Agno through."""
-    return {
-        alias.asname or alias.name
-        for node in ast.parse(source).body
-        if isinstance(node, ast.ImportFrom) and node.module is not None and agno_imports(f"import {node.module}")
-        for alias in node.names
-    }
-
-
-def reexport_agno_type_importers() -> set[str]:
-    """Return each module outside the allowed paths that imports an Agno name from the re-export."""
-    agno_names = reexported_agno_names((SOURCE_ROOT / REEXPORT).read_text(encoding="utf-8"))
-    importers: set[str] = set()
-    for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        relative = path.relative_to(SOURCE_ROOT)
-        if relative.parts[0] in ALLOWED_PACKAGES or relative.as_posix() in ALLOWED_MODULES:
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if (
-                isinstance(node, ast.ImportFrom)
-                and node.module == "mindroom.tool_system.agno_toolkits"
-                and any(alias.name in agno_names for alias in node.names)
-            ):
-                importers.add(relative.as_posix())
-    return importers
-
-
-def agno_test_imports() -> dict[str, set[str]]:
-    """Return each test module that imports Agno, with the Agno modules it imports."""
-    imports = {
-        path.relative_to(TESTS_ROOT).as_posix(): agno_imports(path.read_text(encoding="utf-8"))
-        for path in sorted(TESTS_ROOT.rglob("*.py"))
-    }
-    return {module: imported for module, imported in imports.items() if imported}
-
-
 def parity_wording(source: str) -> list[str]:
     """Return each phrase in ``source`` that justifies behavior by the retired Agno runtime, with its line number."""
     phrases: list[str] = []
@@ -217,176 +54,73 @@ def parity_wording(source: str) -> list[str]:
     return phrases
 
 
-def boundary_violations() -> dict[str, list[str]]:
-    """Return each module outside the allowed paths that imports Agno, with the Agno modules it imports."""
+def _agno_imports_under(root: Path) -> dict[str, list[str]]:
+    """Return each Python module under ``root`` that imports Agno, with the Agno modules it imports."""
     violations: dict[str, list[str]] = {}
-    for path in sorted(SOURCE_ROOT.rglob("*.py")):
-        relative = path.relative_to(SOURCE_ROOT)
-        if relative.parts[0] in ALLOWED_PACKAGES or relative.as_posix() in ALLOWED_MODULES:
-            continue
+    for path in sorted(root.rglob("*.py")):
         if imported := agno_imports(path.read_text(encoding="utf-8")):
-            violations[relative.as_posix()] = sorted(imported)
+            violations[path.relative_to(root).as_posix()] = sorted(imported)
     return violations
 
 
 def test_agno_imports_counts_type_checking_and_function_level_imports() -> None:
     """Every import form counts, and neither a relative ``agno`` nor a package merely named like it does."""
-    source = """
-import agno
-import agnostic
-from typing import TYPE_CHECKING
-
-from agno.tools import Toolkit
-from agnostic.tools import Other
-from . import agno as local_agno
-
-if TYPE_CHECKING:
-    from agno.run import RunContext
-
-
-def build() -> None:
-    import agno.media as media
-"""
+    pkg = "agno"
+    source = "\n".join(
+        [
+            f"import {pkg}",
+            "import agnostic",
+            "from typing import TYPE_CHECKING",
+            f"from {pkg}.tools import Toolkit",
+            "from agnostic.tools import Other",
+            f"from . import {pkg} as local_agno",
+            "if TYPE_CHECKING:",
+            f"    from {pkg}.run import RunContext",
+            "def build() -> None:",
+            f"    import {pkg}.media as media",
+        ],
+    )
 
     assert agno_imports(source) == {"agno", "agno.tools", "agno.run", "agno.media"}
 
 
-# Native tool modules that must stay free of Agno imports and AGNO_COMPAT markers.
-AGNO_FREE_TOOL_MODULES = frozenset(
-    {
-        "tools/native_helpers.py",
-        "tools/csv.py",
-        "tools/pandas.py",
-        "tools/duckdb.py",
-        "tools/sql.py",
-        "tools/postgres.py",
-        "tools/redshift.py",
-        "tools/neo4j.py",
-        "tools/yfinance.py",
-        "tools/openbb.py",
-        "tools/financial_datasets_api.py",
-        "tools/openweather.py",
-        "tools/docker.py",
-        "tools/e2b.py",
-        "custom_tools/e2b.py",
-        "tools/daytona.py",
-        "tools/linear.py",
-        "tools/notion.py",
-        "tools/todoist.py",
-        "tools/clickup.py",
-        "tools/trello.py",
-        "tools/bitbucket.py",
-        "tools/cal_com.py",
-        "tools/shopify.py",
-        "tools/zendesk.py",
-        "tools/spotify.py",
-        "custom_tools/spotify.py",
-        "tools/reddit.py",
-        "tools/google_maps.py",
-        "tools/brandfetch.py",
-        "tools/aws_lambda.py",
-        "tools/airflow.py",
-        "tools/composio.py",
-        "tools/mem0.py",
-        "tools/zep.py",
-    },
-)
+def test_no_source_module_imports_agno() -> None:
+    """No module under ``src/mindroom`` imports the removed ``agno`` package."""
+    violations = _agno_imports_under(SOURCE_ROOT)
+
+    assert not violations, f"Agno imports found in src/mindroom: {violations}"
 
 
-def test_native_comms_tools_have_no_agno_dependency() -> None:
-    """Messaging tools own their exposed functions, including Zoom's OAuth boundary."""
-    for name in (
-        "_comms",
-        "aws_ses",
-        "discord",
-        "email",
-        "resend",
-        "telegram",
-        "twilio",
-        "webex",
-        "whatsapp",
-        "x",
-        "zoom",
-    ):
-        path = SOURCE_ROOT / "tools" / f"{name}.py"
-        source = path.read_text(encoding="utf-8")
-        assert not agno_imports(source), path
-        assert "AGNO_COMPAT:" not in source, path
+def test_no_test_module_imports_agno() -> None:
+    """No module under ``tests`` imports the removed ``agno`` package."""
+    violations = _agno_imports_under(TESTS_ROOT)
+
+    assert not violations, f"Agno imports found in tests: {violations}"
 
 
-def test_no_module_outside_the_boundary_imports_agno() -> None:
-    """Every ``agno`` import under ``src/mindroom`` sits in an allowed package or module."""
-    violations = boundary_violations()
+def test_no_source_module_has_agno_compat_markers() -> None:
+    """No module under ``src/mindroom`` carries retired ``AGNO_COMPAT:`` markers."""
+    marker_hits = [
+        path.relative_to(SOURCE_ROOT).as_posix()
+        for path in sorted(SOURCE_ROOT.rglob("*.py"))
+        if "AGNO_COMPAT:" in path.read_text(encoding="utf-8")
+    ]
 
-    assert not violations, f"Agno imports outside the boundary: {violations}"
-
-
-def test_native_tool_modules_have_no_agno_imports_or_compat_markers() -> None:
-    """Rewritten native toolkits neither import Agno nor carry AGNO_COMPAT markers."""
-    agno_hits: dict[str, list[str]] = {}
-    marker_hits: list[str] = []
-    for rel_path in sorted(AGNO_FREE_TOOL_MODULES):
-        source = (SOURCE_ROOT / rel_path).read_text(encoding="utf-8")
-        if imported := agno_imports(source):
-            agno_hits[rel_path] = sorted(imported)
-        if "AGNO_COMPAT:" in source:
-            marker_hits.append(rel_path)
-
-    assert not agno_hits, f"Native tool modules importing Agno: {agno_hits}"
-    assert not marker_hits, f"Native tool modules with AGNO_COMPAT markers: {marker_hits}"
+    assert not marker_hits, f"Retired AGNO_COMPAT markers found in src/mindroom: {marker_hits}"
 
 
-def test_wave_2_toolkits_do_not_import_agno() -> None:
-    """Both halves of each converted toolkit stay inside MindRoom's native authoring boundary."""
-    paths = {SOURCE_ROOT / "tools" / f"{name}.py" for name in NATIVE_WAVE_2}
-    paths.update(SOURCE_ROOT / "custom_tools" / f"{name}.py" for name in NATIVE_WAVE_2.values() if name is not None)
-    imports = {str(path.relative_to(SOURCE_ROOT)): agno_imports(path.read_text(encoding="utf-8")) for path in paths}
-    assert not {path: modules for path, modules in imports.items() if modules}
+def test_pyproject_has_no_agno_dependency() -> None:
+    """``pyproject.toml`` does not declare ``agno`` in any dependency list or group."""
+    data = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    project = data.get("project", {})
+    requirement_specs: list[str] = list(project.get("dependencies", ()))
+    for group in project.get("optional-dependencies", {}).values():
+        requirement_specs.extend(group)
+    for group in data.get("dependency-groups", {}).values():
+        requirement_specs.extend(item for item in group if isinstance(item, str))
 
-
-def test_reexported_agno_names_are_the_names_the_reexport_binds_from_agno() -> None:
-    """A name counts when the re-export imports it from Agno, under its alias; MindRoom's own names do not."""
-    source = """
-from agno.media import Image as AgnoImage
-from agno.tools import Toolkit
-from mindroom.tool_system.tool_function import ToolFunction
-
-
-def warm() -> None:
-    from agno.agent import Agent
-"""
-
-    assert reexported_agno_names(source) == {"AgnoImage", "Toolkit"}
-
-
-def test_no_module_outside_the_boundary_takes_an_agno_type_through_the_reexport() -> None:
-    """A module outside the boundary handles toolkits through the adapter's functions and MindRoom's own types."""
-    importers = sorted(reexport_agno_type_importers())
-
-    assert not importers, f"Modules that take an Agno type through {REEXPORT}: {importers}"
-
-
-def test_the_test_modules_that_import_agno_are_exactly_the_listed_ones() -> None:
-    """No new test module may import Agno or its runtime types, and one that stops leaves the list it no longer fits."""
-    imports = agno_test_imports()
-    runtime_importers = {
-        module
-        for module, imported in imports.items()
-        if any(
-            name == runtime or name.startswith(f"{runtime}.") for name in imported for runtime in AGNO_RUNTIME_MODULES
-        )
-    }
-
-    joined = sorted(imports.keys() - TEST_AGNO_IMPORTERS)
-    assert not joined, f"Test modules that newly import Agno: {joined}"
-    left = sorted(TEST_AGNO_IMPORTERS - imports.keys())
-    assert not left, f"Delete these modules from TEST_AGNO_IMPORTERS, since they no longer import Agno: {left}"
-    joined = sorted(runtime_importers - TEST_AGNO_RUNTIME_IMPORTERS)
-    assert not joined, f"Test modules that newly import Agno runtime types: {joined}"
-    left = sorted(TEST_AGNO_RUNTIME_IMPORTERS - runtime_importers)
-    assert not left, (
-        f"Delete these modules from TEST_AGNO_RUNTIME_IMPORTERS, since they no longer import Agno's runtime types: {left}"
-    )
+    agno_deps = [spec for spec in requirement_specs if Requirement(spec).name.lower() == "agno"]
+    assert not agno_deps, f"pyproject.toml still declares agno dependency: {agno_deps}"
 
 
 def test_parity_wording_finds_each_phrase_across_comment_lines_and_in_docstrings() -> None:

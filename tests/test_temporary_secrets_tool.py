@@ -27,12 +27,12 @@ from mindroom.secret_requests import (
     secret_holder,
     secret_request_registry,
 )
-from mindroom.tool_system.agno_toolkits import adapt_callable, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 
 if TYPE_CHECKING:

@@ -75,11 +75,11 @@ from mindroom.requester_identity import is_human_requester_id, resolve_human_req
 from mindroom.room_steward import membership_observers
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import config_plugins, dispose_plugins, prepare_plugins, publish_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, emit_custom_event, tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.toolkits import toolkit_function
 from mindroom.turn_origin import classify_turn_origin
 
 if TYPE_CHECKING:
@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import HookContext
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.relation_lookup import RelationLookup
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 __all__ = ["LoadedPlugin", "Room", "SentMessage", "TurnRefused", "load_plugin"]
 
@@ -382,7 +382,7 @@ class LoadedPlugin:
             context.resolve_worker_target(),
         )
 
-        async def call(toolkit: AnyToolkit) -> CallResult:
+        async def call(toolkit: Toolkit) -> CallResult:
             target = toolkit_function(toolkit, function)
             if target is None:
                 msg = f"Tool {tool!r} has no function {function!r}"

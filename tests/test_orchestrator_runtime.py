@@ -5403,7 +5403,7 @@ class TestMultiAgentOrchestrator:
             encoding="utf-8",
         )
         (plugin_root / "tools.py").write_text(
-            "from agno.tools import Toolkit\n"
+            "from mindroom.plugin_api import Toolkit\n"
             "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class UpdatedTool(Toolkit):\n"

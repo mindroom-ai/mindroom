@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 
 import pytest
-from agno.tools import Toolkit
 
 from mindroom.ai import stream_agent_response
 from mindroom.cancellation import request_task_cancel
@@ -18,6 +17,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.llm.errors import ProviderUnavailable
 from mindroom.llm.provider import TextDelta
 from mindroom.providers.pipeline import wrapped as provider_attempts
+from mindroom.tool_system.authoring import Toolkit
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,

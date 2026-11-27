@@ -9,13 +9,12 @@ import asyncio
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from agno.tools import Toolkit
-
 from mindroom import run_storage
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.registration import register_tool_with_metadata

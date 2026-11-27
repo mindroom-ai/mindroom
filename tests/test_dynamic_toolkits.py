@@ -8,8 +8,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom import agents as agents_module
@@ -34,11 +32,12 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, offered_refusal
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit, toolkit_offers
 from tests.conftest import test_runtime_paths
@@ -47,6 +46,7 @@ from tests.test_generated_agents import _created, _load, _personal, _with_templa
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
@@ -939,15 +939,12 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
                 runtime_paths=runtime_paths,
                 credentials_manager=get_runtime_credentials_manager(runtime_paths),
             )
-        local = Toolkit(name="local", auto_register=False)
+        local = Toolkit(name="local")
         colliding_names = (
             {"demo_call_tool", "demo_connection_status", "demo_list_tools"} if collide_all else {"demo_list_tools"}
         )
         for function_name in colliding_names:
-            local.functions[function_name] = Function(
-                name=function_name,
-                entrypoint=lambda: "local",
-            )
+            local.functions[function_name] = lambda: "local"
         return local
 
     monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
@@ -1008,8 +1005,8 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
             )
             return built[tool_name]
         if tool_name == "sleep":
-            local = Toolkit(name="local", auto_register=False)
-            local.functions["demo_list_tools"] = Function(name="demo_list_tools", entrypoint=lambda: "local")
+            local = Toolkit(name="local")
+            local.functions["demo_list_tools"] = lambda: "local"
             return local
         return build_agent_toolkit(tool_name, **kwargs)
 
@@ -1057,60 +1054,24 @@ def test_native_tool_search_keeps_deferred_toolkit_instructions_in_the_prompt(
     assert instruction_marker not in (function.description or "")
 
 
-def test_portable_deferral_omits_function_instructions() -> None:
-    """A toolkit deferred behind portable search should not leak instructions attached to its functions."""
+def test_defer_toolkit_splits_instructions_between_portable_and_native_search() -> None:
+    """Portable search moves toolkit instructions to tool_search; native search keeps them for the prompt."""
 
     def deferred_tool() -> str:
+        """Do the deferred thing."""
         return "deferred"
 
-    function = Function(
-        name="deferred_tool",
-        entrypoint=deferred_tool,
-        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
-        add_instructions=True,
-    )
-    toolkit = Toolkit(name="deferred", tools=[function])
+    toolkit = Toolkit(name="deferred", tools=[deferred_tool], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
     adapted = adapt_toolkit(toolkit)
-    deferral, deferred = defer_toolkit("deferred", "", adapted, portable_search=True)
 
-    assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
-    # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
-    assert offered_refusal(deferred) is None
-    assert offered_refusal(adapted) == (
-        "Tool function 'deferred_tool' sets instructions for Agno to add to the system prompt, which MindRoom adds only"
-        " per toolkit; set them on the toolkit instead"
-    )
-    # The built toolkit is left as it was built.
-    assert toolkit.functions["deferred_tool"].add_instructions is True
+    portable_deferral, portable_deferred = defer_toolkit("deferred", "", adapted, portable_search=True)
+    assert portable_deferral.instructions == "DEFERRED_TOOLKIT_INSTRUCTIONS"
+    assert portable_deferred.instructions is None
 
-
-def test_native_deferral_keeps_toolkit_instructions_and_describes_function_instructions() -> None:
-    """Native search keeps the toolkit's instructions for the prompt and puts a function's own in its description."""
-
-    def deferred_tool() -> str:
-        return "deferred"
-
-    function = Function(
-        name="deferred_tool",
-        description="Do the deferred thing.",
-        entrypoint=deferred_tool,
-        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
-        add_instructions=True,
-    )
-    plain = Function(name="plain_tool", description="Lists items.\n", entrypoint=deferred_tool)
-    toolkit = Toolkit(name="deferred", tools=[function, plain], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
-    deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(toolkit), portable_search=False)
-
-    assert deferred.instructions is not None
-    assert "DEFERRED_TOOLKIT_INSTRUCTIONS" in deferred.instructions
-    descriptions = {function.name: function.description for function in deferred.functions}
-    assert descriptions["deferred_tool"] == "Do the deferred thing.\n\nDEFERRED_FUNCTION_INSTRUCTIONS"
-    # A function without instructions of its own goes out exactly as an eager toolkit sends it.
-    assert descriptions["plain_tool"] == "Lists items.\n"
-    assert offered_refusal(deferred) is None
-    # Only portable search reads the deferral's instructions, and native search shows them already.
-    assert deferral.instructions is None
-    assert deferral.function_instructions == {}
+    native_deferral, native_deferred = defer_toolkit("deferred", "", adapted, portable_search=False)
+    assert native_deferral.instructions is None
+    assert native_deferred.instructions == "DEFERRED_TOOLKIT_INSTRUCTIONS"
+    assert [function.description for function in native_deferred.functions] == ["Do the deferred thing."]
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1123,22 +1084,10 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
         return "deferred"
 
     active_toolkit_marker = "ACTIVE_TOOLKIT_INSTRUCTIONS"
-    active_toolkit = Toolkit(
-        name="active",
-        tools=[Function(name="shared_tool", entrypoint=active_tool)],
-        instructions=active_toolkit_marker,
-    )
-    deferred_function = Function(
-        name="shared_tool",
-        entrypoint=deferred_tool,
-        instructions="DEFERRED_FUNCTION_INSTRUCTIONS",
-        add_instructions=True,
-    )
-    deferred_toolkit = Toolkit(
-        name="deferred",
-        tools=[deferred_function],
-        instructions="DEFERRED_TOOLKIT_INSTRUCTIONS",
-    )
+    active_toolkit = Toolkit(name="active", instructions=active_toolkit_marker)
+    active_toolkit.functions["shared_tool"] = active_tool
+    deferred_toolkit = Toolkit(name="deferred", instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
+    deferred_toolkit.functions["shared_tool"] = deferred_tool
     _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit), portable_search=True)
 
     assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
@@ -1657,12 +1606,14 @@ def test_tool_search_says_when_more_functions_matched_than_it_returned() -> None
 def test_tool_search_at_the_result_limit_suggests_only_narrower_keywords() -> None:
     """A cut-off result at the result limit does not suggest raising max_results, which cannot return more."""
 
-    def bulk_function(index: int) -> Function:
-        return Function(name=f"bulk_{index}", description="Bulk operation.", entrypoint=lambda: "ok")
+    def bulk_function(index: int) -> Callable[[], str]:
+        @tool(name=f"bulk_{index}", description="Bulk operation.")
+        def run() -> str:
+            return "ok"
 
-    bulk = Toolkit(name="bulk")
-    for index in range(25):
-        bulk.functions[f"bulk_{index}"] = bulk_function(index)
+        return run
+
+    bulk = Toolkit(name="bulk", tools=[bulk_function(index) for index in range(25)])
     toolkit = _search_toolkit(_deferred(bulk, "Bulk operations"))
 
     below_limit = _tool_payload(toolkit.tool_search("bulk", max_results=19))
@@ -1691,12 +1642,14 @@ def test_tool_search_without_a_query_lists_every_deferred_function() -> None:
 
 
 def _bulk_search_toolkit(count: int, description: str) -> DynamicToolsToolkit:
-    def bulk_function(index: int) -> Function:
-        return Function(name=f"bulk_{index}", description=description, entrypoint=lambda: "ok")
+    def bulk_function(index: int) -> Callable[[], str]:
+        @tool(name=f"bulk_{index}", description=description)
+        def run() -> str:
+            return "ok"
 
-    bulk = Toolkit(name="bulk")
-    for index in range(count):
-        bulk.functions[f"bulk_{index}"] = bulk_function(index)
+        return run
+
+    bulk = Toolkit(name="bulk", tools=[bulk_function(index) for index in range(count)])
     return _search_toolkit(_deferred(bulk, "Bulk operations"))
 
 
@@ -1786,51 +1739,6 @@ def test_call_tool_schema_reaches_gemini_as_authored() -> None:
         "function_declarations": [{"name": "call_tool", "parameters_json_schema": dict(parameters)}],
     }
     assert "example_key" not in str(declarations)
-
-
-class _DualTools(Toolkit):
-    """Registers a sync and an async implementation under one name, as async-capable toolkits do."""
-
-    def __init__(self) -> None:
-        super().__init__(name="dual", tools=[self.lookup])
-        self.async_functions["lookup"] = Function.from_callable(self.lookup_async, name="lookup")
-
-    def lookup(self, customer_id: int) -> str:
-        """Look up a customer synchronously."""
-        return str(customer_id)
-
-    async def lookup_async(self, account_id: int) -> str:
-        """Look up an account asynchronously."""
-        return str(account_id)
-
-
-def test_tool_search_describes_the_async_implementation_the_loop_runs() -> None:
-    """The loop runs a toolkit's async implementation when it has one, so search must describe that one."""
-    toolkit = _search_toolkit(_deferred(_DualTools(), "Dual"))
-
-    match = _tool_payload(toolkit.tool_search("lookup"))["matches"][0]
-
-    assert set(match["parameters"]["properties"]) == {"account_id"}
-
-
-class _PingTools(Toolkit):
-    def __init__(self) -> None:
-        super().__init__(name="ping", tools=[self.ping])
-        self.functions["ping"].instructions = "Only ping hosts the user named."
-
-    def ping(self, host: str) -> str:
-        """Ping a host."""
-        return host
-
-
-def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> None:
-    """Per-function guidance a deferred function would render arrives with its search result instead."""
-    pings = _PingTools()
-    toolkit = _search_toolkit(_deferred(pings, "Network checks"))
-
-    match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
-
-    assert match["instructions"] == "Only ping hosts the user named."
 
 
 class _GithubTools(Toolkit):
@@ -1941,12 +1849,16 @@ def test_request_estimate_leaves_out_hidden_deferred_definitions(
 
 def test_tool_search_exact_name_match_ignores_case() -> None:
     """MCP functions often use camelCase, and an exact name query must outrank a function sharing its word."""
+
+    def getIssue_v2(number: int) -> str:  # noqa: N802
+        return str(number)
+
+    def getIssue(number: int) -> str:  # noqa: N802
+        return str(number)
+
     camel = Toolkit(
         name="camel",
-        tools=[
-            Function.from_callable(lambda number: str(number), name="getIssue_v2"),
-            Function.from_callable(lambda number: str(number), name="getIssue"),
-        ],
+        tools=[getIssue_v2, getIssue],
     )
     toolkit = _search_toolkit(_deferred(camel, "Camel"))
 
@@ -1957,14 +1869,21 @@ def test_tool_search_exact_name_match_ignores_case() -> None:
 
 def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
     """One authored entry can expand to several toolkits; none of their instructions may be dropped."""
+
+    def alpha_tool() -> str:
+        return "a"
+
+    def beta_tool() -> str:
+        return "b"
+
     first = Toolkit(
         name="first",
-        tools=[Function.from_callable(lambda: "a", name="alpha_tool")],
+        tools=[alpha_tool],
         instructions="Use alpha.",
     )
     second = Toolkit(
         name="second",
-        tools=[Function.from_callable(lambda: "b", name="beta_tool")],
+        tools=[beta_tool],
         instructions="Use beta.",
     )
     toolkit = _search_toolkit(_deferred(first, "Shared", "shared"), _deferred(second, "Shared", "shared"))

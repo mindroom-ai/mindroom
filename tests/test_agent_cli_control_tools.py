@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli import cli_approval_recovery
@@ -48,7 +46,7 @@ from mindroom.response_turn import (
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
 from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
@@ -57,10 +55,10 @@ from mindroom.tool_system.runtime_context import get_call_progress_sink, note_ca
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
-from tests.agent_tool_helpers import offered_agno_function
 from tests.approval_continuation_helpers import answered_calls, approval_continuation
 from tests.conftest import bind_runtime_paths, live_turn_tools_for_test, seed_session_row
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
@@ -100,17 +98,16 @@ def _flagged(
     name: str,
     *entrypoints: Callable[..., object],
     gate: ToolGate | None = None,
-    **flags: object,
+    requires_confirmation: bool = False,
+    stop_after_tool_call: bool = False,
 ) -> AdaptedToolkit:
-    """Return a toolkit named ``name`` whose Agno functions all carry ``flags``; ``gate`` replaces the gate they give."""
-    functions = []
-    for entrypoint in entrypoints:
-        function = Function.from_callable(entrypoint)
-        for flag, value in flags.items():
-            setattr(function, flag, value)
-        adapted = offered_agno_function(function)
-        functions.append(adapted if gate is None else replace(adapted, gate=gate))
-    return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
+    """Return a toolkit named ``name`` whose functions carry the given gate and stop flag."""
+    resolved_gate = gate if gate is not None else (ToolGate.CONFIRM if requires_confirmation else None)
+    functions = tuple(
+        replace(adapt_callable(entrypoint), gate=resolved_gate, stop_after_call=stop_after_tool_call)
+        for entrypoint in entrypoints
+    )
+    return AdaptedToolkit(name=name, functions=functions, instructions=None)
 
 
 async def _delegation_catalog(
@@ -185,11 +182,17 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
                 )
         return payload
 
-    switch = Function.from_callable(switch_thread_model)
-    switch.stop_after_tool_call = True
+    control_adapted = adapt_toolkit(Toolkit(name="control", tools=[switch_thread_model, mutate]))
+    control_adapted = replace(
+        control_adapted,
+        functions=tuple(
+            replace(fn, stop_after_call=True) if fn.name == "switch_thread_model" else fn
+            for fn in control_adapted.functions
+        ),
+    )
     catalog = await _catalog(
         tmp_path,
-        [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
+        [_toolkit("shell", run_shell_command), control_adapted],
     )
     catalog.store = create_agent_state_storage("helper", tmp_path)
     receipts = []

@@ -460,7 +460,7 @@ def _ollama_model_options(config: Config, model_name: str, runtime_paths: Runtim
 
 def _mem0_ollama_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
     """Return the client options of Mem0's Ollama memory LLM, which MindRoom gives only the host."""
-    from mindroom.memory.config import mem0_ollama_host  # noqa: PLC0415 - memory setup loads Agno and tiktoken
+    from mindroom.memory.config import mem0_ollama_host  # noqa: PLC0415 - memory setup loads tiktoken
 
     return ollama_client_options(mem0_ollama_host(config, runtime_paths), None)
 

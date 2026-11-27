@@ -15,7 +15,6 @@ import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import (
     CredentialsManager,
     get_runtime_credentials_manager,
@@ -31,7 +30,7 @@ from mindroom.desktop.credentials import (
     save_desktop_credentials,
 )
 from mindroom.desktop.media import DesktopMediaError
-from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
+from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
 from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_system import agent_tools as agent_tools_module
@@ -103,7 +102,7 @@ def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
 
     assert metadata.requires_room_context
     assert metadata.default_execution_target.value == "primary"
-    assert metadata.function_names == ("desktop",)
+    assert metadata.function_names == ("desktop", "run_desktop_shell")
     assert [field.name for field in metadata.config_fields or ()] == ["timeout_seconds"]
 
 
@@ -806,14 +805,13 @@ async def test_timeout_returns_identity_for_request_status_recovery(monkeypatch:
 def _route_desktop_requests(monkeypatch: pytest.MonkeyPatch, *responses: DesktopResponse) -> AsyncMock:
     """Send every command to a recorded router returning the given responses in order."""
     request = AsyncMock(side_effect=list(responses))
+    router = SimpleNamespace(request=request)
     monkeypatch.setattr(
         "mindroom.custom_tools.desktop.get_tool_runtime_context",
         lambda: SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object()),
     )
-    monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.desktop_response_router",
-        lambda _client: SimpleNamespace(request=request),
-    )
+    monkeypatch.setattr("mindroom.custom_tools.desktop.desktop_response_router", lambda _client: router)
+    monkeypatch.setattr("mindroom.custom_tools.desktop_shell.desktop_response_router", lambda _client: router)
     return request
 
 
@@ -842,57 +840,42 @@ def _output_media(output: bytes) -> EncryptedDesktopMedia:
     )
 
 
-def test_local_folder_and_shell_actions_are_discoverable_with_their_own_parameters() -> None:
-    """The schema advertises read-only folder and handle-based shell actions with bounded arguments."""
-    function = toolkit_offers(DesktopTools(), "desktop")
-    schema = function.parameters
-    properties = schema["properties"]
+def test_desktop_exposes_folder_actions_and_separate_run_desktop_shell_tool() -> None:
+    """Desktop exposes folder actions without shell actions; run_desktop_shell has a closed shell schema."""
+    desktop_fn = toolkit_offers(DesktopTools(), "desktop")
+    properties = desktop_fn.parameters["properties"]
 
-    assert {"list_folders", "list_directory", "read_file", "run_shell", "check_shell", "kill_shell"} <= set(
-        properties["action"]["enum"],
-    )
+    assert {"list_folders", "list_directory", "read_file"} <= set(properties["action"]["enum"])
+    assert not ({"run_shell", "check_shell", "kill_shell"} & set(properties["action"]["enum"]))
+    assert not ({"command", "cwd", "timeout_seconds", "handle", "force"} & set(properties))
     assert properties["root_id"]["type"] == "string"
     assert properties["path"]["maxLength"] == 4096
     assert (properties["offset"]["type"], properties["offset"]["minimum"]) == ("integer", 0)
-    assert properties["command"]["maxLength"] == 8192
-    assert properties["cwd"]["maxLength"] == 4096
-    assert (properties["timeout_seconds"]["minimum"], properties["timeout_seconds"]["maximum"]) == (1, 60)
-    assert properties["handle"]["type"] == "string"
-    assert properties["force"]["type"] == "boolean"
-    description = function.description or ""
-    assert "read-only" in description
-    assert "full account access" in description
-    assert "request_status" in description
-    assert "check_shell" in description
-    assert "kill_shell" in description
-    assert "untrusted" in description
-    assert "gui_mode (observe_only or control) covers only app control" in description
-    assert "kill_shell finishes with state killed" in description
+    assert "read_file" in properties["offset"]["description"]
+    assert "check_shell" not in properties["offset"]["description"]
+    desktop_desc = desktop_fn.description or ""
+    assert "run_desktop_shell" in desktop_desc
+    assert "check_shell" not in desktop_desc
+    assert "kill_shell" not in desktop_desc
+    assert "gui_mode (observe_only or control) covers only app control" in desktop_desc
 
-
-def test_shell_guidance_states_output_limits_and_the_shell_it_runs_in() -> None:
-    """The agent learns the real size limits and that each command runs alone in a non-interactive /bin/sh."""
-    function = toolkit_offers(DesktopTools(), "desktop")
-    description = function.description or ""
-    assert f"{DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES // 1024} KiB" in description
-    assert f"{MAX_SHELL_OUTPUT_BYTES // (1024 * 1024)} MiB" in description
+    shell_fn = toolkit_offers(DesktopTools(), "run_desktop_shell")
+    shell_schema = shell_fn.parameters
+    assert shell_schema["additionalProperties"] is False
+    assert set(shell_schema["properties"]) == {"args", "tail", "timeout", "cwd"}
+    assert shell_schema["required"] == ["args"]
+    shell_desc = shell_fn.description or ""
     for phrase in (
-        "stderr is merged into output in order",
-        "2>file",
-        "$SHELL is the user's login shell",
-        "fresh non-interactive /bin/sh",
+        "/bin/sh",
+        "full account access",
         "stdin at EOF",
         "no TTY",
+        "local-only",
+        "120s",
+        "job cancel",
+        "mindroom_output_path",
     ):
-        assert phrase in description
-    command = function.parameters["properties"]["command"]["description"]
-    assert "/bin/sh" in command
-    assert "2>file" in command
-    handle = function.parameters["properties"]["handle"]["description"]
-    assert handle == (
-        "Shell handle from a run_shell or check_shell reply; a finished command keeps one only while output is "
-        "still undelivered."
-    )
+        assert phrase in shell_desc
 
 
 @pytest.mark.asyncio
@@ -920,113 +903,34 @@ async def test_remote_folder_read_encodes_root_and_path_and_returns_text_without
 
 @pytest.mark.asyncio
 async def test_folder_listing_omits_unspecified_optional_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Optional folder and handle arguments are sent only when the agent supplies them."""
+    """Optional folder arguments are sent only when the agent supplies them."""
     request = _route_desktop_requests(
         monkeypatch,
         DesktopResponse("r1", "s", True, result={"folders": []}),
         DesktopResponse("r2", "s", True, result={"entries": [], "truncated": False}),
-        DesktopResponse("r3", "s", True, result={"state": "killed", "handle": "shell:1"}),
-        DesktopResponse("r4", "s", True, result={"state": "killed", "handle": "shell:1"}),
     )
     tool = _configured_tool(monkeypatch)
 
     await tool.desktop("list_folders")
     await tool.desktop("list_directory", root_id="root-1")
-    await tool.desktop("kill_shell", handle="shell:1")
-    await tool.desktop("kill_shell", handle="shell:1", force=True)
 
     assert [call.args[1].parameters for call in request.await_args_list] == [
         {},
         {"root_id": "root-1"},
-        {"handle": "shell:1"},
-        {"handle": "shell:1", "force": True},
     ]
-
-
-@pytest.mark.asyncio
-async def test_check_shell_polls_from_an_offset_and_returns_where_to_continue(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent passes the last next_offset to check_shell; other shell actions refuse an offset."""
-    polled = _shell_result(state="running", handle="shell:1", exit_code=None, output="new", next_offset=9)
-    request = _route_desktop_requests(monkeypatch, DesktopResponse("r1", "s", True, result=polled))
-    tool = _configured_tool(monkeypatch)
-
-    result = await tool.desktop("check_shell", handle="shell:1", offset=6)
-
-    assert request.await_args.args[1].parameters == {"handle": "shell:1", "offset": 6}
-    assert json.loads(result.content)["result"]["next_offset"] == 9
-    for action, arguments, message in (
-        ("check_shell", {"handle": "shell:1", "offset": -1}, "offset must be an integer of at least 0"),
-        ("kill_shell", {"handle": "shell:1", "offset": 6}, "does not accept offset"),
-        ("run_shell", {"command": "ls", "offset": 6}, "does not accept offset"),
-    ):
-        payload = json.loads((await tool.desktop(action, **arguments)).content)
-        assert (payload["status"], message in payload["message"]) == ("error", True)
-    assert request.await_count == 1
-    properties = toolkit_offers(tool, "desktop").parameters["properties"]
-    assert "check_shell" in properties["offset"]["description"]
-    description = toolkit_offers(tool, "desktop").description or ""
-    assert "next_offset" in description
-    assert "an output_start above the offset you asked for" in description
-
-
-@pytest.mark.asyncio
-async def test_run_shell_waits_for_local_approval_while_other_actions_keep_configured_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Shell starts may wait the full command lifetime; handle checks keep the authored timeout."""
-    request = _route_desktop_requests(
-        monkeypatch,
-        DesktopResponse("r1", "s", True, result=_shell_result(output="done\n", output_bytes=5)),
-        DesktopResponse("r2", "s", True, result=_shell_result(state="running", handle="shell:1", exit_code=None)),
-    )
-    monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.load_desktop_credentials",
-        lambda *_args, **_kwargs: {
-            "device_user_id": "@desktop:example.org",
-            "device_id": "DESKTOP",
-            "device_ed25519": "fingerprint",
-        },
-    )
-    tool = DesktopTools(
-        timeout_seconds=12,
-        credentials_manager=MagicMock(spec=CredentialsManager),
-        worker_target=_desktop_target(),
-    )
-
-    run = await tool.desktop("run_shell", command="make test", cwd="/work/project", timeout_seconds=45)
-    check = await tool.desktop("check_shell", handle="shell:1")
-
-    run_call, check_call = request.await_args_list
-    assert run_call.args[1].parameters == {"command": "make test", "cwd": "/work/project", "timeout_seconds": 45}
-    assert run_call.args[1].expires_at_ms - run_call.args[1].issued_at_ms == 120_000
-    assert run_call.kwargs["timeout_seconds"] == 120
-    assert check_call.args[1].parameters == {"handle": "shell:1"}
-    assert check_call.args[1].expires_at_ms - check_call.args[1].issued_at_ms == 12_000
-    assert check_call.kwargs["timeout_seconds"] == 12
-    run_result = json.loads(run.content)["result"]
-    assert run_result["output"] == "done\n"
-    assert "output_attachment" not in run_result
-    assert json.loads(check.content)["result"]["handle"] == "shell:1"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "arguments", "message"),
     [
-        ("read_file", {"root_id": "root-1", "path": "a.txt", "command": "ls"}, "command"),
         ("list_directory", {"path": "docs"}, "root_id"),
         ("read_file", {"root_id": "root-1"}, "path"),
         ("read_file", {"root_id": "root-1", "path": "a.txt", "offset": -1}, "offset"),
-        ("run_shell", {"command": "ls", "app": "com.example.Editor"}, "app"),
-        ("run_shell", {"command": "ls", "timeout_seconds": 61}, "timeout_seconds"),
-        ("run_shell", {"command": "ls", "timeout_seconds": True}, "timeout_seconds"),
-        ("run_shell", {"command": "ls", "handle": "shell:1"}, "handle"),
-        ("run_shell", {}, "command"),
-        ("run_shell", {"command": "x" * 8193}, "command"),
-        ("check_shell", {"handle": "shell:1", "force": True}, "force"),
-        ("kill_shell", {}, "handle"),
+        ("run_shell", {}, "Unsupported desktop action: run_shell"),
+        ("check_shell", {}, "Unsupported desktop action: check_shell"),
+        ("kill_shell", {}, "Unsupported desktop action: kill_shell"),
         ("status", {"root_id": "root-1"}, "root_id"),
-        ("get_app_state", {"app": "com.example.Editor", "cwd": "/work"}, "cwd"),
     ],
 )
 async def test_local_actions_accept_only_their_own_arguments(
@@ -1035,7 +939,7 @@ async def test_local_actions_accept_only_their_own_arguments(
     arguments: dict[str, object],
     message: str,
 ) -> None:
-    """Arguments meant for another action are refused before anything leaves the cloud."""
+    """Arguments meant for another action and removed shell actions are refused before leaving the cloud."""
     request = _route_desktop_requests(monkeypatch)
     tool = _configured_tool(monkeypatch)
 
@@ -1048,98 +952,32 @@ async def test_local_actions_accept_only_their_own_arguments(
 
 
 @pytest.mark.asyncio
-async def test_shell_output_attachment_is_downloaded_verified_and_returned_as_text(
+async def test_request_status_recovers_a_lost_shell_reply_with_stdout_and_stderr_attachments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Large output arrives as the full text; the transport descriptor and its key never reach the model."""
-    output = "row\n" * 30_000
-    media = _output_media(output.encode())
-    _route_desktop_requests(
-        monkeypatch,
-        DesktopResponse(
-            "r1",
-            "s",
-            True,
-            result=_shell_result(output_bytes=len(output), output_attachment=media.to_content()),
-        ),
-    )
-    download = AsyncMock(return_value=output.encode())
-    monkeypatch.setattr("mindroom.custom_tools.desktop.download_encrypted_media", download)
-
-    result = await _configured_tool(monkeypatch).desktop("run_shell", command="seq 30000")
-
-    payload = json.loads(result.content)
-    assert payload["status"] == "ok"
-    assert payload["result"]["output"] == output
-    assert "output_attachment" not in payload["result"]
-    assert media.key not in result.content
-    downloaded_media = download.await_args.args[1]
-    assert downloaded_media == media
-    assert download.await_args.kwargs["timeout_seconds"] == 30.0
-
-
-@pytest.mark.asyncio
-async def test_failed_output_download_is_partial_and_points_to_request_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A command that ran is never presented as safe to run again when only its output transfer failed."""
-    media = _output_media(b"x" * 50_000)
-    request = _route_desktop_requests(
-        monkeypatch,
-        DesktopResponse(
-            "r1",
-            "s",
-            True,
-            result=_shell_result(output_bytes=50_000, output_attachment=media.to_content()),
-        ),
-    )
-    monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.download_encrypted_media",
-        AsyncMock(side_effect=DesktopMediaError("Matrix media authentication or decryption failed.")),
-    )
-
-    result = await _configured_tool(monkeypatch).desktop("check_shell", handle="shell:1")
-
-    payload = json.loads(result.content)
-    assert payload["status"] == "partial"
-    assert payload["result"]["exit_code"] == 0
-    assert "output_attachment" not in payload["result"]
-    assert "request_status" in payload["message"]
-    assert "check_shell again" in payload["message"]
-    assert payload["request_id"] == request.await_args.args[1].request_id
-    assert payload["recovery_action"] == "request_status"
-    assert media.key not in result.content
-
-
-@pytest.mark.asyncio
-async def test_interrupted_shell_command_is_partial_with_the_bridge_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An uncertain shell outcome keeps the do-not-repeat warning instead of looking like a failed screenshot."""
-    warning = "The shell command outcome is unknown and it may have completed; do not repeat it automatically."
-    _route_desktop_requests(
-        monkeypatch,
-        DesktopResponse(
-            "r1",
-            "s",
-            True,
-            result={"action": "run_shell", "action_outcome": "unknown", "warning": warning},
-        ),
-    )
-
-    result = await _configured_tool(monkeypatch).desktop("run_shell", command="make deploy")
-
-    payload = json.loads(result.content)
-    assert payload["status"] == "partial"
-    assert payload["message"] == warning
-
-
-@pytest.mark.asyncio
-async def test_request_status_recovers_a_lost_shell_reply_with_its_full_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A lost check_shell reply is recovered from its receipt, including output sent as an attachment."""
+    """A lost shell reply is recovered from its receipt, expanding both stdout and stderr attachments."""
     output = b"recovered\n" * 10_000
-    media = _output_media(output)
+    stderr = b"err-line\n" * 5_000
+    out_media = _output_media(output)
+    err_media = EncryptedDesktopMedia(
+        url="mxc://example.org/shell-stderr",
+        key="stderr-key",
+        iv="stderr-iv",
+        sha256="stderr-hash",
+        mime_type="text/plain",
+        size=len(stderr),
+    )
     recorded = DesktopResponse(
         "original",
         "s",
         True,
-        result=_shell_result(handle="shell:1", output_bytes=len(output), output_attachment=media.to_content()),
+        result=_shell_result(
+            handle="shell:1",
+            output_bytes=len(output),
+            output_attachment=out_media.to_content(),
+            stderr_bytes=len(stderr),
+            stderr_attachment=err_media.to_content(),
+        ),
     )
     _route_desktop_requests(
         monkeypatch,
@@ -1150,7 +988,10 @@ async def test_request_status_recovers_a_lost_shell_reply_with_its_full_output(m
             result={"request_id": "original", "state": "completed", "response": recorded.to_content()},
         ),
     )
-    monkeypatch.setattr("mindroom.custom_tools.desktop.download_encrypted_media", AsyncMock(return_value=output))
+    monkeypatch.setattr(
+        "mindroom.custom_tools.desktop.download_encrypted_media",
+        AsyncMock(side_effect=[output, stderr]),
+    )
 
     result = await _configured_tool(monkeypatch).desktop("request_status", request_id="original")
 
@@ -1158,17 +999,20 @@ async def test_request_status_recovers_a_lost_shell_reply_with_its_full_output(m
     assert payload["status"] == "ok"
     recovered = payload["result"]["response"]["result"]
     assert recovered["output"] == output.decode()
+    assert recovered["stderr"] == stderr.decode()
     assert recovered["handle"] == "shell:1"
     assert "output_attachment" not in recovered
-    assert media.key not in result.content
+    assert "stderr_attachment" not in recovered
+    assert out_media.key not in result.content
+    assert err_media.key not in result.content
 
 
 @pytest.mark.asyncio
-async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
+async def test_large_desktop_and_shell_outputs_use_workspace_output_file_wrapper(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The registered toolkit is wrapped, so large desktop results auto-save and honor mindroom_output_path."""
+    """Registered desktop and run_desktop_shell tools support mindroom_output_path and auto-save."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     output = "log line\n" * 12_000
@@ -1176,11 +1020,20 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
         "r1",
         "s",
         True,
-        result=_shell_result(output_bytes=len(output), output_attachment=_output_media(output.encode()).to_content()),
+        result=_shell_result(
+            output_bytes=len(output),
+            output_attachment=_output_media(output.encode()).to_content(),
+            stderr="",
+            stderr_bytes=0,
+            stderr_start=0,
+            stderr_next_offset=0,
+            stderr_truncated=False,
+            stderr_attachment=None,
+        ),
     )
     _route_desktop_requests(monkeypatch, response, response)
     monkeypatch.setattr(
-        "mindroom.custom_tools.desktop.download_encrypted_media",
+        "mindroom.custom_tools.desktop_shell.download_encrypted_media",
         AsyncMock(return_value=output.encode()),
     )
     monkeypatch.setattr(
@@ -1199,25 +1052,23 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
         worker_target=_desktop_target(),
         tools=builtin_tool_registry(),
     )
-    function = toolkit_offers(toolkit, "desktop")
-    assert "mindroom_output_path" in function.parameters["properties"]
+    desktop_fn = toolkit_offers(toolkit, "desktop")
+    shell_fn = toolkit_offers(toolkit, "run_desktop_shell")
+    assert "mindroom_output_path" in desktop_fn.parameters["properties"]
+    assert "mindroom_output_path" in shell_fn.parameters["properties"]
 
-    auto_saved = await function.entrypoint(action="run_shell", command="make logs")
-    redirected = await function.entrypoint(
-        action="run_shell",
-        command="make logs",
-        mindroom_output_path="logs/shell.json",
-    )
+    auto_saved = await shell_fn.entrypoint(args="make logs", tail=20_000)
+    redirected = await shell_fn.entrypoint(args="make logs", mindroom_output_path="logs/shell.txt")
 
     receipt = auto_saved["mindroom_tool_output"]
     assert receipt["auto_saved"] is True
-    assert receipt["path"].startswith("mindroom_tool_outputs/desktop-")
+    assert receipt["path"].startswith("mindroom_tool_outputs/run_desktop_shell-")
     assert "log line" in receipt["preview"]
-    saved = json.loads((workspace / receipt["path"]).read_text(encoding="utf-8"))
-    assert saved["result"]["output"] == output
-    assert redirected["mindroom_tool_output"]["status"] == "saved_to_file"
-    written = json.loads((workspace / "logs" / "shell.json").read_text(encoding="utf-8"))
-    assert written["result"]["output"] == output
+    auto_text = (workspace / receipt["path"]).read_text(encoding="utf-8")
+    assert "of 12000 lines; output truncated to the last 51200 bytes" in auto_text
+    redirected_receipt = json.loads(redirected)["mindroom_tool_output"]
+    assert redirected_receipt["status"] == "saved_to_file"
+    assert (workspace / "logs" / "shell.txt").read_text(encoding="utf-8") == output
 
 
 def _build_assistant(

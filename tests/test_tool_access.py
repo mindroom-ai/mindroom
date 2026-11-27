@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import pytest
-from agno.tools.function import Function
 
 from mindroom.llm.provider import ToolSpec
+from mindroom.tool_system.authoring import passthrough_tool
 from mindroom.tool_system.tool_access import (
     search_tool_metadata,
     tool_definition,
     validate_tool_arguments,
 )
-from tests.agent_tool_helpers import offered_agno_function
+from mindroom.tool_system.toolkits import adapt_callable
 
 
 def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
@@ -20,19 +20,14 @@ def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
     def list_files(path: str) -> str:
         return path
 
-    required: list[object] = []
-    required.append(required)
-    function = Function(
-        name="list",
-        entrypoint=list_files,
-        parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": required},
-    )
+    parameters = {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+    marked = passthrough_tool(name="list", parameters=parameters)(list_files)
 
-    schema = offered_agno_function(function).parameters
+    adapted = adapt_callable(marked)
 
-    assert schema["required"] == ["path"]
-    assert function.parameters["required"][0] is function.parameters["required"]
-    assert function.entrypoint is list_files
+    assert adapted.parameters == parameters
+    assert adapted.parameters is not parameters
+    assert adapted.entrypoint is list_files
 
 
 def test_a_tool_definition_shows_the_model_its_name_description_and_schema_only() -> None:

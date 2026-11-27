@@ -24,9 +24,9 @@ from mindroom.background_tasks import create_background_task
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.skill_usage import record_skill_use
+from mindroom.tool_system.toolkits import configure_toolkit_functions
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

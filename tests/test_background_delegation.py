@@ -59,7 +59,7 @@ from mindroom.tool_jobs.control import (
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context

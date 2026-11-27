@@ -78,7 +78,7 @@ def _write_broken_tool_plugin(plugin_root: Path, tool_name: str = "broken_plugin
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
@@ -108,7 +108,7 @@ def _write_pre_registration_broken_tool_plugin(plugin_root: Path, tool_name: str
     )
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
@@ -136,7 +136,7 @@ def _write_constant_named_broken_tool_plugin(plugin_root: Path, tool_name: str =
     )
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         f"TOOL_NAME = {tool_name!r}\n"
@@ -166,7 +166,7 @@ def _write_dynamic_named_broken_tool_plugin(plugin_root: Path, tool_name: str = 
     )
     (plugin_root / "tools.py").write_text(
         "from definitely_missing_plugin_dependency import broken\n"
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
@@ -193,7 +193,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class BrokenTool(Toolkit):\n"
@@ -228,7 +228,7 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
 def _tool_plugin_source(tool_name: str, *, toolkit_name: str = "demo") -> str:
     """Return a tools module registering ``tool_name``, built as an empty toolkit named ``toolkit_name``."""
     return (
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
@@ -1057,7 +1057,7 @@ def _write_package_helper_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         encoding="utf-8",
     )
     (plugin_root / "helpers.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
@@ -2039,7 +2039,7 @@ def test_plugin_loading_rejects_plugin_tool_name_collisions(tmp_path: Path) -> N
     )
     for root, display_name in ((first_root, "First Tool"), (second_root, "Second Tool")):
         (root / "tools.py").write_text(
-            "from agno.tools import Toolkit\n"
+            "from mindroom.plugin_api import Toolkit\n"
             "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
             "\n"
             "class DemoTool(Toolkit):\n"
@@ -2077,7 +2077,7 @@ def test_plugin_loading_rejects_duplicate_tool_names_within_one_plugin(tmp_path:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class FirstTool(Toolkit):\n"
@@ -3019,6 +3019,37 @@ def test_plugin_loading_skips_later_broken_plugin_and_keeps_earlier_tools(
         call.args == ("Failed to load plugin, skipping",)
         and call.kwargs["path"] == str(bad_root.resolve())
         and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+        for call in mock_logger.warning.call_args_list
+    )
+
+
+def test_plugin_loading_logs_agno_migration_message_when_skipping_legacy_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping a plugin that imports removed Agno logs the actionable migration error."""
+    bad_root = tmp_path / "plugins" / "legacy_agno"
+    bad_root.mkdir(parents=True)
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "legacy_agno", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "tools.py").write_text("from agno.tools import Toolkit\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = _runtime_paths(config_path)
+    config = Config(plugins=["./plugins/legacy_agno"])
+
+    mock_logger = MagicMock()
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    assert _loaded(config, runtime_paths) == []
+    assert any(
+        call.args == ("Failed to load plugin, skipping",)
+        and call.kwargs["path"] == str(bad_root.resolve())
+        and "MindRoom removed Agno support" in call.kwargs["error"]
+        and "mindroom.plugin_api.Toolkit" in call.kwargs["error"]
         for call in mock_logger.warning.call_args_list
     )
 

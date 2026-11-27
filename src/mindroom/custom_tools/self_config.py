@@ -37,6 +37,8 @@ _PLATFORM_ADMIN_REQUIRED_MESSAGE = (
 class SelfConfigTools(Toolkit):
     """Tools that let an agent read and modify its own configuration only."""
 
+    offer_background_after = False
+
     def __init__(self, agent_name: str, runtime_paths: RuntimePaths) -> None:
         self.agent_name = agent_name
         self.runtime_paths = runtime_paths
@@ -46,11 +48,11 @@ class SelfConfigTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Require confirmation of every write."""
+        """Require confirmation of every write and omit output redirection from config updates."""
         # A human confirms every write, even under tool_approval.default: auto_approve,
         # because the model issuing the call also reads untrusted content.
         if function.name == "update_own_config":
-            return replace(function, gate=ToolGate.CONFIRM)
+            return replace(function, gate=ToolGate.CONFIRM, offer_output_path=False)
         return function
 
     def get_own_config(self) -> str:

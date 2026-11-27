@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import weakref
-from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
+from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - tool schema reads annotations at runtime
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -15,8 +15,6 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
-from agno.tools import Toolkit
 
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
@@ -55,6 +53,7 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.llm.media import Image  # noqa: TC001 - tool schema reads annotations at runtime
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
@@ -71,7 +70,7 @@ from mindroom.scheduling.tasks import (
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
@@ -80,6 +79,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
+from mindroom.tool_system.toolkits import adapt_toolkit, configure_toolkit_functions
 from tests.agent_tool_helpers import detached_policy
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
@@ -1182,10 +1182,27 @@ class _LiveRun:
     toolkits: tuple[tuple[Toolkit, str | None], ...]
     middleware: tuple[ToolMiddleware, ...] = ()
     gate: ToolGate | None = None
+    authored_confirmation: bool = False
+    stop_after_tool_call: bool = False
 
     async def call(self, function_name: str, /, **arguments: object) -> object:
         """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
         adapted = [adapt_toolkit(toolkit, key=name) for toolkit, name in self.toolkits]
+        if self.authored_confirmation or self.stop_after_tool_call:
+            adapted = [
+                replace(
+                    toolkit,
+                    functions=tuple(
+                        replace(
+                            function,
+                            gate=ToolGate.CONFIRM if self.authored_confirmation else function.gate,
+                            stop_after_call=self.stop_after_tool_call or function.stop_after_call,
+                        )
+                        for function in toolkit.functions
+                    ),
+                )
+                for toolkit in adapted
+            ]
         if self.gate is not None:
             adapted = [
                 replace(toolkit, functions=tuple(replace(function, gate=self.gate) for function in toolkit.functions))
@@ -1226,12 +1243,13 @@ def _live_agent(
     else:
         assert runs is None, "runs records only the default toolkit's calls"
         assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
-    for function in toolkit.get_async_functions().values():
-        if authored_confirmation:
-            function.requires_confirmation = True
-        if stop_after_tool_call:
-            function.stop_after_tool_call = True
-    return _LiveRun(((toolkit, toolkit_name),), middleware, gate)
+    return _LiveRun(
+        ((toolkit, toolkit_name),),
+        middleware,
+        gate,
+        authored_confirmation=authored_confirmation,
+        stop_after_tool_call=stop_after_tool_call,
+    )
 
 
 async def _schedule_from_tool(

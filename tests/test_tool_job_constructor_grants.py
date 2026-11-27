@@ -14,11 +14,11 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
-from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (

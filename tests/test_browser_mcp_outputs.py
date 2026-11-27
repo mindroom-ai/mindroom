@@ -10,11 +10,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from agno.tools.function import ToolResult
 from mcp import StdioServerParameters
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
 from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer import mcp_provider
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
@@ -86,7 +86,7 @@ async def test_inline_screenshot_preparation_does_not_block_browser_loop(
 
     original_image_result = mcp_provider.image_result
 
-    def held_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:
+    def held_image_result(data: bytes, *, metadata: dict[str, object]) -> ToolValue:
         preparation_threads.append(threading.get_ident())
         preparation_started.set()
         released_by_test.append(release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS))

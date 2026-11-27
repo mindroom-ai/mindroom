@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 class SkillManageTools(Toolkit):
     """Create and change the agent's workspace skills."""
 
+    offer_background_after = False
+
     def __init__(self, agent_name: str, config: Config, runtime_paths: RuntimePaths, skills_root: Path) -> None:
         self._agent_name = agent_name
         self._config = config

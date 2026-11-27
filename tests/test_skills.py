@@ -22,9 +22,9 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.skill_learning import library
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.skills import RefusedWorkspaceSkill, Skill, SkillsToolkit, build_skills_toolkit
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.cpu_budget_helpers import cpu_budget

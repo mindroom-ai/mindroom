@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING, Never
 from uuid import uuid4
 
 import pytest
-from agno.media import Image
-from agno.tools.function import ToolResult
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.json_io import canonical_json
@@ -42,15 +39,17 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cl
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.llm.media import Image
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolGate, ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.agent_tool_helpers import detached_policy
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
@@ -60,8 +59,6 @@ from tests.test_tool_hooks import _plugin
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
-
-    from agno.run import RunContext
 
     from mindroom.agent_cli.turn import LiveTurnTools
 
@@ -105,8 +102,10 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         assert settled["parent_bash_call_id"] == "outer-1"
         return "shell done"
 
-    async def mutate(run_context: RunContext) -> str:
-        run_context.session_state["count"] = run_context.session_state.get("count", 0) + 1
+    async def mutate() -> str:
+        call = current_call()
+        assert call is not None
+        call.session_state["count"] = call.session_state.get("count", 0) + 1
         return "mutated"
 
     async def hook(call, call_next):
@@ -175,8 +174,10 @@ def test_cli_operations_select_filesystem_by_its_other_names() -> None:
 async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: Path) -> None:
     """A standard-mode shell call opens the response's CLI window and environment around its own work."""
 
-    async def mutate(run_context: RunContext) -> str:
-        run_context.session_state["count"] = run_context.session_state.get("count", 0) + 1
+    async def mutate() -> str:
+        call = current_call()
+        assert call is not None
+        call.session_state["count"] = call.session_state.get("count", 0) + 1
         return "mutated"
 
     catalog = await _catalog(tmp_path, [_toolkit("state", mutate)])
@@ -223,8 +224,8 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
 async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Path) -> None:
     """An image a CLI call returns reaches the model with the native shell's result, as in minimal Bash."""
 
-    async def produce() -> ToolResult:
-        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+    async def produce() -> ToolValue:
+        return ToolValue(content="image", images=(Image(content=b"png", mime_type="image/png"),))
 
     catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
@@ -496,8 +497,8 @@ async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
 async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path: Path) -> None:
     """Media a failed command's CLI calls returned is dropped with it, not attached to the next command."""
 
-    async def produce() -> ToolResult:
-        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+    async def produce() -> ToolValue:
+        return ToolValue(content="image", images=(Image(content=b"png", mime_type="image/png"),))
 
     async def authorize(key, arguments) -> None:
         return None
@@ -748,8 +749,8 @@ async def test_calls_naming_no_closed_or_unknown_window_are_rejected_while_anoth
 async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path: Path) -> None:
     """A call from the earlier of two running commands belongs to that command, media included."""
 
-    async def produce() -> ToolResult:
-        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
+    async def produce() -> ToolValue:
+        return ToolValue(content="image", images=(Image(content=b"png", mime_type="image/png"),))
 
     async def authorize(key, arguments) -> None:
         return None
@@ -1179,12 +1180,19 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         assert receipt["outcome"] == "completed-via-http"
         return "same-window"
 
-    async def mutate(run_context: RunContext) -> str:
-        run_context.session_state["http"] = "inside-bash"
+    async def mutate() -> str:
+        call = current_call()
+        assert call is not None
+        call.session_state["http"] = "inside-bash"
         return "completed-via-http"
 
-    state = Toolkit(name="state", tools=[mutate], requires_confirmation_tools=["mutate"] if approval else None)
-    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command), adapt_toolkit(state)])
+    adapted_state = adapt_toolkit(Toolkit(name="state", tools=[mutate]))
+    if approval:
+        adapted_state = replace(
+            adapted_state,
+            functions=tuple(replace(fn, gate=ToolGate.CONFIRM) for fn in adapted_state.functions),
+        )
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command), adapted_state])
     waiting = asyncio.Event()
     decision = asyncio.Event()
 

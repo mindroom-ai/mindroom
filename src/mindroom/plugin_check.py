@@ -8,20 +8,23 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
+from mindroom.tool_system.toolkits import adapt_callable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.catalog import ToolMetadata
 
 # The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
 # from other modules, plus the client docs/tools/background-scripts.md offers to scripts, such as a skill's. Every other
@@ -58,14 +61,27 @@ class _PluginCheckResult:
     skill_directories: tuple[str, ...]
 
 
-def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
-    """Derive each ``@tool`` function of an owned toolkit class as an agent build does, without constructing the class.
+def _raise_plugin_error(error: BaseException, *, tool_name: str | None = None) -> NoReturn:
+    """Re-raise ``error``, replacing missing ``agno`` imports with an actionable migration message."""
+    if (migration_error := plugin_imports.agno_migration_error(error, tool_name=tool_name)) is not None:
+        raise migration_error from error
+    raise error
 
-    A function that does not derive, such as one whose annotation names a type imported only for type checking, leaves
-    every agent without the toolkit. An Agno toolkit names its functions only once constructed, so its build checks them.
+
+def _derive_owned_functions(tool_name: str, tool_class: object) -> None:
+    """Derive each ``@tool`` function of a native toolkit class as an agent build does, without constructing the class.
+
+    A factory returning anything other than a ``mindroom.plugin_api.Toolkit`` subclass, or a function that does not
+    derive (such as one whose annotation names a type imported only for type checking), leaves every agent without the
+    toolkit.
     """
-    if not issubclass(tool_class, Toolkit):
-        return
+    if not isinstance(tool_class, type) or not issubclass(tool_class, Toolkit):
+        got = tool_class.__qualname__ if isinstance(tool_class, type) else type(tool_class).__qualname__
+        msg = (
+            f"Tool {tool_name!r} factory returned {got!r}, which does not subclass mindroom.plugin_api.Toolkit; "
+            "migrate this tool to subclass mindroom.plugin_api.Toolkit"
+        )
+        raise TypeError(msg)
     for attribute in tool_attributes(tool_class):
         try:
             # Bound as an instance binds it, to a stand-in no derivation reads, so the schema leaves out ``self``.
@@ -73,6 +89,24 @@ def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
         except Exception as error:
             msg = f"Tool {tool_name!r} cannot offer its function {attribute!r}: {error}"
             raise ValueError(msg) from error
+
+
+def _check_plugin_tools(tools: Mapping[str, ToolMetadata]) -> tuple[str, ...]:
+    """Validate every tool factory registered by one plugin and return the sorted tool names."""
+    tool_names = tuple(sorted(tools))
+    for tool_name in tool_names:
+        factory = tools[tool_name].factory
+        # Every plugin tool registration sets its factory.
+        assert factory is not None
+        try:
+            tool_class = load_toolkit_class(factory)
+        except ImportError as error:
+            if (migration_error := plugin_imports.agno_migration_error(error, tool_name=tool_name)) is not None:
+                raise migration_error from error
+            # A factory may import a package the user installs after the plugin; its build checks it then.
+            continue
+        _derive_owned_functions(tool_name, tool_class)
+    return tool_names
 
 
 def _throwaway_runtime_paths(temporary_root: Path) -> RuntimePaths:
@@ -105,7 +139,7 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
         with staged_plugins(config, runtime_paths) as generation:
             try:
                 if generation.skipped:
-                    raise generation.skipped[0].error
+                    _raise_plugin_error(generation.skipped[0].error)
                 plugins = ConfigPlugins.of(generation, config, runtime_paths)
                 automations = plugins.hooks.automations
                 if automations.collisions:
@@ -119,18 +153,8 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 [plugin] = plugins.loaded_plugins
                 for error in (plugin.routes_error, plugin.lifespan_error, plugin.origin_error):
                     if error is not None:
-                        raise error
-                tool_names = tuple(sorted(plugin.tools))
-                for tool_name in tool_names:
-                    factory = plugin.tools[tool_name].factory
-                    # Every plugin tool registration sets its factory.
-                    assert factory is not None
-                    try:
-                        tool_class = load_toolkit_class(tool_name, factory)
-                    except ImportError:
-                        # A factory may import a package the user installs after the plugin; its build checks it then.
-                        continue
-                    _derive_owned_functions(tool_name, tool_class)
+                        _raise_plugin_error(error)
+                tool_names = _check_plugin_tools(plugin.tools)
                 hook_names = tuple(
                     sorted(
                         metadata.hook_name

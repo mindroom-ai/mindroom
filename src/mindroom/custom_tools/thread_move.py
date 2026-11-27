@@ -144,6 +144,8 @@ class _PreparedMove:
 class ThreadMoveTools(Toolkit):
     """Tools for moving a Matrix thread from the current room into another room."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(name="thread_move", tools=[self.move_thread])
 

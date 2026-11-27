@@ -23,11 +23,11 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     make_conversation_reader_mock,

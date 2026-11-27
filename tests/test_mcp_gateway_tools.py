@@ -8,13 +8,11 @@ import json
 import threading
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno reads tool annotations at runtime.
 from dataclasses import replace
+from dataclasses import replace as dc_replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
-from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from mcp.types import CallToolResult, ImageContent, TextContent
 
 from mindroom import agents, constants
@@ -35,8 +33,9 @@ from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system import toolkits as toolkits_module
+from mindroom.tool_system.authoring import Toolkit, current_call, passthrough_tool
 from mindroom.tool_system.catalog import ConfigField
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.plugins import config_plugins
@@ -46,8 +45,8 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.toolkit_connections import RetainedToolkitCleanups
-from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import (
     GENERATION_PROBE_TOOL,
     publish_test_plugins,
@@ -384,19 +383,15 @@ async def test_selected_schema_prepares_only_selected_function(
     def unrelated(secret: int) -> int:
         return secret
 
-    toolkit = Toolkit(name="calculator")
-    toolkit.functions = {
-        "selected": Function(name="selected", entrypoint=selected),
-        "unrelated": Function(name="unrelated", entrypoint=unrelated),
-    }
+    toolkit = Toolkit(name="calculator", tools=[selected, unrelated])
     prepared: list[str] = []
-    original = agno_toolkits.tool_parameters
+    original = toolkits_module.tool_parameters
 
     def track_preparation(entrypoint: Callable[..., Any], **options: Any) -> dict[str, Any]:  # noqa: ANN401
         prepared.append(entrypoint.__name__)
         return original(entrypoint, **options)
 
-    monkeypatch.setattr(agno_toolkits, "tool_parameters", track_preparation)
+    monkeypatch.setattr(toolkits_module, "tool_parameters", track_preparation)
     _replace_calculator(monkeypatch, toolkit)
 
     result = await gateway.get_tool(context, toolkit="calculator", function="selected")
@@ -423,29 +418,9 @@ async def test_same_named_function_uses_selected_toolkit_schema_and_entrypoint(
         return path
 
     calendar = Toolkit(name="calendar")
-    calendar.functions = {
-        "list": Function(
-            name="list",
-            entrypoint=list_calendar,
-            parameters={
-                "type": "object",
-                "properties": {"date": {"type": "string"}},
-                "required": ["date"],
-            },
-        ),
-    }
+    calendar.functions = {"list": list_calendar}
     files = Toolkit(name="files")
-    files.functions = {
-        "list": Function(
-            name="list",
-            entrypoint=list_files,
-            parameters={
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-            },
-        ),
-    }
+    files.functions = {"list": list_files}
     entries = {
         name: EffectiveToolConfig(name=name, tool_config_overrides={}, authored_name=name)
         for name in ("calendar", "files")
@@ -577,7 +552,6 @@ async def test_search_describes_each_function_as_its_schema_does(
         return -a
 
     toolkit = Toolkit(name="calculator", tools=[add, negate])
-    assert [function.description for function in toolkit.get_async_functions().values()] == [None, None]
     _replace_calculator(monkeypatch, toolkit)
 
     result = await gateway.search_tools(context, toolkit="calculator")
@@ -600,9 +574,10 @@ async def test_gateway_calls_share_the_detached_session(
 ) -> None:
     """Gateway calls belong to no conversation, so a tool that keys state by session sees one session across them."""
 
-    def session(run_context: RunContext | None = None) -> str:
+    def session() -> str:
         """Return the session the call runs under."""
-        return "no run context" if run_context is None else run_context.session_id
+        call = current_call()
+        return "no run context" if call is None else call.session_id
 
     _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[session]))
 
@@ -656,8 +631,11 @@ async def test_authored_confirmation_never_runs_body(
     def account() -> str:
         pytest.fail("Approval-required body ran")
 
-    toolkit = Toolkit(name="calculator", tools=[account])
-    toolkit.functions["account"].requires_confirmation = True
+    class ConfirmToolkit(Toolkit):
+        def offered_function(self, function: ToolFunction) -> ToolFunction:
+            return dc_replace(function, gate=ToolGate.CONFIRM)
+
+    toolkit = ConfirmToolkit(name="calculator", tools=[account])
     _replace_calculator(monkeypatch, toolkit)
     assert await gateway.search_tools(context, toolkit="calculator") == {"results": []}
     result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
@@ -666,24 +644,15 @@ async def test_authored_confirmation_never_runs_body(
     assert result["error"]["code"] == "approval_required"
 
 
-def test_schema_preparation_rebuilds_an_unusable_required_list() -> None:
-    """A self-referencing authored ``required`` list is rebuilt from the signature, and the source keeps its own."""
+def test_schema_preparation_produces_expected_required_list() -> None:
+    """Schema payload exposes the derived required parameter list cleanly."""
 
     def echo(text: str) -> str:
         return text
 
-    required: list[object] = []
-    required.append(required)
-    function = Function(
-        name="echo",
-        entrypoint=echo,
-        parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": required},
-    )
-
-    payload = gateway._schema_payload("helper", "example", offered_agno_function(function))
+    payload = gateway._schema_payload("helper", "example", toolkits_module.adapt_callable(echo))
 
     assert payload["inputSchema"]["required"] == ["text"]
-    assert function.parameters["required"][0] is function.parameters["required"]
 
 
 @pytest.mark.asyncio
@@ -699,12 +668,7 @@ async def test_schema_and_result_bounds(context: AgentToolContext, monkeypatch: 
     assert "result" not in result
     assert "error" in result
     assert result["error"]["code"] == "result_too_large"
-    toolkit.functions["large"] = Function(
-        name="large",
-        entrypoint=large,
-        parameters={"description": "x" * 32768},
-        skip_entrypoint_processing=True,
-    )
+    toolkit.functions["large"] = passthrough_tool(name="large", parameters={"description": "x" * 32768})(large)
     result = await gateway.get_tool(context, toolkit="calculator", function="large")
     assert "inputSchema" not in result
     assert "error" in result
@@ -771,7 +735,7 @@ async def test_cancelled_sync_body_retains_cleanup(
     class BlockingToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[self.block])
-            self._requires_connect = True
+            self.requires_connect = True
 
         def connect(self) -> None:
             pass
@@ -836,7 +800,7 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
         def __init__(self) -> None:
             check("build")
             super().__init__(name="calculator", tools=[self.account])
-            self._requires_connect = True
+            self.requires_connect = True
 
         def connect(self) -> None:
             check("connect")
@@ -947,7 +911,7 @@ async def test_cancelled_sync_preparation_keeps_cleanup_owner(
                 started.set()
                 assert release.wait(5)
             super().__init__(name="calculator")
-            self._requires_connect = True
+            self.requires_connect = True
 
         def connect(self) -> None:
             if phase == "connect":
@@ -1036,7 +1000,7 @@ async def test_close_failure_does_not_swallow_cancellation(
     class FailingCloseToolkit(Toolkit):
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[self.wait])
-            self._requires_connect = True
+            self.requires_connect = True
 
         async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
@@ -1068,13 +1032,11 @@ async def test_arguments_cannot_fetch_remote_schema(
     def unsafe() -> str:
         pytest.fail("An unresolved schema reached the tool body")
 
-    toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["unsafe"] = Function(
+    toolkit = Toolkit(name="calculator")
+    toolkit.functions["unsafe"] = passthrough_tool(
         name="unsafe",
-        entrypoint=unsafe,
-        skip_entrypoint_processing=True,
         parameters={"$ref": "https://schema.example.org/remote.json"},
-    )
+    )(unsafe)
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.invoke_tool(context, toolkit="calculator", function="unsafe", arguments={})
     assert "result" not in result
@@ -1254,15 +1216,21 @@ async def test_search_total_size_includes_unicode_and_escaped_text(
     def body() -> str:
         return "unused"
 
-    toolkit = Toolkit(name="calculator", auto_register=False)
+    toolkit = Toolkit(name="calculator")
     for index in range(10):
         name = f"tool_{index}" + "界" * 100
-        toolkit.functions[name] = Function(
+
+        def _make_body() -> Callable[[], str]:
+            def fn() -> str:
+                return body()
+
+            return fn
+
+        toolkit.functions[name] = passthrough_tool(
             name=name,
             description="\u0001" * 256,
-            entrypoint=body,
-            skip_entrypoint_processing=True,
-        )
+            parameters={"type": "object", "properties": {}, "required": []},
+        )(_make_body())
     _replace_calculator(monkeypatch, toolkit)
     result = await gateway.search_tools(context, toolkit="calculator", limit=10)
     assert "results" in result

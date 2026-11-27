@@ -171,7 +171,7 @@ Structured-output helpers run on each of the three structured-output paths: `ant
 ## Tool goldens (`tools/`)
 
 `tools/schemas.json`, `tools/schemas_all_enabled.json`, and `tools/arguments.json` were first captured from Agno 3.0.9's tool preparation and tool-call handling and now regenerate from the owned toolkit adapter and tool-call execution.
-`tests/tool_system/test_agno_toolkits.py` compares every adapted toolkit with the two schema files, and `tests/tool_system/test_tool_invocation.py` runs every argument case through the owned tool-call execution.
+`tests/tool_system/test_toolkits.py` compares every adapted toolkit with the two schema files, and `tests/tool_system/test_tool_invocation.py` runs every argument case through the owned tool-call execution.
 A regeneration builds and normalizes the entries through the same support functions the tests compare with, so an unchanged tool reproduces its entry byte for byte.
 All three are pretty JSON.
 The schema files list tools in sorted order and keep every other key in the order providers receive it, such as `parameters` as `type`, `properties`, `required`, with properties in signature order; the test compares serialized bytes, so a reordered key fails parity.

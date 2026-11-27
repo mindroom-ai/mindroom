@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.tools.function import Function, ToolResult
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
 from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, PromptSpec
@@ -64,7 +62,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system import plugins as plugins_module
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import passthrough_tool
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, run_tool_call
@@ -73,10 +71,10 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolValue
+from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
-from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -97,7 +95,6 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 AGENT = "helper"
@@ -182,22 +179,34 @@ def _bound_tool_context() -> ToolRuntimeContext:
     return context
 
 
-def _function(entrypoint: object, parameters: dict | None = None, *, name: str = "add") -> Function:
-    return Function(
-        name=name,
-        description="Add two numbers",
-        parameters=parameters or {"type": "object", "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}}},
-        entrypoint=entrypoint,
+def _function(
+    entrypoint: Callable[..., Any],
+    parameters: dict[str, Any] | None = None,
+    *,
+    name: str = "add",
+    gate: ToolGate | None = None,
+) -> ToolFunction:
+    if parameters is None:
+        return replace(adapt_callable(entrypoint), name=name, description="Add two numbers", gate=gate)
+    return replace(
+        adapt_callable(passthrough_tool(name=name, description="Add two numbers", parameters=parameters)(entrypoint)),
+        gate=gate,
     )
 
 
-def _toolkit(*functions: Function) -> Toolkit:
-    toolkit = Toolkit(name="call_tools")
-    toolkit.functions = {function.name: function for function in functions}
-    return toolkit
+def _toolkit(*functions: ToolFunction, name: str = "call_tools") -> AdaptedToolkit:
+    return AdaptedToolkit(
+        name=name,
+        functions=tuple(replace(fn, toolkit=name, registered_toolkit=name) for fn in functions),
+        instructions=None,
+    )
 
 
-def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: str = "THE CHAT ROLE") -> AgentBuild:
+def _build(
+    *toolkits: AdaptedToolkit,
+    policy: tuple[ToolMiddleware, ...] = (),
+    role: str = "THE CHAT ROLE",
+) -> AgentBuild:
     """Return an agent build offering ``toolkits`` under the tool-call ``policy``, as ``create_agent`` returns one."""
     return AgentBuild(
         spec=AgentSpec(
@@ -205,7 +214,7 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
             name="Helper",
             model=ScriptedModel([]),
             system_messages=(),
-            toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
+            toolkits=offered_toolkits(list(toolkits), agent=AGENT),
         ),
         prompt=PromptSpec(role=role, instructions=()),
         request_template=ModelRequest(messages=()),
@@ -248,9 +257,9 @@ def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:
     return build.spec.functions
 
 
-def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
+def _wrap(function: ToolFunction, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
     return _wrap_tool_function(
-        offered_agno_function(function),
+        function,
         middleware=middleware,
         call_context=_CALL_CONTEXT,
         context=_context(),  # type: ignore[arg-type]
@@ -352,7 +361,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         yield False
 
     wrapped = _wrap_tool_function(
-        offered_agno_function(_function(entrypoint)),
+        _function(entrypoint),
         middleware=(),
         call_context=_CALL_CONTEXT,
         context=_context(),  # type: ignore[arg-type]
@@ -590,8 +599,8 @@ async def test_wrapped_tool_executes_async_entrypoint() -> None:
 async def test_wrapped_tool_gives_the_realtime_model_the_text_of_a_tool_result() -> None:
     """A tool that returns a tool result, as MCP-backed tools do, gives the voice model its text, not its repr."""
 
-    async def add(a: int, b: int) -> ToolResult:
-        return ToolResult(content=f"sum={a + b}")
+    async def add(a: int, b: int) -> ToolValue:
+        return ToolValue(content=f"sum={a + b}")
 
     assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
 
@@ -662,39 +671,37 @@ def _ping() -> str:
     return "pong"
 
 
-def _mcp_function(parameters: dict[str, Any]) -> Function:
+def _mcp_function(parameters: dict[str, Any]) -> ToolFunction:
     """Return a function built the way the MCP toolkit builds one: the server's schema, used as is."""
 
+    @passthrough_tool(name="docs_search", description="Search the docs.", parameters=parameters)
     async def call_tool(**_kwargs: object) -> str:
         return "ok"
 
-    return Function(
-        name="docs_search",
-        description="Search the docs.",
-        parameters=parameters,
-        entrypoint=call_tool,
-        skip_entrypoint_processing=True,
-    )
+    return adapt_callable(call_tool)
 
 
 _SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
 
 
 @pytest.mark.parametrize(
-    "function",
+    ("function", "expected"),
     [
-        pytest.param(Function(name="add", entrypoint=_add_numbers), id="derived-with-arguments"),
-        pytest.param(Function(name="ping", entrypoint=_ping), id="derived-without-arguments"),
-        pytest.param(_mcp_function(_SEARCH_SCHEMA), id="mcp-schema"),
+        pytest.param(replace(adapt_callable(_add_numbers), name="add"), None, id="derived-with-arguments"),
+        pytest.param(replace(adapt_callable(_ping), name="ping"), None, id="derived-without-arguments"),
+        pytest.param(_mcp_function(_SEARCH_SCHEMA), _SEARCH_SCHEMA, id="mcp-schema"),
     ],
 )
-def test_realtime_schemas_are_the_schemas_every_other_model_is_offered(function: Function) -> None:
+def test_realtime_schemas_are_the_schemas_every_other_model_is_offered(
+    function: ToolFunction,
+    expected: dict[str, object] | None,
+) -> None:
     """The realtime model reads a function's parameters schema as text chat offers it, an MCP tool's as sent."""
     parameters = _wrap(function).info.raw_schema["parameters"]
 
-    assert parameters == offered_agno_function(function).parameters
-    if function.skip_entrypoint_processing:
-        assert parameters == _SEARCH_SCHEMA
+    assert parameters == function.parameters
+    if expected is not None:
+        assert parameters == expected
 
 
 def test_realtime_schemas_send_an_empty_schema_as_an_object_without_properties() -> None:
@@ -1032,8 +1039,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
         )
         return TurnResult("It is sunny.")
 
-    confirm = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm")
-    confirm.requires_confirmation = True
+    confirm = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm", gate=ToolGate.CONFIRM)
     cached_build = _build(
         _toolkit(
             _function(lambda: "safe", _EMPTY_SCHEMA, name="safe"),
@@ -1737,9 +1743,7 @@ def _connected_build(log: list[str], **entrypoints: tuple[str, Callable[..., Awa
     schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     toolkits = []
     for toolkit_name, (function_name, entrypoint) in entrypoints.items():
-        toolkit = Toolkit(name=toolkit_name)
-        toolkit.functions = {function_name: _function(entrypoint, schema, name=function_name)}
-        toolkits.append(toolkit)
+        toolkits.append(_toolkit(_function(entrypoint, schema, name=function_name), name=toolkit_name))
     build = _build(*toolkits)
     connected = tuple(connecting(adapted) for adapted in build.spec.toolkits)
     return replace(build, spec=replace(build.spec, toolkits=connected))
@@ -2247,8 +2251,7 @@ async def test_build_call_tools_offers_every_function_of_the_build_in_offer_orde
     async def async_add(a: int, b: int) -> int:
         return a + b
 
-    async_only = Toolkit(name="async_tools")
-    async_only.async_functions = {"async_add": _function(async_add, name="async_add")}
+    async_only = _toolkit(_function(async_add, name="async_add"), name="async_tools")
     generated = _toolkit(
         _function(lambda: "knowledge", _EMPTY_SCHEMA, name="search_knowledge_base"),
         _function(lambda: "skill", _EMPTY_SCHEMA, name="skill"),
@@ -2343,7 +2346,7 @@ async def test_build_call_tools_hides_offered_functions_needing_text_chat(
         name: _function(lambda name=name: name, _EMPTY_SCHEMA, name=name)
         for name in ("safe", "confirm", "policy_approval", "run_workflow")
     }
-    functions["confirm"].requires_confirmation = True
+    functions["confirm"] = replace(functions["confirm"], gate=ToolGate.CONFIRM)
     config = _config()
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],

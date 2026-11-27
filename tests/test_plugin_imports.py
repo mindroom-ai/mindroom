@@ -36,7 +36,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.event_journal.opening import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
     from mindroom.tool_system.construction import get_toolkit_construction
-    from mindroom.tool_system.agno_toolkits import toolkit_function
+    from mindroom.tool_system.toolkits import toolkit_function
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -187,7 +187,7 @@ def _write_registered_plugin(plugin_root: Path) -> None:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
+        "from mindroom.plugin_api import Toolkit\n"
         "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
         "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"

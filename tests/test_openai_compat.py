@@ -23,7 +23,6 @@ from tests.conftest import completed_ai_response_mock, completing, install_model
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
-    from agno.run import RunContext as AgnoRunContext
     from httpx import Response
 
     from mindroom.agent_loop.build import AgentBuild
@@ -86,11 +85,12 @@ from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
-from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
@@ -3317,15 +3317,14 @@ def _team_events(*events: object) -> Callable[..., AsyncIterator[object]]:
     return run
 
 
-def remember(label: str, run_context: AgnoRunContext) -> str:
+def remember(label: str) -> str:
     """Keep a label in the conversation's shared session state.
 
     Args:
         label: What to keep.
-        run_context: The run, supplied by the loop.
 
     """
-    run_context.session_state["remembered"] = label
+    current_call().session_state["remembered"] = label
     return "remembered"
 
 

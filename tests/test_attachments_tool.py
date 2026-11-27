@@ -526,13 +526,18 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     assert schema["attachment_id"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["view"]["type"] == "boolean"
     assert "view" not in parameters["required"]
-    assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
-    assert schema["mindroom_output_path"]["default"] is None
-    assert schema["mindroom_output_path"]["description"] == (
-        "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
-    )
+    assert schema["mindroom_output_path"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "description": (
+            "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
+        ),
+    }
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
+    assert toolkit_offers(tool, "attachment").offer_background_after is True
+    assert toolkit_offers(tool, "attachment").offer_output_path is True
+    offered_view_file = toolkit_offers(tool, "view_file")
+    assert (offered_view_file.offer_background_after, offered_view_file.offer_output_path) == (False, False)
 
 
 @pytest.mark.asyncio

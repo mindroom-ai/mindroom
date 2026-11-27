@@ -20,10 +20,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.custom_tools.searxng import SearxngTools
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 
-def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> AnyToolkit:
+def _configured_tool(tmp_path: Path, tool_name: str, overrides: dict[str, object]) -> Toolkit:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(

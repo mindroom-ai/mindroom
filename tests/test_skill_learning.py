@@ -17,7 +17,6 @@ import httpx
 import httpx2
 import pytest
 import structlog
-from agno.tools import Toolkit
 
 import mindroom.skill_learning.reviewer as reviewer_module
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, SendRequest
@@ -73,12 +72,13 @@ from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec

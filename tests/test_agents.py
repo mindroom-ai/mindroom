@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agno.tools.function import Function
-from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -80,6 +78,7 @@ from mindroom.shared_directories.store import (
 from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
@@ -200,7 +199,9 @@ def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
 
 def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:
     """Return a toolkit called ``name`` offering one function of its own, as the registered tool ``name`` would."""
-    return Toolkit(name=name, tools=[Function(name=f"{name}_probe", entrypoint=lambda: None)])
+    toolkit = Toolkit(name=name)
+    toolkit.functions[f"{name}_probe"] = lambda: None
+    return toolkit
 
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> AgentBuild:
@@ -1266,20 +1267,21 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
 
 
-def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path: Path) -> None:
-    """A plugin function with an Agno hook MindRoom does not run drops its own toolkit, never the agent."""
+def test_create_agent_skips_a_toolkit_whose_function_fails_adaptation(tmp_path: Path) -> None:
+    """A plugin function that fails adaptation drops its own toolkit, never the agent."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].tools = ["file", "calculator"]
     config.agents["general"].include_default_tools = False
     build_agent_toolkit = agents_module.build_agent_toolkit
 
-    def ping(text: str) -> str:
+    def ping(text: str, agent: object = None) -> str:
+        del agent
         return text
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "filesystem":
-            return Toolkit(name="filesystem", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
+            return Toolkit(name="filesystem", tools=[ping])
         return build_agent_toolkit(tool_name, **kwargs)
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
@@ -1288,7 +1290,7 @@ def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path:
     assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
     [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
     assert warning["tool"] == "filesystem"
-    assert "'ping' sets an Agno pre_hook" in warning["error"]
+    assert "'ping' takes agent" in warning["error"]
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -4062,10 +4064,9 @@ def test_tool_function_filter_prunes_resolved_functions(tmp_path: Path) -> None:
     config = _test_config()
     config.agents["general"].tools = ["calculator"]
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-    toolkit = Toolkit(
-        name="mixed",
-        tools=[Function(name="safe", entrypoint=lambda: "safe"), Function(name="unsafe", entrypoint=lambda: "unsafe")],
-    )
+    toolkit = Toolkit(name="mixed")
+    toolkit.functions["safe"] = lambda: "safe"
+    toolkit.functions["unsafe"] = lambda: "unsafe"
 
     with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
         build = _create_agent_for_test("general", config, tool_function_filter=lambda function: function.name == "safe")
@@ -4092,14 +4093,10 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
             },
         },
     )
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[
-            Function(name="dangerous", entrypoint=lambda: None),
-            Function(name="dangerous_async", entrypoint=dangerous_async),
-            Function(name="safe", entrypoint=lambda: None),
-        ],
-    )
+    toolkit = Toolkit(name="approval-test")
+    toolkit.functions["dangerous"] = lambda: None
+    toolkit.functions["dangerous_async"] = dangerous_async
+    toolkit.functions["safe"] = lambda: None
 
     functions = gated_functions(toolkit, config)
 
@@ -4125,27 +4122,43 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
             },
         },
     )
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[
-            Function(name="dangerous", entrypoint=lambda: None),
-            Function(name="dangerous_async", entrypoint=dangerous_async),
-            Function(name="safe", entrypoint=lambda: None),
-        ],
-    )
+    toolkit = Toolkit(name="approval-test")
+    toolkit.functions["dangerous"] = lambda: None
+    toolkit.functions["dangerous_async"] = dangerous_async
+    toolkit.functions["safe"] = lambda: None
 
     assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
 
 
+class _ConfiguredApprovalToolkit(Toolkit):
+    def __init__(
+        self,
+        name: str,
+        functions: dict[str, Callable[..., Any]],
+        *,
+        confirm_names: frozenset[str] = frozenset(),
+        stop_names: frozenset[str] = frozenset(),
+        connects: bool = False,
+    ) -> None:
+        super().__init__(name=name)
+        self.functions = dict(functions)
+        self._confirm_names = confirm_names
+        self._stop_names = stop_names
+        self.requires_connect = connects
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        gate = ToolGate.CONFIRM if function.name in self._confirm_names else function.gate
+        stop = function.name in self._stop_names or function.stop_after_call
+        return replace(function, gate=gate, stop_after_call=stop)
+
+
 def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
-    """An authored Agno confirmation must not escape onto a surface with no resume owner."""
+    """A tool-authored confirmation must not escape onto a surface with no resume owner."""
     config = Config.model_validate({"tool_approval": {"default": "auto_approve"}})
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[
-            Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True),
-            Function(name="safe", entrypoint=lambda: None),
-        ],
+    toolkit = _ConfiguredApprovalToolkit(
+        "approval-test",
+        {"native_confirmation": lambda: None, "safe": lambda: None},
+        confirm_names=frozenset({"native_confirmation"}),
     )
 
     assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
@@ -4154,9 +4167,10 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
 def test_native_approval_capability_preserves_tool_authored_confirmation() -> None:
     """MindRoom marks only policy pauses, leaving an authored confirmation distinguishable."""
     config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
+    toolkit = _ConfiguredApprovalToolkit(
+        "approval-test",
+        {"native_confirmation": lambda: None},
+        confirm_names=frozenset({"native_confirmation"}),
     )
 
     function = gated_functions(toolkit, config)["native_confirmation"]
@@ -4168,9 +4182,19 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
     """A gated call that can become a managed job asks as its job; a call that must finish in its run still pauses it."""
     config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
 
-    def gated(*, connects: bool = False, **options: bool) -> ToolFunction:
-        toolkit = Toolkit(name="approval-test", tools=[Function(name="gated", entrypoint=lambda: None, **options)])
-        toolkit._requires_connect = connects
+    def gated(
+        *,
+        connects: bool = False,
+        requires_confirmation: bool = False,
+        stop_after_tool_call: bool = False,
+    ) -> ToolFunction:
+        toolkit = _ConfiguredApprovalToolkit(
+            "approval-test",
+            {"gated": lambda: None},
+            confirm_names=frozenset({"gated"}) if requires_confirmation else frozenset(),
+            stop_names=frozenset({"gated"}) if stop_after_tool_call else frozenset(),
+            connects=connects,
+        )
         return gated_functions(toolkit, config, approvals_as_jobs=True)["gated"]
 
     assert gated().gate is ToolGate.JOB
@@ -4226,7 +4250,8 @@ def test_non_resumable_tool_surface_drops_an_empty_toolkit(tmp_path: Path) -> No
     config.agents["general"].tools = ["calculator"]
     config.tool_approval = ToolApprovalConfig(default="require_approval")
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-    toolkit = Toolkit(name="approval-test", tools=[Function(name="dangerous", entrypoint=lambda: None)])
+    toolkit = Toolkit(name="approval-test")
+    toolkit.functions["dangerous"] = lambda: None
 
     with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
         build = _create_agent_for_test("general", config, supports_native_tool_approval=False)
@@ -4245,7 +4270,7 @@ def test_create_agent_tool_filter_applies_to_the_generated_knowledge_function(tm
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
     seen: list[str] = []
 
-    def allow_call_function(function: Function) -> bool:
+    def allow_call_function(function: ToolFunction) -> bool:
         seen.append(function.name)
         return function.name != "search_knowledge_base"
 

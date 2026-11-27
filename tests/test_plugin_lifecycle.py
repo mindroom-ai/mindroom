@@ -101,7 +101,7 @@ async def live(websocket: WebSocket) -> None:
 """
 
 TOOLS = """
-from agno.tools import Toolkit
+from mindroom.plugin_api import Toolkit
 
 from mindroom.hooks import hook
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess

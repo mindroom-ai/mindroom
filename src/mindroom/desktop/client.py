@@ -40,6 +40,7 @@ class DesktopRequestError(RuntimeError):
         self.action_outcome = "unknown" if request_id is not None else "not_sent"
 
 
+_HANDLE_ACTIONS = frozenset({"check_shell", "kill_shell"})
 _SHELL_CONCURRENT_ACTIONS = frozenset({"status", "request_status", "check_shell", "kill_shell"})
 _READ_ONLY_ACTIONS = frozenset(
     {
@@ -56,7 +57,29 @@ _READ_ONLY_ACTIONS = frozenset(
 )
 
 
-def _actions_conflict(in_flight_action: str, new_action: str) -> bool:
+def _command_handle(command: DesktopCommand) -> str | None:
+    if command.action not in _HANDLE_ACTIONS:
+        return None
+    raw_handle = command.parameters.get("handle")
+    if isinstance(raw_handle, str) and raw_handle:
+        return f"handle:{raw_handle}"
+    if command.action == "kill_shell":
+        raw_request_id = command.parameters.get("request_id")
+        if isinstance(raw_request_id, str) and raw_request_id:
+            return f"request_id:{raw_request_id}"
+    return None
+
+
+def _actions_conflict(
+    in_flight_action: str,
+    in_flight_handle: str | None,
+    new_action: str,
+    new_handle: str | None,
+) -> bool:
+    if in_flight_action in _HANDLE_ACTIONS or new_action in _HANDLE_ACTIONS:
+        if in_flight_action in _HANDLE_ACTIONS and new_action in _HANDLE_ACTIONS:
+            return in_flight_handle is None or new_handle is None or in_flight_handle == new_handle
+        return False
     if in_flight_action == "run_shell":
         return new_action not in _SHELL_CONCURRENT_ACTIONS
     if new_action == "run_shell":
@@ -70,6 +93,7 @@ class _PendingDesktopResponse:
     session_id: str
     action: str
     future: asyncio.Future[DesktopResponse]
+    handle: str | None = None
 
 
 class DesktopResponseRouter:
@@ -97,8 +121,9 @@ class DesktopResponseRouter:
         if command.request_id in self._pending:
             msg = f"Desktop request ID is already pending: {command.request_id}."
             raise DesktopRequestError(msg)
+        handle = _command_handle(command)
         if any(
-            entry.target == target and _actions_conflict(entry.action, command.action)
+            entry.target == target and _actions_conflict(entry.action, entry.handle, command.action, handle)
             for entry in self._pending.values()
         ):
             msg = "A desktop request is already in progress for this device; inspect its result before the next action."
@@ -110,6 +135,7 @@ class DesktopResponseRouter:
             session_id=command.session_id,
             action=command.action,
             future=future,
+            handle=handle,
         )
         send_lock = self._send_locks.setdefault(target, asyncio.Lock())
         try:

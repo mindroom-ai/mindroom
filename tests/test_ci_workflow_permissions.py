@@ -158,7 +158,7 @@ def test_security_scan_audits_the_locked_dependencies(tmp_path: Path) -> None:
         str(platform_backend_requirements),
         "--",
     ]
-    assert re.search(r"^agno==", requirements.read_text(encoding="utf-8"), re.MULTILINE)
+    assert re.search(r"^mindroom-nio==", requirements.read_text(encoding="utf-8"), re.MULTILINE)
     # The platform backend locks its own dependencies, which the root lock file does not contain.
     assert re.search(r"^stripe==", platform_backend_requirements.read_text(encoding="utf-8"), re.MULTILINE)
 

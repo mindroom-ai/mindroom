@@ -24,6 +24,7 @@ from mindroom.shared_directories.paths import (
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key
 from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount, plan_shared_directory_mounts
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -538,3 +539,18 @@ def test_changes_succeed_after_a_member_left_the_config(tmp_path: Path, function
     assert payload["status"] == "ok"
     assert "bob:" not in str(payload["message"])
     assert "and bob" not in str(payload["message"])
+
+
+def test_shared_directory_meta_schema_flags() -> None:
+    """Only recursive deletion keeps background_after; all shared directory tools omit mindroom_output_path."""
+    by_name = {fn.name: fn for fn in adapt_toolkit(SharedDirectoryTools("alice")).functions}
+    assert (
+        by_name["delete_shared_directory"].offer_background_after,
+        by_name["delete_shared_directory"].offer_output_path,
+    ) == (
+        True,
+        False,
+    )
+    for name, fn in by_name.items():
+        if name != "delete_shared_directory":
+            assert (fn.offer_background_after, fn.offer_output_path) == (False, False)

@@ -39,6 +39,7 @@ from mindroom.path_confinement import open_regular_file_within_root
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
+    OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     ToolOutputFileRequest,
     current_tool_workdir,
@@ -537,6 +538,9 @@ async def send_resolved_attachments(
 class AttachmentTools(Toolkit):
     """Toolkit for reading and sending context-scoped attachments."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(
         self,
         *,
@@ -615,17 +619,17 @@ class AttachmentTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Offer ``attachment``'s output path for binary saves and JSON redirects."""
+        """Offer ``attachment``'s output path and wait budget for binary saves and JSON redirects."""
         if function.name != "attachment":
             return function
         parameters = with_optional_output_path(function.parameters)
-        parameters["properties"]["mindroom_output_path"] = {
-            **parameters["properties"]["mindroom_output_path"],
+        parameters["properties"][OUTPUT_PATH_ARGUMENT] = {
+            **parameters["properties"][OUTPUT_PATH_ARGUMENT],
             "description": (
                 "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
             ),
         }
-        return replace(function, parameters=parameters)
+        return replace(function, parameters=parameters, offer_background_after=True, offer_output_path=True)
 
     def _prepare_output_request(
         self,

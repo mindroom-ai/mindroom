@@ -13,7 +13,6 @@ import mindroom.tool_system.skills as skills_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolArgumentError, ToolCallContext, execute_tool_call, parse_tool_arguments
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.skills import (
@@ -23,6 +22,7 @@ from mindroom.tool_system.skills import (
     build_skills_toolkit,
 )
 from mindroom.tool_system.tool_access import tool_definition
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.agno_parity.prompt_scenarios import FIXTURE_DIR
 

@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from structlog.testing import capture_logs
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
@@ -41,6 +39,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     register_background_runtime,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -294,7 +293,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
         tool_name="add",
         toolkit_name="calculator",
         adapter={
-            "origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"},
+            "origin": {"module": "mindroom.custom_tools.calculator", "qualname": "CalculatorTools.add"},
             "authority": {
                 **authority_snapshot(config, "lead"),
                 "construction": {
@@ -406,8 +405,11 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
         runtime_paths=coordinator.runtime_paths,
         caller_execution_identity=completed_delegation_job().owner,
     )
-    toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+
+    def add() -> None:
+        return None
+
+    toolkit = Toolkit(name="calculator", tools=[add])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
@@ -454,8 +456,11 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
         runtime_paths=coordinator.runtime_paths,
         caller_execution_identity=completed_delegation_job().owner,
     )
-    toolkit = Toolkit(name="calculator", auto_register=False)
-    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+
+    def add() -> None:
+        return None
+
+    toolkit = Toolkit(name="calculator", tools=[add])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
@@ -609,8 +614,10 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
 
     class SlowConstruction(Toolkit):
         def __init__(self, **_kwargs: object) -> None:
-            super().__init__(name="calculator", auto_register=False)
-            self.functions["add"] = Function(name="add", entrypoint=lambda: None)
+            def add() -> None:
+                return None
+
+            super().__init__(name="calculator", tools=[add])
             replace_test_tool_factory(monkeypatch, "calculator", replacement_factory)
 
     def original_factory() -> type[Toolkit]:

@@ -6,11 +6,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue  # The schema reads it from module globals.
 from mindroom.tool_system.tool_schema import closed_parameters
+from mindroom.tool_system.toolkits import adapt_callable
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

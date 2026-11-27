@@ -148,7 +148,10 @@ HIDDEN_TOOL_CALLS_PROMPT = (
     '(e.g. "let me check").'
 )
 
-OUTPUT_REDIRECT_PROMPT = ""
+OUTPUT_REDIRECT_PROMPT = (
+    "Tools with `mindroom_output_path` accept an optional workspace-relative file path "
+    "to save full supported output and return a receipt."
+)
 
 DATETIME_CONTEXT_TEMPLATE = "Current date: {date_str} ({timezone_str}, {timezone_abbrev})."
 

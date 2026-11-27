@@ -17,9 +17,9 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
+from mindroom.tool_system.toolkits import toolkit_function, toolkit_worker_stand_ins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.workers.models import WorkerHandle, WorkerSpec, worker_api_root
 from mindroom.workers.runtime import reset_primary_worker_manager
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _TOKEN = "proxy-token"  # noqa: S105
@@ -44,7 +44,7 @@ def _paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
     )
 
 
-def _shell(paths: RuntimePaths, worker_scope: WorkerScope | None = None) -> AnyToolkit:
+def _shell(paths: RuntimePaths, worker_scope: WorkerScope | None = None) -> Toolkit:
     """Build the agent's shell toolkit, with its own settings, as a reply to ``_IDENTITY`` builds it."""
     entry = ToolConfigEntry(
         name="shell",
@@ -63,7 +63,7 @@ def _shell(paths: RuntimePaths, worker_scope: WorkerScope | None = None) -> AnyT
     return toolkit
 
 
-async def _run_shell_command(toolkit: AnyToolkit, command: str) -> object:
+async def _run_shell_command(toolkit: Toolkit, command: str) -> object:
     function = toolkit_function(toolkit, "run_shell_command")
     assert function is not None
     return await function.entrypoint(command)

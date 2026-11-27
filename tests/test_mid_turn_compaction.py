@@ -14,8 +14,6 @@ from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 from mindroom.agent_loop.model_loop import LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.run import run_agent
@@ -76,13 +74,14 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
 from mindroom.teams.leader import LeaderRun
 from mindroom.token_counting.counts import count, utf8_byte_bound
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     detached_requester_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import install_model_providers, prepare_history_for_run_for_test, seed_session
@@ -178,7 +177,7 @@ class _Agent:
     model: ToolLoopModel | ScriptedModel
     config: Config
     runtime_paths: RuntimePaths
-    tools: list[Callable[..., object] | Function] = field(default_factory=lambda: [probe])
+    tools: list[Callable[..., object]] = field(default_factory=lambda: [probe])
     extra_toolkits: tuple[AdaptedToolkit, ...] = ()
     store: ConversationStore | None = None
     replays_history: bool = False
@@ -813,9 +812,7 @@ async def test_a_fold_whose_summary_the_next_reply_cannot_replay_is_not_stored(
         storage,
         lifecycle=lifecycle,
         system_messages=(Message(role="system", content=context),) if context_in == "system" else (),
-        tools=[probe, Function(name="lookup", description=context, entrypoint=lambda: "ok")]
-        if context_in == "tools"
-        else [probe],
+        tools=[probe, tool(name="lookup", description=context)(lambda: "ok")] if context_in == "tools" else [probe],
     )
 
     output = await _run(agent, f"Do the task. {context}" if context_in == "prompt" else "Do the task")
@@ -1397,7 +1394,7 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
         seed_summary(storage, session, TEST_AGENT_SCOPE, earlier_summary)
     model = ToolLoopModel(tool_rounds=0)
     # Tool definitions alone push the first request, which has no exchanges of its own yet, over the limit.
-    lookup = Function(name="lookup", description="d" * 10_000, entrypoint=lambda: "ok")
+    lookup = tool(name="lookup", description="d" * 10_000)(lambda: "ok")
     # The reply's delivery, before the model's first request: it has collected nothing.
     recorder = ReplyCompactions()
     recorder.bind(CollectedStreamPresentation(show_tool_calls=False, track_hidden_tools=True))
