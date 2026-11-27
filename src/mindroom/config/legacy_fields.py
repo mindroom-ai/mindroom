@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
@@ -615,7 +616,7 @@ class _RetiredApprovalSpec:
     broad_probe: str | None = None
 
 
-_SPECIAL_RETIRED_APPROVALS: dict[str, _RetiredApprovalSpec] = {
+_BUILTIN_RETIRED_APPROVALS: dict[str, _RetiredApprovalSpec] = {
     "triggers": _RetiredApprovalSpec(_RETIRED_TRIGGER_FUNCTIONS),
     # Probe historical broad globs like `slack_*` without matching `slack_w*`.
     "slack_watch": _RetiredApprovalSpec(_RETIRED_SLACK_FUNCTIONS, broad_probe="slack_post"),
@@ -623,8 +624,28 @@ _SPECIAL_RETIRED_APPROVALS: dict[str, _RetiredApprovalSpec] = {
 }
 
 
-def retired_approval_error(
-    target: str,
+def retired_builtin_approval_error(
+    target: Literal["triggers", "slack_watch", "dynamic_workflow"],
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+    agent_names: Collection[str] = (),
+) -> str | None:
+    """Return a migration error for a built-in retired approval target (`triggers`, `slack_watch`, `dynamic_workflow`)."""
+    spec = _BUILTIN_RETIRED_APPROVALS[target]
+    return _first_retired_approval_error(
+        spec.renames.items(),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=spec.reject_wildcard_scripts,
+        broad_probe=spec.broad_probe,
+        agent_names=agent_names,
+    )
+
+
+def retired_consolidated_approval_error(
+    toolkit_name: str,
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
@@ -634,26 +655,19 @@ def retired_approval_error(
     reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
-    spec = _SPECIAL_RETIRED_APPROVALS.get(target)
-    effective_renames = (
-        (spec.renames if spec is not None else RETIRED_CONSOLIDATED_FUNCTIONS.get(target))
-        if renames is None
-        else renames
-    )
+    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
     if not effective_renames:
         return None
-    strict_scripts = (
-        (spec.reject_wildcard_scripts if spec is not None else target in STRICT_WILDCARD_SCRIPT_TOOLKITS)
-        if reject_wildcard_scripts is None
-        else reject_wildcard_scripts
-    )
     return _first_retired_approval_error(
         effective_renames.items(),
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=strict_scripts,
-        broad_probe=spec.broad_probe if spec is not None else None,
+        reject_wildcard_scripts=(
+            toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
+            if reject_wildcard_scripts is None
+            else reject_wildcard_scripts
+        ),
         agent_names=agent_names,
     )
 
@@ -686,6 +700,15 @@ def _retired_consolidated_filter_guidance(tool_name: str, key: str, old: str, ne
     )
 
 
+def _stored_consolidated_filter_guidance(tool_name: str, key: str, _old: str, new: str) -> str:
+    return (
+        f"use `{tool_name}: {{{key}: [{new}]}}` "
+        f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
+        f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
+        "if per-action gating is needed"
+    )
+
+
 _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str, str, str], str]], ...]] = {
     "filesystem": ((_RETIRED_FILE_FUNCTIONS, lambda key, _old, new: f"use `filesystem: {{{key}: [{new}]}}`"),),
     "triggers": (
@@ -710,7 +733,7 @@ _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str,
     "atlassian": (
         (
             RETIRED_CONSOLIDATED_FUNCTIONS["atlassian"],
-            lambda key, old, new: _retired_consolidated_filter_guidance("atlassian", key, old, new),
+            partial(_retired_consolidated_filter_guidance, "atlassian"),
         ),
     ),
     "slack": (
@@ -723,24 +746,24 @@ _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str,
         ),
         (
             RETIRED_CONSOLIDATED_FUNCTIONS["slack"],
-            lambda key, old, new: _retired_consolidated_filter_guidance("slack", key, old, new),
+            partial(_retired_consolidated_filter_guidance, "slack"),
         ),
     ),
-}
-
-_STORED_CONSOLIDATED_FILTER_TOOLKITS = frozenset(
-    {
-        "shared_directories",
-        "contacts",
-        "knowledge_graph",
-        "agent_manager",
-        "email_invite",
-        "terminal",
-        "claude_agent",
-        "thread_model",
-        "usage_stats",
+    **{
+        name: ((RETIRED_CONSOLIDATED_FUNCTIONS[name], partial(_stored_consolidated_filter_guidance, name)),)
+        for name in (
+            "shared_directories",
+            "contacts",
+            "knowledge_graph",
+            "agent_manager",
+            "email_invite",
+            "terminal",
+            "claude_agent",
+            "thread_model",
+            "usage_stats",
+        )
     },
-)
+}
 
 
 def retired_stored_tool_setting(
@@ -755,17 +778,6 @@ def retired_stored_tool_setting(
         return next(
             ((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings),
             None,
-        )
-    if tool_name in _STORED_CONSOLIDATED_FILTER_TOOLKITS:
-        return _retired_function_filter(
-            settings,
-            RETIRED_CONSOLIDATED_FUNCTIONS[tool_name],
-            guidance_for=lambda key, _old, new: (
-                f"use `{tool_name}: {{{key}: [{new}]}}` "
-                f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
-                f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
-                "if per-action gating is needed"
-            ),
         )
     return None
 

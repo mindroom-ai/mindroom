@@ -144,9 +144,9 @@ def reject_unexpected_args(
     """Return an ``invalid_argument`` error payload when ``action`` receives unsupported arguments."""
     if (allowed := allowed_by_action.get(action)) is None:
         return None
-    if (msg := unexpected_action_args_error(action, allowed, provided)) is None:
+    if (msg := unexpected_action_args_error(action, allowed, provided, phrase="not supported")) is None:
         return None
-    return graph_error_payload(tool_name, MicrosoftGraphError(code="invalid_argument", message=f"{msg}."))
+    return graph_error_payload(tool_name, MicrosoftGraphError(code="invalid_argument", message=msg))
 
 
 def time_zone_name(value: str) -> str:

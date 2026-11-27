@@ -1858,6 +1858,33 @@ def test_plugin_retired_functions_fail_closed_in_config_validation(tmp_path: Pat
         )
 
 
+def test_plugin_named_like_builtin_approval_target_does_not_inherit_builtin_probe(tmp_path: Path) -> None:
+    """A plugin toolkit named `slack_watch` validates cleanly without inheriting built-in `slack_watch` probe rules."""
+    plugin_root = _write_consolidated_plugin(
+        tmp_path,
+        plugin_name="slack_watch",
+        function_name="poll",
+        retired_name="old_poll",
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    loaded = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [{"path": str(plugin_root)}],
+            "agents": {"a": {"display_name": "A", "tools": ["slack_watch"], "include_default_tools": False}},
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": "old_poll", "action": "require_approval"},
+                    {"match": "poll", "action": "auto_approve"},
+                ],
+            },
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in loaded.tool_approval.rules] == ["old_poll", "poll"]
+
+
 @pytest.mark.parametrize("seconds", [300, 600, 1800])
 def test_timed_wire_round_trip_keeps_original_card(seconds: int) -> None:
     """A custom threaded action targets the reply card, not the thread root."""

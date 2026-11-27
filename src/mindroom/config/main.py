@@ -61,7 +61,8 @@ from mindroom.config.legacy_fields import (
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
-    retired_approval_error,
+    retired_builtin_approval_error,
+    retired_consolidated_approval_error,
     retired_tool_message,
 )
 from mindroom.config.matrix import (
@@ -1678,7 +1679,7 @@ class Config(BaseModel):
         if (
             any(entry.name == "triggers" for _, entry in entries)
             and (
-                trigger_error := retired_approval_error(
+                trigger_error := retired_builtin_approval_error(
                     "triggers",
                     self.tool_approval.rules,
                     self.tool_approval.default,
@@ -1692,7 +1693,7 @@ class Config(BaseModel):
         if (
             any(entry.aliased_from_dynamic_workflow for _, entry in entries)
             and (
-                workflow_error := retired_approval_error(
+                workflow_error := retired_builtin_approval_error(
                     "dynamic_workflow",
                     self.tool_approval.rules,
                     self.tool_approval.default,
@@ -1769,7 +1770,7 @@ class Config(BaseModel):
             "slack" in enabled_toolkits
             and "triggers" in enabled_toolkits
             and (
-                slack_watch_error := retired_approval_error(
+                slack_watch_error := retired_builtin_approval_error(
                     "slack_watch",
                     self.tool_approval.rules,
                     self.tool_approval.default,
@@ -1800,7 +1801,7 @@ class Config(BaseModel):
                 continue
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
             if (
-                consolidated_error := retired_approval_error(
+                consolidated_error := retired_consolidated_approval_error(
                     toolkit_name,
                     self.tool_approval.rules,
                     self.tool_approval.default,

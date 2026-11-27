@@ -799,7 +799,7 @@ class SlackTools(Toolkit):
             if (allowed := _INSPECT_ALLOWED_ARGS.get(action)) is None:
                 _refuse(f"Unsupported slack_inspect action: {action!r}")
             if error := unexpected_action_args_error(action, allowed, provided):
-                _refuse(error)
+                _refuse(error.removesuffix("."))
             if action == "search":
                 return await self._do_search(session, query, kind, limit, cursor)
             if action == "recent":

@@ -186,6 +186,7 @@ def unexpected_action_args_error(
     allowed: str | Collection[str],
     provided: Mapping[str, object],
     *,
+    phrase: str = "not used",
     hints: Mapping[str, str] | None = None,
 ) -> str | None:
     """Return an error string when ``provided`` has non-``None`` keys outside ``allowed``."""
@@ -194,7 +195,7 @@ def unexpected_action_args_error(
         return None
     verb = "is" if len(unexpected) == 1 else "are"
     hint = next((hints[name] for name in unexpected if hints and name in hints), "")
-    return f"{', '.join(unexpected)} {verb} not used for action {action!r}" + (f". {hint}" if hint else "")
+    return f"{', '.join(unexpected)} {verb} {phrase} for action {action!r}." + (f" {hint}" if hint else "")
 
 
 def validate_action_params(
@@ -220,7 +221,7 @@ def validate_action_params(
         missing = [
             name
             for name in required
-            if (value := params[name]) is None
+            if (value := params.get(name)) is None
             or (reject_blank_required and isinstance(value, str) and not value.strip())
         ]
         if missing:

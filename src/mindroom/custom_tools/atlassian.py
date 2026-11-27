@@ -606,7 +606,7 @@ class AtlassianToolkit(Toolkit):
         allowed, builder = entry
         try:
             if error := unexpected_action_args_error(action, allowed, provided, hints=(hints or {}).get(action)):
-                raise _InvalidArgumentError(error if error.endswith(".") else f"{error}.")
+                raise _InvalidArgumentError(error)
             operation = builder()
         except AtlassianError as exc:
             return self._error(exc)
