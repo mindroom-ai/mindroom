@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from dataclasses import asdict
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -14,10 +15,12 @@ from fastapi.testclient import TestClient
 from mindroom.api import room_reads, room_triggers
 from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.main import app as main_app
+from mindroom.api.room_triggers import ScriptCheckSummary
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig
 from mindroom.event_sources import EventSource, EventSourceEmitter, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
@@ -28,6 +31,8 @@ from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
+    ScriptCheckCheckpoint,
+    ScriptCheckSourceSpec,
     ThreadCheckpoint,
     ThreadTagSourceSpec,
     TriggerSourceSpec,
@@ -73,18 +78,27 @@ class _Harness:
         room_state_events: dict[str, list[dict[str, object]]] | None = None,
         max_reactive_triggers_per_owner: int = 50,
         max_github_pr_watches_per_owner: int = 20,
+        max_script_checks_per_owner: int = 10,
+        allow_local_script_checks: bool = False,
     ) -> None:
         self.paths: RuntimePaths = test_runtime_paths(tmp_path)
+        assistant_tools = ["triggers", "script"] if allow_local_script_checks else []
         self.config = Config(
             administrators=admins or [],
             authorization=AuthorizationConfig(aliases=aliases or {}),
+            defaults=DefaultsConfig(allow_shell_without_worker=allow_local_script_checks),
             external_trigger_policy=ExternalTriggerPolicyConfig(
                 admin_users=admins or [],
                 max_reactive_triggers_per_owner=max_reactive_triggers_per_owner,
                 max_github_pr_watches_per_owner=max_github_pr_watches_per_owner,
+                max_script_checks_per_owner=max_script_checks_per_owner,
             ),
             agents={
-                "assistant": AgentConfig(display_name="Assistant", rooms=["lobby", ROOM_A, ROOM_B, ROOM_C]),
+                "assistant": AgentConfig(
+                    display_name="Assistant",
+                    rooms=["lobby", ROOM_A, ROOM_B, ROOM_C],
+                    tools=assistant_tools,
+                ),
                 "ops": AgentConfig(display_name="Ops", rooms=[ROOM_B]),
             },
         )
@@ -176,6 +190,7 @@ class _Harness:
         cursor: RoomCursor | None = extra.pop("initial_cursor", None)
         checkpoint: ThreadCheckpoint | None = extra.pop("initial_checkpoint", None)
         gh_checkpoint: GitHubPRCheckpoint | None = extra.pop("initial_github_pr_checkpoint", None)
+        sc_checkpoint: ScriptCheckCheckpoint | None = extra.pop("initial_script_check_checkpoint", None)
         target = TriggerTargetSpec(
             agent=agent,
             room_id=target_room,
@@ -198,6 +213,7 @@ class _Harness:
             initial_cursor=cursor,
             initial_checkpoint=checkpoint,
             initial_github_pr_checkpoint=gh_checkpoint,
+            initial_script_check_checkpoint=sc_checkpoint,
         )
 
     def req(
@@ -301,6 +317,7 @@ def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None
         "last_fired_at": 1_764_000_000_000,
         "owner_user_id": ALICE,
         "can_manage": True,
+        "script_check": None,
         "source_id": None,
         "paused_reason": None,
     }
@@ -528,6 +545,230 @@ def test_reenabling_github_pr_trigger_over_quota_returns_409(tmp_path: Path) -> 
     resp2 = h2.req("PATCH", ROOM_A, ALICE, "tr_pr_closed", {"enabled": True})
     assert resp2.status_code == 409
     assert "reactive trigger limit" in resp2.json()["detail"]
+
+
+def test_script_check_trigger_summary_owner_health_and_cross_room_redaction(tmp_path: Path) -> None:
+    """Room triggers API projects script_check summary, owner-only health, and redacts cross-room watches."""
+    h = _Harness(tmp_path)
+    digest_same = hashlib.sha256(b"same-room-check").hexdigest()
+    digest_cross = hashlib.sha256(b"cross-room-check").hexdigest()
+
+    h.add_reactive(
+        "tr_sc_same",
+        ScriptCheckSourceSpec(
+            agent="assistant",
+            room_id=ROOM_A,
+            source_digest=digest_same,
+            poll_interval_seconds=120,
+        ),
+        target_room=ROOM_A,
+        agent="assistant",
+        description="Poll same-room feed",
+        prompt="Summarize new items",
+        initial_script_check_checkpoint=ScriptCheckCheckpoint(
+            revision=2,
+            source_utf8="def check():\n    return {'secret_same_source': True}\n",
+            identity_json={"channel": "matrix", "session_id": "secret-session-same"},
+            state={"secret_cursor": "cursor-xyz"},
+            next_poll_at=1_764_001_000.0,
+            consecutive_errors=2,
+            last_error_code="timeout",
+            last_run_at=1_764_000_250.5,
+            updated_at=1_764_000_250.5,
+        ),
+    )
+    h.add_reactive(
+        "tr_sc_cross",
+        ScriptCheckSourceSpec(
+            agent="ops",
+            room_id=ROOM_A,
+            source_digest=digest_cross,
+            poll_interval_seconds=600,
+        ),
+        target_room=ROOM_B,
+        agent="ops",
+        description="Private ops script check",
+        prompt="Secret ops escalation",
+        created_at=1_764_000_200.0,
+        initial_script_check_checkpoint=ScriptCheckCheckpoint(
+            revision=1,
+            source_utf8="def check():\n    return {'secret_cross_source': True}\n",
+            identity_json={"channel": "matrix", "session_id": "secret-session-cross"},
+            state={"secret_token": "tok-123"},
+            next_poll_at=1_764_001_000.0,
+            consecutive_errors=1,
+            last_error_code="source_room_state_unreadable",
+            last_run_at=1_764_000_300.25,
+            updated_at=1_764_000_300.25,
+        ),
+    )
+
+    # Owner gets summary + health in epoch ms and never receives source/identity/state
+    alice_resp = h.req("GET", ROOM_A, ALICE)
+    assert alice_resp.status_code == 200
+    alice_rows = {row["trigger_id"]: row for row in alice_resp.json()["triggers"]}
+    assert alice_rows["tr_sc_same"]["script_check"] == asdict(
+        ScriptCheckSummary(
+            executing_agent="assistant",
+            poll_interval_seconds=120,
+            source_digest=digest_same,
+            last_run_at=1_764_000_250_500,
+            consecutive_errors=2,
+            last_error_code="timeout",
+        ),
+    )
+    assert alice_rows["tr_sc_cross"]["relation"] == "watch"
+    assert alice_rows["tr_sc_cross"]["script_check"] == {
+        "executing_agent": "ops",
+        "poll_interval_seconds": 600,
+        "source_digest": digest_cross,
+        "last_run_at": 1_764_000_300_250,
+        "consecutive_errors": 1,
+        "last_error_code": "source_room_state_unreadable",
+    }
+    for forbidden in (
+        "secret_same_source",
+        "secret_cross_source",
+        "secret-session-same",
+        "secret-session-cross",
+        "secret_cursor",
+        "cursor-xyz",
+        "secret_token",
+        "tok-123",
+    ):
+        assert forbidden not in alice_resp.text
+
+    # Non-owner joined to both ROOM_A and ROOM_B gets summary with None health and no source/state
+    bob_resp = h.req("GET", ROOM_A, BOB)
+    assert bob_resp.status_code == 200
+    bob_rows = {row["trigger_id"]: row for row in bob_resp.json()["triggers"]}
+    assert bob_rows["tr_sc_same"]["can_manage"] is False
+    assert bob_rows["tr_sc_same"]["script_check"] == {
+        "executing_agent": "assistant",
+        "poll_interval_seconds": 120,
+        "source_digest": digest_same,
+        "last_run_at": None,
+        "consecutive_errors": None,
+        "last_error_code": None,
+    }
+    assert bob_rows["tr_sc_cross"]["script_check"] == {
+        "executing_agent": "ops",
+        "poll_interval_seconds": 600,
+        "source_digest": digest_cross,
+        "last_run_at": None,
+        "consecutive_errors": None,
+        "last_error_code": None,
+    }
+    for forbidden in (
+        "secret_same_source",
+        "secret_cross_source",
+        "cursor-xyz",
+        "tok-123",
+        "source_room_state_unreadable",
+    ):
+        assert forbidden not in bob_resp.text
+
+    # Non-owner in ROOM_A who is NOT in ROOM_B gets redacted cross-room watch with script_check=None
+    carol_resp = h.req("GET", ROOM_A, CAROL)
+    assert carol_resp.status_code == 200
+    carol_rows = {row["trigger_id"]: row for row in carol_resp.json()["triggers"]}
+    assert carol_rows["tr_sc_same"]["script_check"] == {
+        "executing_agent": "assistant",
+        "poll_interval_seconds": 120,
+        "source_digest": digest_same,
+        "last_run_at": None,
+        "consecutive_errors": None,
+        "last_error_code": None,
+    }
+    assert carol_rows["tr_sc_cross"]["relation"] == "watch"
+    assert carol_rows["tr_sc_cross"]["script_check"] is None
+    for leaked in (
+        digest_cross,
+        "Private ops script check",
+        "Secret ops escalation",
+        ROOM_B,
+        "secret_cross_source",
+        "tok-123",
+    ):
+        assert leaked not in carol_resp.text
+
+    # PATCH returns populated script_check summary for owner
+    disable_resp = h.req("PATCH", ROOM_A, ALICE, "tr_sc_same", {"enabled": False})
+    assert disable_resp.status_code == 200
+    assert disable_resp.json()["script_check"] == {
+        "executing_agent": "assistant",
+        "poll_interval_seconds": 120,
+        "source_digest": digest_same,
+        "last_run_at": 1_764_000_250_500,
+        "consecutive_errors": 2,
+        "last_error_code": "timeout",
+    }
+
+
+def test_script_check_quota_rejected_reenable_preserves_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Astra fresh #3: quota-rejected PATCH re-enable (409) leaves script_check checkpoint untouched."""
+    monkeypatch.setattr(
+        "mindroom.script_runs.manager.background_script_supervision_supported",
+        lambda: True,
+    )
+    h = _Harness(tmp_path, max_script_checks_per_owner=1, allow_local_script_checks=True)
+    digest = hashlib.sha256(b"def check():\n    return None\n").hexdigest()
+    h.add_reactive(
+        "tr_sc_active",
+        ScriptCheckSourceSpec(agent="assistant", room_id=ROOM_A, source_digest=digest, poll_interval_seconds=120),
+        target_room=ROOM_A,
+        agent="assistant",
+        enabled=True,
+        initial_script_check_checkpoint=ScriptCheckCheckpoint(
+            revision=1,
+            source_utf8="def check():\n    return None\n",
+            identity_json={"channel": "matrix"},
+            next_poll_at=1_764_001_000.0,
+            updated_at=1_764_000_000.0,
+        ),
+    )
+    h.add_reactive(
+        "tr_sc_disabled",
+        ScriptCheckSourceSpec(agent="assistant", room_id=ROOM_A, source_digest=digest, poll_interval_seconds=120),
+        target_room=ROOM_A,
+        agent="assistant",
+        enabled=False,
+        disabled_reason="manual",
+        initial_script_check_checkpoint=ScriptCheckCheckpoint(
+            revision=2,
+            source_utf8="def check():\n    return None\n",
+            identity_json={"channel": "matrix"},
+            next_poll_at=1_764_001_000.0,
+            consecutive_errors=3,
+            last_error_code="timeout",
+            last_run_at=1_764_000_250.5,
+            updated_at=1_764_000_250.5,
+        ),
+    )
+
+    rejected = h.req("PATCH", ROOM_A, ALICE, "tr_sc_disabled", {"enabled": True})
+    assert rejected.status_code == 409
+    cp_after_409 = h.reactive_store.get_script_check_checkpoint("tr_sc_disabled")
+    assert cp_after_409 is not None
+    assert (
+        cp_after_409.revision,
+        cp_after_409.consecutive_errors,
+        cp_after_409.last_error_code,
+        cp_after_409.next_poll_at,
+    ) == (2, 3, "timeout", 1_764_001_000.0)
+
+    # Once quota has room, PATCH re-enable succeeds and resets errors + bumps revision transactionally.
+    assert h.req("PATCH", ROOM_A, ALICE, "tr_sc_active", {"enabled": False}).status_code == 200
+    allowed = h.req("PATCH", ROOM_A, ALICE, "tr_sc_disabled", {"enabled": True})
+    assert allowed.status_code == 200
+    assert allowed.json()["script_check"]["consecutive_errors"] == 0
+    assert allowed.json()["script_check"]["last_error_code"] is None
+    cp_after_200 = h.reactive_store.get_script_check_checkpoint("tr_sc_disabled")
+    assert cp_after_200 is not None
+    assert (cp_after_200.revision, cp_after_200.consecutive_errors, cp_after_200.last_error_code) == (3, 0, None)
 
 
 def _private_room_source(source_id: str) -> FakeEventSource:

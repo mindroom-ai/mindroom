@@ -330,7 +330,7 @@ async def _upload_to_microsoft_files(
         tool_output_workspace_root=workspace,
         file_access=file_access,
     )
-    result = json.loads(tool.microsoft_files_upload_file(raw_path))
+    result = json.loads(tool.microsoft_files_write("upload_file", local_path=raw_path))
     return result["status"] == "ok" and [request.content for request in graph.requests] == [_PNG]
 
 

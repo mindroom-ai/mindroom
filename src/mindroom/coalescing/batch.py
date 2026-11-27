@@ -425,6 +425,10 @@ def _batch_facts(ordered_pending_events: list[PendingEvent]) -> IngressFacts:
         original_sender=relayed.original_sender,
         original_sender_is_human=relayed.original_sender_is_human,
         hook_source=next(iter(hook_sources), None),
+        automation_origin=next(
+            (event.facts.automation_origin for event in ordered_pending_events if event.facts.automation_origin),
+            None,
+        ),
         message_received_depth=max(event.facts.message_received_depth for event in ordered_pending_events),
     )
 
