@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -19,7 +18,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom import constants
-    from mindroom.config.main import Config
     from mindroom.delegation.state import SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.runtime_resolution import ResolvedAgentRuntime
@@ -30,112 +28,88 @@ if TYPE_CHECKING:
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-
-@dataclass(frozen=True, slots=True)
-class _AgentToolkitBuildContext:
-    agent_name: str
-    config: Config
-    runtime_paths: constants.RuntimePaths
-    workspace_root: Path
-    execution_identity: ToolExecutionIdentity | None
-    delegation_depth: int
-    refresh_scheduler: KnowledgeRefreshScheduler | None
-    persona: SubagentPersona | None
-    deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None
-    calls_as_jobs: bool
-
-    def _memory(self) -> Toolkit:
-        from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
-
-        return MemoryTools(self.agent_name, self.config, self.runtime_paths, self.execution_identity)
-
-    def _knowledge_graph(self) -> Toolkit:
-        from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
-
-        return KnowledgeGraphTools(self.agent_name, self.config, self.runtime_paths, self.execution_identity)
-
-    def _delegate(self) -> Toolkit:
-        # Imported lazily to avoid a cycle: delegate -> ai -> agents -> toolkit_builder -> delegate.
-        from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
-
-        return DelegateTools(
-            agent_name=self.agent_name,
-            runtime_paths=self.runtime_paths,
-            config=self.config,
-            execution_identity=self.execution_identity,
-            delegation_depth=self.delegation_depth,
-            refresh_scheduler=self.refresh_scheduler,
-            workspace_root=self.workspace_root,
-            persona=self.persona,
-            calls_as_jobs=self.calls_as_jobs,
-        )
-
-    def _self_config(self) -> Toolkit:
-        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-        return SelfConfigTools(self.agent_name, self.runtime_paths)
-
-    def _agent_manager(self) -> Toolkit:
-        from mindroom.custom_tools.agent_manager import AgentManagerTools  # noqa: PLC0415
-
-        can_create = self.config.get_agent(self.agent_name).created_agents_per_owner > 0
-        info = self.config.generated_agent(self.agent_name)
-        return AgentManagerTools(
-            self.agent_name,
-            can_create=can_create,
-            generated=info is not None,
-            created=info is not None and info.created,
-        )
-
-    def _contacts(self) -> Toolkit:
-        from mindroom.custom_tools.contacts import ContactsTools  # noqa: PLC0415
-
-        return ContactsTools(self.agent_name)
-
-    def _skill_manage(self) -> Toolkit:
-        from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
-
-        return SkillManageTools(
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-            agent_workspace_skills_root(self.workspace_root),
-        )
-
-    def _compact_context(self) -> Toolkit:
-        from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
-
-        return CompactContextTools(self.agent_name, self.config, self.runtime_paths, self.execution_identity)
-
-    def _report_publishing(self) -> Toolkit:
-        from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
-
-        return ReportPublishingTools()
-
-    def _dynamic_tools(self) -> Toolkit | None:
-        if self.deferred_toolkits is None:
-            return None
-        from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
-
-        return DynamicToolsToolkit(deferred_toolkits=self.deferred_toolkits)
-
-
 # Skill management keeps its own output handling; dynamic tool search returns inline.
 _DIRECT_OUTPUT_TOOLKITS = frozenset({"skill_manage", "dynamic_tools"})
 
-# Toolkits whose constructors require per-agent build context rather than generic registry metadata.
-_CONTEXT_TOOLKIT_BUILDERS: dict[str, Callable[[_AgentToolkitBuildContext], Toolkit | None]] = {
-    "memory": _AgentToolkitBuildContext._memory,
-    "knowledge_graph": _AgentToolkitBuildContext._knowledge_graph,
-    "delegate": _AgentToolkitBuildContext._delegate,
-    "self_config": _AgentToolkitBuildContext._self_config,
-    "agent_manager": _AgentToolkitBuildContext._agent_manager,
-    "contacts": _AgentToolkitBuildContext._contacts,
-    "skill_manage": _AgentToolkitBuildContext._skill_manage,
-    "compact_context": _AgentToolkitBuildContext._compact_context,
-    "report_publishing": _AgentToolkitBuildContext._report_publishing,
-    "dynamic_tools": _AgentToolkitBuildContext._dynamic_tools,
-}
+
+def _build_context_toolkit(  # noqa: C901 - flat match dispatch over per-agent context toolkits
+    tool_name: str,
+    *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    agent_runtime: ResolvedAgentRuntime,
+    execution_identity: ToolExecutionIdentity | None,
+    delegation_depth: int,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    persona: SubagentPersona | None,
+    deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None,
+    calls_as_jobs: bool,
+) -> Toolkit | None:
+    """Build a per-agent context toolkit, or return ``None`` for registry-backed tools."""
+    config = agent_tools.config
+    agent_name = agent_tools.agent_name
+    workspace_root = agent_runtime.workspace.root
+    toolkit: Toolkit | None = None
+    match tool_name:
+        case "memory":
+            from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
+
+            toolkit = MemoryTools(agent_name, config, runtime_paths, execution_identity)
+        case "knowledge_graph":
+            from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
+
+            toolkit = KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity)
+        case "delegate":
+            # Imported lazily to avoid a cycle: delegate -> ai -> agents -> toolkit_builder -> delegate.
+            from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
+
+            toolkit = DelegateTools(
+                agent_name=agent_name,
+                runtime_paths=runtime_paths,
+                config=config,
+                execution_identity=execution_identity,
+                delegation_depth=delegation_depth,
+                refresh_scheduler=refresh_scheduler,
+                workspace_root=workspace_root,
+                persona=persona,
+                calls_as_jobs=calls_as_jobs,
+            )
+        case "self_config":
+            from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
+
+            toolkit = SelfConfigTools(agent_name, runtime_paths)
+        case "agent_manager":
+            from mindroom.custom_tools.agent_manager import AgentManagerTools  # noqa: PLC0415
+
+            can_create = config.get_agent(agent_name).created_agents_per_owner > 0
+            info = config.generated_agent(agent_name)
+            toolkit = AgentManagerTools(
+                agent_name,
+                can_create=can_create,
+                generated=info is not None,
+                created=info is not None and info.created,
+            )
+        case "contacts":
+            from mindroom.custom_tools.contacts import ContactsTools  # noqa: PLC0415
+
+            toolkit = ContactsTools(agent_name)
+        case "skill_manage":
+            from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
+
+            toolkit = SkillManageTools(agent_name, config, runtime_paths, agent_workspace_skills_root(workspace_root))
+        case "compact_context":
+            from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
+
+            toolkit = CompactContextTools(agent_name, config, runtime_paths, execution_identity)
+        case "report_publishing":
+            from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
+
+            toolkit = ReportPublishingTools()
+        case "dynamic_tools" if deferred_toolkits is not None:
+            from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
+
+            toolkit = DynamicToolsToolkit(deferred_toolkits=deferred_toolkits)
+    return toolkit
 
 
 def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_path: Path) -> dict[str, object] | None:
@@ -184,24 +158,22 @@ def build_agent_toolkit(
             execution_identity=execution_identity,
             create=True,
         )
-
-    if (build := _CONTEXT_TOOLKIT_BUILDERS.get(tool_name)) is not None:
-        toolkit = build(
-            _AgentToolkitBuildContext(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                workspace_root=agent_runtime.workspace.root,
-                execution_identity=execution_identity,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                persona=persona,
-                deferred_toolkits=deferred_toolkits,
-                calls_as_jobs=calls_as_jobs,
-            ),
+    if tool_name == "dynamic_tools" and deferred_toolkits is None:
+        return None
+    if (
+        toolkit := _build_context_toolkit(
+            tool_name,
+            agent_tools=agent_tools,
+            runtime_paths=runtime_paths,
+            agent_runtime=agent_runtime,
+            execution_identity=execution_identity,
+            delegation_depth=delegation_depth,
+            refresh_scheduler=refresh_scheduler,
+            persona=persona,
+            deferred_toolkits=deferred_toolkits,
+            calls_as_jobs=calls_as_jobs,
         )
-        if toolkit is None:
-            return None
+    ) is not None:
         if tool_name not in _DIRECT_OUTPUT_TOOLKITS:
             policy = ToolOutputFilePolicy.for_current_tools(
                 agent_runtime.workspace.root,

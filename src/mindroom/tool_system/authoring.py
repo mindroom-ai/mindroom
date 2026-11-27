@@ -196,6 +196,7 @@ class Toolkit:
     requires_connect: bool = False
     offer_background_after: bool = True
     offer_output_path: bool = True
+    # MindRoom-owned metadata set during toolkit configuration/construction; plugin subclasses should not redefine.
     function_finishing: ToolkitFinishing | None = None
     tool_construction: ToolConstruction | None = None
 
