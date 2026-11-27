@@ -58,9 +58,9 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
         ToolManagedInitArg.AGENT_NAME,
     ),
     requires_room_context=True,
-    function_names=("workflow",),
-    workspace_writers=("workflow",),
-    action_scoped_grants=("workflow",),
+    function_names=("workflow_read", "workflow_write"),
+    workspace_writers=("workflow_write",),
+    action_scoped_grants=("workflow_read", "workflow_write"),
     supports_toolkit_filters=False,
 )
 def workflow_tools() -> type[WorkflowTools]:

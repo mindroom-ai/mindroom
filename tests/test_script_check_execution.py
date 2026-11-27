@@ -387,7 +387,7 @@ async def test_policy_gateway_routes_and_manager_isolation(tmp_path: Path) -> No
         resolve_current_script_tool(ctx_pol, ScriptToolGrant("calculator", "calculate"), script_check=True) is not None
     )
     assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("website", "read_url"), script_check=True) is None
-    assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("triggers", "triggers"), script_check=True) is None
+    assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("triggers", "triggers_read"), script_check=True) is None
 
     store = ScriptRunStore(ctx_pol.runtime_paths)
     broker = ScriptToolBroker(store=store, runtime_resolver=_SimpleResolver(ctx_pol))
@@ -669,20 +669,20 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path, monke
             )
             assert {r.run_id for r in interrupt_m.await_args.args[0]} == expected_ids
 
-    # Workflow-only agent loses script_check eligibility on reload only when workflow(action="start") may ask.
+    # Workflow-only agent loses script_check eligibility on reload only when workflow_write(action="start") may ask.
     cfg_box[0] = _script_ctx(tmp_path / "lc", tools=["triggers", "workflow"], allow_local=True).config
     for allowed_approval in (
         {
             "default": "auto_approve",
-            "rules": [{"match": "workflow", "agents": "other_agent", "action": "require_approval"}],
+            "rules": [{"match": "workflow_write", "agents": "other_agent", "action": "require_approval"}],
         },
         {
             "default": "auto_approve",
-            "rules": [{"match": "workflow", "arguments": {"action": "cancel"}, "action": "require_approval"}],
+            "rules": [{"match": "workflow_write", "arguments": {"action": "cancel"}, "action": "require_approval"}],
         },
         {
             "default": "require_approval",
-            "rules": [{"match": "workflow", "arguments": {"action": "start"}, "action": "auto_approve"}],
+            "rules": [{"match": "workflow_write", "arguments": {"action": "start"}, "action": "auto_approve"}],
         },
     ):
         cfg_allowed = _script_ctx(
@@ -701,11 +701,15 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path, monke
             interrupt_m.assert_not_awaited()
 
     for gated_approval in (
-        {"default": "auto_approve", "rules": [{"match": "workflow", "action": "require_approval"}]},
+        {"default": "auto_approve", "rules": [{"match": "workflow_write", "action": "require_approval"}]},
         {
             "default": "auto_approve",
             "rules": [
-                {"match": "workflow", "arguments": {"action": "start", "source": "*"}, "action": "require_approval"},
+                {
+                    "match": "workflow_write",
+                    "arguments": {"action": "start", "source": "*"},
+                    "action": "require_approval",
+                },
             ],
         },
     ):
@@ -932,7 +936,7 @@ async def test_script_check_denied_tool_call_cannot_commit_state_or_fire(tmp_pat
         ) as h:
             for tid, denied_call in (
                 ("sc_excluded", "tool('feed', 'fetch_items')"),
-                ("sc_restricted", "tool('triggers', 'triggers', action='list')"),
+                ("sc_restricted", "tool('triggers', 'triggers_read', action='list')"),
             ):
                 src = (
                     "def check():\n"

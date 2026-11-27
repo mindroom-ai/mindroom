@@ -259,7 +259,7 @@ async def test_get_workflow_shows_the_runs_cost_and_the_attempts(stack: Workflow
     await stack.resume(stack.run_id)
     assert await stack.result("@1", "agent", {"prompt": "And this."}) == "more"
 
-    status = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id, nodes="all"))
+    status = json.loads(await stack.call("workflow_read", action="get", run_id=stack.run_id, nodes="all"))
 
     shown = status["usage"]
     assert (shown["cost_usd"], shown["attempt_cost_usd"]) == (pytest.approx(0.50), pytest.approx(0.10))

@@ -251,7 +251,7 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
 
 def _default_wait(function: ToolFunction, *, job_kind: str | None = None) -> float | None:
     """Return how long a managed call of ``function`` that sets no budget waits, None until completion."""
-    if function.registered_toolkit == "workflow" and function.name == "workflow":
+    if function.registered_toolkit == "workflow" and function.name == "workflow_write":
         # Workflow runs take as long as their agents do, so start/resume jobs return their handle at once,
         # while synchronous control actions (get/cancel/list/save) run as regular tool jobs and wait to finish.
         # Schema projection (job_kind=None) omits an unconditional 0s default since it depends on action.

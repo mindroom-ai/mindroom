@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_api",
     helper_text=(
-        "Search uses action='search' with required `search_term`. "
+        "Search uses `matrix_api_read(action='search', ...)` with required `search_term`. "
         "`room_id` defaults to the current room. "
         "If `keys` is omitted, all supported keys "
         "(['content.body', 'content.name', 'content.topic']) are searched via the server default. "
@@ -38,7 +38,8 @@ if TYPE_CHECKING:
         "when `event_context.include_profile` is requested). Full event `content` is intentionally "
         "omitted; use `get_event` when needed."
     ),
-    function_names=("matrix_api",),
+    function_names=("matrix_api_read", "matrix_api_write"),
+    action_scoped_grants=("matrix_api_read", "matrix_api_write"),
 )
 def matrix_api_tools() -> type[MatrixApiTools]:
     """Return low-level Matrix API tools."""

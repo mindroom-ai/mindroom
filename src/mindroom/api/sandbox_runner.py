@@ -2483,9 +2483,8 @@ def _persistent_browser_runtime(
     payload: ExecuteRequest,
 ) -> WorkerComputerRuntime | WorkerBrowserRuntime | None:
     """Return the worker's long-lived browser runtime when this call drives it."""
-    if payload.tool_name != "browser_mcp" and (payload.tool_name, payload.function_name) != (
-        "browser",
-        "browser_control",
+    if payload.tool_name != "browser_mcp" and not (
+        payload.tool_name == "browser" and payload.function_name in {"browser_read", "browser_control"}
     ):
         return None
     computer = getattr(app.state, "worker_computer", None)

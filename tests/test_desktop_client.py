@@ -166,7 +166,7 @@ async def test_browser_control_timeout_requests_browser_observation(monkeypatch:
 
     with pytest.raises(
         DesktopRequestError,
-        match=r"browser\(action='tabs' or 'snapshot', target='desktop'\)",
+        match=r"browser_read\(action='tabs' or 'snapshot', target='desktop'\)",
     ):
         await router.request(TARGET, _command(action="browser_control"), timeout_seconds=0.001)
 

@@ -218,7 +218,7 @@ def test_matrix_search_response_zero_results_without_results_key() -> None:
 @pytest.mark.asyncio
 async def test_matrix_api_requires_runtime_context() -> None:
     """Tool should fail clearly when no Matrix runtime context is available."""
-    payload = json.loads(await MatrixApiTools().matrix_api(action="send_event"))
+    payload = json.loads(await MatrixApiTools().matrix_api_write(action="send_event"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "matrix_api"
@@ -240,7 +240,7 @@ async def test_matrix_api_send_event_happy_path() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="com.example.event",
                 content={"body": "hello"},
@@ -300,7 +300,7 @@ async def test_matrix_api_rejects_model_authored_reserved_metadata(
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action=action,
                 event_type="m.room.message",
                 content=content,
@@ -346,11 +346,11 @@ async def test_matrix_api_rejects_runtime_owned_event_types(action: str, event_t
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action=action,
                 event_type=event_type,
-                state_key="evil-1",
                 content={"task_id": "evil-1", "status": "pending", "workflow": forged_workflow},
+                **({"state_key": "evil-1"} if action == "put_state" else {}),
             ),
         )
 
@@ -371,7 +371,7 @@ async def test_matrix_api_rejects_deeply_nested_content_without_exhausting_the_s
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(action="send_event", event_type="m.room.message", content={"deep": nested}),
+            await tool.matrix_api_write(action="send_event", event_type="m.room.message", content={"deep": nested}),
         )
 
     assert payload["status"] == "error"
@@ -403,7 +403,7 @@ async def test_matrix_api_send_event_reports_a_sent_threaded_message() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -436,7 +436,7 @@ async def test_matrix_api_send_event_room_message_preserves_raw_payload() -> Non
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -478,7 +478,7 @@ async def test_matrix_api_send_event_room_message_names_the_human_requester(
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(action="send_event", event_type="m.room.message", content=content),
+            await tool.matrix_api_write(action="send_event", event_type="m.room.message", content=content),
         )
 
     assert payload["status"] == "ok"
@@ -504,7 +504,7 @@ async def test_matrix_api_send_event_sends_a_plain_reply_to_a_threaded_target() 
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -527,7 +527,7 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content={"body": "hello", "msgtype": "m.text"},
@@ -562,7 +562,7 @@ async def test_matrix_api_send_event_room_mode_edit_stays_room_level() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -594,7 +594,7 @@ async def test_matrix_api_send_event_room_mode_edit_errors_when_thread_lookup_fa
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -626,7 +626,7 @@ async def test_matrix_api_send_event_errors_when_thread_classification_fails() -
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.message",
                 content=content,
@@ -656,7 +656,7 @@ async def test_matrix_api_get_state_happy_path() -> None:
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="get_state", event_type="com.example.state"))
+        payload = json.loads(await tool.matrix_api_read(action="get_state", event_type="com.example.state"))
 
     assert payload == {
         "action": "get_state",
@@ -689,7 +689,7 @@ async def test_matrix_api_accepts_a_room_version_12_room_id() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(action="get_state", room_id=room_id, event_type="com.example.state"),
+            await tool.matrix_api_read(action="get_state", room_id=room_id, event_type="com.example.state"),
         )
 
     assert payload["status"] == "ok"
@@ -716,7 +716,7 @@ async def test_matrix_api_put_state_happy_path() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.state",
                 content={"enabled": True},
@@ -764,7 +764,7 @@ async def test_matrix_api_redact_happy_path(reason: str, expected_reason: str | 
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$target:localhost",
                 reason=reason,
@@ -797,7 +797,7 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$target:localhost",
                 reason="cleanup",
@@ -829,7 +829,7 @@ async def test_matrix_api_redact_thread_lookup_uses_the_journal_relation_view() 
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$target:localhost",
                 reason="cleanup",
@@ -850,7 +850,7 @@ async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> N
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$reaction:localhost",
                 reason="cleanup",
@@ -889,7 +889,7 @@ async def test_matrix_api_redact_resolves_a_transitive_plain_reply_target() -> N
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$plain-two",
                 reason="cleanup",
@@ -912,7 +912,7 @@ async def test_matrix_api_redact_reports_the_redaction_it_sent() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$target:localhost",
                 reason="cleanup",
@@ -935,7 +935,7 @@ async def test_matrix_api_get_event_happy_path() -> None:
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="get_event", event_id="$evt:localhost"))
+        payload = json.loads(await tool.matrix_api_read(action="get_event", event_id="$evt:localhost"))
 
     assert payload == {
         "action": "get_event",
@@ -979,7 +979,7 @@ async def test_matrix_api_search_happy_path() -> None:
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="search", search_term="needle"))
+        payload = json.loads(await tool.matrix_api_read(action="search", search_term="needle"))
 
     assert payload == {
         "action": "search",
@@ -1024,7 +1024,7 @@ async def test_matrix_api_search_explicit_keys_pass_through() -> None:
     ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
 
     with tool_runtime_context(ctx):
-        await tool.matrix_api(
+        await tool.matrix_api_read(
             action="search",
             search_term="meeting",
             keys=[" content.name "],
@@ -1058,7 +1058,7 @@ async def test_matrix_api_search_snippet_falls_back_to_topic() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 search_term="meeting",
                 keys=["content.topic"],
@@ -1114,14 +1114,14 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
 
     with tool_runtime_context(ctx):
         first_payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 search_term="needle",
                 limit=1,
             ),
         )
         second_payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 search_term="needle",
                 limit=1,
@@ -1181,7 +1181,7 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 search_term="needle",
                 event_context={"include_profile": True},
@@ -1229,7 +1229,7 @@ async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_it
 
         ctx.client._send.side_effect = search
         with tool_runtime_context(ctx):
-            payload = json.loads(await tool.matrix_api(action="search", search_term=term, event_context={}))
+            payload = json.loads(await tool.matrix_api_read(action="search", search_term=term, event_context={}))
         return [[result["snippet"], result["context"]["events_before"][0]["snippet"]] for result in payload["results"]]
 
     built, held = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
@@ -1261,7 +1261,7 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 room_id="!other:localhost",
                 search_term="needle",
@@ -1308,7 +1308,7 @@ async def test_matrix_api_search_validation_errors(kwargs: dict[str, object], ex
     ctx = _make_context()
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(**kwargs))
+        payload = json.loads(await tool.matrix_api_read(**kwargs))
 
     assert payload["status"] == "error"
     assert payload["action"] == "search"
@@ -1367,7 +1367,7 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="search",
                 search_term="needle",
                 filter=raw_filter,
@@ -1422,20 +1422,13 @@ async def test_matrix_api_search_filter_and_event_context_pass_through() -> None
     ],
 )
 async def test_matrix_api_search_rejects_write_only_flags(kwargs: dict[str, object]) -> None:
-    """Search should reject write-only flags that do not apply to read-only actions."""
-    tool = MatrixApiTools()
+    """Read schema rejects write-only flags before the tool body runs."""
+    entrypoint = toolkit_offers(MatrixApiTools(), "matrix_api_read").entrypoint
     ctx = _make_context()
 
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(**kwargs))
+    with tool_runtime_context(ctx), pytest.raises(ValidationError):
+        await entrypoint(**kwargs)
 
-    assert payload == {
-        "action": "search",
-        "message": "dry_run/allow_dangerous not applicable to read-only search action",
-        "room_id": ctx.room_id,
-        "status": "error",
-        "tool": "matrix_api",
-    }
     ctx.client._send.assert_not_awaited()
 
 
@@ -1447,7 +1440,7 @@ async def test_matrix_api_send_event_dry_run() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="com.example.event",
                 content={"body": "preview"},
@@ -1478,7 +1471,7 @@ async def test_matrix_api_put_state_dry_run() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.state",
                 content={"enabled": True},
@@ -1512,7 +1505,7 @@ async def test_matrix_api_put_state_blocks_room_create() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="m.room.create",
                 content={"creator": "@user:localhost"},
@@ -1563,7 +1556,7 @@ async def test_matrix_api_put_state_requires_allow_dangerous(event_type: str) ->
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type=event_type,
                 content={"users": {"@user:localhost": 100}},
@@ -1608,7 +1601,7 @@ async def test_matrix_api_put_state_allow_dangerous_succeeds_for_joined_room_adm
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type=event_type,
                 content=content,
@@ -1646,7 +1639,7 @@ async def test_matrix_api_put_state_dangerous_accepts_joined_admin_bridge_alias(
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="m.room.join_rules",
                 content={"join_rule": "invite"},
@@ -1685,7 +1678,7 @@ async def test_matrix_api_put_state_dangerous_requires_joined_room_admin_request
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="m.room.join_rules",
                 content={"join_rule": "public"},
@@ -1718,7 +1711,7 @@ async def test_matrix_api_put_state_dangerous_rejects_non_human_requester(reques
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="m.room.member",
                 state_key="@attacker:localhost",
@@ -1757,7 +1750,7 @@ async def test_matrix_api_put_state_dangerous_fails_closed_when_power_levels_unr
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="m.room.history_visibility",
                 content={"history_visibility": "world_readable"},
@@ -1817,7 +1810,7 @@ async def test_matrix_api_redact_state_event_follows_put_state_policy(
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$state:localhost",
                 allow_dangerous=allow_dangerous,
@@ -1839,7 +1832,7 @@ async def test_matrix_api_redact_dry_run() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="redact",
                 event_id="$target:localhost",
                 reason="preview",
@@ -1872,7 +1865,7 @@ async def test_matrix_api_get_state_maps_not_found_to_found_false() -> None:
     ctx.client.room_get_state_event.return_value = _state_error(room_id=ctx.room_id)
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="get_state", event_type="com.example.state"))
+        payload = json.loads(await tool.matrix_api_read(action="get_state", event_type="com.example.state"))
 
     assert payload == {
         "action": "get_state",
@@ -1897,7 +1890,7 @@ async def test_matrix_api_get_state_returns_normalized_non_not_found_error() -> 
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="get_state", event_type="com.example.state"))
+        payload = json.loads(await tool.matrix_api_read(action="get_state", event_type="com.example.state"))
 
     assert payload == {
         "action": "get_state",
@@ -1923,7 +1916,7 @@ async def test_matrix_api_get_event_maps_not_found_to_found_false() -> None:
     )
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="get_event", event_id="$missing:localhost"))
+        payload = json.loads(await tool.matrix_api_read(action="get_event", event_id="$missing:localhost"))
 
     assert payload == {
         "action": "get_event",
@@ -1944,7 +1937,7 @@ async def test_matrix_api_send_event_blocks_redaction_type() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.redaction",
                 content={"redacts": "$target:localhost"},
@@ -1966,7 +1959,7 @@ async def test_matrix_api_send_event_blocks_dangerous_state_types() -> None:
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="m.room.encryption",
                 content={"algorithm": "m.megolm.v1.aes-sha2"},
@@ -1999,35 +1992,35 @@ async def test_matrix_api_rate_limit_uses_weighted_budget() -> None:
         tool_runtime_context(ctx),
     ):
         first = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.one",
                 content={"value": 1},
             ),
         )
         second = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.two",
                 content={"value": 2},
             ),
         )
         third = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.three",
                 content={"value": 3},
             ),
         )
         fourth = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="put_state",
                 event_type="com.example.four",
                 content={"value": 4},
             ),
         )
         fifth = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="com.example.extra",
                 content={"value": 5},
@@ -2079,7 +2072,7 @@ async def test_matrix_api_rejects_invalid_room_id(room_id: str, expected_message
 
     with tool_runtime_context(ctx):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 room_id=room_id,
                 event_type="com.example.event",
@@ -2096,27 +2089,36 @@ async def test_matrix_api_rejects_invalid_room_id(room_id: str, expected_message
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "kwargs",
+    ("fn_name", "kwargs"),
     [
-        {"action": 123},
-        {"action": "send_event", "room_id": 123},
-        {"action": "send_event", "event_type": "com.example.event", "content": "hello"},
-        {"action": "send_event", "event_type": "com.example.event", "content": {"body": "x"}, "dry_run": "maybe"},
-        {
-            "action": "put_state",
-            "event_type": "m.room.power_levels",
-            "content": {"users": {"@user:localhost": 100}},
-            "allow_dangerous": "maybe",
-        },
-        {"action": "get_state", "event_type": "com.example.state", "state_key": 123},
-        {"action": "search", "search_term": "needle", "limit": "many"},
-        {"action": "search", "search_term": "needle", "keys": "content.body"},
-        {"action": "search", "search_term": "needle", "filter": ["!room:localhost"]},
+        ("matrix_api_read", {"action": 123}),
+        ("matrix_api_write", {"action": 123}),
+        ("matrix_api_write", {}),
+        ("matrix_api_read", {}),
+        ("matrix_api_write", {"action": "send_event", "room_id": 123}),
+        ("matrix_api_write", {"action": "send_event", "event_type": "com.example.event", "content": "hello"}),
+        (
+            "matrix_api_write",
+            {"action": "send_event", "event_type": "com.example.event", "content": {"body": "x"}, "dry_run": "maybe"},
+        ),
+        (
+            "matrix_api_write",
+            {
+                "action": "put_state",
+                "event_type": "m.room.power_levels",
+                "content": {"users": {"@user:localhost": 100}},
+                "allow_dangerous": "maybe",
+            },
+        ),
+        ("matrix_api_read", {"action": "get_state", "event_type": "com.example.state", "state_key": 123}),
+        ("matrix_api_read", {"action": "search", "search_term": "needle", "limit": "many"}),
+        ("matrix_api_read", {"action": "search", "search_term": "needle", "keys": "content.body"}),
+        ("matrix_api_read", {"action": "search", "search_term": "needle", "filter": ["!room:localhost"]}),
     ],
 )
-async def test_matrix_api_rejects_malformed_arguments(kwargs: dict[str, object]) -> None:
+async def test_matrix_api_rejects_malformed_arguments(fn_name: str, kwargs: dict[str, object]) -> None:
     """Arguments that disagree with the signature fail call validation before the tool body runs."""
-    entrypoint = toolkit_offers(MatrixApiTools(), "matrix_api").entrypoint
+    entrypoint = toolkit_offers(MatrixApiTools(), fn_name).entrypoint
     ctx = _make_context()
 
     with tool_runtime_context(ctx), pytest.raises(ValidationError):
@@ -2148,8 +2150,9 @@ async def test_matrix_api_cross_room_access_is_denied(
     tool = MatrixApiTools()
     ctx = _make_context()
 
+    fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action, room_id="!other:localhost", **kwargs))
+        payload = json.loads(await fn(action=action, room_id="!other:localhost", **kwargs))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == "!other:localhost"
@@ -2214,7 +2217,8 @@ async def test_matrix_api_cross_room_access_allowed_uses_target_room_id(
         patch("mindroom.custom_tools.matrix_api.logger.warning"),
         tool_runtime_context(ctx),
     ):
-        payload = json.loads(await tool.matrix_api(action=action, room_id="!other:localhost", **kwargs))
+        fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
+        payload = json.loads(await fn(action=action, room_id="!other:localhost", **kwargs))
 
     assert payload["status"] == "ok"
     assert payload["room_id"] == "!other:localhost"
@@ -2258,7 +2262,7 @@ async def test_matrix_api_cross_room_get_event_uses_target_room_id() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_read(
                 action="get_event",
                 room_id="!other:localhost",
                 event_id="$evt:localhost",
@@ -2272,21 +2276,34 @@ async def test_matrix_api_cross_room_get_event_uses_target_room_id() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("action", "expected_action"),
-    [("delete_room", "delete_room"), (" Delete_Room ", "delete_room"), ("   ", "   ")],
+    ("fn_name", "action", "expected_action", "expected_valid"),
+    [
+        ("matrix_api_read", "delete_room", "delete_room", "get_event"),
+        ("matrix_api_read", " Delete_Room ", "delete_room", "get_state"),
+        ("matrix_api_read", "   ", "   ", "search"),
+        ("matrix_api_read", "send_event", "send_event", "get_event"),
+        ("matrix_api_write", "delete_room", "delete_room", "send_event"),
+        ("matrix_api_write", " Delete_Room ", "delete_room", "put_state"),
+        ("matrix_api_write", "   ", "   ", "redact"),
+        ("matrix_api_write", "get_event", "get_event", "send_event"),
+    ],
 )
-async def test_matrix_api_rejects_invalid_action(action: str, expected_action: str) -> None:
-    """Unsupported actions should return a clear error listing valid options."""
+async def test_matrix_api_rejects_invalid_action(
+    fn_name: str,
+    action: str,
+    expected_action: str,
+    expected_valid: str,
+) -> None:
+    """Unsupported or cross-boundary actions should return a clear error listing valid options."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action))
+        payload = json.loads(await getattr(tool, fn_name)(action=action))
 
     assert payload["status"] == "error"
     assert payload["action"] == expected_action
-    assert "send_event" in payload["message"]
-    assert "get_event" in payload["message"]
+    assert expected_valid in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -2296,7 +2313,7 @@ async def test_matrix_api_rejects_invalid_action(action: str, expected_action: s
         ("send_event", {"event_type": "com.example.event"}, "dict"),
         ("put_state", {"event_type": "com.example.event"}, "dict"),
         ("send_event", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
-        ("get_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("get_state", {"event_type": "   "}, "event_type"),
         ("put_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
         ("redact", {"event_id": "   "}, "event_id"),
         ("get_event", {"event_id": "   "}, "event_id"),
@@ -2311,8 +2328,9 @@ async def test_matrix_api_rejects_missing_required_arguments(
     tool = MatrixApiTools()
     ctx = _make_context()
 
+    fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
+        payload = json.loads(await fn(action=action, **kwargs))
 
     assert payload["status"] == "error"
     assert payload["action"] == action
@@ -2336,7 +2354,7 @@ async def test_matrix_api_preserves_retry_after_ms_in_error_output() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_api(
+            await tool.matrix_api_write(
                 action="send_event",
                 event_type="com.example.event",
                 content={"body": "hello"},
@@ -2400,7 +2418,8 @@ async def test_matrix_api_audit_logs_real_writes(
         patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
         tool_runtime_context(ctx),
     ):
-        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
+        fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
+        payload = json.loads(await fn(action=action, **kwargs))
 
     assert payload["status"] == "ok"
     mock_warning.assert_called_once()
@@ -2472,7 +2491,8 @@ async def test_matrix_api_reports_raising_client_call(
         patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
         tool_runtime_context(ctx),
     ):
-        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
+        fn = tool.matrix_api_read if action in {"get_event", "get_state", "search"} else tool.matrix_api_write
+        payload = json.loads(await fn(action=action, **kwargs))
 
     assert payload == {
         "action": action,
@@ -2488,3 +2508,65 @@ async def test_matrix_api_reports_raising_client_call(
         assert mock_warning.call_args.kwargs["response"] == "RuntimeError: boom"
     else:
         mock_warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize(
+    ("fn_name", "kwargs", "unexpected"),
+    [
+        ("matrix_api_read", {"action": "get_event", "search_term": "needle"}, "search_term"),
+        ("matrix_api_read", {"action": "get_state", "event_id": "$evt:localhost"}, "event_id"),
+        ("matrix_api_read", {"action": "search", "event_id": "$evt:localhost"}, "event_id"),
+        (
+            "matrix_api_write",
+            {"action": "send_event", "state_key": "k", "event_type": "m.room.message", "content": {}},
+            "state_key",
+        ),
+        (
+            "matrix_api_write",
+            {"action": "send_event", "reason": "nope", "event_type": "m.room.message", "content": {}},
+            "reason",
+        ),
+        (
+            "matrix_api_write",
+            {"action": "put_state", "event_id": "$evt:localhost", "event_type": "com.ex", "content": {}},
+            "event_id",
+        ),
+        ("matrix_api_write", {"action": "redact", "content": {"body": "x"}, "event_id": "$evt:localhost"}, "content"),
+    ],
+)
+async def test_matrix_api_rejects_cross_action_params_before_room_access(
+    fn_name: str,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    """Cross-action parameters fail cleanly before target room resolution, authorization, or RPC."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await getattr(tool, fn_name)(room_id="!other:localhost", **kwargs))
+
+    assert payload["status"] == "error"
+    assert unexpected in payload["message"]
+    ctx.client.room_send.assert_not_awaited()
+    ctx.client.room_put_state.assert_not_awaited()
+    ctx.client.room_get_state_event.assert_not_awaited()
+    ctx.client.room_get_event.assert_not_awaited()
+    ctx.client.room_redact.assert_not_awaited()
+    ctx.client._send.assert_not_awaited()
+
+
+def test_matrix_api_offer_boundaries_and_required_action() -> None:
+    """matrix_api_read offers output_path; matrix_api_write disables both; both require action."""
+    tool = MatrixApiTools()
+    read_fn = toolkit_offers(tool, "matrix_api_read")
+    write_fn = toolkit_offers(tool, "matrix_api_write")
+
+    assert read_fn.offer_background_after is False
+    assert read_fn.offer_output_path is True
+    assert write_fn.offer_background_after is False
+    assert write_fn.offer_output_path is False
+    assert read_fn.parameters["required"] == ["action"]
+    assert write_fn.parameters["required"] == ["action"]

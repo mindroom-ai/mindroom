@@ -51,7 +51,7 @@ async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
     with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
         await stack.open_jobs()
         handle = json.loads(
-            await stack.call("workflow", action="start", source=_SCRIPT, title="Count the invented things"),
+            await stack.call("workflow_write", action="start", source=_SCRIPT, title="Count the invented things"),
         )
         stack.run_id = handle["run_id"]
         await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)

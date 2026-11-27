@@ -209,7 +209,7 @@ def _timeout_message(command: DesktopCommand, *, timeout_seconds: float) -> str:
     if command.action not in DESKTOP_CONTROL_ACTIONS:
         return message
     recovery_action = (
-        "browser(action='tabs' or 'snapshot', target='desktop')"
+        "browser_read(action='tabs' or 'snapshot', target='desktop')"
         if command.action in DESKTOP_BROWSER_ACTIONS
         else "get_app_state"
     )

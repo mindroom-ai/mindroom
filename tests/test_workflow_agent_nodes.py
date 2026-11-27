@@ -94,7 +94,7 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
     ids = {"job_id": job.job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
     # With the agent and the model the call resolved to, which its arguments need not name.
     assert node.links == ids | {"agent": "watcher", "model": "default"}
-    listed = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id, nodes="all"))["nodes"]
+    listed = json.loads(await stack.call("workflow_read", action="get", run_id=stack.run_id, nodes="all"))["nodes"]
     assert [shown["links"] for shown in listed] == [node.links]
     totals = stack.store.usage_summary(stack.run_id).totals
     assert (totals["input_tokens"], totals["output_tokens"]) == (11, 3)
@@ -990,7 +990,7 @@ async def test_plain_copy_inherits_the_owners_tools(stack: WorkflowStack) -> Non
 
     await stack.result("@0", "agent", _PROMPT)
 
-    assert {"append", "run_shell_command", "workflow"} <= set(offered_tools(model)[0])
+    assert {"append", "run_shell_command", "workflow_read", "workflow_write"} <= set(offered_tools(model)[0])
 
 
 @pytest.mark.asyncio

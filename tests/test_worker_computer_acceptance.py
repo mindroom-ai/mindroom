@@ -120,7 +120,7 @@ def test_runner_requests_speak_this_worker_protocol(monkeypatch: pytest.MonkeyPa
 
     request = fixture.runner_request(
         "browser",
-        "browser_control",
+        "browser_read",
         {"action": "status"},
         user="@alice:computer.localhost",
         worker_key=worker_key,

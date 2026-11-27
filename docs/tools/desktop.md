@@ -69,7 +69,7 @@ To drive the user's signed-in browser, also configure the [`browser`](web-scrapi
    The verification value ensures that only the device that claimed the code can confirm it.
 
 Only the same requester with the same agent can confirm or use the pairing.
-Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
+Until pairing is confirmed, `desktop_read`, `desktop_control`, and `run_desktop_shell` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
 Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
@@ -301,10 +301,10 @@ On macOS, `get_app_state` returns the app's accessibility tree with roles, names
 The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
 Taking a screenshot on macOS brings the selected app to the front.
 
-Observation actions are `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
+`desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
-Control actions require a control lease or full control:
+`desktop_control(action=...)` provides control actions, which require a control lease or full control:
 
 - `launch_app` launches or foregrounds one allowlisted app.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
@@ -322,7 +322,7 @@ Windows on secondary displays are supported when the window lies on one display;
 
 ## Read-Only Folders
 
-The agent can list and read inside locally selected folders, and it cannot write, create, rename, or delete anything there.
+The agent can list and read inside locally selected folders via `desktop_read(action=...)`, and it cannot write, create, rename, or delete anything there.
 
 - `list_folders` returns an ID, name, and absolute path for each selected folder.
 - `list_directory` takes a folder `root_id` and an optional relative `path` and returns at most 200 entries.
@@ -342,7 +342,7 @@ A saved folder that no longer exists makes startup fail with `Cannot open local 
 
 Enable shell requests locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`.
 
-The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, cwd=None)` alongside `desktop(...)`:
+The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, cwd=None)` alongside `desktop_read(...)` and `desktop_control(...)`:
 
 - `args` takes a shell command string or an argv list of strings (converted with POSIX shell quoting), up to 8,192 characters, and runs via `/bin/sh -c` in optional absolute `cwd` (defaulting to the local home directory).
 - `tail` returns the last `tail` lines of stdout then stderr (all stderr on non-zero exit), matching `run_shell_command`.
@@ -398,7 +398,7 @@ MindRoom's normal [tool output files](execution-and-coding.md#workspace-and-tool
 ## Uncertain Outcomes
 
 A timeout returns the original `request_id` and an unknown outcome; the action may still be queued or may have run (and `run_desktop_shell` automatically recovers uncertain transport replies via `request_status` without replaying commands).
-Call `desktop(action="request_status", request_id="...")` to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
+Call `desktop_read(action="request_status", request_id="...")` to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
 Only the requester and agent that sent the action can read its outcome; other callers get `not_found`, and `not_found` does not prove that the action never ran.
 Do not repeat an uncertain action automatically; observe current state first, because some apps change their UI and still report an error.
 Interrupted work is never run again and reports an unknown outcome.
@@ -406,45 +406,19 @@ Never resubmit or rephrase a rejected or expired shell command.
 
 ## Require Matrix Approval for App Control
 
-The local lease is the hard authority boundary, but MindRoom's [tool approval](../tool-approval.md#tool-approval) cards can add per-action confirmation in the Matrix conversation.
-Create `approval_scripts/desktop_control.py` beside the cloud config:
-
-```python
-CONTROL_ACTIONS = {
-    "launch_app",
-    "click_element",
-    "set_value",
-    "scroll_element",
-    "perform_action",
-    "click",
-    "double_click",
-    "hover",
-    "drag",
-    "type_text",
-    "scroll",
-    "keypress",
-}
-
-
-def check(tool_name: str, arguments: dict[str, object], agent_name: str) -> bool:
-    action = arguments.get("action")
-    return tool_name == "desktop" and isinstance(action, str) and action in CONTROL_ACTIONS
-```
-
-Reference that script from the cloud configuration:
+The local lease is the hard authority boundary, but MindRoom's [tool approval](../tool-approval.md#tool-approval) cards can add per-action confirmation in the Matrix conversation because read and control actions are separate functions (`desktop_read` vs `desktop_control`):
 
 ```yaml
 tool_approval:
   default: auto_approve
   rules:
-    - match: desktop
-      script: ./approval_scripts/desktop_control.py
+    - match: desktop_control
+      action: require_approval
 ```
 
-Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
+Observation and read-only folder access (`desktop_read`) stay immediate while each app-control action (`desktop_control`) waits for the original requester's approval in Matrix.
 Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
-Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule.
-Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Adding a rule matching `run_desktop_shell` adds a chat confirmation before a shell request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 

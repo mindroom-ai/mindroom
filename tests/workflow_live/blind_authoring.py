@@ -47,7 +47,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="scatter_join",
         prompt=(
-            "Write a workflow script for workflow(action='start') that takes args['topics'] (a list of short topics), "
+            "Write a workflow script for workflow_write(action='start') that takes args['topics'] (a list of short topics), "
             "researches every topic in parallel with an agent, keeps the surviving notes if any topic fails, "
             "and has a final agent synthesize those notes into a concise report string."
         ),
@@ -56,7 +56,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="bounded_check",
         prompt=(
-            "Write a workflow script for workflow(action='start') that takes args['prompt'], drafts an answer with one agent, "
+            "Write a workflow script for workflow_write(action='start') that takes args['prompt'], drafts an answer with one agent, "
             "then runs at most 3 rounds of an independent checker agent with a JSON schema "
             "{ok: boolean, issues: array of strings} and a fixer agent when ok is false, returning the final draft."
         ),
@@ -65,7 +65,7 @@ TASKS: tuple[AuthoringTask, ...] = (
     AuthoringTask(
         name="negotiate",
         prompt=(
-            "Write a workflow script for workflow(action='start') that takes args['feature'], runs two named agents in parallel "
+            "Write a workflow script for workflow_write(action='start') that takes args['feature'], runs two named agents in parallel "
             "('backend' and 'frontend') that negotiate a JSON API contract directly using peer messages and save the "
             "agreed contract in shared state under 'contract', then has an integrator agent read the contract from "
             "shared state and summarize how backend and frontend fit together."
@@ -96,7 +96,7 @@ def _build_start_workflow_description(deployment: Deployment) -> tuple[Config, R
     room_id = str(deployment.live["lobby"]["roomId"])
     toolkit = WorkflowTools(config, agent_name, room_id, runtime_paths)
     functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
-    description = functions["workflow"].description or ""
+    description = functions["workflow_write"].description or ""
     return config, runtime_paths, description
 
 

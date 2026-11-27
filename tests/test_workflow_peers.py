@@ -710,10 +710,10 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
     # workflow(action="get", ..., messages=True) returns full uncapped text and state to owner.
     tools = WorkflowTools()
     with tool_runtime_context(stack.context):
-        without_msgs = json.loads(await tools.workflow("get", run_id=stack.run_id))
+        without_msgs = json.loads(await tools.workflow_read("get", run_id=stack.run_id))
         assert "messages" not in without_msgs
         assert "shared_state" not in without_msgs
-        with_msgs = json.loads(await tools.workflow("get", run_id=stack.run_id, messages=True))
+        with_msgs = json.loads(await tools.workflow_read("get", run_id=stack.run_id, messages=True))
     assert {m["text"] for m in with_msgs["messages"]} == {payload_text, "second message"}
     assert len(with_msgs["messages"]) == 2
     assert with_msgs["shared_state"] == {"contract": secret_state}
@@ -721,7 +721,7 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
     # Another requester gets WorkflowRunNotFoundError (reads as unknown).
     other = stack.context.__class__(**{**stack.context.__dict__, "requester_id": "@mallory:example.test"})
     with tool_runtime_context(other), pytest.raises(WorkflowRunNotFoundError):
-        await tools.workflow("get", run_id=stack.run_id, messages=True)
+        await tools.workflow_read("get", run_id=stack.run_id, messages=True)
 
 
 @pytest.mark.asyncio

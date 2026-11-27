@@ -312,7 +312,7 @@ class _DesktopShellRunner:
             suffix = f" (exit code {self.exit_code})" if self.exit_code is not None else ""
             msg = (
                 f"The desktop shell command finished{suffix}, but its full output could not be downloaded: {exc}. "
-                f'Recover it without re-running the command via desktop(action="request_status", request_id={response.request_id!r}).'
+                f'Recover it without re-running the command via desktop_read(action="request_status", request_id={response.request_id!r}).'
             )
             raise _DesktopShellError(msg) from exc
         self.truncated = bool(result.get("output_truncated") or result.get("stderr_truncated"))

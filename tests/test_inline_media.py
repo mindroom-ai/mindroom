@@ -554,7 +554,7 @@ async def test_model_read_boundaries_strip_inline_media_keys(tmp_path: Path) -> 
     )
     ctx.client.room_get_event = AsyncMock(return_value=raw_response)
     with tool_runtime_context(ctx):
-        api_payload = json.loads(await MatrixApiTools().matrix_api(action="get_event", event_id="$e2"))
+        api_payload = json.loads(await MatrixApiTools().matrix_api_read(action="get_event", event_id="$e2"))
     assert api_payload["status"] == "ok"
     assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]
     assert INLINE_MEDIA_CONTENT_KEY not in api_payload["event"]["content"]["m.new_content"]

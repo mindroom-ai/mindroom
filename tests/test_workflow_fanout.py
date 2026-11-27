@@ -83,7 +83,7 @@ async def test_lane_that_failed_in_its_own_code_goes_on_from_there_after_the_fix
 @pytest.mark.asyncio
 async def test_completed_run_with_caught_failures_says_so_in_the_delivery(stack: WorkflowStack) -> None:
     """A run whose script caught failures completes, and its report opens with the calls that failed."""
-    handle = json.loads(await stack.call("workflow", action="start", source=_SOURCE))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=_SOURCE))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     await stack.submit("@0", "group", _FOREACH, {"members": ["/0:a", "/0:b", "/0:x"]})
@@ -97,16 +97,16 @@ async def test_completed_run_with_caught_failures_says_so_in_the_delivery(stack:
 
     [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == handle["job_id"]]
     first, _, report = str(await stack.collect(job)).partition("\n\n")
-    assert first == '2 calls failed (n3, n4); workflow(action="get", run_id=..., nodes="failed") shows them.'
+    assert first == '2 calls failed (n3, n4); workflow_read(action="get", run_id=..., nodes="failed") shows them.'
     assert (report, stack.store.get_run(stack.run_id).result) == ("the report", "the report")
     # The run's own record keeps the report as the script returned it.
-    assert json.loads(await stack.call("workflow", action="get", run_id=stack.run_id))["result"] == "the report"
+    assert json.loads(await stack.call("workflow_read", action="get", run_id=stack.run_id))["result"] == "the report"
 
 
 @pytest.mark.asyncio
 async def test_completed_run_without_failures_and_a_failed_run_deliver_no_such_line(stack: WorkflowStack) -> None:
     """The line is for failures a run completed in spite of: no failure has none, and a failed run says why it failed."""
-    handle = json.loads(await stack.call("workflow", action="start", source=_SOURCE))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=_SOURCE))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     await stack.finish_attempt(result="the report")
@@ -114,7 +114,7 @@ async def test_completed_run_without_failures_and_a_failed_run_deliver_no_such_l
     [job] = [job for job in stack.jobs.retained_jobs() if job.job_id == handle["job_id"]]
     assert await stack.collect(job) == "the report"
 
-    second = json.loads(await stack.call("workflow", action="start", source=_SOURCE))
+    second = json.loads(await stack.call("workflow_write", action="start", source=_SOURCE))
     stack.run_id = second["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     with pytest.raises(NodeFailed):

@@ -215,7 +215,7 @@ async def test_browser_target_takes_only_host_or_desktop(target: str) -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValidationError, match="target"):
-        await toolkit_offers(tool, "browser_control").entrypoint(action="status", target=target)
+        await toolkit_offers(tool, "browser_read").entrypoint(action="status", target=target)
 
 
 def test_resolve_selector_prefers_ref_mapping() -> None:
@@ -248,10 +248,10 @@ async def test_host_snapshot_defaults_unset_or_non_positive_limits(
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     page = SimpleNamespace(evaluate=AsyncMock(return_value=[]), title=AsyncMock(return_value="Page"), url="about:blank")
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
-    await tool.browser(action="snapshot", **arguments)
+    await tool.browser_read(action="snapshot", **arguments)
 
     assert page.evaluate.await_args.args[1] == expected
 
@@ -285,10 +285,10 @@ async def test_host_snapshot_payload_by_format(
         url="https://example.com/",
     )
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
-    payload = json.loads(await tool.browser(action="snapshot", snapshotFormat=snapshot_format, mode="efficient"))
+    payload = json.loads(await tool.browser_read(action="snapshot", snapshotFormat=snapshot_format, mode="efficient"))
 
     assert payload == {
         "action": "snapshot",
@@ -312,7 +312,7 @@ async def test_host_act_requires_request() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="request required for action=act"):
-        await tool.browser(action="act")
+        await tool.browser_control(action="act")
 
     assert tool._session.profiles == {}
 
@@ -427,12 +427,22 @@ def test_resolve_output_dir_does_not_reuse_previous_context_storage_path(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["nope", "click", "STATUS", " status "])
-async def test_browser_refuses_actions_outside_its_vocabulary(action: str) -> None:
-    """Call validation refuses unknown actions and case or space variants of known ones, naming the valid ones."""
+@pytest.mark.parametrize("action", ["nope", "click", "STATUS", " status ", "open", "act"])
+async def test_browser_read_refuses_actions_outside_its_vocabulary(action: str) -> None:
+    """browser_read validation refuses unknown, control, and case/space variants, naming valid read actions."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    with pytest.raises(ValidationError, match="'act', 'actions'"):
+    with pytest.raises(ValidationError, match="'status', 'profiles'"):
+        await toolkit_offers(tool, "browser_read").entrypoint(action=action)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["nope", "click", "OPEN", " open ", "status", "tabs", "actions"])
+async def test_browser_control_refuses_actions_outside_its_vocabulary(action: str) -> None:
+    """browser_control validation refuses unknown, read, and case/space variants, naming valid control actions."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ValidationError, match="'start', 'stop'"):
         await toolkit_offers(tool, "browser_control").entrypoint(action=action)
 
 
@@ -441,7 +451,7 @@ async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> N
     """Discovery must not direct desktop agents toward rejected host-only arguments."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    payload = json.loads(await tool.browser(action="help", target="desktop"))
+    payload = json.loads(await tool.browser_read(action="help", target="desktop"))
     descriptions = {entry["action"]: entry["description"] for entry in payload["actionTable"]}
 
     assert "Host target only" in descriptions["focus"]
@@ -452,44 +462,50 @@ async def test_browser_discovery_distinguishes_host_and_desktop_semantics() -> N
 
 
 def test_browser_function_schema_documents_actions_and_act_request() -> None:
-    """Tool schema should make browser actions and act request kinds discoverable."""
+    """Tool schemas should make read/control browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    parameters = toolkit_offers(tool, "browser_control").parameters
-    properties = parameters["properties"]
+    read_props = toolkit_offers(tool, "browser_read").parameters["properties"]
+    control_props = toolkit_offers(tool, "browser_control").parameters["properties"]
 
-    action_schema = properties["action"]
-    assert "act" in action_schema["enum"]
-    assert "help" in action_schema["enum"]
+    assert "help" in read_props["action"]["enum"]
+    assert "actions" in read_props["action"]["enum"]
+    assert "act" not in read_props["action"]["enum"]
+    assert "act" in control_props["action"]["enum"]
+    assert "help" not in control_props["action"]["enum"]
 
-    request_description = properties["request"]["description"]
+    request_description = control_props["request"]["description"]
     assert "request.kind" in request_description
     assert "click" in request_description
     assert "evaluate" in request_description
-    assert "action='act' with request.kind" in action_schema["description"]
-    assert properties["target"]["enum"] == ["host", "desktop"]
-    assert "start, stop, open" in properties["target"]["description"]
-    assert "stable targeting" in properties["target"]["description"]
+    assert "`act`" in control_props["action"]["description"]
+    assert read_props["target"]["enum"] == ["host", "desktop"]
+    assert control_props["target"]["enum"] == ["host", "desktop"]
+    assert "start, stop, open" in control_props["target"]["description"]
+    assert "stable targeting" in control_props["target"]["description"]
     for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
-        assert "Host-target" in properties[field_name]["description"]
+        assert "Host-target" in read_props[field_name]["description"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["help", "actions"])
 async def test_browser_help_agrees_with_the_function_schema(action: str) -> None:
-    """Both discovery actions list the schema's actions and act kinds and read the act request shapes from the schema."""
+    """Both discovery actions list the read/control actions and act kinds from the schemas."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
-    properties = toolkit_offers(tool, "browser_control").parameters["properties"]
+    read_props = toolkit_offers(tool, "browser_read").parameters["properties"]
+    control_props = toolkit_offers(tool, "browser_control").parameters["properties"]
 
-    payload = json.loads(await tool.browser(action=action))
+    payload = json.loads(await tool.browser_read(action=action))
 
     assert payload["action"] == action
     assert payload["status"] == "ok"
-    assert payload["actions"] == properties["action"]["enum"]
+    assert payload["readActions"] == read_props["action"]["enum"]
+    assert payload["controlActions"] == control_props["action"]["enum"]
+    assert payload["actions"] == sorted([*read_props["action"]["enum"], *control_props["action"]["enum"]])
     assert "click" in payload["actKinds"]
     assert "evaluate" in payload["actKinds"]
-    assert sorted(row["action"] for row in payload["actionTable"]) == payload["actions"]
-    assert payload["actRequestDescription"] == properties["request"]["description"]
+    assert sorted(row["action"] for row in payload["actionTable"]) == sorted(payload["actions"])
+    assert payload["actRequestDescription"] == control_props["request"]["description"]
 
 
 def test_browser_metadata_documents_default_output_dir() -> None:
@@ -525,7 +541,7 @@ async def test_browser_open_requires_target_url() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="targetUrl required for action=open"):
-        await tool.browser(action="open")
+        await tool.browser_control(action="open")
 
 
 @pytest.mark.asyncio
@@ -544,7 +560,7 @@ async def test_browser_open_dispatches_to_open_tab(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(tool, "_open_tab", open_tab)
 
-    raw = await tool.browser(action="open", targetUrl="https://example.com")
+    raw = await tool.browser_control(action="open", targetUrl="https://example.com")
     payload = json.loads(raw)
 
     open_tab.assert_awaited_once_with("mindroom", "https://example.com")
@@ -561,7 +577,7 @@ async def test_browser_open_rejects_localhost_target_url_by_default(monkeypatch:
     monkeypatch.setattr(tool, "_open_tab", open_tab)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
-        await tool.browser(action="open", targetUrl="http://localhost:5173/")
+        await tool.browser_control(action="open", targetUrl="http://localhost:5173/")
 
     assert exc_info.value.reason == "private_hostname"
     open_tab.assert_not_called()
@@ -599,7 +615,7 @@ async def test_browser_open_file_needs_one_workspace_file_on_the_host(
     monkeypatch.setattr(tool, "_open_tab", open_tab)
 
     with pytest.raises(ValueError, match=message):
-        await tool.browser(action="open", **arguments)
+        await tool.browser_control(action="open", **arguments)
 
     open_tab.assert_not_called()
 
@@ -635,7 +651,7 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
 
     async def page_state() -> list[object]:
         payload = json.loads(
-            await tool.browser(
+            await tool.browser_control(
                 action="act",
                 request={
                     "kind": "evaluate",
@@ -647,19 +663,19 @@ async def test_browser_opens_a_workspace_html_file_without_reaching_local_files(
         return payload["result"]
 
     try:
-        opened = json.loads(await tool.browser(action="open", paths=["page.html"]))
+        opened = json.loads(await tool.browser_control(action="open", paths=["page.html"]))
         assert (opened["title"], opened["path"]) == ("Plans", "page.html")
         assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
         # The page's own navigation to a local file is refused, so it stays on the agent's page.
-        await tool.browser(
+        await tool.browser_control(
             action="act",
             request={"kind": "evaluate", "fn": f"() => {{ location.href = '{secret_page.as_uri()}'; }}"},
         )
         await asyncio.sleep(0.5)
         assert await page_state() == ["Plans", "Rendered", "about:", "null", 0]
-        console = json.loads(await tool.browser(action="console"))
+        console = json.loads(await tool.browser_read(action="console"))
         assert {"level": "error", "text": "Uncaught ReferenceError: drawChart is not defined"} in console["entries"]
-        screenshot = await tool.browser(action="screenshot")
+        screenshot = await tool.browser_read(action="screenshot")
         assert isinstance(screenshot, ToolValue)
     finally:
         await tool.aclose()
@@ -685,10 +701,10 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
     loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
 
     async def evaluate(toolkit: BrowserTools, fn: str) -> object:
-        return json.loads(await toolkit.browser(action="act", request={"kind": "evaluate", "fn": fn}))["result"]
+        return json.loads(await toolkit.browser_control(action="act", request={"kind": "evaluate", "fn": fn}))["result"]
 
     try:
-        await tool.browser(action="start")
+        await tool.browser_control(action="start")
         with monkeypatch.context() as patch:
             patch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 0.5)
             with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
@@ -696,8 +712,8 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
                     await evaluate(tool, "() => new Promise(() => {})")
         assert await evaluate(tool, "() => 1 + 1") == 2
         assert await evaluate(other_reply, "() => 2 + 2") == 4
-        await tool.browser(action="close")
-        await tool.browser(action="tabs")
+        await tool.browser_control(action="close")
+        await tool.browser_read(action="tabs")
         gc.collect()
         assert unhandled == []
     finally:
@@ -718,7 +734,7 @@ async def test_a_jobs_host_call_stops_at_the_time_limit(monkeypatch: pytest.Monk
     monkeypatch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 0.01)
 
     with job_control_context(JobControl()), pytest.raises(TimeoutError, match=r"^Browser action=act did not finish"):
-        await tool.browser(action="act", request={"kind": "wait", "timeMs": 200})
+        await tool.browser_control(action="act", request={"kind": "wait", "timeMs": 200})
 
 
 @pytest.mark.asyncio
@@ -728,7 +744,7 @@ async def test_host_call_timeout_of_its_own_is_not_the_time_limit(monkeypatch: p
     monkeypatch.setattr(tool, "_act", AsyncMock(side_effect=TimeoutError("relay timed out")))
 
     with pytest.raises(TimeoutError, match=r"^relay timed out$"):
-        await tool.browser(action="act", request={"kind": "click", "ref": "e1"})
+        await tool.browser_control(action="act", request={"kind": "click", "ref": "e1"})
 
 
 @pytest.mark.asyncio
@@ -747,7 +763,7 @@ async def test_browser_open_allows_private_target_url_when_configured(monkeypatc
     )
     monkeypatch.setattr(tool, "_open_tab", open_tab)
 
-    raw = await tool.browser(action="open", targetUrl="http://localhost:5173/")
+    raw = await tool.browser_control(action="open", targetUrl="http://localhost:5173/")
     payload = json.loads(raw)
 
     open_tab.assert_awaited_once_with("mindroom", "http://localhost:5173/")
@@ -770,7 +786,7 @@ async def test_browser_navigate_allows_private_target_url_when_configured(monkey
     )
     monkeypatch.setattr(tool, "_navigate", navigate)
 
-    raw = await tool.browser(action="navigate", targetUrl="http://localhost:5173/")
+    raw = await tool.browser_control(action="navigate", targetUrl="http://localhost:5173/")
     payload = json.loads(raw)
 
     navigate.assert_awaited_once_with("mindroom", "http://localhost:5173/", None)
@@ -785,7 +801,7 @@ async def test_browser_navigate_rejects_unsupported_target_url(monkeypatch: pyte
     monkeypatch.setattr(tool, "_navigate", navigate)
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
-        await tool.browser(action="navigate", targetUrl="file:///etc/passwd")
+        await tool.browser_control(action="navigate", targetUrl="file:///etc/passwd")
 
     assert exc_info.value.reason == "unsupported_scheme"
     navigate.assert_not_called()
@@ -797,10 +813,10 @@ async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="configured Matrix desktop device identity"):
-        await tool.browser(action="status", target="desktop")
+        await tool.browser_read(action="status", target="desktop")
 
     with pytest.raises(ValueError, match="node parameter is not supported in MindRoom"):
-        await tool.browser(action="status", target="host", node="node-1")
+        await tool.browser_read(action="status", target="host", node="node-1")
 
     configured_tool = BrowserTools(
         TEST_RUNTIME_PATHS,
@@ -809,7 +825,7 @@ async def test_browser_rejects_unsupported_or_unconfigured_targets() -> None:
         device_ed25519="fingerprint",
     )
     with pytest.raises(ValueError, match="requires a live Matrix runtime context"):
-        await configured_tool.browser(action="status", target="desktop")
+        await configured_tool.browser_read(action="status", target="desktop")
 
 
 def _desktop_browser(
@@ -865,9 +881,9 @@ async def test_desktop_target_routes_snapshot_and_control_over_matrix(monkeypatc
     )
     tool = _desktop_browser(monkeypatch, request)
 
-    plain_snapshot = await tool.browser(action="snapshot", maxChars=1000)
-    opened = await tool.browser(action="open", targetUrl="https://example.com")
-    tabs = await tool.browser(action="tabs")
+    plain_snapshot = await tool.browser_read(action="snapshot", maxChars=1000)
+    opened = await tool.browser_control(action="open", targetUrl="https://example.com")
+    tabs = await tool.browser_read(action="tabs")
 
     assert isinstance(plain_snapshot, str)
     assert isinstance(opened, str)
@@ -914,7 +930,7 @@ async def test_desktop_target_rejects_page_control_before_any_round_trip(
     tool = _desktop_browser(monkeypatch, request)
 
     with pytest.raises(ValueError, match=f"does not support action={action}") as exc_info:
-        await tool.browser(action=action, **arguments)
+        await tool.browser_control(action=action, **arguments)
 
     assert (
         "Supported desktop actions: console, open, profiles, screenshot, snapshot, start, status, stop, tabs."
@@ -925,18 +941,19 @@ async def test_desktop_target_rejects_page_control_before_any_round_trip(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("action", "arguments", "expected"),
+    ("method", "action", "arguments", "expected"),
     [
-        ("snapshot", {"targetId": "1"}, "does not support targetId"),
-        ("snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
-        ("status", {"profile": "chrome"}, "does not support: profile"),
-        ("tabs", {"inputRef": "e1"}, "does not support: inputRef"),
-        ("console", {"timeoutMs": 1000}, "does not support: timeoutMs"),
-        ("open", {}, "targetUrl required for action=open"),
+        ("browser_read", "snapshot", {"targetId": "1"}, "does not support targetId"),
+        ("browser_read", "snapshot", {"snapshotFormat": "aria"}, "does not support: snapshotFormat"),
+        ("browser_read", "status", {"profile": "chrome"}, "does not support: profile"),
+        ("browser_read", "tabs", {"frame": "main"}, "does not support: frame"),
+        ("browser_control", "open", {"timeoutMs": 1000}, "does not support: timeoutMs"),
+        ("browser_control", "open", {}, "targetUrl required for action=open"),
     ],
 )
 async def test_desktop_target_rejects_unsupported_host_arguments(
     monkeypatch: pytest.MonkeyPatch,
+    method: str,
     action: str,
     arguments: dict[str, object],
     expected: str,
@@ -946,7 +963,7 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
     tool = _desktop_browser(monkeypatch, request)
 
     with pytest.raises(ValueError, match=expected):
-        await tool.browser(action=action, **arguments)
+        await getattr(tool, method)(action=action, **arguments)
 
     request.assert_not_awaited()
 
@@ -977,7 +994,7 @@ async def test_desktop_snapshot_forwards_only_what_the_extension_honors(
     request = AsyncMock(return_value=response)
     tool = _desktop_browser(monkeypatch, request)
 
-    result = await tool.browser(action="snapshot", **arguments)
+    result = await tool.browser_read(action="snapshot", **arguments)
 
     assert json.loads(result) == {"action": "snapshot", "provider": "playwright_mcp_extension"}
     command = request.await_args.args[1]
@@ -1025,7 +1042,7 @@ async def test_desktop_target_returns_decrypted_browser_screenshot(
     )
 
     with tool_runtime_context(context):
-        result = await tool.browser(action="screenshot")
+        result = await tool.browser_read(action="screenshot")
 
     assert not isinstance(result, str)
     assert result.images
@@ -1061,7 +1078,7 @@ async def test_desktop_browser_screenshot_can_return_sendable_attachment(
         AsyncMock(return_value=PNG_BYTES),
     )
 
-    result = await tool.browser(action="screenshot", returnAttachment=True)
+    result = await tool.browser_read(action="screenshot", returnAttachment=True)
 
     assert not isinstance(result, str)
     payload = json.loads(result.content)
@@ -1079,9 +1096,9 @@ async def test_browser_return_attachment_requires_desktop_screenshot() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValueError, match="requires target=desktop"):
-        await tool.browser(action="screenshot", target="host", returnAttachment=True)
+        await tool.browser_read(action="screenshot", target="host", returnAttachment=True)
     with pytest.raises(ValueError, match="only supported for action=screenshot"):
-        await tool.browser(action="tabs", target="desktop", returnAttachment=True)
+        await tool.browser_read(action="tabs", target="desktop", returnAttachment=True)
 
 
 @pytest.mark.asyncio
@@ -1151,7 +1168,7 @@ async def test_dialog_action_answers_only_the_next_dialog(monkeypatch: pytest.Mo
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=object()))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
 
-    payload = json.loads(await tool.browser(action="dialog", accept=accept, promptText="yes", timeoutMs=500))
+    payload = json.loads(await tool.browser_control(action="dialog", accept=accept, promptText="yes", timeoutMs=500))
 
     assert payload == {
         "accept": accept,
@@ -1484,20 +1501,20 @@ async def test_local_preview_requires_computer_binding(
         url = f"http://{host}:{port}/redirect"
         if binding != "computer":
             with pytest.raises(ServerFetchUrlError):
-                await tool.browser(action=action, targetUrl=url)
+                await tool.browser_control(action=action, targetUrl=url)
             assert not hits
         else:
-            result = json.loads(await tool.browser(action=action, targetUrl=url))
+            result = json.loads(await tool.browser_control(action=action, targetUrl=url))
             assert result["title"] == "Preview loaded"
             assert result["url"] == f"http://{host}:{port}/preview"
             assert "/app.js" in hits
             with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-                await tool.browser(action="open", targetUrl=f"http://{host}:{port}/private-redirect")
+                await tool.browser_control(action="open", targetUrl=f"http://{host}:{port}/private-redirect")
             assert "/private-redirect" in hits
             assert "/blocked" not in hits
         for denied_host in ["10.0.0.1", "169.254.169.254"]:
             with pytest.raises(ServerFetchUrlError):
-                await tool.browser(action="open", targetUrl=f"http://{denied_host}/")
+                await tool.browser_control(action="open", targetUrl=f"http://{denied_host}/")
     finally:
         await tool.aclose()
 
@@ -1516,26 +1533,26 @@ async def test_computer_browser_upstream_preserves_http_and_local_preview(
     port, _private_host, hits = local_preview_server
     try:
         for host in ["localhost", "127.0.0.1", "[::ffff:127.0.0.1]", "localhost."]:
-            result = json.loads(await tool.browser(action="open", targetUrl=f"http://{host}:{port}/redirect"))
+            result = json.loads(await tool.browser_control(action="open", targetUrl=f"http://{host}:{port}/redirect"))
             assert result["title"] == "Preview loaded"
         assert "/app.js" in hits
         assert not any(b"localhost" in request or b"127.0.0.1" in request for request in requests)
-        result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/preview"))
+        result = json.loads(await tool.browser_control(action="open", targetUrl="http://8.8.8.8/preview"))
         assert result["title"] == "Forwarded HTTP"
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in requests
         with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-            await tool.browser(action="open", targetUrl="https://9.9.9.9/denied")
+            await tool.browser_control(action="open", targetUrl="https://9.9.9.9/denied")
         with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-            await tool.browser(action="navigate", targetUrl="https://9.9.9.9/denied")
+            await tool.browser_control(action="navigate", targetUrl="https://9.9.9.9/denied")
         assert b"CONNECT 9.9.9.9:443 HTTP/1.1" in requests
         # Redirects the page route never sees are still refused at dial time, before any proxy.
         for redirect in ["metadata-redirect", "alias-redirect", "private-redirect"]:
             with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-                await tool.browser(action="open", targetUrl=f"http://localhost:{port}/{redirect}")
+                await tool.browser_control(action="open", targetUrl=f"http://localhost:{port}/{redirect}")
         assert not any(b"169.254.169.254" in request or b"localhost.localdomain" in request for request in requests)
         assert "/blocked" not in hits
         with pytest.raises(ServerFetchUrlError):
-            await tool.browser(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
+            await tool.browser_control(action="open", targetUrl=f"http://localhost.localdomain:{port}/preview")
     finally:
         await tool.aclose()
         await squid.close()
@@ -1558,11 +1575,11 @@ async def test_worker_browser_plain_http_needs_egress_proxy_connect_to_port_80(
     try:
         with capture_logs() as logs:
             if loads:
-                result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/plain"))
+                result = json.loads(await tool.browser_control(action="open", targetUrl="http://8.8.8.8/plain"))
                 assert result["title"] == "Via egress proxy"
             else:
                 with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-                    await tool.browser(action="open", targetUrl="http://8.8.8.8/plain")
+                    await tool.browser_control(action="open", targetUrl="http://8.8.8.8/plain")
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
         assert bool(refusals) is not loads
@@ -1599,12 +1616,12 @@ async def test_hostname_allowlist_proxies_serve_worker_browsers_but_not_the_prim
     try:
         with capture_logs() as logs:
             if loads:
-                result = json.loads(await tool.browser(action="open", targetUrl="http://allowed.example/page"))
+                result = json.loads(await tool.browser_control(action="open", targetUrl="http://allowed.example/page"))
                 assert result["title"] == "Via egress proxy"
                 assert b"CONNECT allowed.example:80 HTTP/1.1" in squid.requests
             else:
                 with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-                    await tool.browser(action="open", targetUrl="http://allowed.example/page")
+                    await tool.browser_control(action="open", targetUrl="http://allowed.example/page")
                 assert b"CONNECT 93.184.216.34:80 HTTP/1.1" in squid.requests
         refusals = [entry for entry in logs if entry["event"] == "browser_egress_proxy_refused_tunnel"]
         if not loads:
@@ -1685,7 +1702,7 @@ async def test_computer_browser_owns_destination_proxy_lifetime(
 
     monkeypatch.setattr(adapter, "launch_persistent_context", launch)
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
-    opening = asyncio.create_task(tool.browser("start"))
+    opening = asyncio.create_task(tool.browser_control("start"))
     try:
         if outcome == "cancel_launch":
             await asyncio.wait_for(adapter.reached.wait(), SETTLE_TIMEOUT_SECONDS)
@@ -1855,7 +1872,7 @@ async def test_headless_host_browser_dials_only_validated_addresses(
     tool = BrowserTools(paths)
     try:
         with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-            await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
+            await tool.browser_control(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
         assert hits == []
     finally:
         await tool.aclose()
@@ -1911,9 +1928,9 @@ async def test_page_websockets_follow_browser_destination_policy(
     port, hits = loopback_service
     tool = _headless_real_browser(binding, monkeypatch, tmp_path)
     try:
-        await tool.browser(action="start")
+        await tool.browser_control(action="start")
         result = json.loads(
-            await tool.browser(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
+            await tool.browser_control(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
         )
         assert result["result"] == expected
         assert ("/socket" in hits) is (expected == "open")
@@ -1938,7 +1955,7 @@ async def test_computer_browser_opens_ipv6_loopback_preview(monkeypatch: pytest.
     port = site._server.sockets[0].getsockname()[1]
     tool = _headless_real_browser("computer", monkeypatch, tmp_path)
     try:
-        result = json.loads(await tool.browser(action="open", targetUrl=f"http://[::1]:{port}/"))
+        result = json.loads(await tool.browser_control(action="open", targetUrl=f"http://[::1]:{port}/"))
         assert result["title"] == "IPv6 preview"
     finally:
         await tool.aclose()
@@ -1970,9 +1987,9 @@ async def test_page_webrtc_sends_no_udp_around_the_destination_relay(
         local_addr=("127.0.0.1", 0),
     )
     try:
-        await tool.browser(action="start")
+        await tool.browser_control(action="start")
         result = json.loads(
-            await tool.browser(
+            await tool.browser_control(
                 action="act",
                 request={"kind": "evaluate", "fn": _WEBRTC_STUN_PROBE_JS % transport.get_extra_info("sockname")[1]},
             ),
@@ -2130,7 +2147,7 @@ async def test_egress_proxy_cannot_rebind_a_validated_hostname_to_loopback(
     monkeypatch.setenv("ALL_PROXY", await forwarder.start())
     try:
         with pytest.raises(RuntimeError, match=_PROXY_FAILURE_HINTED):
-            await tool.browser(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
+            await tool.browser_control(action="open", targetUrl=f"http://{_REBINDING_HOST}:{port}/secret")
         assert hits == []
         # Chromium's own background connections share the proxy; the page's tunnels name only the pinned address.
         page_requests = [request for request in forwarder.requests if f":{port} ".encode() in request]
@@ -2154,9 +2171,9 @@ async def test_page_websocket_to_loopback_is_refused_beside_an_egress_proxy(
     forwarder = _LocalForwardingProxy(port, frozenset({"127.0.0.1", "localhost"}))
     monkeypatch.setenv("ALL_PROXY", await forwarder.start())
     try:
-        await tool.browser(action="start")
+        await tool.browser_control(action="start")
         result = json.loads(
-            await tool.browser(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
+            await tool.browser_control(action="act", request={"kind": "evaluate", "fn": _WEBSOCKET_PROBE_JS % port}),
         )
         assert result["result"] == "error"
         assert hits == []
@@ -2179,7 +2196,7 @@ async def test_primary_browser_uses_scheme_proxies_beside_an_unused_socks_all_pr
     monkeypatch.setenv("https_proxy", upstream)
     monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:7891")
     try:
-        result = json.loads(await tool.browser(action="open", targetUrl="http://8.8.8.8/clash"))
+        result = json.loads(await tool.browser_control(action="open", targetUrl="http://8.8.8.8/clash"))
         assert result["title"] == "Via egress proxy"
         assert b"CONNECT 8.8.8.8:80 HTTP/1.1" in clash.requests
     finally:
@@ -2252,7 +2269,7 @@ async def test_private_network_browser_reaches_loopback_directly_beside_an_egres
     )
     tool = BrowserTools(paths, allow_private_networks=True)
     try:
-        result = json.loads(await tool.browser(action="open", targetUrl=f"http://127.0.0.1:{port}/app"))
+        result = json.loads(await tool.browser_control(action="open", targetUrl=f"http://127.0.0.1:{port}/app"))
         assert result["title"] == "Internal service"
         assert hits == ["/app"]
         # Chromium's own background requests still use the proxy; the loopback page never does.
@@ -2287,7 +2304,7 @@ async def test_host_url_validation_resolves_hostnames_off_event_loop(
     monkeypatch.setattr(tool, "_open_tab", AsyncMock(return_value={"status": "ok"}))
     monkeypatch.setattr(tool, "_navigate", AsyncMock(return_value={"status": "ok"}))
 
-    await tool.browser(action=action, targetUrl="https://slow-dns.example")
+    await tool.browser_control(action=action, targetUrl="https://slow-dns.example")
 
     # Requester-chosen hostnames resolve on threads page traffic cannot occupy, never on the loop.
     assert len(threads) == 1
@@ -2307,7 +2324,7 @@ async def test_desktop_url_validation_resolves_hostnames_off_event_loop(monkeypa
     )
     tool = _desktop_browser(monkeypatch, request)
 
-    await tool.browser(action="open", targetUrl="https://slow-dns.example")
+    await tool.browser_control(action="open", targetUrl="https://slow-dns.example")
 
     # Requester-chosen hostnames resolve on threads page traffic cannot occupy, never on the loop.
     assert len(threads) == 1
@@ -2726,7 +2743,7 @@ async def test_invalid_profile_name_is_rejected_before_browser_startup(
     )
 
     with pytest.raises(ValueError, match="must not start with a dot"):
-        await tool.browser(action="start", profile="..")
+        await tool.browser_control(action="start", profile="..")
 
     assert not (runtime_paths.storage_root / "browser-profiles").exists()
     assert not (runtime_paths.storage_root / "Default").exists()
@@ -2864,8 +2881,8 @@ async def test_screenshot_selector_uses_locator_screenshot(
     page: Any = SimpleNamespace(locator=locator, screenshot=page_screenshot)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "#timeline"})
 
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
     payload, image_bytes = await tool._screenshot(
         profile_name="mindroom",
@@ -2899,11 +2916,11 @@ async def test_host_screenshot_returns_inline_image_and_retains_saved_path(
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
     tab = _BrowserTabState(target_id="tab-1", page=page)
     read_saved_bytes = Path.read_bytes
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
     monkeypatch.setattr(Path, "read_bytes", MagicMock(side_effect=AssertionError("screenshot path was reread")))
 
-    result = await tool.browser(action="screenshot")
+    result = await tool.browser_read(action="screenshot")
 
     assert not isinstance(result, str)
     assert result.images
@@ -2931,10 +2948,10 @@ async def test_host_screenshot_save_only_returns_existing_metadata(
 
     page = SimpleNamespace(screenshot=AsyncMock(side_effect=capture))
     tab = _BrowserTabState(target_id="tab-1", page=page)
-    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=mock_state))
-    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+    monkeypatch.setattr(tool, "_running_profile", AsyncMock(return_value=mock_state))
+    monkeypatch.setattr(tool, "_resolve_read_tab", MagicMock(return_value=("tab-1", tab)))
 
-    result = await tool.browser(action="screenshot", saveOnly=True)
+    result = await tool.browser_read(action="screenshot", saveOnly=True)
 
     assert isinstance(result, str)
     receipt = json.loads(result)
@@ -2949,9 +2966,9 @@ async def test_browser_save_only_is_boolean_and_screenshot_specific() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
     with pytest.raises(ValidationError, match="saveOnly"):
-        await toolkit_offers(tool, "browser_control").entrypoint(action="screenshot", saveOnly="maybe")
+        await toolkit_offers(tool, "browser_read").entrypoint(action="screenshot", saveOnly="maybe")
     with pytest.raises(ValueError, match="only supported for action=screenshot"):
-        await tool.browser(action="tabs", saveOnly=True)
+        await tool.browser_read(action="tabs", saveOnly=True)
 
 
 @pytest.mark.asyncio
@@ -2965,7 +2982,7 @@ async def test_browser_save_only_rejects_transient_desktop_capture() -> None:
     )
 
     with pytest.raises(ValueError, match="saveOnly requires target=host"):
-        await tool.browser(action="screenshot", target="desktop", saveOnly=True)
+        await tool.browser_read(action="screenshot", target="desktop", saveOnly=True)
 
 
 @pytest.mark.asyncio
@@ -2976,7 +2993,7 @@ async def test_worker_display_rejects_desktop_routing_and_binds_outputs(tmp_path
     workspace = tmp_path / "workspace"
     browser.bind_worker_display(":99", workspace)
     with pytest.raises(ValueError, match="desktop"):
-        await browser.browser("tabs", target="desktop")
+        await browser.browser_read("tabs", target="desktop")
     assert browser._resolve_output_dir() == workspace / "browser"
     await browser.aclose()
 
@@ -3124,13 +3141,17 @@ async def test_selected_worker_tab_is_visible(
     adapter = LifecycleBrowser()
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
     try:
-        opened = json.loads(await browser.browser("open", targetUrl="https://example.org"))
+        opened = json.loads(await browser.browser_control("open", targetUrl="https://example.org"))
         fixture_page = adapter.pages[-1]
         fixture_page.foreground = False
         adapter.add_native_page("chrome://newtab")
 
         selected = json.loads(
-            await browser.browser(action, targetId=opened["targetId"], targetUrl="https://example.org/selected"),
+            await browser.browser_control(
+                action,
+                targetId=opened["targetId"],
+                targetUrl="https://example.org/selected",
+            ),
         )
 
         assert selected["targetId"] == opened["targetId"]
@@ -3155,7 +3176,7 @@ async def test_worker_cancelled_startup_releases_partial_resources(
     runtime = WorkerComputerRuntime(FakeDisplay())
 
     async def execute() -> object:
-        return await browser.browser("start")
+        return await browser.browser_control("start")
 
     task = asyncio.create_task(
         runtime.run_browser_call("binding", lambda _: BrowserSession(execute, browser.aclose), [], {}),
@@ -3169,7 +3190,7 @@ async def test_worker_cancelled_startup_releases_partial_resources(
         await task
     await runtime.close()
     assert adapter.live_resources == set()
-    assert json.loads(await browser.browser("status"))["running"] is False
+    assert json.loads(await browser.browser_read("status"))["running"] is False
 
 
 @pytest.mark.asyncio
@@ -3187,7 +3208,13 @@ async def test_native_tabs_and_tool_tabs_share_targets_and_persistent_download_h
     runtime = WorkerComputerRuntime(FakeDisplay())
 
     async def execute(**kwargs: object) -> object:
-        return await browser.browser(**kwargs)
+        fn = (
+            browser.browser_read
+            if kwargs.get("action")
+            in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else browser.browser_control
+        )
+        return await fn(**kwargs)
 
     def factory(_display: str) -> BrowserSession:
         return BrowserSession(execute, browser.aclose)
@@ -3250,7 +3277,7 @@ async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     browser.bind_worker_display(":99", tmp_path / "workspace")
     adapter = LifecycleBrowser(initial_pages=True)
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
-    await browser.browser("start")
+    await browser.browser_control("start")
 
     async def title() -> str:
         if len(adapter.pages) == 1:
@@ -3258,8 +3285,8 @@ async def test_native_page_creation_during_tab_listing_preserves_snapshot(
         return "initial page"
 
     monkeypatch.setattr(adapter.pages[0], "title", title)
-    first = json.loads(await browser.browser("tabs"))
-    second = json.loads(await browser.browser("tabs"))
+    first = json.loads(await browser.browser_read("tabs"))
+    second = json.loads(await browser.browser_read("tabs"))
     assert len(first["tabs"]) == 1
     assert len(second["tabs"]) == 2
     await browser.aclose()
@@ -3276,7 +3303,7 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     browser = BrowserTools(paths)
-    await browser.browser("start")
+    await browser.browser_control("start")
     reading, answer = asyncio.Event(), asyncio.Event()
 
     async def slow_title() -> str:
@@ -3285,10 +3312,10 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
         return "Busy page"
 
     monkeypatch.setattr(adapters[0].pages[0], "title", slow_title)
-    status = asyncio.create_task(browser.browser("status"))
+    status = asyncio.create_task(browser.browser_read("status"))
     await reading.wait()
 
-    profiles = json.loads(await asyncio.wait_for(browser.browser("profiles"), SETTLE_TIMEOUT_SECONDS))
+    profiles = json.loads(await asyncio.wait_for(browser.browser_read("profiles"), SETTLE_TIMEOUT_SECONDS))
 
     assert profiles["running_profiles"] == ["mindroom"]
     assert not status.done()
@@ -3306,7 +3333,7 @@ async def test_tab_listings_report_a_crashed_tab_instead_of_failing(
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     browser = BrowserTools(paths)
-    crashed_id = json.loads(await browser.browser("start"))["activeTargetId"]
+    crashed_id = json.loads(await browser.browser_control("start"))["activeTargetId"]
 
     async def crashed_title() -> str:
         msg = "Page.title: Target crashed"
@@ -3315,7 +3342,7 @@ async def test_tab_listings_report_a_crashed_tab_instead_of_failing(
     monkeypatch.setattr(adapters[0].pages[0], "title", crashed_title)
 
     for action in ("status", "tabs"):
-        tabs = json.loads(await browser.browser(action))["tabs"]
+        tabs = json.loads(await browser.browser_read(action))["tabs"]
         assert [(tab["targetId"], tab["title"], tab.get("unresponsive")) for tab in tabs] == [(crashed_id, None, True)]
     await browser.aclose()
 
@@ -3338,7 +3365,13 @@ async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_clean
 
     async def call(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            return json.loads(await tool.browser(**kwargs))
+            fn = (
+                tool.browser_read
+                if kwargs.get("action")
+                in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+                else tool.browser_control
+            )
+            return json.loads(await fn(**kwargs))
 
     try:
         frozen_id = (await call(action="start"))["activeTargetId"]
@@ -3367,7 +3400,7 @@ async def test_a_tab_whose_open_fails_is_the_current_tab(tmp_path: Path, monkeyp
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     browser = BrowserTools(paths, allow_private_networks=True)
-    earlier_id = json.loads(await browser.browser("start"))["activeTargetId"]
+    earlier_id = json.loads(await browser.browser_control("start"))["activeTargetId"]
 
     async def refused(_page: LifecyclePage, url: str, **_kwargs: object) -> None:
         msg = f"net::ERR_CONNECTION_REFUSED at {url}"
@@ -3375,12 +3408,12 @@ async def test_a_tab_whose_open_fails_is_the_current_tab(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(LifecyclePage, "goto", refused)
     with pytest.raises(PlaywrightError, match="ERR_CONNECTION_REFUSED"):
-        await browser.browser("open", targetUrl="http://127.0.0.1:9/")
-    failed_id = json.loads(await browser.browser("status"))["activeTargetId"]
-    closed = json.loads(await browser.browser("close"))
+        await browser.browser_control("open", targetUrl="http://127.0.0.1:9/")
+    failed_id = json.loads(await browser.browser_read("status"))["activeTargetId"]
+    closed = json.loads(await browser.browser_control("close"))
 
     assert closed["targetId"] == failed_id != earlier_id
-    tabs = json.loads(await browser.browser("tabs"))
+    tabs = json.loads(await browser.browser_read("tabs"))
     assert [tab["targetId"] for tab in tabs["tabs"]] == [earlier_id]
     assert not adapters[0].pages[0].closed
     await browser.aclose()
@@ -3395,9 +3428,9 @@ async def test_a_closed_target_id_is_refused_without_touching_the_open_tab(
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     browser = BrowserTools(paths, allow_private_networks=True)
-    kept_id = json.loads(await browser.browser("start"))["activeTargetId"]
-    closed_id = json.loads(await browser.browser("open", targetUrl="http://127.0.0.1:9/"))["targetId"]
-    await browser.browser("close", targetId=closed_id)
+    kept_id = json.loads(await browser.browser_control("start"))["activeTargetId"]
+    closed_id = json.loads(await browser.browser_control("open", targetUrl="http://127.0.0.1:9/"))["targetId"]
+    await browser.browser_control("close", targetId=closed_id)
 
     for action, arguments in (
         ("close", {}),
@@ -3405,9 +3438,9 @@ async def test_a_closed_target_id_is_refused_without_touching_the_open_tab(
         ("navigate", {"targetUrl": "http://127.0.0.1:9/elsewhere"}),
     ):
         with pytest.raises(ValueError, match=f"^tab not found: {closed_id}$"):
-            await browser.browser(action, targetId=closed_id, **arguments)
+            await browser.browser_control(action, targetId=closed_id, **arguments)
 
-    tabs = json.loads(await browser.browser("tabs"))
+    tabs = json.loads(await browser.browser_read("tabs"))
     assert [tab["targetId"] for tab in tabs["tabs"]] == [kept_id]
     kept_page = adapters[0].pages[0]
     assert not kept_page.closed
@@ -3426,7 +3459,7 @@ async def test_failed_driver_acquisition_closes_manager_owned_resources(
     adapter = LifecycleBrowser(fail_start=True)
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: adapter)
     with pytest.raises(RuntimeError, match="Driver startup failed"):
-        await browser.browser("start")
+        await browser.browser_control("start")
     await browser.aclose()
     assert adapter.live_resources == set()
 
@@ -3451,7 +3484,7 @@ async def test_repeated_start_cancellation_keeps_cleanup_owned_until_runtime_clo
         await browser.aclose()
 
     async def execute() -> object:
-        return await browser.browser("start")
+        return await browser.browser_control("start")
 
     task = asyncio.create_task(
         runtime.run_browser_call("binding", lambda _: BrowserSession(execute, close_browser), [], {}),
@@ -3495,7 +3528,13 @@ async def test_established_browser_teardown_survives_repeated_cancellation(
     runtime = WorkerComputerRuntime(FakeDisplay())
 
     async def execute(**kwargs: object) -> object:
-        return await browser.browser(**kwargs)
+        fn = (
+            browser.browser_read
+            if kwargs.get("action")
+            in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else browser.browser_control
+        )
+        return await fn(**kwargs)
 
     def factory(_display: str) -> BrowserSession:
         return BrowserSession(execute, browser.aclose)
@@ -3506,7 +3545,7 @@ async def test_established_browser_teardown_survives_repeated_cancellation(
     if entry == "aclose":
         operation = browser.aclose()
     elif entry == "profile_stop":
-        operation = browser.browser("stop", profile="p0")
+        operation = browser.browser_control("stop", profile="p0")
     elif entry == "runtime_stop":
         operation = runtime.stop()
     else:
@@ -3547,11 +3586,11 @@ async def test_cancelled_profile_stop_blocks_replacement_until_resources_exit(
     old, new = LifecycleBrowser(), LifecycleBrowser()
     pending = iter([old, new])
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
-    await browser.browser("start")
+    await browser.browser_control("start")
     old.pause_at = phase
-    stopping = asyncio.create_task(browser.browser("stop"))
+    stopping = asyncio.create_task(browser.browser_control("stop"))
     await asyncio.wait_for(old.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    restarting = asyncio.create_task(browser.browser("start"))
+    restarting = asyncio.create_task(browser.browser_control("start"))
     try:
         for _ in range(3):
             stopping.cancel()
@@ -3582,7 +3621,7 @@ async def test_browser_cleanup_error_still_drains_other_profiles(
     pending = iter([first, second])
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
     for profile in ["first", "second"]:
-        await browser.browser("start", profile=profile)
+        await browser.browser_control("start", profile=profile)
 
     async def fail_cleanup(at: str) -> None:
         if at == phase:
@@ -3615,7 +3654,7 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
     old, new = LifecycleBrowser(), LifecycleBrowser()
     pending = iter([old, new])
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
-    await browser.browser("start")
+    await browser.browser_control("start")
     checkpoint = old.checkpoint
 
     async def fail_cleanup(at: str) -> None:
@@ -3626,18 +3665,18 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
     old.checkpoint = fail_cleanup
     try:
         with pytest.raises(RuntimeError, match="cleanup failed"):
-            await browser.browser("stop")
+            await browser.browser_control("stop")
         assert old.live_resources
         with pytest.raises(RuntimeError, match="cleanup failed"):
-            await browser.browser("start")
+            await browser.browser_control("start")
         assert not new.live_resources
-        assert json.loads(await browser.browser("status"))["running"] is False
-        assert json.loads(await browser.browser("profiles"))["running_profiles"] == []
+        assert json.loads(await browser.browser_read("status"))["running"] is False
+        assert json.loads(await browser.browser_read("profiles"))["running_profiles"] == []
         old.checkpoint = checkpoint
         old.pause_at = phase
-        restarting = asyncio.create_task(browser.browser("start"))
+        restarting = asyncio.create_task(browser.browser_control("start"))
         await asyncio.wait_for(old.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-        replacement = asyncio.create_task(browser.browser("start"))
+        replacement = asyncio.create_task(browser.browser_control("start"))
         try:
             for _ in range(3):
                 restarting.cancel()
@@ -3651,7 +3690,7 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
         assert restarting.cancelled()
         assert not old.live_resources
         assert new.live_resources == {"driver", "context"}
-        assert json.loads(await browser.browser("status"))["running"] is True
+        assert json.loads(await browser.browser_read("status"))["running"] is True
     finally:
         old.checkpoint = checkpoint
         old.proceed.set()
@@ -3688,11 +3727,11 @@ async def test_primary_toolkits_on_one_profile_root_share_its_running_browser(
     adapters = _browser_per_start(monkeypatch)
     first = BrowserTools(paths, agent_state_root=agent_state)
     second = BrowserTools(paths, agent_state_root=agent_state if spelling == "same" else linked_state)
-    started = json.loads(await first.browser("start"))
+    started = json.loads(await first.browser_control("start"))
     native = adapters[0].add_native_page("https://example.org/opened-earlier")
 
-    restarted = json.loads(await second.browser("start"))
-    tabs = json.loads(await second.browser("tabs"))["tabs"]
+    restarted = json.loads(await second.browser_control("start"))
+    tabs = json.loads(await second.browser_read("tabs"))["tabs"]
 
     assert len(adapters) == 1
     assert restarted["activeTargetId"] == started["activeTargetId"]
@@ -3700,7 +3739,7 @@ async def test_primary_toolkits_on_one_profile_root_share_its_running_browser(
     assert tabs[0]["targetId"] == started["activeTargetId"]
     await second.aclose()
     assert not adapters[0].live_resources
-    assert json.loads(await first.browser("status"))["running"] is False
+    assert json.loads(await first.browser_read("status"))["running"] is False
 
 
 @pytest.mark.asyncio
@@ -3712,15 +3751,15 @@ async def test_stopping_a_shared_profile_through_any_toolkit_lets_the_next_start
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     adapters = _browser_per_start(monkeypatch)
     first, second = BrowserTools(paths), BrowserTools(paths)
-    await first.browser("start")
+    await first.browser_control("start")
 
-    await second.browser("stop")
+    await second.browser_control("stop")
 
     assert not adapters[0].live_resources
-    assert json.loads(await first.browser("status"))["running"] is False
-    await first.browser("start")
+    assert json.loads(await first.browser_read("status"))["running"] is False
+    await first.browser_control("start")
     assert len(adapters) == 2
-    assert json.loads(await second.browser("status"))["running"] is True
+    assert json.loads(await second.browser_read("status"))["running"] is True
     await first.aclose()
     assert not adapters[1].live_resources
 
@@ -3749,17 +3788,21 @@ async def test_a_toolkit_with_other_launch_settings_restarts_the_shared_profile(
     adapters = _browser_per_start(monkeypatch)
     current = BrowserTools(paths)
     changed = BrowserTools(changed_paths, allow_private_networks=setting == "allow_private_networks")
-    await current.browser("start")
+    await current.browser_control("start")
 
-    await changed.browser("tabs")
+    with pytest.raises(RuntimeError, match=r'browser_control\(action="start"\)'):
+        await changed.browser_read("tabs")
+    assert len(adapters) == 1
+
+    await changed.browser_control("start")
 
     assert len(adapters) == 2
     assert not adapters[0].live_resources
     assert adapters[1].live_resources == {"driver", "context"}
-    await current.browser("tabs")
+    await current.browser_control("start")
     assert len(adapters) == 3
     assert not adapters[1].live_resources
-    await current.browser("tabs")
+    await current.browser_read("tabs")
     assert len(adapters) == 3
     await current.aclose()
     assert not adapters[2].live_resources
@@ -3778,9 +3821,9 @@ async def test_a_toolkit_reads_its_launch_settings_once_however_many_calls_it_ma
     tool = BrowserTools(paths)
 
     with capture_logs() as logs:
-        await tool.browser("start")
-        await tool.browser("tabs")
-        await tool.browser("tabs")
+        await tool.browser_control("start")
+        await tool.browser_read("tabs")
+        await tool.browser_read("tabs")
 
     assert [entry["variable"] for entry in logs if entry["event"] == "browser_proxy_variable_ignored"] == [
         "auto_proxy",
@@ -3804,16 +3847,16 @@ async def test_worker_bound_toolkits_keep_their_own_browser_beside_the_shared_pr
         worker.bind_worker_display(":99", tmp_path / "workspace")
     else:
         worker.bind_worker_headless(tmp_path / "workspace", {})
-    await primary.browser("start")
-    await worker.browser("start")
+    await primary.browser_control("start")
+    await worker.browser_control("start")
     assert len(adapters) == 2
 
-    await worker.browser("stop")
+    await worker.browser_control("stop")
 
     assert not adapters[1].live_resources
     assert adapters[0].live_resources == {"driver", "context"}
-    assert json.loads(await other_primary.browser("status"))["running"] is True
-    assert json.loads(await worker.browser("status"))["running"] is False
+    assert json.loads(await other_primary.browser_read("status"))["running"] is True
+    assert json.loads(await worker.browser_read("status"))["running"] is False
     await other_primary.aclose()
     assert not adapters[0].live_resources
 
@@ -3833,14 +3876,19 @@ async def test_headless_worker_runtime_hands_its_browser_to_each_fresh_toolkit(
         toolkit = BrowserTools(paths)
         binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
         toolkits.append(toolkit)
-        return json.loads(await runtime.run(toolkit, (binding, ()), lambda: toolkit.browser(action)))
+        fn = (
+            toolkit.browser_read
+            if action in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else toolkit.browser_control
+        )
+        return json.loads(await runtime.run(toolkit, (binding, ()), lambda: fn(action)))
 
     started = await call("start")
     tabs = await call("tabs")
 
     assert len(adapters) == 1
     assert [tab["targetId"] for tab in tabs["tabs"]] == [started["activeTargetId"]]
-    assert json.loads(await toolkits[0].browser("status"))["running"] is False
+    assert json.loads(await toolkits[0].browser_read("status"))["running"] is False
     with pytest.raises(ValueError, match="Only a fresh browser toolkit"):
         toolkits[1].take_worker_session(toolkits[0])
     with pytest.raises(ValueError, match="Bind the worker display before starting"):
@@ -3862,7 +3910,7 @@ async def test_headless_worker_runtime_closes_its_browser_when_another_timeout_s
     binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
 
     async def stalled() -> None:
-        await toolkit.browser("start")
+        await toolkit.browser_control("start")
         async with asyncio.timeout(0.01):
             await asyncio.Event().wait()
 
@@ -3886,14 +3934,28 @@ async def test_worker_runtimes_keep_their_browser_after_a_call_stops_at_its_time
     headless, computer = WorkerBrowserRuntime(), WorkerComputerRuntime(FakeDisplay())
     computer_toolkit = BrowserTools(paths)
     computer_toolkit.bind_worker_display(":99", tmp_path / "workspace")
-    session = BrowserSession(computer_toolkit.browser, computer_toolkit.aclose)
+
+    async def _computer_dispatch(action: str, **arguments: object) -> object:
+        fn = (
+            computer_toolkit.browser_read
+            if action in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else computer_toolkit.browser_control
+        )
+        return await fn(action, **arguments)
+
+    session = BrowserSession(_computer_dispatch, computer_toolkit.aclose)
 
     async def call(action: str, **arguments: object) -> dict[str, Any]:
         if runtime_kind == "computer":
             return json.loads(await computer.run_browser_call("binding", lambda _display: session, [action], arguments))
         toolkit = BrowserTools(paths)
         binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
-        return json.loads(await headless.run(toolkit, (binding, ()), lambda: toolkit.browser(action, **arguments)))
+        fn = (
+            toolkit.browser_read
+            if action in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else toolkit.browser_control
+        )
+        return json.loads(await headless.run(toolkit, (binding, ()), lambda: fn(action, **arguments)))
 
     tab_id = (await call("start"))["activeTargetId"]
     generation = computer.status()["generation"]
@@ -3930,9 +3992,9 @@ async def test_concurrent_starts_from_two_primary_toolkits_launch_one_browser(
     pending = iter([launching, second_launch])
     monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
     first, second = BrowserTools(paths), BrowserTools(paths)
-    starting = asyncio.create_task(first.browser("start"))
+    starting = asyncio.create_task(first.browser_control("start"))
     await asyncio.wait_for(launching.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
-    joining = asyncio.create_task(second.browser("start"))
+    joining = asyncio.create_task(second.browser_control("start"))
     for _ in range(3):
         await asyncio.sleep(0)
 
@@ -3978,12 +4040,12 @@ async def test_worker_browser_accepts_host_override_of_desktop_default(tmp_path:
     else:
         browser.bind_worker_headless(workspace, {})
     try:
-        status = json.loads(await browser.browser("status", target="host"))
+        status = json.loads(await browser.browser_read("status", target="host"))
         assert status["running"] is False
         assert browser._resolve_output_dir() == workspace / "browser"
         for target in (None, "desktop"):
             with pytest.raises(ValueError, match="Worker browser does not support desktop routing"):
-                await browser.browser("status", target=target)
+                await browser.browser_read("status", target=target)
     finally:
         await browser.aclose()
 
@@ -4005,21 +4067,21 @@ async def test_worker_shown_page_is_the_active_tab_of_the_profile_the_agent_last
         return None if page is None else page.url
 
     assert shown_url() is None
-    first = json.loads(await browser.browser("open", targetUrl="https://example.org/first"))
-    await browser.browser("open", targetUrl="https://example.org/second")
+    first = json.loads(await browser.browser_control("open", targetUrl="https://example.org/first"))
+    await browser.browser_control("open", targetUrl="https://example.org/second")
     assert shown_url() == "https://example.org/second"
-    await browser.browser("focus", targetId=first["targetId"])
+    await browser.browser_control("focus", targetId=first["targetId"])
     assert shown_url() == "https://example.org/first"
-    await browser.browser("open", profile="work", targetUrl="https://example.org/work")
+    await browser.browser_control("open", profile="work", targetUrl="https://example.org/work")
     assert shown_url() == "https://example.org/work"
-    await browser.browser("stop", profile="work")
+    await browser.browser_control("stop", profile="work")
     assert shown_url() is None
-    await browser.browser("focus", targetId=first["targetId"])
+    await browser.browser_control("focus", targetId=first["targetId"])
     assert shown_url() == "https://example.org/first"
-    await browser.browser("close", targetId=first["targetId"])
+    await browser.browser_control("close", targetId=first["targetId"])
     # Closing the shown tab leaves its profile's next tab active, and that is what the agent works on next.
     assert shown_url() == "about:blank"
-    await browser.browser("stop")
+    await browser.browser_control("stop")
     assert shown_url() is None
 
 
@@ -4084,7 +4146,7 @@ async def test_desktop_target_resolves_paired_credentials_with_precedence_and_wo
     )
     # 1. No paired credentials and no static pin -> clear setup error.
     with pytest.raises(ValueError, match="/desktop setup"):
-        await paired_only.browser(action="tabs")
+        await paired_only.browser_read(action="tabs")
 
     # 2. Paired READY beats stale static YAML pin and preserves BrowserTools's own 90s timeout + routing_agent_name.
     save_desktop_credentials(
@@ -4107,7 +4169,7 @@ async def test_desktop_target_resolves_paired_credentials_with_precedence_and_wo
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    await with_static.browser(action="tabs")
+    await with_static.browser_read(action="tabs")
     sent_target, sent_command = request.await_args.args
     assert sent_target == PinnedMatrixDevice("@paired:example.org", "PAIREDDEV", "paired-key")
     assert (sent_command.requester_id, sent_command.agent_name) == ("@alice:example.org", "routed_agent")
@@ -4126,7 +4188,7 @@ async def test_desktop_target_resolves_paired_credentials_with_precedence_and_wo
         agent_name="routed_agent",
     )
     with pytest.raises(ValueError, match="timeout_seconds must be a number"):
-        await with_static.browser(action="tabs")
+        await with_static.browser_read(action="tabs")
 
     # 4. Paired SETUP_REQUIRED falls back to static config when configured.
     delete_desktop_credentials(
@@ -4135,7 +4197,7 @@ async def test_desktop_target_resolves_paired_credentials_with_precedence_and_wo
         agent_name="routed_agent",
     )
     request.reset_mock()
-    await with_static.browser(action="tabs")
+    await with_static.browser_read(action="tabs")
     fallback_target, _ = request.await_args.args
     assert fallback_target == PinnedMatrixDevice("@static:example.org", "STATICDEV", "static-key")
 
@@ -4195,6 +4257,286 @@ async def test_desktop_target_corrupt_paired_credentials_fails_closed_without_st
     )
 
     with pytest.raises(ValueError, match="could not be read"):
-        await browser.browser(action="tabs")
+        await browser.browser_read(action="tabs")
 
     request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_browser_read_and_control_enforce_runtime_action_boundaries(tmp_path: Path) -> None:
+    """Direct Python calls still enforce read vs control action boundaries at runtime."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    tool = BrowserTools(paths)
+
+    with pytest.raises(ValueError, match="Unsupported browser_read action"):
+        await tool.browser_read(action="open")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Unsupported browser_control action"):
+        await tool.browser_control(action="tabs")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Unsupported browser_control action"):
+        await tool.browser_control(action="actions")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_host_tabs_does_not_launch_chromium_when_stopped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling browser_read(action='tabs') when no profile is running returns empty tabs without launching."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    tool = BrowserTools(paths)
+
+    payload = json.loads(await tool.browser_read(action="tabs"))
+
+    assert payload == {
+        "action": "tabs",
+        "activeTargetId": None,
+        "profile": "mindroom",
+        "running": False,
+        "status": "ok",
+        "tabs": [],
+    }
+    assert adapters == []
+
+
+def test_browser_runs_on_primary_and_offer_boundaries() -> None:
+    """Desktop routing runs on primary (except help/actions) and offer flags match read vs control."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    desktop_default = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+    read_fn = toolkit_offers(tool, "browser_read")
+    control_fn = toolkit_offers(tool, "browser_control")
+
+    assert read_fn.offer_background_after is False
+    assert read_fn.offer_output_path is True
+    assert control_fn.offer_background_after is True
+    assert control_fn.offer_output_path is True
+    assert desktop_default.runs_on_primary("browser_read", {"action": "help"}) is False
+    assert desktop_default.runs_on_primary("browser_read", {"action": "actions"}) is False
+    assert desktop_default.runs_on_primary("browser_read", {"action": "tabs"}) is True
+    assert tool.runs_on_primary("browser_read", {"action": "tabs"}) is False
+    assert tool.runs_on_primary("browser_read", {"action": "tabs", "target": "desktop"}) is True
+    assert tool.runs_on_primary("browser_control", {"action": "open", "target": "desktop"}) is True
+    assert tool.runs_on_primary("browser_control", {"action": "open", "target": "host"}) is False
+
+
+def test_browser_split_approval_rule_fails_closed_while_include_tools_remains_valid() -> None:
+    """browser_control in approval rules fails closed to prevent silent unapproved reads, while include_tools stays valid."""
+    from mindroom.config.main import Config, ConfigRuntimeValidationError  # noqa: PLC0415
+
+    models = {"default": {"provider": "openai", "id": "gpt-4o-mini"}}
+    valid = Config.validate_with_runtime(
+        {
+            "models": models,
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "tools": [{"browser": {"include_tools": ["browser_control"]}}],
+                },
+            },
+        },
+        TEST_RUNTIME_PATHS,
+    )
+    assert valid.agents["assistant"].tools
+
+    with pytest.raises(ConfigRuntimeValidationError, match="read actions from browser_control moved to browser_read"):
+        Config.validate_with_runtime(
+            {
+                "models": models,
+                "agents": {
+                    "assistant": {
+                        "display_name": "Assistant",
+                        "tools": ["browser"],
+                    },
+                },
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [{"match": ["browser_control"], "action": "require_approval"}],
+                },
+            },
+            TEST_RUNTIME_PATHS,
+        )
+
+    explicit = Config.validate_with_runtime(
+        {
+            "models": models,
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "tools": ["browser"],
+                },
+            },
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [
+                    {"match": ["browser_control"], "action": "require_approval"},
+                    {"match": ["browser_read"], "action": "auto_approve"},
+                ],
+            },
+        },
+        TEST_RUNTIME_PATHS,
+    )
+    assert len(explicit.tool_approval.rules) == 2
+
+
+@pytest.mark.asyncio
+async def test_browser_read_never_launches_chromium_or_activates_tabs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """browser_read console/snapshot/screenshot never start Playwright, open tabs, or switch active tabs."""
+    from mindroom.custom_tools.browser import _BrowserProfileState  # noqa: PLC0415
+
+    tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path)
+    ensure_profile = AsyncMock(side_effect=AssertionError("browser_read must not launch Chromium"))
+    monkeypatch.setattr(tool, "_ensure_profile", ensure_profile)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.async_playwright",
+        MagicMock(side_effect=AssertionError("browser_read must not start Playwright")),
+    )
+
+    # 1. Stopped profile: console returns empty entries; snapshot/screenshot fail clearly without starting Chromium.
+    stopped_console = json.loads(await tool.browser_read(action="console"))
+    assert stopped_console["status"] == "ok"
+    assert stopped_console["entries"] == []
+
+    for action in ("snapshot", "screenshot"):
+        with pytest.raises(ValueError, match=r'not running.*browser_control\(action="open"\)'):
+            await tool.browser_read(action=action)
+    ensure_profile.assert_not_awaited()
+
+    # 2. Running profile with zero open tabs: snapshot/screenshot fail clearly without calling context.new_page().
+    new_page = AsyncMock(side_effect=AssertionError("browser_read must not open a new page"))
+    empty_state = _BrowserProfileState(
+        playwright=cast("Any", object()),
+        context=cast("Any", SimpleNamespace(new_page=new_page)),
+        launch_settings=tool._launch_settings("mindroom"),
+        tabs={},
+        active_target_id=None,
+    )
+    try:
+        tool._session.profiles["mindroom"] = empty_state
+        for action in ("snapshot", "screenshot"):
+            with pytest.raises(ValueError, match=r'No open tab.*browser_control\(action="open"\)'):
+                await tool.browser_read(action=action)
+        new_page.assert_not_awaited()
+
+        # 3. Running profile with tab-a active and tab-b inactive: reading tab-b preserves active_target_id and focus.
+        bring_to_front_a = AsyncMock()
+        bring_to_front_b = AsyncMock()
+        page_a: Any = SimpleNamespace(
+            is_closed=lambda: False,
+            bring_to_front=bring_to_front_a,
+            title=AsyncMock(return_value="Tab A"),
+            url="https://a.example/",
+            evaluate=AsyncMock(return_value=[]),
+            screenshot=AsyncMock(return_value=PNG_BYTES),
+        )
+        page_b: Any = SimpleNamespace(
+            is_closed=lambda: False,
+            bring_to_front=bring_to_front_b,
+            title=AsyncMock(return_value="Tab B"),
+            url="https://b.example/",
+            evaluate=AsyncMock(
+                return_value=[{"selector": "#btn", "role": "button", "name": "Submit", "tag": "button", "type": ""}],
+            ),
+            screenshot=AsyncMock(return_value=PNG_BYTES),
+        )
+        tab_a = _BrowserTabState(target_id="tab-a", page=page_a, console=[{"level": "log", "text": "from-a"}])
+        tab_b = _BrowserTabState(target_id="tab-b", page=page_b, console=[{"level": "error", "text": "from-b"}])
+        running_state = _BrowserProfileState(
+            playwright=cast("Any", object()),
+            context=cast("Any", SimpleNamespace(new_page=new_page)),
+            launch_settings=tool._launch_settings("mindroom"),
+            tabs={"tab-a": tab_a, "tab-b": tab_b},
+            active_target_id="tab-a",
+        )
+        tool._session.profiles["mindroom"] = running_state
+
+        console_b = json.loads(await tool.browser_read(action="console", targetId="tab-b"))
+        assert console_b["entries"] == [{"level": "error", "text": "from-b"}]
+        snap_b = json.loads(await tool.browser_read(action="snapshot", targetId="tab-b"))
+        assert snap_b["targetId"] == "tab-b"
+        assert snap_b["title"] == "Tab B"
+        shot_b = json.loads(await tool.browser_read(action="screenshot", targetId="tab-b", saveOnly=True))
+        assert shot_b["targetId"] == "tab-b"
+
+        assert running_state.active_target_id == "tab-a"
+        bring_to_front_a.assert_not_awaited()
+        bring_to_front_b.assert_not_awaited()
+        new_page.assert_not_awaited()
+
+        # 4. Changed launch settings refuse reads without restarting Chromium.
+        different_tool = BrowserTools(TEST_RUNTIME_PATHS, output_dir=tmp_path, allow_private_networks=True)
+        for action in ("console", "snapshot", "screenshot"):
+            with pytest.raises(
+                RuntimeError,
+                match=r'different launch or egress settings.*browser_control\(action="start"\)',
+            ):
+                await different_tool.browser_read(action=action)
+    finally:
+        tool._session.profiles.pop("mindroom", None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "should_fail"),
+    [
+        ({"exclude_tools": ["browser_control"]}, True),
+        ({"include_tools": ["browser_control"]}, False),
+        ({"include_tools": ["browser_read"]}, False),
+        ({"exclude_tools": ["browser_read"]}, False),
+        ({"exclude_tools": ["browser_control", "browser_read"]}, False),
+        ({"include_tools": ["browser_read"], "exclude_tools": ["browser_control"]}, False),
+    ],
+)
+def test_browser_exclude_browser_control_alone_fails_closed(
+    tmp_path: Path,
+    overrides: dict[str, list[str]],
+    should_fail: bool,
+) -> None:
+    """Excluding browser_control without browser_read fails closed in authored overrides and stored settings."""
+    from mindroom.config.main import Config, ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError, get_tool_by_name  # noqa: PLC0415
+    from tests.conftest import test_runtime_paths  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    config_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{"browser": overrides}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("browser", {"_source": "ui", **overrides})
+
+    if should_fail:
+        pattern = r"exclude_tools: browser_control.*browser_read.*\['browser_control', 'browser_read'\].*include_tools: \['browser_read'\]"
+        with pytest.raises(ConfigRuntimeValidationError, match=pattern):
+            Config.validate_with_runtime(config_data, runtime_paths)
+        with pytest.raises(ToolConfigOverrideError, match=pattern):
+            get_tool_by_name(
+                "browser",
+                runtime_paths,
+                tools=builtin_tool_registry(),
+                credentials_manager=manager,
+                worker_target=None,
+            )
+    else:
+        Config.validate_with_runtime(config_data, runtime_paths)
+        get_tool_by_name(
+            "browser",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=None,
+        )

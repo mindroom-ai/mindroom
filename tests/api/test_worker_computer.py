@@ -125,15 +125,21 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
     pages = {}
 
     @tool(name="browser_control")
-    async def browser(self: BrowserTools, action: str, targetId: str | None = None) -> str:  # noqa: N803
+    async def browser_control(self: BrowserTools, action: str, targetId: str | None = None) -> str:  # noqa: N803
         if action == "open":
             pages[id(self)] = "target-one"
+        return json.dumps({"targetId": pages.get(id(self)), "same_target": targetId == pages.get(id(self))})
+
+    @tool(name="browser_read")
+    async def browser_read(self: BrowserTools, action: str, targetId: str | None = None) -> str:  # noqa: N803
+        del action
         return json.dumps({"targetId": pages.get(id(self)), "same_target": targetId == pages.get(id(self))})
 
     async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
         return ExecuteResponse(ok=True, result="subprocess")
 
-    monkeypatch.setattr(BrowserTools, "browser", browser)
+    monkeypatch.setattr(BrowserTools, "browser_control", browser_control)
+    monkeypatch.setattr(BrowserTools, "browser_read", browser_read)
     monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
     payload["kwargs"] = {"action": "open"}
     if worker_scope is None:
@@ -149,6 +155,7 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
             return
         assert first.status_code == 200, first.text
         assert json.loads(first.json()["result"])["targetId"] == "target-one"
+        payload["function_name"] = "browser_read"
         payload["kwargs"] = {"action": "tabs", "targetId": "target-one"}
         second = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         assert json.loads(second.json()["result"])["same_target"] is True
@@ -187,7 +194,7 @@ def test_worker_browser_call_reaches_its_own_time_limit_past_a_shorter_runner_ti
         raise AssertionError
 
     monkeypatch.setattr(BrowserTools, "_status_payload", unresponsive_status)
-    payload |= {"kwargs": {"action": "status"}, "run_as_job": True}
+    payload |= {"function_name": "browser_read", "kwargs": {"action": "status"}, "run_as_job": True}
     with TestClient(app) as client:
         response = client.post(
             "/api/sandbox-runner/execute",
@@ -454,7 +461,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
 
 @pytest.mark.parametrize(
     ("provider", "function"),
-    [("browser", "browser_control"), ("browser_mcp", "browser_snapshot")],
+    [("browser", "browser_read"), ("browser", "browser_control"), ("browser_mcp", "browser_snapshot")],
 )
 @pytest.mark.parametrize("agent_name", [[], {}, ["writer"], {"name": "writer"}, 7, True])
 def test_computer_execute_rejects_malformed_agent_name(

@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 SCRIPT = "def main(args):\n    return 'counted'\n"
 _A = tool_args("counter", "append", line="a")
 _NO_ACCESS = "The requester no longer has access."
-_OUT_OF_TIME = 'The run used its 72 hours of working time. workflow(action="resume", run_id=...) continues it.'
+_OUT_OF_TIME = 'The run used its 72 hours of working time. workflow_write(action="resume", run_id=...) continues it.'
 
 
 @pytest_asyncio.fixture
@@ -56,7 +56,7 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
 
 async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
     """Start a run as its job and return the handle, once its first attempt runs."""
-    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, **arguments))
+    handle = json.loads(await stack.call("workflow_write", action="start", source=SCRIPT, **arguments))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     return handle
@@ -117,7 +117,7 @@ async def test_every_attempt_is_admitted_by_the_one_check_right_before_it_starts
         assert await stack.maintain() == []
     else:
         options = {"source": SCRIPT} if path == "start" else {"run_id": stack.run_id}
-        stack.run_id = json.loads(await stack.call("workflow", action=path, **options))["run_id"]
+        stack.run_id = json.loads(await stack.call("workflow_write", action=path, **options))["run_id"]
     await stack.until(lambda: asked.count(WorkflowRunState.STARTING) >= 2 or _run(stack).state is ends)
     await asyncio.sleep(0.1)
 
@@ -144,7 +144,7 @@ async def test_call_that_waits_for_its_run_itself_asks_again_until_the_check_ans
         return None if unanswered else admit(run, *args)
 
     monkeypatch.setattr(stack.engine, "admit", answered)
-    call = asyncio.create_task(stack.call("workflow", action="resume", depth=1, run_id=stack.run_id))
+    call = asyncio.create_task(stack.call("workflow_write", action="resume", depth=1, run_id=stack.run_id))
     await stack.until(lambda: _run(stack).attempt == 2)
 
     assert (asked.count(WorkflowRunState.STARTING), len(stack.scripts.launched)) == (3, 2)
@@ -173,7 +173,7 @@ async def test_pass_starts_no_attempt_of_a_run_whose_job_was_stopped_before_its_
         await save(store, job_id, job_json, *args, **options)
 
     monkeypatch.setattr(ToolJobStore, "save", held)
-    call = asyncio.create_task(stack.call("workflow", action="start", source=SCRIPT))
+    call = asyncio.create_task(stack.call("workflow_write", action="start", source=SCRIPT))
     await asyncio.wait_for(at_save.wait(), SETTLE_TIMEOUT_SECONDS)
     [intent] = stack.store.list_runs()
     try:
@@ -247,7 +247,7 @@ async def test_resume_waits_until_the_report_of_the_runs_job_is_saved_and_each_j
     ended = _run(stack)
 
     with pytest.raises(CallFailed, match="is still delivering its report"):
-        await stack.call("workflow", action="resume", run_id=stack.run_id)
+        await stack.call("workflow_write", action="resume", run_id=stack.run_id)
     assert _run(stack) == ended
 
     # Both stores are opened again before the save could be tried again: the journal holds the job as running.
@@ -258,7 +258,7 @@ async def test_resume_waits_until_the_report_of_the_runs_job_is_saved_and_each_j
     old = await _ended_job(stack, first["job_id"])
     assert (old.status, await stack.collect(old), _run(stack)) == ("completed", "the first report", ended)
 
-    handle = json.loads(await stack.call("workflow", action="resume", run_id=stack.run_id))
+    handle = json.loads(await stack.call("workflow_write", action="resume", run_id=stack.run_id))
     await stack.until(lambda: _run(stack).attempt == 2)
     await stack.finish_attempt(result="the second report")
     new = await _ended_job(stack, handle["job_id"])
@@ -304,7 +304,9 @@ async def test_resume_from_another_thread_that_took_the_run_waits_for_access_to_
     await stack.end_attempt(ScriptRunState.FAILED)
     await _ended_job(stack, first["job_id"])
     monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
-    handle = json.loads(await stack.call("workflow", action="resume", context=_elsewhere(stack), run_id=stack.run_id))
+    handle = json.loads(
+        await stack.call("workflow_write", action="resume", context=_elsewhere(stack), run_id=stack.run_id),
+    )
     await stack.until(lambda: _run(stack).state is WorkflowRunState.STARTING)
     await stack.restart(kill=True)
     stack.access = "pending"
@@ -339,10 +341,10 @@ async def test_resume_of_an_ended_run_needs_a_free_slot_of_its_owner(stack: Work
     await _ended_job(stack, first["job_id"])
     ended = stack.status(first["run_id"])
     for _ in range(8):
-        await stack.call("workflow", action="start", source=SCRIPT)
+        await stack.call("workflow_write", action="start", source=SCRIPT)
     stack.run_id = first["run_id"]
 
-    handle = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"], rerun=["n1"]))
+    handle = json.loads(await stack.call("workflow_write", action="resume", run_id=first["run_id"], rerun=["n1"]))
     job = await _ended_job(stack, handle["job_id"])
 
     limit = "You have 8 workflow runs in progress, the limit. Wait for one to end or cancel one."
