@@ -68,8 +68,6 @@ def _stored_status(value: str) -> RunStatus:
 
 # The stored keys of the tool-execution fields whose names differ from them.
 _STORED_TOOL_KEYS = {"is_error": "tool_call_error", "stop_after_call": "stop_after_tool_call"}
-# In-memory-only tool-execution fields excluded from persisted run JSON.
-_TRANSIENT_TOOL_FIELDS = frozenset({"counts_as_tool_failure"})
 
 
 @dataclass(kw_only=True)
@@ -114,7 +112,7 @@ class ToolExecution:
         return {
             _STORED_TOOL_KEYS.get(name, name): value
             for name, value in asdict(self).items()
-            if name not in _TRANSIENT_TOOL_FIELDS and value != _TOOL_DEFAULTS[name]
+            if name in _TOOL_DEFAULTS and value != _TOOL_DEFAULTS[name]
         }
 
     @classmethod
@@ -158,14 +156,11 @@ class ToolExecution:
         return cls(**values)
 
 
+_STORED_TOOL_FIELDS = tuple(item for item in fields(ToolExecution) if item.name != "counts_as_tool_failure")
 # Each tool-execution field by its stored key.
-_TOOL_FIELDS = {
-    _STORED_TOOL_KEYS.get(item.name, item.name): item.name
-    for item in fields(ToolExecution)
-    if item.name not in _TRANSIENT_TOOL_FIELDS
-}
+_TOOL_FIELDS = {_STORED_TOOL_KEYS.get(item.name, item.name): item.name for item in _STORED_TOOL_FIELDS}
 # Each tool-execution field's default, ``MISSING`` for the call's id and name, which every stored dict holds.
-_TOOL_DEFAULTS = {item.name: item.default for item in fields(ToolExecution) if item.name not in _TRANSIENT_TOOL_FIELDS}
+_TOOL_DEFAULTS = {item.name: item.default for item in _STORED_TOOL_FIELDS}
 
 _DENIED_WITHOUT_REASON = "Not approved by requester"
 

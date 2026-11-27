@@ -231,14 +231,6 @@ def saved_output_envelope(result: object) -> dict[str, object] | None:
     return None
 
 
-def is_tool_output_error(result: object) -> bool:
-    """Return whether ``result`` is a ``mindroom_tool_output`` error receipt."""
-    if not isinstance(result, dict) or result.keys() != {"mindroom_tool_output"}:
-        return False
-    inner = cast("dict[str, object]", result)["mindroom_tool_output"]
-    return isinstance(inner, dict) and inner.get("status") == "error"
-
-
 def _error_receipt(error: str) -> dict[str, object]:
     return {
         "mindroom_tool_output": {

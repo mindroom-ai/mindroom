@@ -459,6 +459,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         execution_error = payload.get("execution_error", False)
         return_code = payload.get("return_code")
         timed_out = payload.get("timed_out", False)
+        background_rejected = payload.get("background_rejected", False)
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
         return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}", execution_error=True)
     if (
@@ -468,6 +469,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         or not isinstance(execution_error, bool)
         or (return_code is not None and not isinstance(return_code, int))
         or not isinstance(timed_out, bool)
+        or not isinstance(background_rejected, bool)
     ):
         return ShellRunResult(
             message="Error: Invalid shell supervisor response: invalid result fields.",
@@ -480,6 +482,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         execution_error=execution_error,
         return_code=return_code,
         timed_out=timed_out,
+        background_rejected=background_rejected,
     )
 
 

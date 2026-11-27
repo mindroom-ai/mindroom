@@ -567,17 +567,17 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             try:
                 command_args = normalize_shell_args(args)
             except ValueError as exc:
+                refused = _not_started(f"Error: {exc}")
                 if worker is not None:
-                    report_tool_metadata(not_started=True)
                     raise
-                return _not_started(f"Error: {exc}")
+                return refused
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
                 msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                refused = _not_started(f"Error: {msg}")
                 if worker is not None:
-                    report_tool_metadata(not_started=True)
                     raise ValueError(msg)
-                return _not_started(f"Error: {msg}")
+                return refused
             subprocess_env = self._command_env()
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
@@ -624,13 +624,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 bg_scope.had_backgrounded = True
             if result.return_code is not None:
                 report_tool_metadata(exit_code=result.return_code)
-            if worker is not None and result.execution_error and not result.timed_out:
+            if worker is not None and result.execution_error:
                 raise ValueError(result.message)
             value: str | ToolOutcome = (
                 ToolOutcome(
                     content=result.message,
                     is_error=True,
-                    counts_as_tool_failure=result.execution_error,
+                    counts_as_tool_failure=result.execution_error or result.background_rejected,
                 )
                 if result.failed
                 else result.message

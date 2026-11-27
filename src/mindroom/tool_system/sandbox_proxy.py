@@ -907,28 +907,6 @@ def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str
     return f"{mount_dir}/{normalized}"
 
 
-def _format_saved_output_receipt(
-    result: dict[str, object],
-    *,
-    header: str,
-    admitted_sandbox: WorkerSandboxConfig | None,
-) -> dict[str, object]:
-    saved = result.get("mindroom_tool_output")
-    if not (isinstance(saved, dict) and saved.get("status") == "saved_to_file"):
-        return result
-    updated_saved = dict(saved)
-    preview = saved.get("preview")
-    if isinstance(preview, str):
-        updated_saved["preview"] = f"{header}\n{preview}"
-    if admitted_sandbox is not None and admitted_sandbox.mount_dir is not None:
-        saved_path = saved.get("path")
-        if isinstance(saved_path, str):
-            updated_saved["path"] = _sandbox_agent_workspace_output_path(saved_path, admitted_sandbox.mount_dir)
-    if updated_saved != saved:
-        return {**result, "mindroom_tool_output": updated_saved}
-    return result
-
-
 def _format_named_worker_result(
     result: object,
     *,
@@ -937,23 +915,31 @@ def _format_named_worker_result(
 ) -> object:
     """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
     if isinstance(result, ToolOutcome):
-        if result.saved_output is not None:
-            updated = _format_saved_output_receipt(
-                result.saved_output,
-                header=header,
-                admitted_sandbox=admitted_sandbox,
-            )
-            if updated is not result.saved_output:
-                return replace(result, content=str(updated), saved_output=updated)
-            return result
-        return replace(result, content=f"{header}\n{result.content}")
+        if result.saved_output is None:
+            return replace(result, content=f"{header}\n{result.content}")
+        updated = _format_named_worker_result(result.saved_output, header=header, admitted_sandbox=admitted_sandbox)
+        return (
+            replace(result, content=str(updated), saved_output=updated)
+            if isinstance(updated, dict) and updated is not result.saved_output
+            else result
+        )
     if isinstance(result, str):
         return f"{header}\n{result}"
     # The runner can save its shell result before it gets here. The preview has the same exit line,
     # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
-    if isinstance(result, dict):
-        return _format_saved_output_receipt(result, header=header, admitted_sandbox=admitted_sandbox)
-    return result
+    if (
+        not isinstance(result, dict)
+        or not isinstance(saved := result.get("mindroom_tool_output"), dict)
+        or saved.get("status") != "saved_to_file"
+    ):
+        return result
+    updated_saved = dict(saved)
+    if isinstance(preview := saved.get("preview"), str):
+        updated_saved["preview"] = f"{header}\n{preview}"
+    mount_dir = admitted_sandbox.mount_dir if admitted_sandbox is not None else None
+    if mount_dir is not None and isinstance(saved_path := saved.get("path"), str):
+        updated_saved["path"] = _sandbox_agent_workspace_output_path(saved_path, mount_dir)
+    return {**result, "mindroom_tool_output": updated_saved} if updated_saved != saved else result
 
 
 def _build_execute_request(

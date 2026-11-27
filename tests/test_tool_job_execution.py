@@ -25,8 +25,17 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import (
+    EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_RESULT_TRANSFORM,
+    HookBindings,
+    HookRegistry,
+    ToolBeforeCallContext,
+    ToolResultTransformContext,
+    hook,
+)
 from mindroom.llm.errors import ProviderError
+from mindroom.llm.media import Image
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -36,7 +45,7 @@ from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
     consume_tool_job,
     consumption_context,
-    job_failure,
+    job_outcome,
     set_consumption_storage,
 )
 from mindroom.tool_jobs.control import pending_human_messages_context
@@ -71,7 +80,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import detached_policy
 from tests.delegation_helpers import (
@@ -112,15 +121,12 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
-    from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.tool_system.tool_function import AdaptedToolkit
 
 
 def _hold_job_outcomes(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
@@ -537,14 +543,15 @@ async def test_after_a_restart_the_agent_finds_its_job_in_the_same_conversation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("mode", ["unmanaged", "managed_inline", "managed_wait"])
 async def test_failed_shell_command_states_exit_code_inline_and_as_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    managed: bool,
+    mode: str,
 ) -> None:
-    """A non-zero exit fails the call inline and fails its managed job; its exit code leads the summary."""
-    reply_returned = _hold_job_outcomes(monkeypatch) if managed else threading.Event()
+    """A non-zero exit fails unmanaged inline, managed inline, and job(wait) without tripping failing_tools."""
+    managed = mode != "unmanaged"
+    reply_returned = _hold_job_outcomes(monkeypatch) if mode == "managed_wait" else threading.Event()
     paths = _runtime_paths(tmp_path)
     config = Config(
         agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
@@ -565,10 +572,11 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         tools=builtin_tool_registry(),
     )
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
-    if managed:
+    if mode == "managed_wait":
         arguments["background_after"] = 0
     model = ScriptedModel([calls(tool_call("run_shell_command", "shell-call", **arguments)), answer("done")])
-    actor = job_actor(*toolkit_job_tools(toolkit, authored_name="shell").values())
+    controls = toolkit_job_tools(_job_controls(context), authored_name="job").values() if managed else ()
+    actor = job_actor(*toolkit_job_tools(toolkit, authored_name="shell").values(), *controls)
     expected = ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
     try:
         async with execution_resources():
@@ -576,10 +584,13 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
                 record = await run_job_turn(actor, model, "run the command", session_id=context.session_id)
                 assert record.tools is not None
                 tool = record.tools[0]
-                if not managed:
-                    assert tool.is_error, tool.result
+                if mode != "managed_wait":
+                    assert (tool.is_error, not record.failing_tools) == (True, True)
                     assert str(tool.result).splitlines() == expected
+                    if managed:
+                        assert [job.status for job in await runtime.list_jobs(owner=owner, depth=0)] == ["failed"]
                     return
+                assert tool.is_error is not True
                 job_id = json.loads(str(tool.result))["job_id"]
                 reply_returned.set()
                 waited = await asyncio.wait_for(runtime.wait(job_id, owner=owner, depth=0), JOB_TEST_TIMEOUT)
@@ -587,9 +598,17 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
                 assert listed["status"] == "failed"
                 assert listed["summary"].splitlines()[:2] == expected[:2]
                 payload = await read_result_payload(runtime, waited.job)
-                assert payload.value is None
+                assert (payload.value, payload.counts_as_tool_failure) == (None, False)
                 assert payload.error is not None
                 assert payload.error.splitlines() == expected
+                await runtime.release_wait(job_id, waited.claim)
+                wait_model = ScriptedModel(
+                    [calls(tool_call("job", "wait-call", action="wait", job_id=job_id)), answer("read")],
+                )
+                wait_record = await run_job_turn(actor, wait_model, "wait", session_id=context.session_id)
+                assert wait_record.tools is not None
+                assert (wait_record.tools[0].is_error, not wait_record.failing_tools) == (True, True)
+                assert str(wait_record.tools[0].result).splitlines() == expected
     finally:
         await runtime.shutdown()
 
@@ -1676,9 +1695,9 @@ def test_a_read_of_one_job_fails_every_outcome_but_completion_with_its_reason(st
     """The call that started a job and a later wait on it share this rule, so neither reads a denial as a success."""
     job = BackgroundJob("job", job_owner(), tool_name="slow", depth=0, status=status)  # type: ignore[arg-type]
 
-    failure = job_failure(job, "the reason", ToolResultPayload(value="the reason"))
+    outcome = job_outcome(job, "the reason", ToolResultPayload(value="the reason"))
 
-    assert failure == (None if status == "completed" else "the reason")
+    assert outcome == ("the reason" if status == "completed" else ToolOutcome(content="the reason", is_error=True))
 
 
 @pytest.mark.asyncio
@@ -1936,401 +1955,92 @@ async def test_non_job_owned_turn_auto_backgrounds_shell_and_cleans_up_on_exit(
     assert "[MindRoom: stopped when turn ended]" in (workspace / rel_log).read_text(encoding="utf-8")
 
 
-@pytest.mark.asyncio
-async def test_managed_shell_job_returns_is_error_both_inline_and_on_job_wait(tmp_path: Path) -> None:
-    """Managed shell failures surface is_error=True on inline wait and when retrieved via job(action="wait")."""
-    paths = _runtime_paths(tmp_path)
-    config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-    )
-    context = _delegate_runtime_context(config, paths)
-    owner = context.execution_identity
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-    toolkit = get_tool_by_name(
-        "shell",
-        paths,
-        worker_target=None,
-        runs_in_worker=False,
-        tool_init_overrides={"base_dir": str(tmp_path)},
-        tools=builtin_tool_registry(),
-    )
-    expected = ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
-    shell_args = "echo partial; echo broken >&2; exit 7"
-    actor = job_actor(
-        *toolkit_job_tools(toolkit, authored_name="shell").values(),
-        *toolkit_job_tools(_job_controls(context), authored_name="job").values(),
-    )
-    try:
-        async with execution_resources():
-            with tool_runtime_context(context):
-                inline_model = ScriptedModel(
-                    [calls(tool_call("run_shell_command", "shell-inline", args=shell_args)), answer("done")],
-                )
-                inline_record = await run_job_turn(actor, inline_model, "inline", session_id=context.session_id)
-                assert inline_record.tools is not None
-                assert inline_record.tools[0].is_error is True
-                assert str(inline_record.tools[0].result).splitlines() == expected
-
-                bg_model = ScriptedModel(
-                    [
-                        calls(
-                            tool_call("run_shell_command", "shell-bg", args=shell_args, background_after=0),
-                        ),
-                        answer("started"),
-                    ],
-                )
-                bg_record = await run_job_turn(actor, bg_model, "bg", session_id=context.session_id)
-                assert bg_record.tools is not None
-                assert bg_record.tools[0].is_error is not True
-                job_id = json.loads(str(bg_record.tools[0].result))["job_id"]
-                await wait_for_status(runtime, job_id, "failed")
-
-                wait_model = ScriptedModel(
-                    [calls(tool_call("job", "wait-call", action="wait", job_id=job_id)), answer("read")],
-                )
-                wait_record = await run_job_turn(actor, wait_model, "wait", session_id=context.session_id)
-                assert wait_record.tools is not None
-                assert wait_record.tools[0].is_error is True
-                assert str(wait_record.tools[0].result).splitlines() == expected
-                assert [job.status for job in await runtime.list_jobs(owner=owner, depth=0)] == ["failed", "failed"]
-    finally:
-        await runtime.shutdown()
+@hook(EVENT_TOOL_RESULT_TRANSFORM)
+async def _withhold_result(_ctx: ToolResultTransformContext) -> None:
+    raise RuntimeError("withheld")  # noqa: EM101
 
 
 def _follow_up_images(model: ScriptedModel) -> list[bytes]:
-    assert len(model.requests) >= 2
     return [
-        img.content
-        for message in model.requests[-1].messages
-        if message.role == "user" and message.images
-        for img in message.images
-        if isinstance(img.content, bytes)
+        i.content
+        for m in model.requests[-1].messages
+        if m.role == "user" and m.images
+        for i in m.images
+        if isinstance(i.content, bytes)
     ]
 
 
-async def _build_failing_native_shell_media_harness(
-    tmp_path: Path,
-) -> tuple[
-    Config,
-    RuntimePaths,
-    ToolRuntimeContext,
-    ToolJobRuntime,
-    LiveTurnTools,
-    AdaptedToolkit,
-    JobActor,
-    list[bytes],
-    list[asyncio.Event | None],
-]:
-    from uuid import uuid4  # noqa: PLC0415
-
-    from agno.media import Image as AgnoImage  # noqa: PLC0415
-    from agno.tools.function import ToolResult as AgnoToolResult  # noqa: PLC0415
-
-    from mindroom.agent_cli.cli_shell_agent import _windowed  # noqa: PLC0415
-    from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
-    from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
-    from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
-    from mindroom.session_storage.agent_storage import create_agent_state_storage  # noqa: PLC0415
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
-    from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
-    from tests.conftest import live_turn_tools_for_test  # noqa: PLC0415
-    from tests.minimal_agent_fixtures import cli_window, settled_receipt  # noqa: PLC0415
-    from tests.test_agent_tool_calls import _catalog, _toolkit  # noqa: PLC0415
-
-    paths = _runtime_paths(tmp_path)
-    config = Config(
-        agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
-        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
-    )
-    context = _delegate_runtime_context(config, paths)
-    runtime = await tool_job_runtime(tmp_path)
-    pin_background_tool_jobs(context.config, paths)
-    register_background_runtime(paths, runtime)
-
-    produced_box = [b"png-default"]
-    gate_box: list[asyncio.Event | None] = [None]
-
-    async def produce_image() -> AgnoToolResult:
-        return AgnoToolResult(content="shot", images=[AgnoImage(content=produced_box[0], mime_type="image/png")])
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    catalog = await _catalog(workspace, [_toolkit("media", produce_image)])
-    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_agent_state_storage("leader", workspace)
-
-    async def authorize(_key: object, _arguments: object) -> None:
-        return None
-
-    owner_tools = live_turn_tools_for_test(
-        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        output_file_policy=ToolOutputFilePolicy(workspace),
-    )
-    owner_tools.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
-
-    class _FailingNativeShell(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="shell_tools", tools=[self.run_shell_command])
-
-        async def run_shell_command(self, args: str) -> ToolOutcome:
-            if gate_box[0] is not None:
-                await gate_box[0].wait()
-            queued = await owner_tools.operation(
-                window=cli_window(),
-                operation=ToolCallOperation(
-                    operation="tools.call",
-                    call_id=uuid4(),
-                    toolkit="media",
-                    function="produce_image",
-                ),
-            )
-            receipt = await settled_receipt(owner_tools, queued["call_id"])
-            assert receipt["status"] == "completed", receipt
-            return ToolOutcome(content=f"Exit code 2\nOutput:\n{args}", is_error=True, counts_as_tool_failure=False)
-
-    native_toolkit = _FailingNativeShell()
-    adapted_native = replace(adapt_toolkit(native_toolkit), name="shell")
-    windowed_fn = replace(adapted_native.functions[0], entrypoint=_windowed(adapted_native.functions[0].entrypoint))
-    windowed_kit = replace(adapted_native, functions=(windowed_fn,))
-    raw_shell_job = toolkit_job_tools(native_toolkit, authored_name="shell")["run_shell_command"]
-    shell_job_tool = replace(
-        raw_shell_job,
-        function=replace(raw_shell_job.function, entrypoint=_windowed(raw_shell_job.function.entrypoint)),
-    )
-    actor = job_actor(shell_job_tool, *toolkit_job_tools(_job_controls(context), authored_name="job").values())
-    return config, paths, context, runtime, owner_tools, windowed_kit, actor, produced_box, gate_box
-
-
-async def _run_direct_native_shell_turn(
-    config: Config,
-    paths: RuntimePaths,
-    windowed_kit: AdaptedToolkit,
-    *,
-    label: str,
-    hooks: HookBindings,
-) -> tuple[RunRecord, ScriptedModel]:
-    from uuid import uuid4  # noqa: PLC0415
-
-    from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks  # noqa: PLC0415
-    from mindroom.agent_loop.run import run_agent  # noqa: PLC0415
-    from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession  # noqa: PLC0415
-    from mindroom.llm.events import RunFinished  # noqa: PLC0415
-    from mindroom.llm.messages import Message  # noqa: PLC0415
-    from mindroom.tool_system.tool_hooks import build_tool_hook_middleware  # noqa: PLC0415
-
-    model = ScriptedModel([calls(tool_call("run_shell_command", "direct-1", args=label)), answer("seen")])
-    spec = AgentSpec(id="leader", name="Leader", model=model, system_messages=(), toolkits=(windowed_kit,))
-    middleware = (build_tool_hook_middleware(hooks, config, paths),)
-    ctx_run = RunContext(run_id=f"run-{uuid4().hex}", session=UnstoredSession(f"sess-{uuid4().hex}"))
-    finished: RunRecord | None = None
-    async for event in run_agent(
-        spec,
-        [Message(role="user", content="run")],
-        ctx=ctx_run,
-        hooks=LoopHooks(tool_middleware=middleware),
-        persist=None,
-        request_template=EMPTY_REQUEST,
-    ):
-        if isinstance(event, RunFinished):
-            finished = event.record
-    assert finished is not None
-    return finished, model
-
-
-def _withhold_shell_hooks() -> HookBindings:
-    from mindroom.hooks import EVENT_TOOL_RESULT_TRANSFORM, ToolResultTransformContext  # noqa: PLC0415
-
-    @hook(EVENT_TOOL_RESULT_TRANSFORM)
-    async def withhold_shell(_ctx: ToolResultTransformContext) -> None:
-        msg = "withhold failed shell output"
-        raise RuntimeError(msg)
-
-    return HookBindings(registry=HookRegistry.from_plugins([_plugin("guard", [withhold_shell])]))
-
-
 @pytest.mark.asyncio
-async def test_failed_native_shell_delivers_cli_media_inline_and_drops_when_withheld(tmp_path: Path) -> None:
-    """Checked CLI media on a failing native shell reaches the model inline; withheld results deliver none."""
-    from mindroom.agent_cli.lifetime import response_cli_lifetime  # noqa: PLC0415
-    from tests.conftest import SETTLE_TIMEOUT_SECONDS  # noqa: PLC0415
-
-    (
-        config,
-        paths,
-        context,
-        runtime,
-        owner_tools,
-        windowed_kit,
-        _actor,
-        produced,
-        _gate,
-    ) = await _build_failing_native_shell_media_harness(tmp_path)
-    withhold_hooks = _withhold_shell_hooks()
-    withheld_ctx = replace(context, hooks=withhold_hooks)
-
-    try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), execution_resources(), response_cli_lifetime() as lifetime:
-            lifetime.owner = owner_tools
-
-            produced[0] = b"png-direct-inline"
-            with tool_runtime_context(context):
-                direct_rec, direct_model = await _run_direct_native_shell_turn(
-                    config,
-                    paths,
-                    windowed_kit,
-                    label="direct-fail",
-                    hooks=HookBindings(registry=HookRegistry.empty()),
-                )
-            assert direct_rec.tools is not None
-            assert direct_rec.tools[0].is_error is True
-            assert _follow_up_images(direct_model) == [b"png-direct-inline"]
-
-            produced[0] = b"png-direct-withheld"
-            with tool_runtime_context(withheld_ctx):
-                wh_rec, wh_model = await _run_direct_native_shell_turn(
-                    config,
-                    paths,
-                    windowed_kit,
-                    label="direct-wh",
-                    hooks=withhold_hooks,
-                )
-            assert wh_rec.tools is not None
-            assert wh_rec.tools[0].is_error is True
-            assert "was withheld" in str(wh_rec.tools[0].result)
-            assert _follow_up_images(wh_model) == []
-    finally:
-        await owner_tools.close()
-        await runtime.shutdown()
-
-
-async def _start_gated_background_shell(
-    actor: JobActor,
-    runtime: ToolJobRuntime,
-    session_id: str,
-    produced: list[bytes],
-    gate: list[asyncio.Event | None],
-    *,
-    call_id: str,
-    image_bytes: bytes,
-) -> str:
-    release = asyncio.Event()
-    gate[0] = release
-    produced[0] = image_bytes
-    bg_model = ScriptedModel(
-        [calls(tool_call("run_shell_command", call_id, args=call_id, background_after=0)), answer("bg")],
-    )
-    try:
-        bg_rec = await run_job_turn(actor, bg_model, call_id, session_id=session_id)
-    finally:
-        release.set()
-        gate[0] = None
-    assert bg_rec.tools is not None
-    job_id = str(json.loads(str(bg_rec.tools[0].result))["job_id"])
-    await wait_for_status(runtime, job_id, "failed")
-    return job_id
-
-
-@pytest.mark.asyncio
-async def test_failed_managed_shell_job_delivers_cli_media_inline_wait_and_collect_and_drops_when_withheld(
+async def test_failed_managed_job_delivers_media_inline_wait_and_collect_and_drops_when_withheld(
     tmp_path: Path,
 ) -> None:
-    """Managed failing shell jobs carry CLI media inline, on wait, and on collect without tripping the breaker."""
-    from mindroom.agent_cli.lifetime import response_cli_lifetime  # noqa: PLC0415
-    from mindroom.tool_system.tool_hooks import build_tool_hook_middleware  # noqa: PLC0415
-    from tests.conftest import SETTLE_TIMEOUT_SECONDS  # noqa: PLC0415
+    """Failed media-producing jobs deliver media inline, on wait, and on collect, and deliver none when withheld."""
+    paths, cfg = (
+        _runtime_paths(tmp_path),
+        Config(
+            agents={"leader": AgentConfig(display_name="Leader", tools=["shell"])},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+    )
+    ctx, runtime = _delegate_runtime_context(cfg, paths), await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(ctx.config, paths)
+    register_background_runtime(paths, runtime)
+    produced, gate = [b"png-inline"], [None]
 
-    (
-        config,
-        paths,
-        context,
-        runtime,
-        owner_tools,
-        _windowed_kit,
-        actor,
-        produced,
-        gate,
-    ) = await _build_failing_native_shell_media_harness(tmp_path)
-    withhold_hooks = _withhold_shell_hooks()
-    withheld_ctx = replace(context, hooks=withhold_hooks)
+    async def run_shell_command(args: str) -> ToolOutcome:
+        if gate[0] is not None:
+            await gate[0].wait()
+        img = (Image(content=produced[0], mime_type="image/png"),)
+        return ToolOutcome(content=f"Exit code 2\n{args}", images=img, is_error=True, counts_as_tool_failure=False)
+
+    actor = job_actor(
+        *toolkit_job_tools(Toolkit(name="shell_tools", tools=[run_shell_command]), authored_name="shell").values(),
+        *toolkit_job_tools(_job_controls(ctx), authored_name="job").values(),
+    )
+
+    async def run_one(call: object, label: str, mw: tuple = ()) -> tuple[RunRecord, ScriptedModel]:
+        m = ScriptedModel([calls(call), answer(label)])
+        return await run_job_turn(actor, m, label, session_id=ctx.session_id, middleware=mw), m
+
+    async def start_bg(cid: str, img: bytes) -> str:
+        rel = asyncio.Event()
+        gate[0], produced[0] = rel, img
+        try:
+            rec, _ = await run_one(tool_call("run_shell_command", cid, args=cid, background_after=0), cid)
+        finally:
+            rel.set()
+            gate[0] = None
+        jid = str(json.loads(str((rec.tools or [])[0].result))["job_id"])
+        await wait_for_status(runtime, jid, "failed")
+        return jid
 
     try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), execution_resources(), response_cli_lifetime() as lifetime:
-            lifetime.owner = owner_tools
-
-            # Inline wait delivers media and never trips MAX_CONSECUTIVE_TOOL_FAILURES across 10 calls.
-            produced[0] = b"png-job-inline"
-            ten_model = ScriptedModel(
-                [
-                    *[calls(tool_call("run_shell_command", f"j-{i}", args=f"job-{i}")) for i in range(10)],
-                    answer("ten managed shell failures ran"),
-                ],
-            )
-            with tool_runtime_context(context):
-                ten_rec = await run_job_turn(actor, ten_model, "ten", session_id=context.session_id)
-                wait_job_id = await _start_gated_background_shell(
-                    actor,
-                    runtime,
-                    context.session_id,
-                    produced,
-                    gate,
-                    call_id="bg-w",
-                    image_bytes=b"png-job-wait",
-                )
-                wait_model = ScriptedModel(
-                    [calls(tool_call("job", "wait-1", action="wait", job_id=wait_job_id)), answer("waited")],
-                )
-                wait_rec = await run_job_turn(actor, wait_model, "wait", session_id=context.session_id)
-                col_job_id = await _start_gated_background_shell(
-                    actor,
-                    runtime,
-                    context.session_id,
-                    produced,
-                    gate,
-                    call_id="bg-c",
-                    image_bytes=b"png-job-collect",
-                )
-                collect_model = ScriptedModel(
-                    [calls(tool_call("job", "collect-1", action="collect")), answer("collected")],
-                )
-                collect_rec = await run_job_turn(actor, collect_model, "collect", session_id=context.session_id)
-
-            assert (ten_rec.content, len(ten_rec.tools or ()), not ten_rec.failing_tools) == (
-                "ten managed shell failures ran",
-                10,
+        async with execution_resources():
+            with tool_runtime_context(ctx):
+                in_r, in_m = await run_one(tool_call("run_shell_command", "c-in", args="in"), "inline")
+                w_id = await start_bg("bg-w", b"png-wait")
+                w_r, w_m = await run_one(tool_call("job", "c-w", action="wait", job_id=w_id), "wait")
+                c_id = await start_bg("bg-c", b"png-collect")
+                c_r, c_m = await run_one(tool_call("job", "c-c", action="collect"), "collect")
+            assert in_r.tools and w_r.tools and c_r.tools  # noqa: PT018
+            assert (in_r.tools[0].is_error, not in_r.failing_tools, _follow_up_images(in_m)) == (
                 True,
+                True,
+                [b"png-inline"],
             )
-            assert all(tool.is_error is True for tool in ten_rec.tools or ())
-            assert b"png-job-inline" in _follow_up_images(ten_model)
+            assert (w_r.tools[0].is_error, not w_r.failing_tools, _follow_up_images(w_m)) == (True, True, [b"png-wait"])
+            assert (c_id in str(c_r.tools[0].result), b"png-collect" in _follow_up_images(c_m)) == (True, True)
 
-            assert wait_rec.tools is not None
-            assert wait_rec.tools[0].is_error is True
-            assert not wait_rec.failing_tools
-            assert _follow_up_images(wait_model) == [b"png-job-wait"]
-
-            assert collect_rec.tools is not None
-            assert col_job_id in str(collect_rec.tools[0].result)
-            assert b"png-job-collect" in _follow_up_images(collect_model)
-
-            # Withheld managed job delivers no media.
-            produced[0] = b"png-job-withheld"
-            wh_job_model = ScriptedModel([calls(tool_call("run_shell_command", "wh-job", args="wh")), answer("wh")])
-            with tool_runtime_context(withheld_ctx):
-                wh_job_rec = await run_job_turn(
-                    actor,
-                    wh_job_model,
-                    "wh-job",
-                    session_id=context.session_id,
-                    middleware=(build_tool_hook_middleware(withhold_hooks, config, paths),),
+            produced[0] = b"png-withheld"
+            wh = HookBindings(registry=HookRegistry.from_plugins([_plugin("guard", [_withhold_result])]))
+            with tool_runtime_context(replace(ctx, hooks=wh)):
+                wh_r, wh_m = await run_one(
+                    tool_call("run_shell_command", "c-wh", args="wh"),
+                    "wh",
+                    (build_tool_hook_middleware(wh, cfg, paths),),
                 )
-            assert wh_job_rec.tools is not None
-            assert wh_job_rec.tools[0].is_error is True
-            assert "was withheld" in str(wh_job_rec.tools[0].result)
-            assert _follow_up_images(wh_job_model) == []
+            assert wh_r.tools
+            assert (wh_r.tools[0].is_error, _follow_up_images(wh_m)) == (True, [])
+            assert "was withheld" in str(wh_r.tools[0].result)
     finally:
-        await owner_tools.close()
         await runtime.shutdown()

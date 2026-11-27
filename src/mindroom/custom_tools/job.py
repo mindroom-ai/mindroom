@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.active_runs import pause_current_active_run
-from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure, job_failure_outcome, job_failure_text
+from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure_text, job_outcome
 from mindroom.tool_jobs.control import waiting_on_jobs
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
 from mindroom.tool_jobs.runtime import (
@@ -24,7 +24,6 @@ from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
     active_tool_output_file_request,
     finalize_tool_output_file,
-    is_tool_output_error,
     saved_output_envelope,
 )
 from mindroom.tool_system.runtime_context import current_execution_identity
@@ -66,16 +65,8 @@ async def _finish_staged_result(staging: StagedConsumptions, result: object) -> 
         return result
     finalized = finalize_tool_output_file(output_request, result)
     saved = finalized.saved_output if isinstance(finalized, ToolOutcome) else saved_output_envelope(finalized)
-    output_errored = (
-        saved is None
-        if output_request.path is not None
-        else finalized is not result
-        and (is_tool_output_error(finalized) or (isinstance(finalized, ToolOutcome) and finalized.saved_output is None))
-    )
-    if output_errored:
-        await staging.release()
-        return ToolOutputFileHandled(finalized)
-    await staging.commit()
+    output_errored = (output_request.path is not None or finalized is not result) and saved is None
+    await (staging.release() if output_errored else staging.commit())
     return ToolOutputFileHandled(finalized)
 
 
@@ -109,15 +100,13 @@ def _render_collected(
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
     """Return a completed job's outcome as this call's own result; every other outcome returns a failed ToolOutcome.
 
-    The call that started the job fails the same way (``job_failure``).
+    The call that started the job fails the same way (``job_outcome``).
     """
     staging = StagedConsumptions()
     try:
         await staging.stage(runtime, job, claim)
         (prepared,) = staging.prepare_values()
-        failure = job_failure(job, prepared.value, prepared.payload)
-        result = prepared.value if failure is None else job_failure_outcome(failure, prepared.value, prepared.payload)
-        return await _finish_staged_result(staging, result)
+        return await _finish_staged_result(staging, job_outcome(job, prepared.value, prepared.payload))
     except BaseException:
         await staging.release()
         raise

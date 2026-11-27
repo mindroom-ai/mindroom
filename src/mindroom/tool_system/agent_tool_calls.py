@@ -107,7 +107,6 @@ class AgentToolCallStep:
     call: ReportedCall
     saved_output: dict[str, object] | None = None
     counts_as_tool_failure: bool = True
-    refused_by: Literal["plugin_hook", "approval", "result_transform"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,7 +493,6 @@ async def _execute_agent_tool_call(
             replace(call, result=outcome.content, is_error=outcome.is_error),
             outcome.saved_output,
             outcome.counts_as_tool_failure,
-            outcome.refused_by,
         )
 
 

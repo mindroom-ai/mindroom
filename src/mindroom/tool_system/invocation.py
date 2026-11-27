@@ -22,7 +22,7 @@ import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -140,13 +140,10 @@ class CallResult:
 
 
 def _call_result(value: object) -> CallResult:
-    if isinstance(value, ToolOutcome):
-        if value.refused_by == "plugin_hook":
-            return CallResult("declined", value)
-        if value.refused_by == "approval":
-            return CallResult("denied", value)
-        if value.is_error:
-            return CallResult("failed", value)
+    if isinstance(value, ToolOutcome) and value.refused_by is not None:
+        return CallResult("declined" if value.refused_by == "plugin_hook" else "denied", value)
+    if isinstance(value, ToolOutcome) and value.is_error:
+        return CallResult("failed", value)
     if is_oauth_connection_required_result(value.content if isinstance(value, ToolValue) else value):
         return CallResult("connection_required", value)
     return CallResult("ok", value)
@@ -361,19 +358,14 @@ async def execute_tool_call(
     result = await run_tool_call(function, arguments, context, middleware=middleware)
     if result.error is not None:
         return ToolOutcome(content=result.failure_text, stop_after_call=function.stop_after_call, is_error=True)
+    if isinstance(result.value, ToolOutcome):
+        return replace(result.value, stop_after_call=function.stop_after_call or result.value.stop_after_call)
     value = result.value if isinstance(result.value, ToolValue) else ToolValue(content=str(result.value))
-    saved_output = (
-        value.saved_output
-        if isinstance(value, ToolOutcome) and value.saved_output is not None
-        else saved_output_envelope(result.value)
-    )
     return tool_outcome(
         value,
-        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
-        is_error=isinstance(value, ToolOutcome) and value.is_error,
-        refused_by=value.refused_by if isinstance(value, ToolOutcome) else None,
-        counts_as_tool_failure=value.counts_as_tool_failure if isinstance(value, ToolOutcome) else True,
-        saved_output=saved_output,
+        stop_after_call=function.stop_after_call,
+        is_error=False,
+        saved_output=saved_output_envelope(result.value),
     )
 
 
@@ -382,7 +374,6 @@ def tool_outcome(
     *,
     stop_after_call: bool,
     is_error: bool,
-    refused_by: Literal["plugin_hook", "approval", "result_transform"] | None = None,
     counts_as_tool_failure: bool = True,
     saved_output: dict[str, object] | None = None,
 ) -> ToolOutcome:
@@ -395,7 +386,6 @@ def tool_outcome(
         files=value.files,
         stop_after_call=stop_after_call,
         is_error=is_error,
-        refused_by=refused_by,
         counts_as_tool_failure=counts_as_tool_failure,
         saved_output=saved_output,
     )

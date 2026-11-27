@@ -36,7 +36,7 @@ from mindroom.tool_jobs.background_after import (
     background_after_schema,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_outcome, session_state_delta
+from mindroom.tool_jobs.consumption import consume_tool_job, job_outcome, session_state_delta
 from mindroom.tool_jobs.control import counted_tool_call, job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -511,7 +511,7 @@ async def _run_managed_call(
             pause_on_human_wait=pause_current_active_run,
         )
         if waited.claim is None:
-            value, outcome = (job.handle or format_job_handle)(waited.job), None
+            result = (job.handle or format_job_handle)(waited.job)
         else:
             value, payload = await consume_tool_job(
                 runtime,
@@ -521,11 +521,10 @@ async def _run_managed_call(
                 returned_inline=True,
             )
             retained = True
-            error = job_failure(waited.job, value, payload)
-            outcome = None if error is None else job_failure_outcome(error, value, payload)
+            result = job_outcome(waited.job, value, payload)
         # A released wait's call returned its job handle, which names the job a restart's account points to. A
         # failed call is recorded as failed, with the text the model reads.
-        await record_return(value if outcome is None else outcome)
+        await record_return(result)
     except Exception as failure:
         # The call fails with what ended it, as the model reads it, such as the runtime refusing the job or this
         # caller's wait for it, which fails the call, not the reply's run. A cancelled call stays started, since its
@@ -538,9 +537,7 @@ async def _run_managed_call(
             await runtime.release_wait(job_id, claim)
         if reference is not None and job is not None and not admitted:
             await reference.release()
-    if outcome is not None:
-        return outcome
-    return value
+    return result
 
 
 async def _releasing(
@@ -603,18 +600,13 @@ def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str
     counts_as_tool_failure = (
         result.value.counts_as_tool_failure if failure is not None and isinstance(result.value, ToolOutcome) else True
     )
-    if failure is None:
-        value: Any = result.value
-    elif isinstance(result.value, ToolValue) and any(result.value.media()):
-        value = ToolValue(
-            content=failure,
-            images=result.value.images,
-            audios=result.value.audios,
-            videos=result.value.videos,
-            files=result.value.files,
-        )
-    else:
-        value = None
+    value: Any = (
+        result.value
+        if failure is None
+        else replace(result.value, content=failure)
+        if isinstance(result.value, ToolValue) and any(result.value.media())
+        else None
+    )
     try:
         payload = ToolResultPayload(
             value=value,

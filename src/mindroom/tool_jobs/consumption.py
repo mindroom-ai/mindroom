@@ -50,35 +50,28 @@ def job_failure_text(value: Any, payload: ToolResultPayload) -> str:  # noqa: AN
     """Return the text a consumed job reports for its failure: the payload's error, else the value's text.
 
     ``value`` and ``payload`` are what ``consume_tool_job`` returned. Which outcomes fail a read of one job is
-    ``job_failure``'s rule.
+    ``job_outcome``'s rule.
     """
     text = value.content if isinstance(value, ToolValue) else value
     return str(payload.error or text or _JOB_FAILED_TEXT)
 
 
-def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> str | None:  # noqa: ANN401 - A consumed job's value.
-    """Return why a read of one consumed job fails, or None when the job completed.
+def job_outcome(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> Any:  # noqa: ANN401 - A consumed job's value.
+    """Return a completed job's value, or a failed ``ToolOutcome`` preserving media and failure-breaker semantics.
 
     Every other outcome fails with its reason, such as why an approval was denied, for the call that started the job
     and for a later wait on it.
     """
-    return None if job.status == "completed" else job_failure_text(value, payload)
-
-
-def job_failure_outcome(failure: str, value: Any, payload: ToolResultPayload) -> ToolOutcome:  # noqa: ANN401 - A consumed job's value.
-    """Return the failed ``ToolOutcome`` for a consumed job that did not complete, preserving media and failure flag."""
-    if isinstance(value, ToolValue) and any(value.media()):
-        return ToolOutcome(
-            content=failure,
-            images=value.images,
-            audios=value.audios,
-            videos=value.videos,
-            files=value.files,
-            is_error=True,
-            counts_as_tool_failure=payload.counts_as_tool_failure,
-        )
+    if job.status == "completed":
+        return value
+    failure = job_failure_text(value, payload)
+    media = value if isinstance(value, ToolValue) and any(value.media()) else ToolValue(content=failure)
     return ToolOutcome(
         content=failure,
+        images=media.images,
+        audios=media.audios,
+        videos=media.videos,
+        files=media.files,
         is_error=True,
         counts_as_tool_failure=payload.counts_as_tool_failure,
     )

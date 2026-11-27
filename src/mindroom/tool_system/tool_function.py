@@ -203,15 +203,15 @@ class ToolOutcome(ToolValue):
     A tool or middleware may answer a call with one: ``stop_after_call`` stops the run after it, and ``is_error``
     fails it. ``counts_as_tool_failure`` says whether a failed outcome counts toward the agent loop's consecutive
     tool-failure circuit breaker (``False`` when the tool itself worked, such as a shell command exiting non-zero or
-    timing out). ``refused_by`` is set only by the tool-call policy: ``"plugin_hook"`` or ``"approval"`` for a call
-    refused before the body ran, or ``"result_transform"`` when a result-transform hook withheld the output after the
-    body ran; a failed outcome a tool answers with leaves it unset.
+    timing out). ``refused_by`` is set only by the tool-call policy, for a call it refused before the body ran: a
+    plugin hook declined it, or the run's approval gate denied it; a failed outcome a tool answers with leaves it
+    unset.
     """
 
     stop_after_call: bool = False
     is_error: bool = False
     counts_as_tool_failure: bool = True
-    refused_by: Literal["plugin_hook", "approval", "result_transform"] | None = None
+    refused_by: Literal["plugin_hook", "approval"] | None = None
     saved_output: dict[str, object] | None = None
 
 

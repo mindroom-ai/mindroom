@@ -7,7 +7,9 @@ import contextlib
 import json
 import os
 import signal
+import sys
 import tempfile
+from ast import literal_eval
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
@@ -20,6 +22,7 @@ from mindroom.shell.execution import kill_all_records, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
 from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, toolkit_function
+from mindroom.tool_system.invocation import ToolCallContext, client_tool_result, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -218,7 +221,7 @@ async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: 
 
     assert result.status == "success"
     assert isinstance(result.result, ToolOutcome)
-    assert result.result.is_error
+    assert (result.result.is_error, result.result.counts_as_tool_failure) == (True, False)
     assert json.loads(result.result.content)["mindroom_tool_output"]["exit_code"] == 3
     assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
@@ -760,3 +763,30 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         kill_all_records(registry)
         with contextlib.suppress(asyncio.CancelledError):
             await record._monitor_task
+
+
+@pytest.mark.asyncio
+async def test_failed_shell_auto_save_preserves_is_error_and_saved_output(
+    shell_toolkit: AnyToolkit,
+    tmp_path: Path,
+) -> None:
+    """Large failed shell output auto-saves while keeping is_error=True, counts_as_tool_failure=False, and saved_output."""
+    configure_toolkit_functions(
+        shell_toolkit,
+        output_files=ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=64),
+    )
+    fn = toolkit_function(shell_toolkit, "run_shell_command")
+    assert fn is not None
+    outcome = await execute_tool_call(
+        fn,
+        {"args": [sys.executable, "-c", "import sys; print('x' * 200); sys.exit(2)"]},
+        ToolCallContext(run_id="r", session_id="s", user_id="@a:t", call_id="auto"),
+        middleware=(),
+    )
+    assert (outcome.is_error, outcome.counts_as_tool_failure) == (True, False)
+    assert outcome.saved_output is not None
+    receipt = outcome.saved_output["mindroom_tool_output"]
+    assert isinstance(receipt, dict)
+    assert (receipt["status"], receipt["auto_saved"]) == ("saved_to_file", True)
+    assert literal_eval(outcome.content) == client_tool_result(outcome) == outcome.saved_output
+    assert (tmp_path / str(receipt["path"])).read_text().startswith("Exit code 2\nOutput:\n" + "x" * 200)

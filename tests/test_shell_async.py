@@ -42,6 +42,7 @@ from mindroom.shell.execution import (
 from mindroom.shell.output_capture import CapturedShellStream, ShellOutputDestination
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -1751,3 +1752,37 @@ async def test_finite_bulk_writer_finishes_quickly_with_intact_tail() -> None:
     assert wall < 3.0, f"Expected 8 MiB bulk writer to finish well under 3s, took {wall:.2f}s"
     assert lines[0].startswith("[Showing the last 100 of 8292 lines; output truncated to the last 51200 bytes.")
     assert lines[1:] == [*(f"tail-{i:03d}" for i in range(99)), "done"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_execute_tool_call_shell_outcome_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute_tool_call propagates shell is_error/counts_as_tool_failure across signals, refusals, stderr, and bg."""
+    paths = _make_runtime_paths(tmp_path, process_env={"MINDROOM_SANDBOX_RUNNER_MODE": "true"})
+    kit = get_tool_by_name("shell", paths, runs_in_worker=False, worker_target=None, tools=builtin_tool_registry())
+    fn = _get_run_shell_command_function(kit)
+    refused_fn = _get_run_shell_command_function(_shell_for_config(tmp_path, {"allow_shell_without_worker": False}))
+    ctx = ToolCallContext(run_id="r", session_id="s", user_id="@a:t", call_id="c")
+
+    for target, args, flags, prefix in (
+        (fn, {"args": "kill -KILL $$"}, (True, False), "Exit code -9"),
+        (fn, {"args": ["/definitely-missing-xyz"], "worker": "build"}, (True, False), "Exit code 127\nStderr:\n"),
+        (fn, {"args": "echo hi", "timeout": 0}, (True, True), "Error: timeout"),
+        (refused_fn, {"args": "echo hi"}, (True, True), "Error: Shell commands run only in a worker"),
+        (fn, {"args": "echo ok; echo warn >&2"}, (False, True), "ok\nStderr:\nwarn"),
+    ):
+        out = await execute_tool_call(target, args, ctx, middleware=())
+        assert (out.is_error, out.counts_as_tool_failure) == flags
+        assert out.content.startswith(prefix)
+
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15)
+    async with shell_background_scope() as scope:
+        bg = await execute_tool_call(fn, {"args": "echo bg; sleep 30"}, ctx, middleware=())
+        assert (bg.is_error, scope.had_backgrounded) == (False, True)
+
+    monkeypatch.setattr("mindroom.shell.execution.MAX_BACKGROUNDED", 0)
+    async with shell_background_scope():
+        rejected = await fn.entrypoint(["bash", "-c", "sleep 30"], worker="build")
+    assert isinstance(rejected, ToolOutcome)
+    assert (rejected.is_error, rejected.counts_as_tool_failure) == (True, True)
+    assert rejected.content.startswith("Error: Too many backgrounded")

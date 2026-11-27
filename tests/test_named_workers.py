@@ -2067,3 +2067,28 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
     assert (agent_workspace / nested_saved["mindroom_tool_output"]["path"]).read_text(
         encoding="utf-8",
     ) == "nested mount output"
+
+
+def test_named_worker_formatting_preserves_failed_tool_outcome_and_rewrites_sandbox_receipt() -> None:
+    """Named-worker header prefixing and sandbox mount_dir rewriting preserve failed ToolOutcome fields."""
+    fmt = sandbox_proxy_module._format_named_worker_result
+    plain = ToolOutcome(content="Exit code 2", is_error=True, counts_as_tool_failure=False)
+    assert fmt(plain, header="[worker: b, started]", admitted_sandbox=None) == replace(
+        plain,
+        content="[worker: b, started]\nExit code 2",
+    )
+    inner = {"status": "saved_to_file", "path": "mindroom_tool_outputs/f.txt", "preview": "Exit code 2"}
+    receipt: dict[str, object] = {"mindroom_tool_output": inner}
+    saved = ToolOutcome(content=str(receipt), is_error=True, counts_as_tool_failure=False, saved_output=receipt)
+    sbx = WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=False)
+    exp = {
+        **inner,
+        "path": "scratch/job1/mindroom_tool_outputs/f.txt",
+        "preview": "[worker: sbx, started]\nExit code 2",
+    }
+    exp_out: dict[str, object] = {"mindroom_tool_output": exp}
+    assert fmt(saved, header="[worker: sbx, started]", admitted_sandbox=sbx) == replace(
+        saved,
+        content=str(exp_out),
+        saved_output=exp_out,
+    )

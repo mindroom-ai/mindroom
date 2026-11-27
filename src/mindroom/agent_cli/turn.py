@@ -147,24 +147,13 @@ def _page(items: list[dict[str, object]], cursor: str | None, limit: int) -> dic
 
 def _with_media(content: object, media_results: list[ToolValue]) -> ToolValue:
     """Attach media that CLI calls returned during one shell command to its text result."""
-    images = tuple(item for media in media_results for item in media.images)
-    audios = tuple(item for media in media_results for item in media.audios)
-    videos = tuple(item for media in media_results for item in media.videos)
-    files = tuple(item for media in media_results for item in media.files)
-    if isinstance(content, ToolValue):
-        return replace(
-            content,
-            images=(*content.images, *images),
-            audios=(*content.audios, *audios),
-            videos=(*content.videos, *videos),
-            files=(*content.files, *files),
-        )
-    return ToolValue(
-        content=str(content),
-        images=images,
-        audios=audios,
-        videos=videos,
-        files=files,
+    base = content if isinstance(content, ToolValue) else ToolValue(content=str(content))
+    return replace(
+        base,
+        images=(*base.images, *(item for media in media_results for item in media.images)),
+        audios=(*base.audios, *(item for media in media_results for item in media.audios)),
+        videos=(*base.videos, *(item for media in media_results for item in media.videos)),
+        files=(*base.files, *(item for media in media_results for item in media.files)),
     )
 
 
@@ -661,7 +650,6 @@ class LiveTurnTools(TurnToolBridge):
                 _with_media(str(terminal.call.result or ""), media_results),
                 stop_after_call=bool(self.control_calls),
                 is_error=bool(terminal.call.is_error),
-                refused_by=terminal.refused_by,
                 counts_as_tool_failure=terminal.counts_as_tool_failure,
                 saved_output=terminal.saved_output,
             )
@@ -698,16 +686,15 @@ class LiveTurnTools(TurnToolBridge):
             shell_leaf=leaf,
             requirement=requirement,
         )
-        withheld = False
+        drop_media = False
         async with closing_async_stream(events):
             async for event in events:
                 self._check_control(event)
-                if isinstance(event, AgentToolCallStep) and event.refused_by == "result_transform":
-                    withheld = True
+                if isinstance(event, AgentToolCallStep) and event.call.is_error and event.counts_as_tool_failure:
+                    drop_media = True
                 yield event
-        media_list = self._media.pop(parent, [])
-        if not withheld:
-            for media in media_list:
+        for media in self._media.pop(parent, []):
+            if not drop_media:
                 yield AgentToolCallMedia(media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:

@@ -50,7 +50,7 @@ from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from tests.agent_tool_helpers import detached_policy
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
@@ -220,43 +220,51 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Path) -> None:
-    """An image a CLI call returns reaches the model with the native shell's result, as in minimal Bash."""
+@pytest.mark.parametrize("failed", [False, True], ids=["success", "failed_outcome"])
+async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Path, failed: bool) -> None:
+    """An image a CLI call returns reaches the model with both plain and failed ToolOutcome native shell results."""
 
     async def produce() -> ToolResult:
         return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
 
-    catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
-    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_agent_state_storage("helper", tmp_path)
-    (tmp_path / "workspace").mkdir()
+    owner = await _native_owner(tmp_path, [produce], _allow)
+    saved: dict[str, object] = {"mindroom_tool_output": {"status": "saved_to_file", "path": "out.txt"}}
 
-    async def authorize(key, arguments) -> None:
-        return None
-
-    owner = live_turn_tools_for_test(
-        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
-    )
-    owner.shell_env = _SHELL_ENV
-
-    async def command() -> str:
-        queued = await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
-        )
-        receipt = await settled_receipt(owner, queued["call_id"])
+    async def command() -> str | ToolOutcome:
+        receipt = await _call_receipt(owner, "produce")
         assert receipt["status"] == "completed", receipt
+        if failed:
+            return ToolOutcome(
+                content="Exit code 2\nStderr:\nboom",
+                is_error=True,
+                counts_as_tool_failure=False,
+                stop_after_call=True,
+                saved_output=saved,
+            )
         return "shell done"
 
     async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         result = await owner.run_native_shell(command)
 
     assert isinstance(result, ToolValue)
-    assert result.content == "shell done"
     assert [image.content for image in result.images or []] == [b"png"]
+    if failed:
+        assert isinstance(result, ToolOutcome)
+        assert (
+            result.content,
+            result.is_error,
+            result.counts_as_tool_failure,
+            result.stop_after_call,
+            result.saved_output,
+        ) == (
+            "Exit code 2\nStderr:\nboom",
+            True,
+            False,
+            True,
+            saved,
+        )
+    else:
+        assert result.content == "shell done"
     await owner.close()
 
 
@@ -266,8 +274,9 @@ async def _native_owner(
     authorize,
     middleware: tuple = (),
     hooks: HookBindings | None = None,
+    extra_toolkits: tuple = (),
 ) -> LiveTurnTools:
-    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
+    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools), *extra_toolkits], middleware=middleware)
     catalog.runtime_context = replace(
         catalog.runtime_context,
         storage_path=tmp_path / "storage",
@@ -2053,320 +2062,90 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_shell_refusal")
-async def test_minimal_bash_propagates_shell_is_error_and_keeps_success_and_background_clean(
-    tmp_path: Path,
-) -> None:
-    """Minimal-mode execute_bash sets is_error on non-zero exit, timeout, and refusal, not exit 0 or auto-bg."""
-    from unittest.mock import patch  # noqa: PLC0415
-
+async def test_minimal_bash_propagates_shell_outcome_and_breaker_flags(tmp_path: Path) -> None:
+    """Minimal-mode execute_bash propagates is_error and counts_as_tool_failure across exits, timeouts, and bad args."""
     from mindroom.config.agent import AgentConfig  # noqa: PLC0415
     from mindroom.config.main import Config  # noqa: PLC0415
     from mindroom.config.models import DefaultsConfig  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
-    from mindroom.session_storage.agent_storage import create_agent_state_storage  # noqa: PLC0415
-    from mindroom.shell.background_scope import shell_background_scope  # noqa: PLC0415
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
     from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome  # noqa: PLC0415
 
-    def build_shell(allow_without_worker: bool) -> AdaptedToolkit:
-        runtime_paths = resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "storage",
-            process_env={},
-        )
-        config = Config(
-            defaults=DefaultsConfig(allow_shell_without_worker=allow_without_worker),
-            agents={"code": AgentConfig(display_name="Code", tools=["shell"])},
-        )
-        toolkit = get_tool_by_name(
-            "shell",
-            runtime_paths,
-            runs_in_worker=False,
-            worker_target=None,
-            runtime_config=config,
-            tool_init_overrides={"base_dir": str(tmp_path)},
-            tools=builtin_tool_registry(),
-        )
-        return replace(adapt_toolkit(toolkit, key="shell"), name="shell")
-
-    async def authorize(_key: object, _arguments: object) -> None:
-        return None
-
-    async def run_bash(allow_without_worker: bool, call_id: str, arguments: dict[str, object]) -> ToolOutcome:
-        catalog = await _catalog(tmp_path, [build_shell(allow_without_worker)])
-        catalog.store = create_agent_state_storage("helper", tmp_path)
-        owner = live_turn_tools_for_test(
-            CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-            catalog=catalog,
-            authorize=authorize,
-            output_file_policy=ToolOutputFilePolicy(tmp_path),
-        )
-        owner.shell_env = _SHELL_ENV
-        try:
-            async with response_cli_lifetime():
-                await capture_bash_batch(owner, (call_id, {"command": str(arguments.get("args", ""))}))
-                return await owner.execute_bash(ToolKey("shell", "run_shell_command"), arguments, call_id)
-        finally:
-            await owner.close()
-
-    failed = await run_bash(True, "bash-fail", {"args": "echo bad >&2; exit 4"})
-    assert failed.is_error is True
-    assert failed.content == "Exit code 4\nStderr:\nbad"
-
-    timed = await run_bash(True, "bash-timeout", {"args": "echo slow; sleep 30", "timeout": 1})
-    assert timed.is_error is True
-    assert timed.content == "Stopped after 1s.\nOutput:\nslow"
-
-    refused = await run_bash(False, "bash-refused", {"args": "echo hi"})
-    assert refused.is_error is True
-    assert "Shell commands run only in a worker" in refused.content
-
-    ok = await run_bash(True, "bash-ok", {"args": "echo hi; echo note >&2"})
-    assert ok.is_error is False
-    assert ok.content == "hi\nStderr:\nnote"
-
-    with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
-        async with shell_background_scope():
-            bg = await run_bash(True, "bash-bg", {"args": "echo bg; sleep 30"})
-            assert bg.is_error is False
-            assert "moved to the background" in bg.content
+    paths = resolve_runtime_paths(config_path=tmp_path / "c.yaml", storage_path=tmp_path / "s", process_env={})
+    cfg = Config(
+        defaults=DefaultsConfig(allow_shell_without_worker=True),
+        agents={"c": AgentConfig(display_name="C", tools=["shell"])},
+    )
+    kit = get_tool_by_name(
+        "shell",
+        paths,
+        runs_in_worker=False,
+        worker_target=None,
+        runtime_config=cfg,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
+    )
+    owner = await _native_owner(
+        tmp_path,
+        [],
+        _allow,
+        extra_toolkits=(replace(adapt_toolkit(kit, key="shell"), name="shell"),),
+    )
+    try:
+        async with response_cli_lifetime():
+            for cid, args, expected, prefix in (
+                ("fail", {"args": "echo bad >&2; exit 4"}, (True, False), "Exit code 4\nStderr:\nbad"),
+                (
+                    "to",
+                    {"args": "echo slow; sleep 30", "timeout": 1},
+                    (True, False),
+                    "Stopped after 1s.\nOutput:\nslow",
+                ),
+                ("bad-to", {"args": "echo hi", "timeout": 0}, (True, True), "Error: timeout"),
+                ("ok", {"args": "echo hi; echo note >&2"}, (False, True), "hi\nStderr:\nnote"),
+            ):
+                await capture_bash_batch(owner, (cid, {"command": str(args["args"])}))
+                out = await owner.execute_bash(ToolKey("shell", "run_shell_command"), args, cid)
+                assert (out.is_error, out.counts_as_tool_failure) == expected
+                assert out.content.startswith(prefix)
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio
-async def test_native_shell_with_cli_media_preserves_failed_tool_outcome_fields(tmp_path: Path) -> None:
-    """run_native_shell preserves ToolOutcome(is_error=True, stop_after_call, saved_output) when attaching CLI media."""
-    from mindroom.session_storage.agent_storage import create_agent_state_storage  # noqa: PLC0415
-    from mindroom.tool_system.tool_function import ToolOutcome  # noqa: PLC0415
-
-    async def produce() -> ToolResult:
-        return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
-
-    catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
-    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.store = create_agent_state_storage("helper", tmp_path)
-    (tmp_path / "workspace").mkdir()
-
-    async def authorize(_key: object, _arguments: object) -> None:
-        return None
-
-    owner = live_turn_tools_for_test(
-        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
-    )
-    owner.shell_env = _SHELL_ENV
-    saved: dict[str, object] = {"mindroom_tool_output": {"status": "saved_to_file", "path": "out.txt"}}
-
-    async def failing_command() -> ToolOutcome:
-        queued = await owner.operation(
-            window=cli_window(),
-            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
-        )
-        receipt = await settled_receipt(owner, queued["call_id"])
-        assert receipt["status"] == "completed", receipt
-        return ToolOutcome(
-            content="Exit code 2\nStderr:\nboom",
-            is_error=True,
-            stop_after_call=True,
-            saved_output=saved,
-        )
-
-    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-        result = await owner.run_native_shell(failing_command)
-
-    assert isinstance(result, ToolOutcome)
-    assert result.is_error is True
-    assert result.stop_after_call is True
-    assert result.saved_output == saved
-    assert result.content == "Exit code 2\nStderr:\nboom"
-    assert [image.content for image in result.images] == [b"png"]
-    await owner.close()
-
-
-@pytest.mark.asyncio
-async def test_minimal_bash_nonzero_exits_do_not_trip_breaker_while_invalid_args_do(tmp_path: Path) -> None:
-    """10 failing minimal bash batches never trip MAX_CONSECUTIVE_TOOL_FAILURES; 8 invalid-arg batches do."""
-    from mindroom.agent_cli.bash import minimal_bash_toolkit  # noqa: PLC0415
-    from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks  # noqa: PLC0415
-    from mindroom.agent_loop.run import run_agent  # noqa: PLC0415
-    from mindroom.agent_loop.spec import AgentSpec  # noqa: PLC0415
-    from mindroom.config.main import Config  # noqa: PLC0415
-    from mindroom.config.models import DefaultsConfig  # noqa: PLC0415
-    from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
-    from mindroom.llm.events import RunFinished  # noqa: PLC0415
-    from mindroom.llm.messages import Message  # noqa: PLC0415
-    from mindroom.tool_system.agno_toolkits import configure_toolkit_functions  # noqa: PLC0415
-    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
-    from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
-    from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call  # noqa: PLC0415
-
-    async def run_minimal_turn(model: ScriptedModel) -> object:
-        workspace = tmp_path / f"ws-{uuid4().hex}"
-        workspace.mkdir()
-        storage = tmp_path / f"storage-{uuid4().hex}"
-        runtime_paths = resolve_runtime_paths(
-            config_path=workspace / "config.yaml",
-            storage_path=storage,
-            process_env={},
-        )
-        shell_kit = get_tool_by_name(
-            "shell",
-            runtime_paths,
-            runs_in_worker=False,
-            worker_target=None,
-            tool_init_overrides={"base_dir": str(workspace)},
-            tools=builtin_tool_registry(),
-        )
-        shell_kit = configure_toolkit_functions(shell_kit, output_files=ToolOutputFilePolicy(workspace))
-        catalog = await _catalog(workspace, [replace(adapt_toolkit(shell_kit), name="shell")])
-        catalog.runtime_context = replace(
-            catalog.runtime_context,
-            config=Config(defaults=DefaultsConfig(allow_shell_without_worker=True)),
-            runtime_paths=runtime_paths,
-            storage_path=storage,
-        )
-        catalog.store = create_agent_state_storage("helper", workspace)
-
-        async def authorize(_key: object, _arguments: object) -> None:
-            return None
-
-        owner = live_turn_tools_for_test(
-            CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-            catalog=catalog,
-            authorize=authorize,
-            output_file_policy=ToolOutputFilePolicy(workspace),
-        )
-        owner.shell_env = _SHELL_ENV
-        spec = AgentSpec(
-            id="helper",
-            name="Helper",
-            model=model,
-            system_messages=(),
-            toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
-        )
-        finished = None
-        try:
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), response_cli_lifetime():
-                async for event in run_agent(
-                    spec,
-                    [Message(role="user", content="run commands")],
-                    ctx=catalog.run,
-                    hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
-                    persist=None,
-                    request_template=EMPTY_REQUEST,
-                ):
-                    if isinstance(event, RunFinished):
-                        finished = event.record
-        finally:
-            await owner.close()
-        assert finished is not None
-        return finished
-
-    # 10 consecutive failing bash commands all execute with is_error=True and never trip the breaker.
-    ten_exits = ScriptedModel(
-        [
-            *[calls(tool_call("bash", f"b-{i}", command=f"echo step-{i}; exit 1")) for i in range(10)],
-            answer("all ten bash calls ran"),
-        ],
-    )
-    ok_record = await run_minimal_turn(ten_exits)
-    assert ok_record.content == "all ten bash calls ran"
-    assert len(ok_record.tools) == 10
-    assert all(tool.is_error is True for tool in ok_record.tools)
-    assert [tool.result for tool in ok_record.tools] == [f"Exit code 1\nOutput:\nstep-{i}" for i in range(10)]
-    assert not ok_record.failing_tools
-
-    # 8 consecutive invalid-arg bash calls (timeout=0) trip the breaker on the 9th call.
-    bad_args = ScriptedModel(
-        [
-            *[calls(tool_call("bash", f"bad-{i}", command="echo hi", timeout=0)) for i in range(8)],
-            calls(tool_call("bash", "ninth", command="echo should-not-run")),
-            answer("stopped"),
-        ],
-    )
-    tripped = await run_minimal_turn(bad_args)
-    assert len(tripped.tools) == 9
-    assert "failed in 8 requests of this turn" in str(tripped.tools[8].result)
-    assert "should-not-run" not in str(tripped.tools[8].result)
-
-
-@pytest.mark.asyncio
-async def test_minimal_bash_delivers_cli_media_on_nonzero_exit_and_drops_when_withheld(tmp_path: Path) -> None:
-    """Minimal bash carries inner CLI media on non-zero exit and drops it if result_transform withholds the output."""
+@pytest.mark.parametrize("withhold", [False, True], ids=["kept", "withheld"])
+async def test_minimal_bash_delivers_cli_media_on_nonzero_exit_and_drops_when_withheld(
+    tmp_path: Path,
+    withhold: bool,
+) -> None:
+    """Minimal bash delivers inner CLI media to the model on non-zero exit and drops it when withheld."""
+    from mindroom.agent_loop.tools import tool_result_message  # noqa: PLC0415
     from mindroom.hooks import EVENT_TOOL_RESULT_TRANSFORM, ToolResultTransformContext  # noqa: PLC0415
-    from mindroom.tool_system.tool_function import ToolOutcome  # noqa: PLC0415
+    from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
 
     async def produce() -> ToolResult:
         return ToolResult(content="shot", images=[Image(content=b"png-bash", mime_type="image/png")])
 
-    async def run_case(*, withhold: bool) -> ToolOutcome:
-        workspace = tmp_path / f"ws-{uuid4().hex}"
-        workspace.mkdir()
+    async def run_shell_command(args: str) -> ToolOutcome:
+        assert (await _call_receipt(owner, "produce"))["status"] == "completed"
+        return ToolOutcome(content=f"Exit code 2\n{args}", is_error=True, counts_as_tool_failure=False)
 
-        async def run_shell_command(args: str) -> ToolOutcome:
-            queued = await owner.operation(
-                window=cli_window(),
-                operation=ToolCallOperation(
-                    operation="tools.call",
-                    call_id=uuid4(),
-                    toolkit="media",
-                    function="produce",
-                ),
-            )
-            receipt = await settled_receipt(owner, queued["call_id"])
-            assert receipt["status"] == "completed", receipt
-            return ToolOutcome(content=f"Exit code 2\n{args}", is_error=True, counts_as_tool_failure=False)
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def block(ctx: ToolResultTransformContext) -> None:
+        if ctx.tool_name == "run_shell_command":
+            raise RuntimeError("withheld")  # noqa: EM101
 
-        registry = HookRegistry.empty()
-        if withhold:
+    reg = HookRegistry.from_plugins([_plugin("guard", [block])]) if withhold else HookRegistry.empty()
+    shell = (_toolkit("shell", run_shell_command),)
+    owner = await _native_owner(tmp_path, [produce], _allow, (detached_policy(reg),), HookBindings(reg), shell)
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            await capture_bash_batch(owner, ("bash-media", {"args": "fail"}))
+            out = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "fail"}, "bash-media")
+    finally:
+        await owner.close()
 
-            @hook(EVENT_TOOL_RESULT_TRANSFORM)
-            async def block(ctx: ToolResultTransformContext) -> None:
-                if ctx.tool_name == "run_shell_command":
-                    msg = "withheld bash"
-                    raise RuntimeError(msg)
-
-            registry = HookRegistry.from_plugins([_plugin("guard", [block])])
-
-        catalog = await _catalog(
-            workspace,
-            [_toolkit("shell", run_shell_command), _toolkit("media", produce)],
-            middleware=(detached_policy(registry),),
-        )
-        catalog.runtime_context = replace(
-            catalog.runtime_context,
-            storage_path=workspace / "storage",
-            hooks=HookBindings(registry=registry),
-        )
-        catalog.store = create_agent_state_storage("helper", workspace)
-
-        async def authorize(_key: object, _arguments: object) -> None:
-            return None
-
-        owner = live_turn_tools_for_test(
-            CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
-            catalog=catalog,
-            authorize=authorize,
-            output_file_policy=ToolOutputFilePolicy(workspace),
-        )
-        owner.shell_env = _SHELL_ENV
-        try:
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                await capture_bash_batch(owner, ("bash-media", {"args": "fail"}))
-                return await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "fail"}, "bash-media")
-        finally:
-            await owner.close()
-
-    kept = await run_case(withhold=False)
-    assert kept.is_error is True
-    assert kept.counts_as_tool_failure is False
-    assert [img.content for img in kept.images] == [b"png-bash"]
-
-    withheld = await run_case(withhold=True)
-    assert withheld.is_error is True
-    assert withheld.counts_as_tool_failure is True
-    assert withheld.refused_by == "result_transform"
-    assert withheld.images == ()
+    assert (out.is_error, out.counts_as_tool_failure) == (True, withhold)
+    ex = ToolExecution(tool_call_id="bash-media", tool_name="bash", is_error=out.is_error, result=out.content)
+    msg = tool_result_message(ex, media=out)
+    assert [img.content for img in msg.images or ()] == ([] if withhold else [b"png-bash"])

@@ -345,11 +345,17 @@ class ShellRunResult:
     return_code: int | None = None
     """The exit status of a command that ended within the call; None when it did not start or still runs."""
     timed_out: bool = False
+    background_rejected: bool = False
 
     @property
     def failed(self) -> bool:
-        """Return whether the command exited non-zero, timed out, or hit an execution error."""
-        return self.execution_error or self.timed_out or (self.return_code is not None and self.return_code != 0)
+        """Return whether the command exited non-zero, timed out, or failed to start/background."""
+        return (
+            self.execution_error
+            or self.background_rejected
+            or self.timed_out
+            or (self.return_code is not None and self.return_code != 0)
+        )
 
 
 def default_run_timeout_seconds() -> float:
@@ -1056,12 +1062,7 @@ async def _background_process(
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return ShellRunResult(
-            message=rejection,
-            output_file_handled=had_capture,
-            execution_error=True,
-            timed_out=True,
-        )
+        return ShellRunResult(message=rejection, output_file_handled=had_capture, background_rejected=True)
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
@@ -1096,8 +1097,7 @@ async def _background_process(
         return ShellRunResult(
             message="Error: Shell turn already ended.",
             output_file_handled=had_capture,
-            execution_error=True,
-            timed_out=True,
+            background_rejected=True,
         )
     message = (
         _format_auto_background_message(

@@ -14,7 +14,8 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from functools import reduce
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -459,7 +460,7 @@ def _checked_results(
         transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context, rewritable=not control)
         if transformed is None:
             withheld = _WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name)
-            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops, refused_by="result_transform")
+            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
         if transformed == text:
             return result
         if isinstance(result, ToolOutcome):
@@ -816,23 +817,6 @@ async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, st
     return given
 
 
-def _mask_result_values(result: object, mask_text: Callable[[str], str]) -> object:
-    if isinstance(result, str):
-        return mask_text(result)
-    if isinstance(result, ToolOutcome) and result.saved_output is not None:
-        masked_saved = _mask_result_values(result.saved_output, mask_text)
-        if isinstance(masked_saved, dict):
-            return replace(result, content=mask_text(str(masked_saved)), saved_output=masked_saved)
-    if isinstance(result, ToolValue):
-        # A result with media beside its text, as a shell command that used the agent CLI returns.
-        return replace(result, content=mask_text(result.content))
-    if isinstance(result, dict):
-        return {key: _mask_result_values(item, mask_text) for key, item in result.items()}
-    if isinstance(result, list):
-        return [_mask_result_values(item, mask_text) for item in result]
-    return result
-
-
 def _without_given_secrets(
     func: Callable[..., Awaitable[_ToolHookResult]],
     given: Mapping[str, str],
@@ -851,14 +835,27 @@ def _without_given_secrets(
     values = sorted(given.values(), key=lambda value: -len(value))
 
     def masked_text(text: str) -> str:
-        for value in values:
-            text = text.replace(value, REDACTED)
-        return text
+        return reduce(lambda current, value: current.replace(value, REDACTED), values, text)
+
+    def masked(result: object) -> object:
+        if isinstance(result, str):
+            return masked_text(result)
+        if isinstance(result, ToolOutcome) and result.saved_output is not None:
+            masked_saved = cast("dict[str, object]", masked(result.saved_output))
+            return replace(result, content=masked_text(str(masked_saved)), saved_output=masked_saved)
+        if isinstance(result, ToolValue):
+            # A result with media beside its text, as a shell command that used the agent CLI returns.
+            return replace(result, content=masked_text(result.content))
+        if isinstance(result, dict):
+            return {key: masked(item) for key, item in result.items()}
+        if isinstance(result, list):
+            return list(map(masked, result))
+        return result
 
     async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
         with tool_progress_through(masked_text):
             result = await func(**arguments)
-        return _mask_result_values(result, masked_text)
+        return masked(result)
 
     return without_given_secrets
 

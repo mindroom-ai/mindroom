@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_RESULT_TRANSFORM,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -26,15 +31,23 @@ from mindroom.hooks.execution import _EMIT_DEPTH, _MAX_EMIT_DEPTH
 from mindroom.hooks.types import default_timeout_ms_for_event
 from mindroom.llm.events import ReportedCall
 from mindroom.llm.media import Image
+from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import secret_holder, temporary_secrets
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, run_tool_call
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, ToolOutputFileRequest, finalize_tool_output_file
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome, ToolValue
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.agent_tool_helpers import detached_policy, tool_policy
+from tests.authorization_helpers import make_test_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 _WITHHELD = "The result of fetch_page was withheld because a result check failed."
 
@@ -325,37 +338,6 @@ async def test_raised_oauth_and_declined_calls_never_run_the_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_tool_outcome_runs_the_hook_and_clears_stale_saved_output() -> None:
-    """A tool-returned failed ToolOutcome is checked by result-transform hooks, clearing stale saved_output on rewrite."""
-    seen: list[str] = []
-
-    @hook(EVENT_TOOL_RESULT_TRANSFORM)
-    async def check(ctx: ToolResultTransformContext) -> str:
-        seen.append(ctx.result)
-        return "replaced"
-
-    bridge = tool_policy(_registry(check))
-    failure = ToolOutcome(
-        content="it failed",
-        is_error=True,
-        counts_as_tool_failure=False,
-        saved_output={"mindroom_tool_output": {"path": "x"}},
-    )
-
-    async def answers_failure(**_kwargs: object) -> object:
-        return failure
-
-    rewritten = await bridge("answers_failure", answers_failure, {})
-    assert rewritten == ToolOutcome(
-        content="replaced",
-        is_error=True,
-        counts_as_tool_failure=False,
-        saved_output=None,
-    )
-    assert seen == ["it failed"]
-
-
-@pytest.mark.asyncio
 async def test_without_transform_hooks_the_result_is_the_tool_s_own_object() -> None:
     """A deployment without the hook pays nothing and gets the exact object back."""
 
@@ -577,3 +559,69 @@ async def test_a_stop_a_checker_swallows_still_stops_the_call() -> None:
 
     assert recorder.started_calls == ["fetch_page"]
     assert recorder.finished_results == []
+
+
+@pytest.mark.asyncio
+async def test_failed_shell_secret_masking_and_result_transform_cover_saved_output(tmp_path: Path) -> None:
+    """Failed auto-saved shell output redacts escaped secrets before hooks, clears saved_output on rewrite, and fails on withhold."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "c.yaml", storage_path=tmp_path / "s", process_env={})
+    cfg, secret = Config(), r"sec\ret'quote"
+    policy = ToolOutputFilePolicy(tmp_path, auto_save_threshold_bytes=64)
+
+    async def shell_body() -> object:
+        raw = ToolOutcome(content=f"Exit code 2\n{secret} {'z' * 160}", is_error=True, counts_as_tool_failure=False)
+        return finalize_tool_output_file(ToolOutputFileRequest(policy, "run_shell_command", None), raw)
+
+    fn = ToolFunction(name="run_shell_command", description=None, parameters={}, entrypoint=shell_body, toolkit="shell")
+    target = MessageTarget.resolve(room_id="!r:t", thread_id="$t", reply_to_event_id="$m")
+    stub = SimpleNamespace()
+    base = make_test_tool_runtime_context(
+        agent_name="code",
+        target=target,
+        requester_id="@a:t",
+        client=stub,
+        conversation_reader=stub,
+        relations=stub,
+        config=cfg,
+        runtime_paths=paths,
+        storage_path=tmp_path / "s",
+    )
+    holder = secret_holder(base.execution_identity)
+    assert holder is not None
+    temporary_secrets().give(holder, "TOK", secret, keep="memory", now=time.time(), storage_root=paths.storage_root)
+
+    async def run_case(cb: object) -> ToolOutcome:
+        bindings = HookBindings(registry=_registry(cb))
+        with tool_runtime_context(replace(base, hooks=bindings)):
+            return await execute_tool_call(
+                fn,
+                {},
+                _CALL_CONTEXT,
+                middleware=(build_tool_hook_middleware(bindings, cfg, paths),),
+            )
+
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def observe(ctx: ToolResultTransformContext) -> None:
+        seen.append(ctx.result)
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def rewrite(_ctx: ToolResultTransformContext) -> str:
+        return "sanitized"
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def withhold(_ctx: ToolResultTransformContext) -> None:
+        raise RuntimeError("withheld")  # noqa: EM101
+
+    passed = await run_case(observe)
+    assert (passed.is_error, passed.counts_as_tool_failure) == (True, False)
+    assert passed.saved_output is not None
+    saved_json = json.dumps(passed.saved_output)
+    for leaked in (secret, secret.replace("\\", "\\\\"), r"sec\ret", r"sec\\ret"):
+        assert (leaked in passed.content, leaked in saved_json, leaked in seen[0]) == (False, False, False)
+    assert (REDACTED in passed.content, REDACTED in saved_json) == (True, True)
+    rw = await run_case(rewrite)
+    assert (rw.is_error, rw.counts_as_tool_failure, rw.content, rw.saved_output) == (True, False, "sanitized", None)
+    wh = await run_case(withhold)
+    assert (wh.is_error, wh.counts_as_tool_failure, wh.saved_output) == (True, True, None)

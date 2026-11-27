@@ -89,7 +89,6 @@ class BatchCheckpoint:
             tool_args=deepcopy(call.execution.tool_args),
             is_error=outcome.is_error,
             result=outcome.content,
-            counts_as_tool_failure=outcome.counts_as_tool_failure,
         )
         batch.executions[call_id] = execution
         batch.messages.append(tool_result_message(execution, media=outcome))

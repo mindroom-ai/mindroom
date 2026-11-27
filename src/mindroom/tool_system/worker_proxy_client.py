@@ -575,29 +575,17 @@ def _stream_execute_response(
 
 def _worker_error_outcome(result: object, *, counts_as_tool_failure: bool = True) -> ToolOutcome:
     """Reconstruct a failed ``ToolOutcome`` from a worker's ``ExecuteResponse(is_error=True)`` payload."""
-    if is_media_result_envelope(result):
-        decoded = decode_media_result(result)
-        if isinstance(decoded, ToolValue):
-            return ToolOutcome(
-                content=decoded.content,
-                images=decoded.images,
-                audios=decoded.audios,
-                videos=decoded.videos,
-                files=decoded.files,
-                is_error=True,
-                counts_as_tool_failure=counts_as_tool_failure,
-            )
-        return ToolOutcome(
-            content=str(decoded),
-            is_error=True,
-            counts_as_tool_failure=counts_as_tool_failure,
-            saved_output=saved_output_envelope(decoded),
-        )
+    decoded = decode_media_result(result) if is_media_result_envelope(result) else result
+    value = decoded if isinstance(decoded, ToolValue) else ToolValue(content=str(decoded))
     return ToolOutcome(
-        content=result if isinstance(result, str) else str(result),
+        content=value.content,
+        images=value.images,
+        audios=value.audios,
+        videos=value.videos,
+        files=value.files,
         is_error=True,
         counts_as_tool_failure=counts_as_tool_failure,
-        saved_output=saved_output_envelope(result),
+        saved_output=saved_output_envelope(decoded),
     )
 
 

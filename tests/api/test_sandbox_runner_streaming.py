@@ -573,3 +573,23 @@ def test_a_spawned_child_that_exited_never_waits_for_a_process_that_holds_its_pi
         if holder is not None:
             with suppress(ProcessLookupError):
                 os.kill(holder, signal.SIGKILL)
+
+
+def test_streamed_shell_command_sets_is_error_and_breaker_flag(runner: TestClient) -> None:
+    """Streamed shell execution marks non-zero exits and timeouts as is_error=True, counts_as_tool_failure=False."""
+    for cmd, kwargs, err, prefix in (
+        (["bash", "-c", "echo hi"], {}, False, "Streamed "),
+        (["bash", "-c", "echo err >&2; exit 6"], {}, True, "Exit code 6\n"),
+        (["bash", "-c", "sleep 30"], {"timeout": 1}, True, "Stopped after 1s.\n"),
+    ):
+        frames = _stream(
+            runner,
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[cmd],
+            kwargs=kwargs,
+            stream_io=True,
+        )
+        answer = ExecuteResponse.model_validate(frames[-1])
+        assert (answer.ok, answer.is_error, answer.counts_as_tool_failure) == (True, err, not err)
+        assert str(answer.result).startswith(prefix)
