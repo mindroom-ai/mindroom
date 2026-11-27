@@ -85,6 +85,7 @@ from mindroom.hooks import (
     TurnTrust,
     hook,
 )
+from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.provider import ModelProvider
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
@@ -188,6 +189,7 @@ __all__ = [
     "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
+    "Audio",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
@@ -200,6 +202,7 @@ __all__ = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "File",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
@@ -208,6 +211,7 @@ __all__ = [
     "HookContext",
     "HookMatrixAdmin",
     "HookMessageSender",
+    "Image",
     "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
@@ -255,6 +259,7 @@ __all__ = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "Video",
     "WorkerService",
     "WorkerServiceError",
     "WorkerServiceState",

@@ -10,7 +10,7 @@ import pytest
 
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
-from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call, parse_tool_arguments
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.toolkits import adapt_toolkit, with_offered_instructions
@@ -267,3 +267,47 @@ def test_reserved_framework_parameter_names_are_refused(param_name: str, entrypo
     """Framework-reserved parameter names are refused so models cannot spoof call identity."""
     with pytest.raises(ValueError, match=rf"takes {param_name}.*current_call\(\)"):
         adapt_toolkit(Toolkit(name="reserved", tools=[entrypoint]))
+
+
+@pytest.mark.asyncio
+async def test_passthrough_tool_preserves_declared_reserved_argument_names_and_drops_undeclared_spoofs() -> None:
+    """Passthrough schemas (e.g. MCP tools) keep declared names like ``team`` while dropping undeclared reserved keys."""
+    received: list[dict[str, object]] = []
+    schema = {
+        "type": "object",
+        "properties": {
+            "team": {"type": "string"},
+            "title": {"type": "string"},
+        },
+        "required": ["team", "title"],
+    }
+
+    @passthrough_tool(name="create_issue", description="Create an issue.", parameters=schema)
+    def create_issue(**kwargs: object) -> str:
+        received.append(dict(kwargs))
+        return json.dumps(kwargs)
+
+    [function] = adapt_toolkit(Toolkit(name="mcp_tracker", tools=[create_issue])).functions
+    raw_arguments = {
+        "team": "ENG",
+        "title": "Fix bug",
+        "agent": "spoof",
+        "run_context": "spoof",
+        "_agno_agent": "spoof",
+        "_agno_team": "spoof",
+        "_agno_run_context": "spoof",
+    }
+
+    parsed = parse_tool_arguments(json.dumps(raw_arguments), function)
+    assert parsed == {"team": "ENG", "title": "Fix bug"}
+
+    outcome = await execute_tool_call(
+        function,
+        raw_arguments,
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
+
+    assert not outcome.is_error
+    assert json.loads(outcome.content) == {"team": "ENG", "title": "Fix bug"}
+    assert received == [{"team": "ENG", "title": "Fix bug"}]

@@ -293,7 +293,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
         tool_name="add",
         toolkit_name="calculator",
         adapter={
-            "origin": {"module": "agno.tools.calculator", "qualname": "CalculatorTools.add"},
+            "origin": {"module": "mindroom.custom_tools.calculator", "qualname": "CalculatorTools.add"},
             "authority": {
                 **authority_snapshot(config, "lead"),
                 "construction": {

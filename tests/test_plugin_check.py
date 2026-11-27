@@ -535,3 +535,59 @@ def test_check_plugin_rejects_an_automation_named_like_a_built_in(tmp_path: Path
 
     with pytest.raises(ValueError, match="dreaming"):
         check_plugin(plugin_root)
+
+
+def test_check_plugin_emits_migration_error_for_lazy_agno_import_in_factory(tmp_path: Path) -> None:
+    """A factory lazily importing removed Agno fails with a clear migration error instead of being skipped."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    from agno.tools import Toolkit\n    return Toolkit\n",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Tool 'wrapper' imports removed dependency 'agno(?:\.tools)?'; .*mindroom\.plugin_api\.Toolkit",
+    ):
+        check_plugin(plugin_root)
+
+
+def test_check_plugin_emits_migration_error_for_top_level_agno_import(tmp_path: Path) -> None:
+    """A plugin module importing removed Agno at import time fails with a clear migration error."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "legacy-agno", "tools_module": "tools.py"},
+        modules={"tools.py": "from agno.tools import Toolkit\n"},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Plugin imports removed dependency 'agno(?:\.tools)?'; .*mindroom\.plugin_api\.Toolkit",
+    ):
+        check_plugin(plugin_root)
+
+    cli_result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
+    assert cli_result.exit_code == 1
+    assert "mindroom.plugin_api.Toolkit" in cli_result.stdout
+    assert "Traceback (most recent call last)" not in cli_result.output
+
+
+@pytest.mark.parametrize(
+    ("factory", "expected_got"),
+    [
+        ("class LegacyTools:\n    pass\ndef wrapper_tools():\n    return LegacyTools\n", "LegacyTools"),
+        ("def wrapper_tools():\n    return object()\n", "object"),
+    ],
+)
+def test_check_plugin_rejects_factory_returning_non_toolkit_class_or_object(
+    tmp_path: Path,
+    factory: str,
+    expected_got: str,
+) -> None:
+    """A factory returning a non-Toolkit class or object fails with a migration error pointing to plugin_api.Toolkit."""
+    plugin_root = _tool_plugin(tmp_path / "plugin", factory)
+
+    with pytest.raises(
+        TypeError,
+        match=rf"Tool 'wrapper' factory returned {expected_got!r}, which does not subclass mindroom\.plugin_api\.Toolkit",
+    ):
+        check_plugin(plugin_root)

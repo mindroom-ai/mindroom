@@ -393,7 +393,7 @@ def _normalize_json_value(value: object) -> object:  # noqa: PLR0911 - One branc
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    # Deferred because the toolkit adapter, which reads a vendor tool's value, imports this module.
+    # Deferred because mindroom.tool_system.toolkits imports this module.
     from mindroom.tool_system.toolkits import read_tool_value  # noqa: PLC0415
 
     if (value := read_tool_value(result)) is not None:

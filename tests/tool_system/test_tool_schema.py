@@ -18,6 +18,7 @@ from typing import (  # noqa: UP035 - The bare typing aliases are annotation-kin
     Literal,
     Optional,
     Union,
+    get_origin,
 )
 
 import pytest
@@ -46,9 +47,36 @@ def owned_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[s
     return tool_description(entrypoint), tool_parameters(entrypoint)
 
 
-def assert_same_bytes(owned: object, agno: object) -> None:
+_PIPED_UNION_IS_TYPING_UNION = get_origin(int | None) is Union
+
+
+def _piped_optional(schema: dict[str, Any], *, description: str | None = None) -> dict[str, Any]:
+    """Return the schema ``_parameter_schema`` emits for top-level ``X | None`` on this Python version.
+
+    Python 3.14 unified ``types.UnionType`` with ``typing.Union``, so top-level ``X | None`` drops ``null`` like
+    ``Optional[X]`` on 3.14 while keeping ``anyOf`` on 3.13.
+    """
+    result = dict(schema) if _PIPED_UNION_IS_TYPING_UNION else {"anyOf": [schema, {"type": "null"}]}
+    if description is not None:
+        result["description"] = description
+    return result
+
+
+def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties) if required is None else required,
+    }
+
+
+def _string_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": value}
+
+
+def assert_same_bytes(owned: object, expected: object) -> None:
     """Compare serialized bytes, key order included, because providers receive schemas serialized."""
-    assert json.dumps(owned, indent=2) == json.dumps(agno, indent=2)
+    assert json.dumps(owned, indent=2) == json.dumps(expected, indent=2)
 
 
 class Color(Enum):
@@ -186,12 +214,12 @@ def test_values_annotated_any_or_object_take_any_json_value() -> None:
     ) -> str:
         return ""
 
-    mapping = {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}}
+    mapping = _string_mapping({})
     assert tool_parameters(open_values)["properties"] == {
         "anything": {},
         "thing": {},
         "mapping": mapping,
-        "objects": {"anyOf": [mapping, {"type": "null"}]},
+        "objects": _piped_optional(mapping),
         "rows": {"type": "array", "items": {"type": "array", "items": {}}},
     }
 
@@ -323,66 +351,64 @@ ANNOTATION_KINDS = (
 )
 
 
+_INNER_MODEL_SCHEMA: dict[str, Any] = {
+    "description": "A model nested in another.",
+    "properties": {
+        "key": {"title": "Key", "type": "string"},
+        "weight": {"default": 1.0, "title": "Weight", "type": "number"},
+    },
+    "required": ["key"],
+    "title": "Inner",
+    "type": "object",
+}
+
 _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
     "scalars": (
         "Take scalars.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "count": {"type": "integer", "description": "A whole number."},
                 "ratio": {"type": "number", "description": "A decimal number."},
                 "enabled": {"type": "boolean", "description": "A flag."},
                 "label": {"type": "string", "description": "Free text."},
             },
-            "required": ["count", "ratio", "enabled", "label"],
-        },
+        ),
     ),
     "optionals": (
         "Take optional values and defaults.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "typed": {"type": "string", "description": "Optional text."},
                 "union": {"type": "integer", "description": "Optional number."},
-                "piped": {
-                    "anyOf": [{"type": "integer"}, {"type": "null"}],
-                    "description": "Optional number with a pipe.",
-                },
+                "piped": _piped_optional({"type": "integer"}, description="Optional number with a pipe."),
                 "choice": {"type": "string", "enum": ["a", "b"], "description": "An optional choice."},
                 "flag": {"type": "boolean", "description": "A defaulted flag."},
             },
-            "required": [],
-        },
+            required=[],
+        ),
     ),
     "literals": (
         "Take constrained choices.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "words": {"type": "string", "enum": ["fast", "slow"]},
                 "numbers": {"type": "integer", "enum": [1, 2]},
                 "flags": {"type": "boolean", "enum": [True]},
                 "mixed": {"enum": ["a", 1]},
             },
-            "required": ["words", "numbers", "flags", "mixed"],
-        },
+        ),
     ),
     "enums": (
         "Take enumerations.",
-        {
-            "type": "object",
-            "properties": {
-                "color": {"type": "string", "enum": ["red", "green"]},
-                "level": {"type": "string", "enum": [1, 2]},
-            },
-            "required": ["color"],
-        },
+        _object_schema(
+            {"color": {"type": "string", "enum": ["red", "green"]}, "level": {"type": "string", "enum": [1, 2]}},
+            required=["color"],
+        ),
     ),
     "collections": (
         "Take sequences.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "pairs": {"type": "array", "items": {"type": "integer"}},
                 "unique": {"type": "array", "items": {"type": "string"}},
@@ -406,97 +432,37 @@ _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
                 },
                 "either": {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
             },
-            "required": ["tags", "pairs", "unique", "frozen", "bare", "legacy", "rows", "either"],
-        },
+        ),
     ),
     "mappings": (
         "Take mappings.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "bare": {"type": "object", "additionalProperties": True},
-                "legacy": {
-                    "type": "object",
-                    "propertyNames": {"type": "string"},
-                    "additionalProperties": {"type": "string"},
-                },
-                "typed": {
-                    "type": "object",
-                    "propertyNames": {"type": "string"},
-                    "additionalProperties": {"type": "integer"},
-                },
-                "anything": {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}},
-                "objects": {"type": "object", "propertyNames": {"type": "string"}, "additionalProperties": {}},
-                "unions": {
-                    "type": "object",
-                    "propertyNames": {"type": "string"},
-                    "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}]},
-                },
-                "nested": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "propertyNames": {"type": "string"},
-                            "additionalProperties": {"type": "array", "items": {"type": "string"}},
-                        },
-                        {"type": "null"},
-                    ],
-                },
+                "legacy": _string_mapping({"type": "string"}),
+                "typed": _string_mapping({"type": "integer"}),
+                "anything": _string_mapping({}),
+                "objects": _string_mapping({}),
+                "unions": _string_mapping(
+                    {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}]},
+                ),
+                "nested": _piped_optional(_string_mapping({"type": "array", "items": {"type": "string"}})),
             },
-            "required": ["bare", "legacy", "typed", "anything", "objects", "unions"],
-        },
+            required=["bare", "legacy", "typed", "anything", "objects", "unions"],
+        ),
     ),
     "models": (
         "Take structured values.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "outer": {
                     "description": "A model holding nested models.",
                     "properties": {
                         "name": {"title": "Name", "type": "string"},
-                        "inner": {
-                            "description": "A model nested in another.",
-                            "properties": {
-                                "key": {"title": "Key", "type": "string"},
-                                "weight": {"default": 1.0, "title": "Weight", "type": "number"},
-                            },
-                            "required": ["key"],
-                            "title": "Inner",
-                            "type": "object",
-                        },
-                        "extras": {
-                            "default": [],
-                            "items": {
-                                "description": "A model nested in another.",
-                                "properties": {
-                                    "key": {"title": "Key", "type": "string"},
-                                    "weight": {"default": 1.0, "title": "Weight", "type": "number"},
-                                },
-                                "required": ["key"],
-                                "title": "Inner",
-                                "type": "object",
-                            },
-                            "title": "Extras",
-                            "type": "array",
-                        },
+                        "inner": _INNER_MODEL_SCHEMA,
+                        "extras": {"default": [], "items": _INNER_MODEL_SCHEMA, "title": "Extras", "type": "array"},
                         "note": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Note"},
-                        "maybe": {
-                            "anyOf": [
-                                {
-                                    "description": "A model nested in another.",
-                                    "properties": {
-                                        "key": {"title": "Key", "type": "string"},
-                                        "weight": {"default": 1.0, "title": "Weight", "type": "number"},
-                                    },
-                                    "required": ["key"],
-                                    "title": "Inner",
-                                    "type": "object",
-                                },
-                                {"type": "null"},
-                            ],
-                            "default": None,
-                        },
+                        "maybe": {"anyOf": [_INNER_MODEL_SCHEMA, {"type": "null"}], "default": None},
                     },
                     "required": ["name", "inner"],
                     "title": "Outer",
@@ -517,96 +483,60 @@ _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
                     "title": "TreeNode",
                     "type": "object",
                 },
-                "many": {
-                    "anyOf": [
-                        {
-                            "type": "array",
-                            "items": {
-                                "description": "A model nested in another.",
-                                "properties": {
-                                    "key": {"title": "Key", "type": "string"},
-                                    "weight": {"default": 1.0, "title": "Weight", "type": "number"},
-                                },
-                                "required": ["key"],
-                                "title": "Inner",
-                                "type": "object",
-                            },
-                        },
-                        {"type": "null"},
-                    ],
-                },
+                "many": _piped_optional({"type": "array", "items": _INNER_MODEL_SCHEMA}),
             },
-            "required": ["outer", "tree"],
-        },
+            required=["outer", "tree"],
+        ),
     ),
-    "untyped": (
-        "Take values of any type.",
-        {
-            "type": "object",
-            "properties": {"value": {}, "anything": {}, "thing": {}},
-            "required": ["value", "anything", "thing"],
-        },
-    ),
-    "no_docstring": ("", {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}),
+    "untyped": ("Take values of any type.", _object_schema({"value": {}, "anything": {}, "thing": {}})),
+    "no_docstring": ("", _object_schema({"value": {"type": "string"}})),
     "google_style": (
         "Search for something.\nA longer body that explains\nover two lines.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "query": {"type": "string", "description": "(str) The query."},
                 "limit": {"type": "integer", "description": "How many results."},
             },
-            "required": ["query"],
-        },
+            required=["query"],
+        ),
     ),
     "numpy_style": (
         "Search for something.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "query": {"type": "string", "description": "(str) The query."},
                 "limit": {"type": "integer", "description": "(int) How many results."},
             },
-            "required": ["query"],
-        },
+            required=["query"],
+        ),
     ),
     "rest_style": (
         "Search for something.",
-        {
-            "type": "object",
-            "properties": {
+        _object_schema(
+            {
                 "query": {"type": "string", "description": "(str) The query."},
                 "limit": {"type": "integer", "description": "How many results."},
             },
-            "required": ["query"],
-        },
+            required=["query"],
+        ),
     ),
     "undocumented_parameter": (
         "Search for something.",
-        {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "description": "How many results."},
-            },
-            "required": ["query"],
-        },
+        _object_schema(
+            {"query": {"type": "string"}, "limit": {"type": "integer", "description": "How many results."}},
+            required=["query"],
+        ),
     ),
     "asynchronous": (
         "Search asynchronously.",
-        {
-            "type": "object",
-            "properties": {"query": {"type": "string", "description": "The query."}},
-            "required": ["query"],
-        },
+        _object_schema({"query": {"type": "string", "description": "The query."}}),
     ),
     "keyword_only": (
         "Take keyword-only parameters.",
-        {
-            "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}, "required": {"type": "boolean"}},
-            "required": ["query", "required"],
-        },
+        _object_schema(
+            {"query": {"type": "string"}, "limit": {"type": "integer"}, "required": {"type": "boolean"}},
+            required=["query", "required"],
+        ),
     ),
 }
 

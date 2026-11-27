@@ -8,6 +8,7 @@ than framework-injected parameters.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -23,7 +24,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, Too
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection
 
     from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.sandbox_proxy import WorkerStandIns
@@ -218,8 +219,10 @@ def _adapt_function(toolkit: Toolkit, name: str, finishing: _Finishing) -> ToolF
 
 
 def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dict[str, Any]:
-    """Drop model-sent values for reserved framework parameter names."""
-    dropped = {name for name in arguments if name in _RESERVED_FRAMEWORK_NAMES}
+    """Drop model-sent values for undeclared reserved framework parameter names."""
+    properties = function.parameters.get("properties")
+    declared = set(properties) if isinstance(properties, Mapping) else set()
+    dropped = {name for name in arguments if name in _RESERVED_FRAMEWORK_NAMES and name not in declared}
     if not dropped:
         return dict(arguments)
     logger.warning(
