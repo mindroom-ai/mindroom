@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import importlib
 import ipaddress
 import math
+import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -119,8 +121,10 @@ from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
+    import ssl
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
+    from mindroom.workers.backends._dedicated_worker_common import ScopedWorkspaceMount, SharedDirectoryMount
     from mindroom.workers.models import (
         ProgressSink,
         WorkerHandle,
@@ -175,7 +179,23 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_READY_WORKER_REVALIDATE_SECONDS = 300.0
 _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
+_REAL_HTTPX_CLIENT = httpx.Client
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_default_ssl_context(ssl_cert_file: str | None, ssl_cert_dir: str | None) -> ssl.SSLContext:
+    del ssl_cert_file, ssl_cert_dir
+    return httpx.create_ssl_context(verify=True)
+
+
+def _open_health_http_client(*, timeout: float) -> httpx.Client:
+    client_factory = httpx.Client
+    if client_factory is _REAL_HTTPX_CLIENT:
+        verify = _cached_default_ssl_context(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
+        return client_factory(timeout=timeout, verify=verify)
+    return client_factory(timeout=timeout)
 
 
 class _WorkerImageIncompatibleError(WorkerBackendError):
@@ -439,6 +459,22 @@ class _DockerLaunch:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReadyWorkerCacheEntry:
+    spec: WorkerSpec
+    launch_digest: str
+    worker_id: str
+    container_name: str
+    container_id: str
+    host_port: int
+    ssh_port: int | None
+    ssh: bool
+    lifecycle: WorkerLifecycleState
+    validated_at: float
+    workspace_mounts: tuple[ScopedWorkspaceMount, ...]
+    shared_directory_mounts: tuple[SharedDirectoryMount, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _WorkerContainerState:
     """What one ensure finds for its worker, evaluated once before it acts.
 
@@ -501,6 +537,8 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks = WorkerLocks()
         self._metadata_lock = threading.Lock()
+        self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
+        self._ready_workers_lock = threading.Lock()
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._projection_manager = DockerProjectionManager(
             config=config,
@@ -519,12 +557,15 @@ class DockerWorkerBackend(WorkerBackendDefaults):
 
     def shutdown(self) -> None:
         """Remove backend-owned containers before discarding this Docker manager."""
+        with self._ready_workers_lock:
+            self._ready_workers.clear()
         failures: list[str] = []
         for paths in self._metadata_paths():
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
             with self._worker_locks.for_key(metadata.worker_key):
+                self._invalidate_ready_worker(metadata.worker_key)
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -552,16 +593,15 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         # A caller waiting behind another's start of this worker is sent that start's progress.
         with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
             launch = self._current_launch()
-            # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
-            plan_scoped_workspace_mounts(
-                worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
-                local_shared_storage_root=self._storage_root,
-                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-                private_agent_names=spec.private_agent_names,
-                resolved_agent_policies=launch.agent_policies,
-                create_shared=True,
-            )
             paths = self._worker_paths(spec.worker_key)
+            cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp, paths=paths)
+            if cached_handle is not None:
+                return cached_handle
+            self._invalidate_ready_worker(spec.worker_key)
+            # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
+            workspace_mounts = self._plan_workspace_mounts(spec, launch, create_shared=True)
+            shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
+            ssh = self._ssh_marked(spec, launch)
             metadata = self._load_metadata(paths, expected_worker_key=spec.worker_key) or self._default_metadata(
                 spec.worker_key,
                 timestamp,
@@ -608,6 +648,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                     # A worker is replaced once; a replacement that still mismatches fails the request.
                     self._wait_for_ready(container, on_poll_tick=reporter.on_poll_tick)
             except Exception as exc:
+                self._invalidate_ready_worker(spec.worker_key)
                 failure_reason = str(exc)
                 if reporter is not None:
                     reporter.finish(exc)
@@ -620,17 +661,42 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 reporter.finish(None)
             metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
             self._save_metadata(paths, metadata)
-            return self._to_handle(metadata, container, now=timestamp, paths=paths)
+            handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
+            host_port = self._container_host_port(container, self.config.worker_port)
+            if handle.status == "ready" and host_port is not None:
+                self._store_ready_worker(
+                    _ReadyWorkerCacheEntry(
+                        spec=spec,
+                        launch_digest=launch.digest,
+                        worker_id=metadata.worker_id,
+                        container_name=metadata.container_name,
+                        container_id=container.id,
+                        host_port=host_port,
+                        ssh_port=None if handle.ssh_endpoint is None else handle.ssh_endpoint.port,
+                        ssh=ssh,
+                        lifecycle=metadata.lifecycle,
+                        validated_at=timestamp,
+                        workspace_mounts=workspace_mounts,
+                        shared_directory_mounts=shared_directory_mounts,
+                    ),
+                )
+            return handle
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
+            cached_handle = self._touch_cached_worker(worker_key, now=timestamp, paths=paths)
+            if cached_handle is not None:
+                return cached_handle
             metadata = self._load_metadata(paths, expected_worker_key=worker_key)
             if metadata is None:
                 return None
-            metadata.lifecycle = touch_worker_lifecycle(metadata.lifecycle, now=timestamp)
+            metadata.lifecycle = touch_worker_lifecycle(
+                metadata.lifecycle,
+                now=max(timestamp, metadata.lifecycle.last_used_at),
+            )
             container = self._read_owned_container(metadata.worker_key)
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, container, now=timestamp, paths=paths)
@@ -668,11 +734,14 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 idle_timed_out = timestamp - metadata.lifecycle.last_used_at >= self.idle_timeout_seconds
                 expired_subagent_worker = subagent_worker_expired(handle, self.idle_timeout_seconds, now=timestamp)
                 running = self._container_is_running(container)
+                if not running:
+                    self._invalidate_ready_worker(metadata.worker_key)
                 if expired_subagent_worker and not running:
                     # A subagent's own worker serves no one once it expires: it is stopped first, then removed.
                     if retire_pinned_worker(self._retire_worker_locked, metadata.worker_key):
                         cleaned.append(handle)
                 elif running and (handle.status == "idle" or expired_subagent_worker):
+                    self._invalidate_ready_worker(metadata.worker_key)
                     self._stop_container(container)
                     metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     self._save_metadata(paths, metadata)
@@ -683,6 +752,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                     # idle timeout it is abandoned, so reap the container to stop
                     # stale failures from accumulating; the failed metadata is kept
                     # and a later ensure recreates the container.
+                    self._invalidate_ready_worker(metadata.worker_key)
                     self._stop_container(container)
                     self._remove_container(container)
         return filter_and_sort_worker_handles(cleaned, True)
@@ -725,6 +795,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 ):
                     msg = f"Docker worker container does not match retirement key '{worker_log_id(worker_key)}'."
                     raise WorkerBackendError(msg)
+                self._invalidate_ready_worker(worker_key)
                 self._remove_container(container)
                 if self._read_container(container_name) is not None:
                     msg = f"Docker worker '{worker_log_id(worker_key)}' still exists after retirement."
@@ -1109,7 +1180,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         endpoint_root = self._endpoint_root(host_port)
         healthz_url = f"{endpoint_root}/healthz"
         deadline = time.time() + self.config.ready_timeout_seconds
-        with httpx.Client(timeout=min(5.0, self.config.ready_timeout_seconds)) as client:
+        with _open_health_http_client(timeout=min(5.0, self.config.ready_timeout_seconds)) as client:
             while True:
                 self._reload_container(container)
                 if not self._container_is_running(container):
@@ -1148,6 +1219,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         *,
         now: float,
     ) -> WorkerHandle:
+        self._invalidate_ready_worker(metadata.worker_key)
         container = self._read_owned_container(metadata.worker_key)
         self._stop_container(container)
         metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=now, failure_reason=failure_reason)
@@ -1308,27 +1380,42 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             return False
         return not address.is_unspecified and tailnet_ssh_marked(spec.worker_key, launch, spec.state_scope_worker_key)
 
+    def _plan_workspace_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        create_shared: bool,
+    ) -> tuple[ScopedWorkspaceMount, ...]:
+        return plan_scoped_workspace_mounts(
+            worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
+            local_shared_storage_root=self._storage_root,
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+            private_agent_names=spec.private_agent_names,
+            resolved_agent_policies=launch.agent_policies,
+            create_shared=create_shared,
+        )
+
+    def _plan_shared_directory_mounts(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+    ) -> tuple[SharedDirectoryMount, ...]:
+        return plan_shared_directory_mounts(
+            worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
+            runtime_paths=self._runtime_paths,
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+            resolved_agent_policies=launch.agent_policies,
+        )
+
     def _scoped_storage_mount_specs(self, spec: WorkerSpec, launch: WorkerLaunchConfig) -> list[tuple[Path, str, bool]]:
-        resolved_agent_policies = launch.agent_policies
-        state_scope_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
         mount_specs = [
-            (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
-            for workspace_mount in plan_scoped_workspace_mounts(
-                worker_key=state_scope_key,
-                local_shared_storage_root=self._storage_root,
-                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-                private_agent_names=spec.private_agent_names,
-                resolved_agent_policies=resolved_agent_policies,
-            )
+            (mount.local_path, str(mount.worker_visible_path), mount.read_only)
+            for mount in self._plan_workspace_mounts(spec, launch, create_shared=False)
         ]
         mount_specs.extend(
-            (shared_mount.local_path, str(shared_mount.worker_visible_path), shared_mount.read_only)
-            for shared_mount in plan_shared_directory_mounts(
-                worker_key=state_scope_key,
-                runtime_paths=self._runtime_paths,
-                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-                resolved_agent_policies=resolved_agent_policies,
-            )
+            (mount.local_path, str(mount.worker_visible_path), mount.read_only)
+            for mount in self._plan_shared_directory_mounts(spec, launch)
         )
         validate_unique_worker_visible_paths(
             (container_path for _host_path, container_path, _read_only in mount_specs),
@@ -1336,6 +1423,120 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             duplicate_label="Docker mount",
         )
         return mount_specs
+
+    def _reuse_cached_ready_worker(
+        self,
+        spec: WorkerSpec,
+        launch: WorkerLaunchConfig,
+        *,
+        now: float,
+        paths: _DockerWorkerPaths,
+    ) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(spec.worker_key, spec=spec, launch=launch, now=now)
+        if entry is None:
+            return None
+        try:
+            state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
+            recheck_workspace_mounts = (
+                not entry.workspace_mounts
+                or resolved_worker_key_scope(state_scope_worker_key) == "user"
+                or (spec.sandbox is not None and spec.sandbox.mount_dir is not None)
+            )
+            if recheck_workspace_mounts and entry.workspace_mounts != self._plan_workspace_mounts(
+                spec,
+                launch,
+                create_shared=False,
+            ):
+                self._invalidate_ready_worker(spec.worker_key)
+                return None
+            shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
+            if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != self._ssh_marked(spec, launch):
+                self._invalidate_ready_worker(spec.worker_key)
+                return None
+        except Exception:
+            self._invalidate_ready_worker(spec.worker_key)
+            raise
+        try:
+            sync_shared_credentials_to_worker(
+                spec.worker_key,
+                allowed_services=mirrored_credential_services(spec, launch),
+                credentials_manager=self._credentials_manager,
+            )
+        except Exception as exc:
+            self._invalidate_ready_worker(spec.worker_key)
+            failure_reason = str(exc)
+            metadata = _DockerWorkerMetadata(
+                entry.worker_id,
+                entry.spec.worker_key,
+                entry.container_name,
+                entry.lifecycle,
+            )
+            self._record_failure_locked(paths, metadata, failure_reason, now=now)
+            if isinstance(exc, WorkerBackendError):
+                raise
+            raise WorkerBackendError(failure_reason) from exc
+        lifecycle = mark_worker_ready(entry.lifecycle, now=max(now, entry.lifecycle.last_used_at))
+        return self._persist_cached_ready_lifecycle(entry, lifecycle=lifecycle, paths=paths)
+
+    def _store_ready_worker(self, entry: _ReadyWorkerCacheEntry) -> None:
+        with self._ready_workers_lock:
+            self._ready_workers[entry.spec.worker_key] = entry
+
+    def _invalidate_ready_worker(self, worker_key: str) -> None:
+        with self._ready_workers_lock:
+            self._ready_workers.pop(worker_key, None)
+
+    def _cached_ready_worker(
+        self,
+        worker_key: str,
+        *,
+        spec: WorkerSpec | None = None,
+        launch: WorkerLaunchConfig | None = None,
+        now: float,
+    ) -> _ReadyWorkerCacheEntry | None:
+        with self._ready_workers_lock:
+            entry = self._ready_workers.get(worker_key)
+            if entry is None:
+                return None
+            cache_invalid = (
+                (spec is not None and entry.spec != spec)
+                or (launch is not None and entry.launch_digest != launch.digest)
+                or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
+                or now - entry.lifecycle.last_used_at >= self.idle_timeout_seconds
+            )
+            if cache_invalid:
+                self._ready_workers.pop(worker_key, None)
+                return None
+            return entry
+
+    def _touch_cached_worker(
+        self,
+        worker_key: str,
+        *,
+        now: float,
+        paths: _DockerWorkerPaths,
+    ) -> WorkerHandle | None:
+        entry = self._cached_ready_worker(worker_key, now=now)
+        if entry is None:
+            return None
+        lifecycle = touch_worker_lifecycle(entry.lifecycle, now=max(now, entry.lifecycle.last_used_at))
+        return self._persist_cached_ready_lifecycle(entry, lifecycle=lifecycle, paths=paths)
+
+    def _persist_cached_ready_lifecycle(
+        self,
+        entry: _ReadyWorkerCacheEntry,
+        *,
+        lifecycle: WorkerLifecycleState,
+        paths: _DockerWorkerPaths,
+    ) -> WorkerHandle:
+        metadata = _DockerWorkerMetadata(entry.worker_id, entry.spec.worker_key, entry.container_name, lifecycle)
+        try:
+            self._save_metadata(paths, metadata)
+        except Exception:
+            self._invalidate_ready_worker(entry.spec.worker_key)
+            raise
+        self._store_ready_worker(replace(entry, lifecycle=lifecycle))
+        return self._handle_from_ready_cache(entry, lifecycle=lifecycle, paths=paths)
 
     def _container_image_id(self, container: _DockerContainer) -> str | None:
         image_id = container.attrs.get("Image")
@@ -1418,6 +1619,55 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             return "idle"
         return "ready"
 
+    def _handle_from_parts(
+        self,
+        metadata: _DockerWorkerMetadata,
+        *,
+        container_id: str,
+        host_port: int | None,
+        ssh_port: int | None,
+        status: WorkerStatus,
+        paths: _DockerWorkerPaths,
+    ) -> WorkerHandle:
+        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
+        ssh_host = self.config.endpoint_host.strip("[]")
+        return worker_handle(
+            worker_id=metadata.worker_id,
+            worker_key=metadata.worker_key,
+            lifecycle=metadata.lifecycle,
+            endpoint=endpoint,
+            auth_token=self._control_token(metadata.worker_key),
+            status=status,
+            backend_name=self.backend_name,
+            debug_metadata={
+                "container_name": metadata.container_name,
+                "container_id": container_id,
+                "host_port": str(host_port or ""),
+                "state_root": str(paths.state.root),
+                "api_root": endpoint.removesuffix("/execute").rstrip("/"),
+            },
+            ssh_endpoint=None
+            if ssh_port is None
+            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
+        )
+
+    def _handle_from_ready_cache(
+        self,
+        entry: _ReadyWorkerCacheEntry,
+        *,
+        lifecycle: WorkerLifecycleState,
+        paths: _DockerWorkerPaths,
+    ) -> WorkerHandle:
+        metadata = _DockerWorkerMetadata(entry.worker_id, entry.spec.worker_key, entry.container_name, lifecycle)
+        return self._handle_from_parts(
+            metadata,
+            container_id=entry.container_id,
+            host_port=entry.host_port,
+            ssh_port=entry.ssh_port,
+            status="ready",
+            paths=paths,
+        )
+
     def _to_handle(
         self,
         metadata: _DockerWorkerMetadata,
@@ -1429,30 +1679,17 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         # Only a running container publishes a port, so any other worker has no endpoint.
         running = container if self._container_is_running(container) else None
         host_port = self._container_host_port(running, self.config.worker_port)
-        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
         # The label is the launch's decision; a 2222 binding on a container without it is not an SSH endpoint.
         ssh_port = (
             self._container_host_port(running, WORKER_SSH_PORT)
             if running is not None and container_config_labels(running).get(LABEL_TAILNET_SSH) == "true"
             else None
         )
-        ssh_host = self.config.endpoint_host.strip("[]")
-        return worker_handle(
-            worker_id=metadata.worker_id,
-            worker_key=metadata.worker_key,
-            lifecycle=metadata.lifecycle,
-            endpoint=endpoint,
-            auth_token=self._control_token(metadata.worker_key),
+        return self._handle_from_parts(
+            metadata,
+            container_id="" if container is None else container.id,
+            host_port=host_port,
+            ssh_port=ssh_port,
             status=self._effective_status(metadata, container, now=now),
-            backend_name=self.backend_name,
-            debug_metadata={
-                "container_name": metadata.container_name,
-                "container_id": "" if container is None else container.id,
-                "host_port": str(host_port or ""),
-                "state_root": str(paths.state.root),
-                "api_root": endpoint.removesuffix("/execute").rstrip("/"),
-            },
-            ssh_endpoint=None
-            if ssh_port is None
-            else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
+            paths=paths,
         )

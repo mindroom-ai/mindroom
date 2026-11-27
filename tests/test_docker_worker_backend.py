@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -149,9 +150,11 @@ class _FakeContainer:
         self.started = 0
         self.stopped = 0
         self.removed = 0
+        self.reloaded = 0
         self.logs_output: bytes = b""
 
     def reload(self) -> None:
+        self.reloaded += 1
         self.attrs["State"]["Status"] = self.status
 
     def start(self) -> None:
@@ -181,10 +184,12 @@ class _FakeContainersApi:
         self.created_containers: list[_FakeContainer] = []
         self.run_calls: list[dict[str, object]] = []
         self.list_calls: list[dict[str, object]] = []
+        self.get_calls: list[str] = []
         self.next_host_port = 43001
         self.images = images
 
     def get(self, name: str) -> _FakeContainer:
+        self.get_calls.append(name)
         container = self.by_name.get(name)
         if container is None or container.status == "removed":
             raise _FakeNotFoundError(name)
@@ -983,7 +988,12 @@ def test_docker_startup_removes_workers_mounting_state_roots(
 ) -> None:
     """Containers from releases that mounted whole state roots are removed and recreated on their next ensure."""
     runtime_paths = _docker_preflight_runtime_paths(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, runtime_paths=runtime_paths)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        runtime_paths=runtime_paths,
+        idle_timeout_seconds=600.0,
+    )
     current = backend.ensure_worker(_spec(backend, "v1:default:shared:current"), now=0.0)
     legacy = backend.ensure_worker(_spec(backend, "v1:default:shared:legacy"), now=0.0)
     foreign = backend.ensure_worker(_spec(backend, "v1:default:shared:foreign"), now=0.0)
@@ -1005,7 +1015,7 @@ def test_docker_startup_removes_workers_mounting_state_roots(
     assert fake_client.containers.get(current.worker_id).removed == 0
     assert foreign_container.removed == 0
     assert sentinel.read_bytes() == b"retained worker bytes"
-    backend.ensure_worker(_spec(backend, "v1:default:shared:legacy"), now=10.0)
+    backend.ensure_worker(_spec(backend, "v1:default:shared:legacy"), now=300.0)
     recreated = fake_client.containers.get(legacy.worker_id)
     assert recreated is not legacy_container
     assert recreated.attrs["Config"]["Labels"]["mindroom.ai/storage-layout"] == "workspaces"
@@ -2017,12 +2027,12 @@ def test_docker_backend_recreates_a_container_whose_run_arguments_changed(
     changed: object,
 ) -> None:
     """Any change to the arguments a container is run with replaces it, even when the image is unchanged."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[handle.worker_id]
 
     monkeypatch.setattr(docker_backend_module, constant, changed)
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     assert first_container.removed == 1
     assert len(fake_client.containers.run_calls) == 2
@@ -2310,7 +2320,7 @@ def test_docker_backend_reports_no_progress_when_a_running_worker_fails_its_heal
     tmp_path: Path,
 ) -> None:
     """A worker that was already running never reported a start, so its failure reaches the caller only as an error."""
-    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     clock = _control_progress_clock(monkeypatch)
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
@@ -2326,7 +2336,7 @@ def test_docker_backend_reports_no_progress_when_a_running_worker_fails_its_heal
     with pytest.raises(WorkerBackendError, match="worker stopped answering"):
         backend.ensure_worker(
             _spec(backend, _TEST_UNSCOPED_WORKER_KEY),
-            now=11.0,
+            now=310.0,
             progress_sink=progress_events.append,
         )
 
@@ -3976,19 +3986,19 @@ def test_warm_ensure_resolves_image_once_and_detects_next_call_tag_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Avoid repeated daemon lookups without caching image identity across calls."""
-    backend, client, _ = _backend(monkeypatch, tmp_path)
+    """Avoid repeated daemon lookups without caching image identity across revalidations."""
+    backend, client, _ = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
-    backend.ensure_worker(spec)
+    backend.ensure_worker(spec, now=10.0)
     original = client.containers.created_containers[-1]
     client.images.gets.clear()
 
-    backend.ensure_worker(spec)
+    backend.ensure_worker(spec, now=310.0)
 
     assert client.containers.by_name[original.name] is original
     assert client.images.gets == [backend.config.image]
     client.images.by_name[backend.config.image] = _FakeImage("sha256:image-v2")
-    backend.ensure_worker(spec)
+    backend.ensure_worker(spec, now=610.0)
     assert original.removed == 1
     assert client.containers.created_containers[-1].attrs["Image"] == "sha256:image-v2"
 
@@ -4053,7 +4063,7 @@ def test_docker_worker_stale_image_recovery_updates_reused_worker_lifecycle(
     tmp_path: Path,
 ) -> None:
     """Replacing a previously ready stale worker records a new startup attempt."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     assert first_handle.startup_count == 1
 
@@ -4065,12 +4075,12 @@ def test_docker_worker_stale_image_recovery_updates_reused_worker_lifecycle(
 
     recovered_handle = backend.ensure_worker(
         _spec(backend, _TEST_UNSCOPED_WORKER_KEY),
-        now=20.0,
+        now=310.0,
         progress_sink=progress_events.append,
     )
 
     assert recovered_handle.startup_count == 2
-    assert recovered_handle.last_started_at == 20.0
+    assert recovered_handle.last_started_at == 310.0
     assert [event.phase for event in progress_events] == ["cold_start", "ready"]
     created = fake_client.containers.created_containers
     assert [item.attrs["Image"] for item in created] == ["sha256:image-v1", "sha256:image-v2"]
@@ -4515,13 +4525,14 @@ def test_docker_backend_recreates_computer_container_when_its_seccomp_profile_ch
         tmp_path,
         runtime_paths=runtime_paths,
         security_policy="computer",
+        idle_timeout_seconds=600.0,
     )
     first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[first_handle.worker_id]
     updated_options = ["no-new-privileges:true", 'seccomp={"defaultAction":"SCMP_ACT_ERRNO"}']
     monkeypatch.setattr(docker_backend_module, "docker_worker_security_options", lambda: list(updated_options))
 
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     assert first_container.removed == 1
     assert fake_client.containers.run_calls[-1]["security_opt"] == updated_options
@@ -4812,7 +4823,12 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     config_data["knowledge_bases"]["docs"]["path"] = "./knowledge_docs/guide.md"
     config_text = yaml.safe_dump(config_data)
     external_file = projected_paths["knowledge_root"] / "guide.md"
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        idle_timeout_seconds=600.0,
+    )
 
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
@@ -4823,7 +4839,7 @@ def test_docker_backend_recreates_container_when_projected_file_asset_changes(
     updated_file.write_text("# Updated Guide\n", encoding="utf-8")
     updated_file.replace(external_file)
 
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     replacement_container = fake_client.containers.by_name[handle.worker_id]
     assert replacement_container is not existing_container
@@ -4843,7 +4859,12 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
 ) -> None:
     """Changing a projected directory asset should rotate the worker."""
     config_text, projected_paths = _projected_config_fixture(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        idle_timeout_seconds=600.0,
+    )
 
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
@@ -4867,7 +4888,7 @@ def test_docker_backend_recreates_container_when_projected_directory_asset_chang
 
     monkeypatch.setattr(backend, "_remove_container", _assert_old_projection_survives_until_removal)
 
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     replacement_container = fake_client.containers.by_name[handle.worker_id]
     assert replacement_container is not existing_container
@@ -5290,7 +5311,12 @@ def test_docker_backend_never_restarts_a_worker_over_a_link_planted_at_a_nested_
 ) -> None:
     """Docker resolves bind destinations again on every start, so a stopped worker's nested targets are walked first."""
     config_text, _projected_paths = _multi_agent_projected_config_fixture(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        idle_timeout_seconds=600.0,
+    )
     worker_key = "v1:default:user_agent:@alice:example.org:alpha"
     spec = _spec(backend, worker_key, private_agent_names=frozenset())
     handle = backend.ensure_worker(spec, now=10.0)
@@ -5303,7 +5329,7 @@ def test_docker_backend_never_restarts_a_worker_over_a_link_planted_at_a_nested_
     (agents / "alpha" / "workspace").symlink_to("/app", target_is_directory=True)
 
     with pytest.raises(WorkerBackendError, match="must be a real directory"):
-        backend.ensure_worker(spec, now=20.0)
+        backend.ensure_worker(spec, now=310.0)
 
     assert container.started == 0
     assert len(fake_client.containers.run_calls) == 1
@@ -5708,14 +5734,14 @@ def test_docker_worker_restarted_without_a_published_port_fails(
     ports: dict[str, object],
 ) -> None:
     """A restarted container that publishes no usable port fails the ensure instead of serving no endpoint."""
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     container = fake_client.containers.by_name[handle.worker_id]
     container.stop()
     container.attrs["NetworkSettings"]["Ports"] = ports
 
     with pytest.raises(WorkerBackendError, match="missing a published port"):
-        backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+        backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
 
 def test_docker_worker_recorded_as_starting_reports_starting_with_or_without_its_container(
@@ -5951,7 +5977,12 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
 ) -> None:
     """Interrupted projection writes should be repaired instead of being reused forever."""
     config_text, _projected_paths = _projected_config_fixture(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        idle_timeout_seconds=600.0,
+    )
 
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
@@ -5961,7 +5992,7 @@ def test_docker_backend_rebuilds_incomplete_projection_snapshot(
     (projection_root / ".projection-ready").unlink()
     (projection_root / "config.yaml").write_text("broken: true\n", encoding="utf-8")
 
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     second_volumes = _volumes_by_source(fake_client.containers.run_calls[-1]["volumes"])
     second_projection_root = _projection_root(second_volumes)
@@ -5982,7 +6013,12 @@ def test_docker_backend_rebuilds_corrupted_ready_projection_snapshot(
 ) -> None:
     """A leftover ready marker must not make the backend trust a projection missing required files."""
     config_text, _projected_paths = _projected_config_fixture(tmp_path)
-    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=config_text,
+        idle_timeout_seconds=600.0,
+    )
 
     handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     existing_container = fake_client.containers.by_name[handle.worker_id]
@@ -5992,7 +6028,7 @@ def test_docker_backend_rebuilds_corrupted_ready_projection_snapshot(
     (projection_root / "config.yaml").unlink()
     assert (projection_root / ".projection-ready").is_file()
 
-    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=310.0)
 
     replacement_container = fake_client.containers.by_name[handle.worker_id]
     assert replacement_container is not existing_container
@@ -6610,12 +6646,12 @@ def test_docker_handle_endpoint_needs_label_and_running_container(
     # A binding alone is not the mark: the label is what the opted-in config produced.
     unmarked_container = fake_client.containers.by_name[unmarked.worker_id]
     unmarked_container.attrs["NetworkSettings"]["Ports"]["2222/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "45000"}]
-    touched = backend.touch_worker(other_key, now=11.0)
+    touched = backend.touch_worker(other_key, now=310.0)
     assert touched is not None
     assert touched.ssh_endpoint is None
 
     marked_container.stop()
-    stopped = backend.touch_worker(_SSH_WORKER_KEY, now=11.0)
+    stopped = backend.touch_worker(_SSH_WORKER_KEY, now=310.0)
     assert stopped is not None
     assert stopped.ssh_endpoint is None
 
@@ -6682,3 +6718,278 @@ def test_docker_worker_container_env_drops_kubernetes_pod_limit_markers(
     assert container_env["EXTRA_ENV"] == "present"
     assert "MINDROOM_KUBERNETES_POD_CPU_LIMIT" not in container_env
     assert "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES" not in container_env
+
+
+def test_docker_backend_reuses_cached_ready_worker_without_daemon_or_projection_work(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A warm ensure hits the ready cache: zero daemon/health/projection calls, identical handle, creds still synced."""
+    backend, fake_client, sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_SSH_CONFIG_TEXT,
+        idle_timeout_seconds=600.0,
+    )
+    _use_real_wait_for_ready(monkeypatch, backend)
+    health_calls: list[str] = []
+    _install_health(
+        monkeypatch,
+        lambda url: (
+            health_calls.append(url),
+            httpx.Response(200, json={"status": "ok", "worker_protocol": WORKER_PROTOCOL_VERSION}),
+        )[1],
+    )
+    spec = _spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset())
+
+    first = backend.ensure_worker(spec, now=10.0)
+    assert first.ssh_endpoint is not None
+    container = fake_client.containers.by_name[first.worker_id]
+    fake_client.containers.get_calls.clear()
+    fake_client.images.gets.clear()
+    container.reloaded = 0
+    health_calls.clear()
+    sync_calls.clear()
+
+    def _unexpected_projection(*_args: object, **_kwargs: object) -> object:
+        msg = "warm cache hit must not walk config projections"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(backend._projection_manager, "config_mount_specs", _unexpected_projection)
+
+    second = backend.ensure_worker(spec, now=20.0)
+
+    assert second == replace(first, last_used_at=20.0)
+    assert fake_client.containers.get_calls == []
+    assert fake_client.images.gets == []
+    assert container.reloaded == 0
+    assert health_calls == []
+    assert len(sync_calls) == 1
+    assert (
+        json.loads(_control_metadata_path(tmp_path, _SSH_WORKER_KEY).read_text(encoding="utf-8"))["last_used_at"]
+        == 20.0
+    )
+
+
+def test_docker_backend_ready_cache_respects_ttl_and_idle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Periodic revalidation (300s) and idle timeout expiry both force full reconciliation."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
+    spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
+    backend.ensure_worker(spec, now=10.0)
+    fake_client.containers.get_calls.clear()
+    fake_client.images.gets.clear()
+
+    backend.ensure_worker(spec, now=309.0)
+    assert fake_client.containers.get_calls == []
+    assert fake_client.images.gets == []
+
+    backend.ensure_worker(spec, now=310.0)
+    assert len(fake_client.containers.get_calls) == 1
+    assert fake_client.images.gets == [backend.config.image]
+
+    short_backend, short_client, _ = _backend(monkeypatch, tmp_path / "short", idle_timeout_seconds=60.0)
+    short_spec = _spec(short_backend, _TEST_UNSCOPED_WORKER_KEY)
+    short_backend.ensure_worker(short_spec, now=10.0)
+    short_client.containers.get_calls.clear()
+
+    short_backend.ensure_worker(short_spec, now=69.0)
+    assert short_client.containers.get_calls == []
+
+    short_backend.ensure_worker(short_spec, now=130.0)
+    assert len(short_client.containers.get_calls) == 1
+
+
+def test_docker_backend_ready_cache_invalidates_on_launch_spec_mounts_and_ssh_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Launch digest, spec, shared directory, tailnet SSH mark, and user-scope workspace changes bypass the cache."""
+    backend, fake_client, _sync_calls = _backend(
+        monkeypatch,
+        tmp_path,
+        config_text=_SSH_CONFIG_TEXT,
+        idle_timeout_seconds=600.0,
+    )
+    launch = backend._current_launch()
+    monkeypatch.setattr(backend, "_current_launch", lambda: launch)
+    spec = _spec(backend, _SSH_WORKER_KEY, private_agent_names=frozenset())
+
+    first = backend.ensure_worker(spec, now=10.0)
+    assert first.ssh_endpoint is not None
+    fake_client.containers.get_calls.clear()
+
+    # Launch digest change invalidates cache.
+    launch = replace(launch, digest=f"{launch.digest}-v2")
+    backend.ensure_worker(spec, now=20.0)
+    assert len(fake_client.containers.get_calls) == 1
+    fake_client.containers.get_calls.clear()
+
+    # Spec change invalidates cache.
+    spec = replace(spec, mirror_grantable_credentials=False)
+    backend.ensure_worker(spec, now=30.0)
+    assert len(fake_client.containers.get_calls) == 1
+    fake_client.containers.get_calls.clear()
+
+    # Shared directory mount change invalidates cache and recreates container.
+    create_shared_directory(backend._runtime_paths, owner="other", name="notes")
+    add_shared_directory_member(backend._runtime_paths, owner="other", name="notes", member="mine")
+    backend.ensure_worker(spec, now=40.0)
+    assert len(fake_client.containers.get_calls) == 1
+    assert len(fake_client.containers.run_calls) == 2
+    fake_client.containers.get_calls.clear()
+
+    # Tailnet SSH toggle invalidates cache even with an unchanged launch digest.
+    toggled_config = launch.config.model_copy(deep=True)
+    toggled_config.agents["mine"].tailnet_ssh = False
+    launch = replace(launch, config=toggled_config)
+    without_ssh = backend.ensure_worker(spec, now=50.0)
+    assert without_ssh.ssh_endpoint is None
+    assert len(fake_client.containers.get_calls) == 1
+    assert len(fake_client.containers.run_calls) == 3
+
+    # User-scope workspace mount appearing later invalidates a non-empty cached entry.
+    user_config = (
+        "agents:\n"
+        "  alpha:\n    display_name: Alpha\n    private:\n      per: user\n"
+        "  beta:\n    display_name: Beta\n    private:\n      per: user\n"
+        "models:\n  default:\n    provider: openai\n    id: test-model\n"
+    )
+    user_backend, user_client, _ = _backend(
+        monkeypatch,
+        tmp_path / "user-scope",
+        config_text=user_config,
+        idle_timeout_seconds=600.0,
+    )
+    user_key = "v1:tenant-123:user:~@alice:localhost"
+    scope_root = private_instance_scope_root_path(tmp_path / "user-scope", user_key)
+    (scope_root / "alpha" / "alpha_data").mkdir(parents=True)
+    user_spec = _spec(user_backend, user_key)
+    user_backend.ensure_worker(user_spec, now=10.0)
+    user_client.containers.get_calls.clear()
+
+    (scope_root / "beta" / "beta_data").mkdir(parents=True)
+    user_backend.ensure_worker(user_spec, now=20.0)
+    assert len(user_client.containers.get_calls) == 1
+    assert len(user_client.containers.run_calls) == 2
+
+
+def test_docker_backend_ready_cache_invalidates_on_lifecycle_transitions_and_credential_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Failure, idle cleanup, retirement, shutdown, and warm credential errors invalidate the cache; stale failures do not."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=60.0)
+    spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
+    first = backend.ensure_worker(spec, now=10.0)
+    fake_client.containers.get_calls.clear()
+
+    # Stale startup_count failure must not evict the newer cached worker.
+    backend.record_failure(spec.worker_key, "stale error", now=15.0, startup_count=first.startup_count - 1)
+    backend.ensure_worker(spec, now=20.0)
+    assert fake_client.containers.get_calls == []
+
+    # Matching failure invalidates cache and forces restart on next ensure.
+    backend.record_failure(spec.worker_key, "worker crashed", now=21.0, startup_count=first.startup_count)
+    fake_client.containers.get_calls.clear()
+    restarted = backend.ensure_worker(spec, now=22.0)
+    assert restarted.startup_count == 2
+    assert len(fake_client.containers.get_calls) >= 1
+
+    # cleanup_idle_workers invalidates cache when stopping an idle worker.
+    backend.cleanup_idle_workers(now=90.0)
+    fake_client.containers.get_calls.clear()
+    revived = backend.ensure_worker(spec, now=91.0)
+    assert revived.startup_count == 3
+    assert len(fake_client.containers.get_calls) >= 1
+
+    # retire_worker invalidates cache.
+    backend.retire_worker(spec.worker_key)
+    fake_client.containers.get_calls.clear()
+    after_retire = backend.ensure_worker(spec, now=92.0)
+    assert after_retire.startup_count == 1
+    assert len(fake_client.containers.get_calls) >= 1
+
+    # shutdown invalidates cache.
+    backend.shutdown()
+    fake_client.containers.get_calls.clear()
+    after_shutdown = backend.ensure_worker(spec, now=93.0)
+    assert after_shutdown.startup_count == 2
+    assert len(fake_client.containers.get_calls) >= 1
+
+    # Credential mirroring failure on cache hit invalidates cache, records failure, and forces restart next ensure.
+    original_sync = docker_backend_module.sync_shared_credentials_to_worker
+    failing = True
+
+    def _flaky_sync(*args: object, **kwargs: object) -> None:
+        if failing:
+            msg = "credential store unreadable"
+            raise OSError(msg)
+        original_sync(*args, **kwargs)
+
+    monkeypatch.setattr(docker_backend_module, "sync_shared_credentials_to_worker", _flaky_sync)
+    with pytest.raises(WorkerBackendError, match="credential store unreadable"):
+        backend.ensure_worker(spec, now=94.0)
+    [failed_listed] = backend.list_workers(now=94.0)
+    assert failed_listed.status == "failed"
+    assert failed_listed.failure_reason == "credential store unreadable"
+
+    failing = False
+    fake_client.containers.get_calls.clear()
+    recovered = backend.ensure_worker(spec, now=95.0)
+    assert recovered.status == "ready"
+    assert recovered.startup_count == 3
+    assert len(fake_client.containers.get_calls) >= 1
+
+
+def test_docker_backend_cached_touch_skips_daemon_and_keeps_last_used_monotonic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Warm touch_worker updates persisted metadata without touching Docker and never moves last_used_at backward."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path, idle_timeout_seconds=600.0)
+    spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
+    first = backend.ensure_worker(spec, now=10.0)
+    container = fake_client.containers.by_name[first.worker_id]
+    fake_client.containers.get_calls.clear()
+    fake_client.images.gets.clear()
+    container.reloaded = 0
+
+    touched = backend.touch_worker(spec.worker_key, now=20.0)
+    backdated = backend.touch_worker(spec.worker_key, now=15.0)
+
+    assert touched == replace(first, last_used_at=20.0)
+    assert backdated == replace(first, last_used_at=20.0)
+    assert fake_client.containers.get_calls == []
+    assert fake_client.images.gets == []
+    assert container.reloaded == 0
+    assert (
+        json.loads(_control_metadata_path(tmp_path, spec.worker_key).read_text(encoding="utf-8"))["last_used_at"]
+        == 20.0
+    )
+
+
+def test_open_health_http_client_reuses_default_ssl_context_and_respects_monkeypatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Health checks reuse the default SSLContext for real httpx.Client, and omit verify when monkeypatched."""
+    docker_backend_module._cached_default_ssl_context.cache_clear()
+    with (
+        docker_backend_module._open_health_http_client(timeout=5.0) as first,
+        docker_backend_module._open_health_http_client(timeout=5.0) as second,
+    ):
+        assert first._transport._pool._ssl_context is second._transport._pool._ssl_context
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    def _patched_client(**kwargs: object) -> contextlib.nullcontext[None]:
+        seen_kwargs.append(kwargs)
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(docker_backend_module.httpx, "Client", _patched_client)
+    with docker_backend_module._open_health_http_client(timeout=3.0):
+        pass
+    assert seen_kwargs == [{"timeout": 3.0}]
+    docker_backend_module._cached_default_ssl_context.cache_clear()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import os
 import secrets
 import threading
 import time
@@ -47,6 +48,8 @@ from mindroom.workers.protocol import (
 )
 
 if TYPE_CHECKING:
+    import ssl
+
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.shell.background_scope import ShellBackgroundScope
     from mindroom.tool_system.runtime_context import CallOutputStream
@@ -105,6 +108,24 @@ class _WorkerProxyClient(Protocol):
 
 
 _WorkerProxyClientFactory = Callable[..., AbstractContextManager[_WorkerProxyClient]]
+_REAL_HTTPX_CLIENT = httpx.Client
+
+
+@functools.lru_cache(maxsize=4)
+def _cached_default_ssl_context(ssl_cert_file: str | None, ssl_cert_dir: str | None) -> ssl.SSLContext:
+    del ssl_cert_file, ssl_cert_dir
+    return httpx.create_ssl_context(verify=True)
+
+
+def _open_worker_http_client(
+    client_factory: _WorkerProxyClientFactory,
+    *,
+    timeout: float,
+) -> AbstractContextManager[_WorkerProxyClient]:
+    if client_factory is _REAL_HTTPX_CLIENT:
+        verify = _cached_default_ssl_context(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
+        return client_factory(timeout=timeout, verify=verify)
+    return client_factory(timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -316,7 +337,7 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
             if worker_handle is not None
             else f"{normalize_sandbox_runner_api_root(config.proxy_url or '')}/{worker_operation}"
         )
-        with client_factory(timeout=config.proxy_timeout_seconds) as client:
+        with _open_worker_http_client(client_factory, timeout=config.proxy_timeout_seconds) as client:
             response = client.post(request_url, json=request.model_dump(mode="json"), headers=headers)
             _raise_for_worker_status(response)
             data = response.json()
@@ -378,7 +399,7 @@ def _post_execute_cancel(
 ) -> None:
     """Ask the runner to stop one execute request the primary no longer waits for."""
     try:
-        with client_factory(timeout=_EXECUTE_CANCEL_TIMEOUT_SECONDS) as client:
+        with _open_worker_http_client(client_factory, timeout=_EXECUTE_CANCEL_TIMEOUT_SECONDS) as client:
             request = CancelRequest(protocol=WORKER_PROTOCOL_VERSION, request_id=request_id)
             client.post(url, json=request.model_dump(mode="json"), headers=headers).raise_for_status()
     except Exception:
@@ -394,7 +415,7 @@ def _post_kill_shell_scope(
 ) -> None:
     """Ask the runner to stop every auto-backgrounded shell process owned by one turn scope."""
     try:
-        with client_factory(timeout=_SHELL_SCOPE_KILL_TIMEOUT_SECONDS) as client:
+        with _open_worker_http_client(client_factory, timeout=_SHELL_SCOPE_KILL_TIMEOUT_SECONDS) as client:
             request = KillShellScopeRequest(protocol=WORKER_PROTOCOL_VERSION, shell_scope_id=shell_scope_id)
             client.post(url, json=request.model_dump(mode="json"), headers=headers).raise_for_status()
     except Exception:
@@ -635,7 +656,7 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else f"{runner_api_root}/leases"
             )
-            with client_factory(timeout=config.proxy_timeout_seconds) as client:
+            with _open_worker_http_client(client_factory, timeout=config.proxy_timeout_seconds) as client:
                 run_as_job = job_owns_execution()
                 sent: dict[str, object] = {
                     "run_as_job": run_as_job,
