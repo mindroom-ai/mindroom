@@ -138,16 +138,16 @@ class _OxylabsTools(Toolkit):
         query: str | None = None,
         asin: str | None = None,
         url: str | None = None,
-        domain_code: str = "com",
-        render_javascript: bool = False,
+        domain_code: str | None = None,
+        render_javascript: bool | None = None,
         markdown: bool | None = None,
     ) -> str:
         """Query Google SERP, Amazon products, or universal web scraping via Oxylabs and return JSON.
 
         - `search_google`: Google search for `query` on `domain_code` (default `"com"`).
-        - `amazon_product`: Amazon product details for 10-char `asin` on `domain_code`.
-        - `search_amazon`: Search Amazon products for `query` on `domain_code`.
-        - `scrape`: Scrape `url` (http/https; optional `render_javascript`, `markdown`).
+        - `amazon_product`: Amazon product details for 10-char `asin` on `domain_code` (default `"com"`).
+        - `search_amazon`: Search Amazon products for `query` on `domain_code` (default `"com"`).
+        - `scrape`: Scrape `url` (http/https; optional `render_javascript`, default False, `markdown`).
         """
         if (
             unexpected := reject_unexpected_args(
@@ -157,20 +157,25 @@ class _OxylabsTools(Toolkit):
                     "query": query is not None,
                     "asin": asin is not None,
                     "url": url is not None,
-                    "domain_code": domain_code != "com",
-                    "render_javascript": render_javascript,
+                    "domain_code": domain_code is not None,
+                    "render_javascript": render_javascript is not None,
                     "markdown": markdown is not None,
                 },
             )
         ) is not None:
             return self._error_response(action, unexpected)
+        resolved_domain = "com" if domain_code is None else domain_code
         if action == "search_google":
-            return self._search_google(query or "", domain_code)
+            return self._search_google(query or "", resolved_domain)
         if action == "amazon_product":
-            return self._amazon_product(asin or "", domain_code)
+            return self._amazon_product(asin or "", resolved_domain)
         if action == "search_amazon":
-            return self._search_amazon(query or "", domain_code)
-        return self._scrape(url or "", render_javascript=render_javascript, markdown=markdown)
+            return self._search_amazon(query or "", resolved_domain)
+        return self._scrape(
+            url or "",
+            render_javascript=False if render_javascript is None else render_javascript,
+            markdown=markdown,
+        )
 
     def _search_google(self, query: str, domain_code: str) -> str:
         if not query or not query.strip():

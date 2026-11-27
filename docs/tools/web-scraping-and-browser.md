@@ -69,7 +69,7 @@ agents:
 
 ### [`trafilatura`]
 
-`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=True)` (`text`, `metadata`, `batch`), `html_to_text()`, and `crawl_website()`.
+`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=None)` (`text`, `metadata`, `batch`), `html_to_text()`, and `crawl_website()`.
 `trafilatura_extract(action="batch")` returns one JSON payload listing successes and failures.
 `crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that; `extract_content=True` reports each refused page it tries to extract.
 `trafilatura_extract(action="batch")` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.

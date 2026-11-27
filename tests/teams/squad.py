@@ -79,13 +79,18 @@ def scripted(model_id: str, *turns: list[Any]) -> ScriptedModel:
 
 
 def calculator(*, gate_multiply: bool) -> AdaptedToolkit:
-    """Legacy Agno 3.0.9 capture calculator exposing ``multiply`` for frozen-dump replay."""
+    """Legacy Agno 3.0.9 capture calculator exposing ``add`` and ``multiply`` for frozen-dump replay."""
     from mindroom.tool_system.authoring import Toolkit, tool  # noqa: PLC0415
 
     calc = CalculatorTools()
 
     class _CaptureCalculator(Toolkit):
         name = "calculator"
+
+        @tool
+        def add(self, a: float, b: float) -> str:
+            """Add two numbers."""
+            return calc.calculate("add", a, b)
 
         @tool
         def multiply(self, a: float, b: float) -> str:

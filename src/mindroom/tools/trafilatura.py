@@ -329,7 +329,7 @@ class _TrafilaturaTools(Toolkit):
         url: str | None = None,
         urls: list[str] | None = None,
         output_format: str | None = None,
-        as_json: bool = True,
+        as_json: bool | None = None,
     ) -> str:
         """Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).
 
@@ -347,7 +347,7 @@ class _TrafilaturaTools(Toolkit):
                     "url": url is not None,
                     "urls": urls is not None,
                     "output_format": output_format is not None,
-                    "as_json": not as_json,
+                    "as_json": as_json is not None,
                 },
             )
         ) is not None:
@@ -358,7 +358,7 @@ class _TrafilaturaTools(Toolkit):
             return f"Error: url is required for {action} extraction."
         if action == "text":
             return self._extract_text(url, output_format=output_format)
-        return self._extract_metadata(url, as_json=as_json)
+        return self._extract_metadata(url, as_json=True if as_json is None else as_json)
 
     def _extract_text(self, url: str, *, output_format: str | None) -> str:
         trafilatura = _require_trafilatura()

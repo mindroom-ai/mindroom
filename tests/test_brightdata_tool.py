@@ -93,10 +93,16 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
     assert bd_fn.parameters["properties"]["action"]["enum"] == ["scrape_markdown"]
     assert set(bd_fn.parameters["properties"]) == {"action", "url"}
     assert "`screenshot`" not in (bd_fn.description or "")
+    bd_http_calls: list[str] = []
+    monkeypatch.setattr(requests, "post", lambda url, **_kw: bd_http_calls.append(url))
+    monkeypatch.setattr(requests, "get", lambda url, **_kw: bd_http_calls.append(url))
     assert "disabled" in str(bd_only_md.brightdata("screenshot", url="https://example.com")).lower()
+    assert "cannot be used" in str(bd_only_md.brightdata("scrape_markdown", url="https://example.com", num_results=10))
+    assert "cannot be used" in str(bd_only_md.brightdata("scrape_markdown", url="https://example.com", engine="google"))
     assert "cannot be used" in str(bd_only_md.brightdata("scrape_markdown", url="https://example.com", engine="bing"))
     bd_full = brightdata_tools()(api_key="k")
     assert "cannot be used" in str(bd_full.brightdata("search_engine", query="q", url="https://example.com"))
+    assert bd_http_calls == []
     assert (
         list(
             brightdata_tools()(
@@ -161,23 +167,36 @@ def test_oxylabs_and_spider_actions_preserve_payloads(monkeypatch: pytest.Monkey
     """Consolidated oxylabs and spider toolkits preserve validation and payload formats."""
     fake_ox_mod = ModuleType("oxylabs")
 
+    ox_calls: list[str] = []
+
     class _FakeClient:
         def __init__(self, _u: str, _p: str) -> None:
             self.google = SimpleNamespace(
-                scrape_search=lambda **_kw: SimpleNamespace(
-                    results=[
-                        SimpleNamespace(content={"results": {"organic": [{"title": "T", "url": "https://x.test"}]}}),
-                    ],
-                ),
+                scrape_search=lambda **_kw: (
+                    ox_calls.append("google"),
+                    SimpleNamespace(
+                        results=[
+                            SimpleNamespace(
+                                content={"results": {"organic": [{"title": "T", "url": "https://x.test"}]}},
+                            ),
+                        ],
+                    ),
+                )[1],
             )
             self.amazon = SimpleNamespace(
-                scrape_product=lambda **_kw: SimpleNamespace(
-                    results=[SimpleNamespace(content={"title": "Widget", "price": 9.99, "currency": "USD"})],
-                ),
-                scrape_search=lambda **_kw: SimpleNamespace(results=[]),
+                scrape_product=lambda **_kw: (
+                    ox_calls.append("amazon_product"),
+                    SimpleNamespace(
+                        results=[SimpleNamespace(content={"title": "Widget", "price": 9.99, "currency": "USD"})],
+                    ),
+                )[1],
+                scrape_search=lambda **_kw: (ox_calls.append("amazon_search"), SimpleNamespace(results=[]))[1],
             )
             self.universal = SimpleNamespace(
-                scrape_url=lambda **_kw: SimpleNamespace(results=[SimpleNamespace(content="# Hi", status_code=200)]),
+                scrape_url=lambda **_kw: (
+                    ox_calls.append("scrape"),
+                    SimpleNamespace(results=[SimpleNamespace(content="# Hi", status_code=200)]),
+                )[1],
             )
 
     fake_ox_mod.RealtimeClient = _FakeClient  # type: ignore[attr-defined]
@@ -192,8 +211,12 @@ def test_oxylabs_and_spider_actions_preserve_payloads(monkeypatch: pytest.Monkey
     assert prod_out["product_info"]["found"] is True
     assert "Invalid ASIN" in json.loads(ox.oxylabs("amazon_product", asin="bad"))["error"]
     assert "Invalid URL" in json.loads(ox.oxylabs("scrape", url="ftp://bad"))["error"]
+    ox_calls_before = len(ox_calls)
+    assert "cannot be used" in json.loads(ox.oxylabs("scrape", url="https://example.com", domain_code="com"))["error"]
     assert "cannot be used" in json.loads(ox.oxylabs("scrape", url="https://example.com", domain_code="de"))["error"]
+    assert "cannot be used" in json.loads(ox.oxylabs("search_google", query="q", render_javascript=False))["error"]
     assert "cannot be used" in json.loads(ox.oxylabs("search_google", query="q", markdown=True))["error"]
+    assert len(ox_calls) == ox_calls_before
 
     fake_spider_mod = ModuleType("spider")
     seen_spider: list[tuple[str, str, dict[str, Any]]] = []

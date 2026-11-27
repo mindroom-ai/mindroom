@@ -218,14 +218,14 @@ class _ExaTools(Toolkit):
         urls: list[str] | None = None,
         num_results: int | None = None,
         category: str | None = None,
-        text: bool = False,
+        text: bool | None = None,
     ) -> str:
         """Query the Exa API and return JSON results.
 
         - `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).
         - `contents`: Fetch content for `urls`.
         - `similar`: Find pages similar to `url` (optional `num_results`, default 5).
-        - `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).
+        - `answer`: LLM answer with citations for `query` (optional `text`, default False, to include citation full text).
         """
         if (disabled := require_enabled_action(action, self._lookup_actions)) is not None:
             return f"Error: {disabled}"
@@ -239,7 +239,7 @@ class _ExaTools(Toolkit):
                     "urls": urls is not None,
                     "num_results": num_results is not None,
                     "category": category is not None,
-                    "text": text,
+                    "text": text is not None,
                 },
             )
         ) is not None:
@@ -266,7 +266,7 @@ class _ExaTools(Toolkit):
                     lambda: self.exa.find_similar_and_contents(url=url, **self._filtered_options(num_results)),
                 )
             )
-        return self._run_answer(query, text=text)
+        return self._run_answer(query, text=False if text is None else text)
 
     def _run_search(self, query: str | None, *, num_results: int | None, category: str | None) -> str:
         if not query:

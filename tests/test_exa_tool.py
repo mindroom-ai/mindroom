@@ -244,7 +244,8 @@ def test_exa_lookup_actions_option_whitelists_and_toggle_narrowing(monkeypatch: 
     assert calls[2][1]["num_results"] == 3
     call_count_before = len(calls)
     assert "cannot be used" in tool.exa_lookup("contents", urls=["https://example.com"], query="x")
-    assert "cannot be used" in tool.exa_lookup("search", query="x", text=True)
+    assert "cannot be used" in tool.exa_lookup("search", query="coffee", text=False)
+    assert "cannot be used" in tool.exa_lookup("search", query="coffee", text=True)
     assert len(calls) == call_count_before
 
     only_contents = exa_module.exa_tools()(

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _BrightDataAction = Literal["scrape_markdown", "screenshot", "search_engine", "web_data_feed"]
+_SearchEngine = Literal["google", "bing", "yandex"]
 _ACTION_FIELDS: dict[str, str] = {
     "scrape_markdown": "url",
     "screenshot": "url",
@@ -156,8 +157,8 @@ class _BrightDataTools(Toolkit):
         action: _BrightDataAction,
         url: str | None = None,
         query: str | None = None,
-        engine: str = "google",
-        num_results: int = 10,
+        engine: _SearchEngine | None = None,
+        num_results: int | None = None,
         language: str | None = None,
         country_code: str | None = None,
         source_type: str | None = None,
@@ -167,7 +168,7 @@ class _BrightDataTools(Toolkit):
 
         - `scrape_markdown`: Scrape `url` as Markdown.
         - `screenshot`: Capture PNG screenshot of `url` as an image artifact.
-        - `search_engine`: Search `query` on `engine` (google, bing, yandex; optional `num_results`, `language`, `country_code`).
+        - `search_engine`: Search `query` on `engine` (google, bing, yandex, default "google"; optional `num_results`, default 10, `language`, `country_code`).
         - `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).
         """
         if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
@@ -179,8 +180,8 @@ class _BrightDataTools(Toolkit):
                 {
                     "url": url is not None,
                     "query": query is not None,
-                    "engine": engine != "google",
-                    "num_results": num_results != 10,
+                    "engine": engine is not None,
+                    "num_results": num_results is not None,
                     "language": language is not None,
                     "country_code": country_code is not None,
                     "source_type": source_type is not None,
@@ -194,7 +195,13 @@ class _BrightDataTools(Toolkit):
         if action == "screenshot":
             return self._screenshot(url or "")
         if action == "search_engine":
-            return self._search_engine(query or "", engine, num_results, language, country_code)
+            return self._search_engine(
+                query or "",
+                "google" if engine is None else engine,
+                10 if num_results is None else num_results,
+                language,
+                country_code,
+            )
         return self._web_data_feed(source_type or "", url or "", num_of_reviews)
 
     def _scrape_markdown(self, url: str) -> str:

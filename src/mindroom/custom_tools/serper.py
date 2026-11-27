@@ -112,21 +112,18 @@ class SerperTools(Toolkit):
     def serper_search(
         self,
         query: str,
-        action: Optional[_SearchAction] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+        action: _SearchAction,
         num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
     ) -> str:
         """Search Google via Serper for `query` (optional `num_results`).
 
-        - `web`: Web search (default when enabled).
+        - `web`: Web search.
         - `news`: Recent news articles.
         - `scholar`: Google Scholar academic papers.
         """
-        if not self._search_actions:
-            return _error_json("All Serper search actions are disabled.")
-        resolved_action = self._search_actions[0] if action is None else action
-        if (disabled := require_enabled_action(resolved_action, self._search_actions)) is not None:
+        if (disabled := require_enabled_action(action, self._search_actions)) is not None:
             return _error_json(disabled)
-        endpoint, empty_error = _SEARCH_SPECS[resolved_action]
+        endpoint, empty_error = _SEARCH_SPECS[action]
         if not query:
             return _error_json(empty_error)
         logger.debug("Searching via Serper", endpoint=endpoint, query=query)

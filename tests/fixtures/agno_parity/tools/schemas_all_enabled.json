@@ -441,7 +441,7 @@
     "functions": [
       {
         "name": "brightdata",
-        "description": "Scrape pages, capture screenshots, run SERP searches, or query structured datasets via Bright Data.\n- `scrape_markdown`: Scrape `url` as Markdown.\n- `screenshot`: Capture PNG screenshot of `url` as an image artifact.\n- `search_engine`: Search `query` on `engine` (google, bing, yandex; optional `num_results`, `language`, `country_code`).\n- `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).",
+        "description": "Scrape pages, capture screenshots, run SERP searches, or query structured datasets via Bright Data.\n- `scrape_markdown`: Scrape `url` as Markdown.\n- `screenshot`: Capture PNG screenshot of `url` as an image artifact.\n- `search_engine`: Search `query` on `engine` (google, bing, yandex, default \"google\"; optional `num_results`, default 10, `language`, `country_code`).\n- `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -475,10 +475,22 @@
               ]
             },
             "engine": {
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "google",
+                "bing",
+                "yandex"
+              ]
             },
             "num_results": {
-              "type": "integer"
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "language": {
               "anyOf": [
@@ -1538,7 +1550,7 @@
     "functions": [
       {
         "name": "duckduckgo_search",
-        "description": "Search DuckDuckGo for `query` (optional `max_results`, default 5).\n- `web`: Web search (default when enabled).\n- `news`: Recent news articles.",
+        "description": "Search DuckDuckGo for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1574,7 +1586,8 @@
             }
           },
           "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -1743,7 +1756,7 @@
     "functions": [
       {
         "name": "exa_lookup",
-        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).",
+        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text`, default False, to include citation full text).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1810,7 +1823,14 @@
               ]
             },
             "text": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2713,7 +2733,7 @@
     "functions": [
       {
         "name": "google_search",
-        "description": "Search Google for `query` (optional `max_results`, default 5).\n- `web`: Web search (default when enabled).\n- `news`: Recent news articles.",
+        "description": "Search Google for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -2749,7 +2769,8 @@
             }
           },
           "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -4518,7 +4539,7 @@
     "functions": [
       {
         "name": "serper_search",
-        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search (default when enabled).\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
+        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search.\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4548,7 +4569,8 @@
             }
           },
           "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -5202,7 +5224,14 @@
               ]
             },
             "as_json": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [

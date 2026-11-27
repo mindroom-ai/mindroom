@@ -103,7 +103,7 @@ def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
 
     serper = serper_tools()()
     schema = tool_parameters(serper.functions["serper_search"])
-    assert schema["required"] == ["query"]
+    assert schema["required"] == ["query", "action"]
     assert schema["properties"]["action"]["enum"] == ["web", "news", "scholar"]
     assert schema["properties"]["num_results"]["type"] == "integer"
 
@@ -156,19 +156,19 @@ def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.Mon
         timelimit="w",
         region="us-en",
     )
-    web_raw = ddg.duckduckgo_search("coffee", max_results=9)
-    news_raw = ddg.duckduckgo_search("coffee", action="news", max_results=9)
+    web_raw = ddg.duckduckgo_search("coffee", "web", max_results=9)
+    news_raw = ddg.duckduckgo_search("coffee", "news", max_results=9)
 
     assert "Café" in web_raw
     assert json.loads(web_raw) == [{"title": "Café", "href": "https://example.com"}]
     assert json.loads(news_raw) == [{"title": "Breaking", "url": "https://news.example.com"}]
 
     ddg_custom = duckduckgo_tools()(backend="brave")
-    ddg_custom.duckduckgo_search("rust")
+    ddg_custom.duckduckgo_search("rust", "web")
 
     google = googlesearch_tools()()
-    google.google_search("python", max_results=4)
-    google.google_search("python", action="news", max_results=2)
+    google.google_search("python", "web", max_results=4)
+    google.google_search("python", "news", max_results=2)
 
     assert client_inits[0] == {"proxy": "http://proxy.internal:8080", "timeout": 25, "verify": False}
     assert client_inits[-1] == {"proxy": None, "timeout": 10, "verify": True}
@@ -220,8 +220,8 @@ def test_search_tools_skip_the_sdk_for_nonpositive_limits(
     ddg = duckduckgo_tools()(fixed_max_results=fixed_limit)
     baidu = baidusearch_tools()(fixed_max_results=fixed_limit)
 
-    assert ddg.duckduckgo_search("coffee", max_results=requested_limit) == "[]"
-    assert ddg.duckduckgo_search("coffee", action="news", max_results=requested_limit) == "[]"
+    assert ddg.duckduckgo_search("coffee", "web", max_results=requested_limit) == "[]"
+    assert ddg.duckduckgo_search("coffee", "news", max_results=requested_limit) == "[]"
     assert baidu.baidu_search("coffee", max_results=requested_limit) == "[]"
 
 
@@ -235,12 +235,12 @@ def test_ddgs_search_returns_structured_backend_errors(monkeypatch: pytest.Monke
     ddg = duckduckgo_tools()(modifier="site:example.com")
     expected = {"error": type(error).__name__, "message": str(error), "query": "site:example.com coffee", "results": []}
 
-    assert json.loads(ddg.duckduckgo_search("coffee")) == expected
-    assert json.loads(ddg.duckduckgo_search("coffee", action="news")) == expected
+    assert json.loads(ddg.duckduckgo_search("coffee", "web")) == expected
+    assert json.loads(ddg.duckduckgo_search("coffee", "news")) == expected
 
 
 def test_ddgs_search_tools_validation_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both DDGS toolkits validate timelimit, narrow schemas on toggles, and default omitted action to enabled."""
+    """Both DDGS toolkits validate timelimit, require action, narrow schemas on toggles, and reject disabled actions."""
     calls: list[tuple[str, str]] = []
 
     class FakeDDGS:
@@ -268,21 +268,21 @@ def test_ddgs_search_tools_validation_and_toggles(monkeypatch: pytest.MonkeyPatc
         assert list(news_only.functions) == [fn_name]
         offered_news = adapt_toolkit(news_only).functions[0]
         assert offered_news.parameters["properties"]["action"]["enum"] == ["news"]
+        assert "action" in offered_news.parameters.get("required", [])
         assert "`web`" not in (offered_news.description or "")
         assert "`news`" in (offered_news.description or "")
-        # Omitting action resolves to the enabled "news" action; explicit disabled "web" fails closed.
-        assert json.loads(getattr(news_only, fn_name)("ai")) == [{"title": "Headline"}]
-        assert json.loads(getattr(news_only, fn_name)("ai", action="news")) == [{"title": "Headline"}]
-        disabled_payload = json.loads(getattr(news_only, fn_name)("ai", action="web"))
+        assert json.loads(getattr(news_only, fn_name)("ai", "news")) == [{"title": "Headline"}]
+        disabled_payload = json.loads(getattr(news_only, fn_name)("ai", "web"))
         assert disabled_payload["error"] == "DisabledAction"
 
         web_only = tool_class(enable_news=False)
         offered_web = adapt_toolkit(web_only).functions[0]
         assert offered_web.parameters["properties"]["action"]["enum"] == ["web"]
+        assert "action" in offered_web.parameters.get("required", [])
         assert "`news`" not in (offered_web.description or "")
 
         assert list(tool_class(enable_search=False, enable_news=False).functions) == []
-    assert calls == [("news", "ai"), ("news", "ai"), ("news", "ai"), ("news", "ai")]
+    assert calls == [("news", "ai"), ("news", "ai")]
 
 
 def test_baidusearch_formatting_language_normalization_and_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,9 +349,9 @@ def test_serper_all_endpoints_headers_payload_and_env_fallback(
             overrides={"location": "nl", "language": "nl", "num_results": 7, "date_range": "qdr:w", "timeout": 15},
         )
 
-        web = json.loads(toolkit.serper_search("python"))
-        news = json.loads(toolkit.serper_search("ai", action="news", num_results=3))
-        scholar = json.loads(toolkit.serper_search("transformers", action="scholar"))
+        web = json.loads(toolkit.serper_search("python", "web"))
+        news = json.loads(toolkit.serper_search("ai", "news", num_results=3))
+        scholar = json.loads(toolkit.serper_search("transformers", "scholar"))
         scraped = json.loads(toolkit.scrape_webpage("https://example.com", markdown=True))
 
     assert web["endpoint"] == "/search"
@@ -383,15 +383,15 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("SERPER_API_KEY", raising=False)
     no_key_toolkit = serper_tools()()
 
-    assert json.loads(no_key_toolkit.serper_search("")) == {"error": "Please provide a query to search for"}
-    assert json.loads(no_key_toolkit.serper_search("", action="news")) == {
+    assert json.loads(no_key_toolkit.serper_search("", "web")) == {"error": "Please provide a query to search for"}
+    assert json.loads(no_key_toolkit.serper_search("", "news")) == {
         "error": "Please provide a query to search for news",
     }
-    assert json.loads(no_key_toolkit.serper_search("", action="scholar")) == {
+    assert json.loads(no_key_toolkit.serper_search("", "scholar")) == {
         "error": "Please provide a query to search for academic papers",
     }
     assert json.loads(no_key_toolkit.scrape_webpage("")) == {"error": "Please provide a URL to scrape"}
-    assert json.loads(no_key_toolkit.serper_search("python")) == {"error": "Please provide a Serper API key"}
+    assert json.loads(no_key_toolkit.serper_search("python", "web")) == {"error": "Please provide a Serper API key"}
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/news":
@@ -402,8 +402,8 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch.setattr(httpx, "post", client.post)
         toolkit = serper_tools()(api_key="serper-key")
 
-        assert "error" in json.loads(toolkit.serper_search("outage", action="news"))
-        assert "error" in json.loads(toolkit.serper_search("bad-json"))
+        assert "error" in json.loads(toolkit.serper_search("outage", "news"))
+        assert "error" in json.loads(toolkit.serper_search("bad-json", "web"))
 
     tool_class = serper_tools()
     only_scrape = tool_class(enable_search=False, enable_search_news=False, enable_search_scholar=False)
@@ -413,10 +413,10 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
     offered_scholar = adapt_toolkit(only_scholar).functions[0]
     assert offered_scholar.name == "serper_search"
     assert offered_scholar.parameters["properties"]["action"]["enum"] == ["scholar"]
+    assert "action" in offered_scholar.parameters.get("required", [])
     assert "`web`" not in (offered_scholar.description or "")
-    assert "disabled" in json.loads(only_scholar.serper_search("q", action="web"))["error"].lower()
-    # Omitting action defaults to enabled "scholar" (hits empty-query scholar error without calling disabled "web").
-    assert json.loads(only_scholar.serper_search("")) == {
+    assert "disabled" in json.loads(only_scholar.serper_search("q", "web"))["error"].lower()
+    assert json.loads(only_scholar.serper_search("", "scholar")) == {
         "error": "Please provide a query to search for academic papers",
     }
 
@@ -551,6 +551,17 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
         assert op_b is not None
         assert op_a != op_b
         assert grant_operation(config, fn_name, {"query": "x"}, tools=registry, toolkit_name=toolkit_name) is None
+
+    # Explicit required action binds timed approval grants for serper_search.
+    serper_news_op = grant_operation(
+        config,
+        "serper_search",
+        {"query": "weather", "action": "news"},
+        tools=registry,
+        toolkit_name="serper",
+    )
+    assert serper_news_op is not None
+    assert serper_news_op.mcp_tool_name == "news"
 
     # scrape_webpage stays non-action-scoped on serper.
     scrape_op = grant_operation(

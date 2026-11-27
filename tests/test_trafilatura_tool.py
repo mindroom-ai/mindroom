@@ -432,9 +432,14 @@ def test_trafilatura_factory_installs_guarded_fetchers() -> None:
     assert spider.sleep is trafilatura_module._pause
 
 
-def test_trafilatura_extract_toggles_narrow_schema_and_guard_disabled_actions() -> None:
-    """Disabling trafilatura_extract actions narrows its schema, prunes fields, and omits the function when all off."""
+def test_trafilatura_extract_toggles_narrow_schema_and_guard_disabled_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabling trafilatura_extract actions narrows its schema, prunes fields, and rejects mismatched args pre-I/O."""
     from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    fetch_calls: list[str] = []
+    monkeypatch.setattr(trafilatura_module, "_fetch_url", lambda url: fetch_calls.append(url) or "")
 
     batch_only = trafilatura_tools()(enable_extract_text=False, enable_extract_metadata_only=False)
     offered = next(fn for fn in adapt_toolkit(batch_only).functions if fn.name == "trafilatura_extract")
@@ -448,12 +453,14 @@ def test_trafilatura_extract_toggles_narrow_schema_and_guard_disabled_actions() 
         url="https://example.com",
         urls=["https://example.com"],
     )
+    assert "cannot be used" in full_extract.trafilatura_extract("text", url="https://example.com", as_json=True)
     assert "cannot be used" in full_extract.trafilatura_extract("text", url="https://example.com", as_json=False)
     assert "cannot be used" in full_extract.trafilatura_extract(
         "batch",
         urls=["https://example.com"],
         output_format="markdown",
     )
+    assert fetch_calls == []
 
     none_extract = trafilatura_tools()(
         enable_extract_text=False,

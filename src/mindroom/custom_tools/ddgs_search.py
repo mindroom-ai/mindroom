@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from ddgs import DDGS
 
@@ -69,28 +69,16 @@ class _DDGSSearchTools(Toolkit):
     def _dispatch_search(
         self,
         query: str,
-        action: _SearchAction | None,
+        action: _SearchAction,
         max_results: int | None,
     ) -> str:
-        if not self._enabled_actions:
-            return json.dumps(
-                {
-                    "error": "DisabledAction",
-                    "message": "All search actions are disabled.",
-                    "query": query,
-                    "results": [],
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        resolved_action = self._enabled_actions[0] if action is None else action
-        if (disabled := require_enabled_action(resolved_action, self._enabled_actions)) is not None:
+        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
             return json.dumps(
                 {"error": "DisabledAction", "message": disabled, "query": query, "results": []},
                 indent=2,
                 ensure_ascii=False,
             )
-        category: Literal["text", "news"] = "text" if resolved_action == "web" else "news"
+        category: Literal["text", "news"] = "text" if action == "web" else "news"
         return self._run_search(category, query, 5 if max_results is None else max_results)
 
     def _run_search(self, category: Literal["text", "news"], query: str, max_results: int) -> str:
@@ -157,12 +145,12 @@ class DuckDuckGoTools(_DDGSSearchTools):
     def duckduckgo_search(
         self,
         query: str,
-        action: Optional[_SearchAction] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+        action: _SearchAction,
         max_results: int | None = None,
     ) -> str:
         """Search DuckDuckGo for `query` (optional `max_results`, default 5).
 
-        - `web`: Web search (default when enabled).
+        - `web`: Web search.
         - `news`: Recent news articles.
         """
         return self._dispatch_search(query, action, max_results)
@@ -200,12 +188,12 @@ class GoogleSearchTools(_DDGSSearchTools):
     def google_search(
         self,
         query: str,
-        action: Optional[_SearchAction] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+        action: _SearchAction,
         max_results: int | None = None,
     ) -> str:
         """Search Google for `query` (optional `max_results`, default 5).
 
-        - `web`: Web search (default when enabled).
+        - `web`: Web search.
         - `news`: Recent news articles.
         """
         return self._dispatch_search(query, action, max_results)
