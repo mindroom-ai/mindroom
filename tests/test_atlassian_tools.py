@@ -126,8 +126,8 @@ async def test_catalog_construction_applies_site_pin(tmp_path: Path, monkeypatch
         tools=builtin_tool_registry(),
     )
 
-    entrypoint = tool.functions["jira_search_issues"]
-    result = json.loads(await entrypoint(jql="project = PROJ"))
+    entrypoint = tool.functions["jira_read"]
+    result = json.loads(await entrypoint(action="search", jql="project = PROJ"))
 
     assert result["status"] == "ok"
     assert result["site"]["cloud_id"] == OTHER_CLOUD_ID
@@ -148,8 +148,8 @@ async def test_missing_connection_returns_requester_bound_link(tmp_path: Path, m
     manager = save_client_config(paths)
     gateway = FakeGateway().install(monkeypatch)
 
-    alice = json.loads(await _tool(paths, manager).jira_search_issues(jql="project = PROJ"))
-    bob = json.loads(await _tool(paths, manager, requester_id=BOB).confluence_search(cql="type = page"))
+    alice = json.loads(await _tool(paths, manager).jira_read(action="search", jql="project = PROJ"))
+    bob = json.loads(await _tool(paths, manager, requester_id=BOB).confluence_read(action="search", cql="type = page"))
 
     assert alice["status"] == "error"
     assert alice["oauth_connection_required"] is True
@@ -174,7 +174,7 @@ async def test_no_requester_never_uses_shared_credentials(tmp_path: Path, monkey
     )
     gateway = FakeGateway(sites_by_token={TOKEN: [site()]}).install(monkeypatch)
 
-    result = json.loads(await _tool(paths, manager, requester_id=None).jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await _tool(paths, manager, requester_id=None).jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []
@@ -189,7 +189,7 @@ async def test_grant_missing_a_requested_scope_must_reconnect(tmp_path: Path, mo
     publish_grant(provider, manager, TOKEN, scopes=[scope for scope in provider.scopes if scope != "write:jira-work"])
     gateway = FakeGateway(sites_by_token={TOKEN: [site()]}).install(monkeypatch)
 
-    result = json.loads(await _tool(paths, manager).jira_search_issues(jql="project = PROJ"))
+    result = json.loads(await _tool(paths, manager).jira_read(action="search", jql="project = PROJ"))
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []
@@ -227,7 +227,7 @@ async def test_expiring_token_is_refreshed_through_the_atlassian_token_endpoint(
     gateway = FakeGateway(sites_by_token={"rotated-token": [site()]}).install(monkeypatch)
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/PROJ-1"), {"key": "PROJ-1", "id": "10001"})
 
-    result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await _tool(paths, manager).jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["status"] == "ok"
     assert [str(request.url) for request in token_requests] == ["https://auth.atlassian.com/oauth/token"]
@@ -264,7 +264,7 @@ async def test_refresh_failures_ask_to_reconnect_or_to_retry(
     monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", oauth_client)
     gateway = FakeGateway().install(monkeypatch)
 
-    result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await _tool(paths, manager).jira_read(action="get", issue_key="PROJ-1"))
 
     if expected_reason is None:
         assert result["code"] == "oauth_refresh_failed"
@@ -289,7 +289,7 @@ async def test_unreadable_grant_asks_for_a_reset(tmp_path: Path, monkeypatch: py
     publish_grant(atlassian_oauth_provider(), wrong_key_manager, TOKEN)
     gateway = FakeGateway(sites_by_token={TOKEN: [site()]}).install(monkeypatch)
 
-    result = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await _tool(paths, manager).jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True
     assert result["reset_required"] is True
@@ -305,7 +305,7 @@ async def test_calls_follow_the_active_requester_not_the_constructing_one(
     tool, gateway = _connected(tmp_path, monkeypatch)
 
     with detached_tool_scope(execution_identity(BOB)):
-        result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+        result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []
@@ -326,7 +326,8 @@ async def test_jira_search_uses_enhanced_jql_search_and_pages(tmp_path: Path, mo
     )
 
     result = json.loads(
-        await tool.jira_search_issues(
+        await tool.jira_read(
+            action="search",
             jql="project = PROJ",
             max_results=500,
             fields=["summary"],
@@ -364,8 +365,8 @@ async def test_jira_get_issue_lists_available_transitions(tmp_path: Path, monkey
         },
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="proj-7", fields=["summary", " status "]))
-    await tool.jira_get_issue(issue_key="PROJ-7")
+    result = json.loads(await tool.jira_read(action="get", issue_key="proj-7", fields=["summary", " status "]))
+    await tool.jira_read(action="get", issue_key="PROJ-7")
 
     explicit, default = gateway.product_requests()
     assert explicit.url.params["expand"] == default.url.params["expand"] == "transitions"
@@ -381,7 +382,8 @@ async def test_jira_create_issue_sends_description_as_document(tmp_path: Path, m
     gateway.route("POST", gateway_url("jira", "/rest/api/3/issue"), {"id": "10002", "key": "PROJ-2"})
 
     result = json.loads(
-        await tool.jira_create_issue(
+        await tool.jira_write(
+            action="create",
             project_key="proj",
             summary="New dashboard",
             issue_type="Story",
@@ -424,9 +426,11 @@ async def test_jira_update_and_comment_write_the_requested_issue(
     gateway.route("PUT", gateway_url("jira", "/rest/api/3/issue/PROJ-3"))
     gateway.route("POST", gateway_url("jira", "/rest/api/3/issue/PROJ-3/comment"), {"id": "900"})
 
-    updated = json.loads(await tool.jira_update_issue(issue_key="PROJ-3", summary="Renamed", fields={"labels": []}))
-    commented = json.loads(await tool.jira_add_comment(issue_key="PROJ-3", comment="Done."))
-    nothing = json.loads(await tool.jira_update_issue(issue_key="PROJ-3"))
+    updated = json.loads(
+        await tool.jira_write(action="update", issue_key="PROJ-3", summary="Renamed", fields={"labels": []}),
+    )
+    commented = json.loads(await tool.jira_write(action="comment", issue_key="PROJ-3", comment="Done."))
+    nothing = json.loads(await tool.jira_write(action="update", issue_key="PROJ-3"))
 
     update_request, comment_request = gateway.product_requests()
     assert json_body(update_request) == {"fields": {"labels": [], "summary": "Renamed"}}
@@ -473,7 +477,7 @@ async def test_jira_transition_resolves_one_transition_or_changes_nothing(
     gateway.route("GET", endpoint, transitions_endpoint)
     gateway.route("POST", endpoint, transitions_endpoint)
 
-    result = json.loads(await tool.jira_transition_issue(issue_key="PROJ-4", transition=requested))
+    result = json.loads(await tool.jira_write(action="transition", issue_key="PROJ-4", transition=requested))
 
     summaries = [{"id": id_, "name": name, "to_status": to} for id_, name, to in transitions]
     if expected.isdecimal():
@@ -511,8 +515,8 @@ async def test_confluence_search_round_trips_encoded_cursors(tmp_path: Path, mon
         },
     )
 
-    first = json.loads(await tool.confluence_search(cql="type = page"))
-    await tool.confluence_search(cql="type = page", cursor=first["next_cursor"])
+    first = json.loads(await tool.confluence_read(action="search", cql="type = page"))
+    await tool.confluence_read(action="search", cql="type = page", cursor=first["next_cursor"])
 
     assert first["results"] == [
         {
@@ -582,7 +586,7 @@ async def test_confluence_search_names_who_created_owns_and_last_edited(
         },
     )
 
-    result = json.loads(await tool.confluence_search(cql="creator = currentUser()"))
+    result = json.loads(await tool.confluence_read(action="search", cql="creator = currentUser()"))
 
     expand = gateway.product_requests()[0].url.params["expand"]
     assert expand == "content.history,content.history.ownedBy,content.version"
@@ -637,7 +641,7 @@ async def test_confluence_get_page_reads_storage_body_through_cql(
         },
     )
 
-    result = json.loads(await tool.confluence_get_page(page_id="123"))
+    result = json.loads(await tool.confluence_read(action="get", page_id="123"))
 
     params = gateway.product_requests()[0].url.params
     assert params["cql"] == "id = 123"
@@ -682,14 +686,17 @@ async def test_confluence_create_page_resolves_space_then_publishes(
     )
 
     created = json.loads(
-        await tool.confluence_create_page(
+        await tool.confluence_write(
+            action="create",
             space_key="DOCS",
             title="Notes",
             body_storage="<p>Hi</p>",
             parent_page_id="12",
         ),
     )
-    missing = json.loads(await tool.confluence_create_page(space_key="NOPE", title="Notes", body_storage="<p>Hi</p>"))
+    missing = json.loads(
+        await tool.confluence_write(action="create", space_key="NOPE", title="Notes", body_storage="<p>Hi</p>"),
+    )
 
     posts = [request for request in gateway.product_requests() if request.method == "POST"]
     assert [json_body(request) for request in posts] == [
@@ -713,7 +720,8 @@ async def test_confluence_update_and_comment_use_v2_writes(tmp_path: Path, monke
     gateway.route("POST", gateway_url("confluence", "/wiki/api/v2/footer-comments"), {"id": "77"})
 
     updated = json.loads(
-        await tool.confluence_update_page(
+        await tool.confluence_write(
+            action="update",
             page_id="123",
             title="Runbook",
             body_storage="<p>New</p>",
@@ -721,9 +729,15 @@ async def test_confluence_update_and_comment_use_v2_writes(tmp_path: Path, monke
             version_message="Refresh steps",
         ),
     )
-    commented = json.loads(await tool.confluence_add_comment(page_id="123", body_storage="<p>Thanks</p>"))
+    commented = json.loads(await tool.confluence_write(action="comment", page_id="123", body_storage="<p>Thanks</p>"))
     stale = json.loads(
-        await tool.confluence_update_page(page_id="123", title="Runbook", body_storage="<p>x</p>", version_number=1),
+        await tool.confluence_write(
+            action="update",
+            page_id="123",
+            title="Runbook",
+            body_storage="<p>x</p>",
+            version_number=1,
+        ),
     )
 
     update_request, comment_request = gateway.product_requests()
@@ -747,22 +761,34 @@ async def test_confluence_update_and_comment_use_v2_writes(tmp_path: Path, monke
 @pytest.mark.parametrize(
     ("function_name", "kwargs"),
     [
-        ("jira_get_issue", {"issue_key": "../../rest/api/3/myself"}),
-        ("jira_get_issue", {"issue_key": "PROJ-1?expand=x"}),
-        ("jira_add_comment", {"issue_key": "PROJ-1/../2", "comment": "x"}),
-        ("jira_create_issue", {"project_key": "PROJ/1", "summary": "x"}),
-        ("confluence_get_page", {"page_id": "123/../456"}),
-        ("confluence_get_page", {"page_id": "https://example.atlassian.net/wiki/pages/1"}),
-        ("confluence_get_page", {"page_id": "１２３"}),  # noqa: RUF001
+        ("jira_read", {"action": "get", "issue_key": "../../rest/api/3/myself"}),
+        ("jira_read", {"action": "get", "issue_key": "PROJ-1?expand=x"}),
+        ("jira_read", {"action": "get"}),
+        ("jira_read", {"action": "search"}),
+        ("jira_read", {"action": "bogus"}),
+        ("jira_write", {"action": "comment", "issue_key": "PROJ-1/../2", "comment": "x"}),
+        ("jira_write", {"action": "create", "project_key": "PROJ/1", "summary": "x"}),
+        ("jira_write", {"action": "bogus"}),
+        ("confluence_read", {"action": "get", "page_id": "123/../456"}),
+        ("confluence_read", {"action": "get", "page_id": "https://example.atlassian.net/wiki/pages/1"}),
+        ("confluence_read", {"action": "get", "page_id": "１２３"}),  # noqa: RUF001
+        ("confluence_read", {"action": "download_attachment", "page_id": "123"}),
+        ("confluence_read", {"action": "bogus"}),
         (
-            "confluence_create_page",
-            {"space_key": "DOCS", "title": "t", "body_storage": "b", "parent_page_id": "1 OR 1"},
+            "confluence_write",
+            {"action": "create", "space_key": "DOCS", "title": "t", "body_storage": "b", "parent_page_id": "1 OR 1"},
         ),
-        ("confluence_create_page", {"space_key": "DOCS/1", "title": "t", "body_storage": "b"}),
-        ("confluence_search", {"cql": "type = page", "cursor": "abc\ndef"}),
-        ("jira_search_issues", {"jql": " "}),
-        ("jira_search_issues", {"jql": "project = PROJ", "fields": ["summary", " "]}),
-        ("jira_search_issues", {"jql": "project = PROJ", "fields": []}),
+        ("confluence_write", {"action": "create", "space_key": "DOCS/1", "title": "t", "body_storage": "b"}),
+        ("confluence_write", {"action": "update", "page_id": "123", "title": "t", "body_storage": "b"}),
+        (
+            "confluence_write",
+            {"action": "update", "page_id": "123", "title": "t", "body_storage": "b", "version_number": True},
+        ),
+        ("confluence_write", {"action": "bogus", "body_storage": "<p>x</p>"}),
+        ("confluence_read", {"action": "search", "cql": "type = page", "cursor": "abc\ndef"}),
+        ("jira_read", {"action": "search", "jql": " "}),
+        ("jira_read", {"action": "search", "jql": "project = PROJ", "fields": ["summary", " "]}),
+        ("jira_read", {"action": "search", "jql": "project = PROJ", "fields": []}),
     ],
 )
 async def test_unsafe_arguments_are_rejected_before_any_network_access(
@@ -797,18 +823,21 @@ async def test_site_pins_select_one_site_and_never_fall_back(tmp_path: Path, mon
     ).install(monkeypatch)
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/PROJ-1", OTHER_CLOUD_ID), {"key": "PROJ-1"})
 
-    unpinned = json.loads(await _tool(paths, manager).jira_get_issue(issue_key="PROJ-1"))
-    by_url = json.loads(await _tool(paths, manager, site_url=OTHER_SITE_URL).jira_get_issue(issue_key="PROJ-1"))
+    unpinned = json.loads(await _tool(paths, manager).jira_read(action="get", issue_key="PROJ-1"))
+    by_url = json.loads(
+        await _tool(paths, manager, site_url=OTHER_SITE_URL).jira_read(action="get", issue_key="PROJ-1"),
+    )
     by_cloud_id = json.loads(
-        await _tool(paths, manager, cloud_id=OTHER_CLOUD_ID.upper()).jira_get_issue(issue_key="PROJ-1"),
+        await _tool(paths, manager, cloud_id=OTHER_CLOUD_ID.upper()).jira_read(action="get", issue_key="PROJ-1"),
     )
     by_both = json.loads(
-        await _tool(paths, manager, site_url=OTHER_SITE_URL, cloud_id=OTHER_CLOUD_ID).jira_get_issue(
+        await _tool(paths, manager, site_url=OTHER_SITE_URL, cloud_id=OTHER_CLOUD_ID).jira_read(
+            action="get",
             issue_key="PROJ-1",
         ),
     )
     no_confluence = json.loads(
-        await _tool(paths, manager, cloud_id=OTHER_CLOUD_ID).confluence_get_page(page_id="1"),
+        await _tool(paths, manager, cloud_id=OTHER_CLOUD_ID).confluence_read(action="get", page_id="1"),
     )
 
     assert unpinned["code"] == "site_selection_required"
@@ -850,7 +879,7 @@ async def test_every_configured_site_value_must_match(
     ).install(monkeypatch)
 
     result = json.loads(
-        await _tool(paths, manager, site_url=site_url, cloud_id=cloud_id).jira_get_issue(issue_key="PROJ-1"),
+        await _tool(paths, manager, site_url=site_url, cloud_id=cloud_id).jira_read(action="get", issue_key="PROJ-1"),
     )
 
     assert result["code"] == "site_not_found"
@@ -876,7 +905,7 @@ async def test_rejected_access_token_returns_reconnect_link(
         lambda _request: httpx.Response(401, json=body) if body is not None else httpx.Response(401),
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["oauth_connection_required"] is True
     assert result["reason"] == "access_rejected"
@@ -896,7 +925,7 @@ async def test_scope_mismatch_is_reported_without_a_reconnect_link(
         lambda _request: httpx.Response(401, json={"code": 401, "message": "Unauthorized; scope does not match"}),
     )
 
-    result = json.loads(await tool.confluence_search(cql="type = page"))
+    result = json.loads(await tool.confluence_read(action="search", cql="type = page"))
 
     assert result["code"] == "scope_mismatch"
     assert result["status_code"] == 401
@@ -925,7 +954,7 @@ async def test_api_errors_keep_messages_but_drop_bodies_urls_and_tokens(
         ),
     )
 
-    result = json.loads(await tool.jira_create_issue(project_key="PROJ", summary="x"))
+    result = json.loads(await tool.jira_write(action="create", project_key="PROJ", summary="x"))
 
     assert result["code"] == "invalid_request"
     assert result["status_code"] == 400
@@ -954,7 +983,7 @@ async def test_api_redirects_are_reported_instead_of_followed(tmp_path: Path, mo
         lambda _request: httpx.Response(302, headers={"location": "https://evil.example.com/steal"}),
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     assert (result["code"], result["status_code"]) == ("atlassian_error", 302)
     assert [request.url.host for request in gateway.product_requests()] == ["api.atlassian.com"]
@@ -994,7 +1023,7 @@ async def test_api_response_bodies_are_bounded(
         lambda _request: httpx.Response(status_code, headers=headers, content=_chunks(body[:600], body[600:])),
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     code, messages = expected
     assert len(gateway.product_requests()) == 1
@@ -1023,7 +1052,7 @@ async def test_api_calls_have_an_overall_deadline(tmp_path: Path, monkeypatch: p
         lambda _request: httpx.Response(200, content=trickle()),
     )
 
-    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["code"] == "request_timeout"
 
@@ -1039,7 +1068,7 @@ async def test_transport_errors_report_only_the_failure_type(tmp_path: Path, mon
 
     gateway.route("GET", gateway_url("jira", "/rest/api/3/issue/PROJ-1"), failing)
 
-    result = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
+    result = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
 
     assert result["code"] == "request_failed"
     assert result["message"] == "The Atlassian request failed (ConnectError)."
@@ -1056,7 +1085,7 @@ async def test_jira_search_flags_pages_without_a_usable_token(tmp_path: Path, mo
         {"issues": [], "nextPageToken": "bad token", "isLast": False},
     )
 
-    result = json.loads(await tool.jira_search_issues(jql="project = PROJ"))
+    result = json.loads(await tool.jira_read(action="search", jql="project = PROJ"))
 
     assert (result["has_more"], result["next_page_token"]) == (True, None)
     assert "incomplete" in result["warning"]
@@ -1068,7 +1097,7 @@ async def test_comment_line_endings_are_normalized(tmp_path: Path, monkeypatch: 
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route("POST", gateway_url("jira", "/rest/api/3/issue/PROJ-3/comment"), {"id": "901"})
 
-    await tool.jira_add_comment(issue_key="PROJ-3", comment="First\r\nline\r\n\r\nSecond")
+    await tool.jira_write(action="comment", issue_key="PROJ-3", comment="First\r\nline\r\n\r\nSecond")
 
     assert json_body(gateway.product_requests()[0])["body"]["content"] == [
         {
@@ -1079,11 +1108,10 @@ async def test_comment_line_endings_are_normalized(tmp_path: Path, monkeypatch: 
     ]
 
 
-@pytest.mark.parametrize("function_name", ["jira_create_issue", "jira_update_issue"])
-def test_extra_fields_accept_any_json_value(tmp_path: Path, function_name: str) -> None:
+def test_extra_fields_accept_any_json_value(tmp_path: Path) -> None:
     """The model-facing schema lets custom fields carry lists, strings, and objects."""
     paths = runtime_paths(tmp_path)
-    function = toolkit_offers(_tool(paths, save_client_config(paths)), function_name)
+    function = toolkit_offers(_tool(paths, save_client_config(paths)), "jira_write")
 
     field_schema = function.parameters["properties"]["fields"]["anyOf"][0]
     assert field_schema == {"type": "object", "additionalProperties": True}
@@ -1102,8 +1130,8 @@ async def test_one_site_listed_per_product_counts_as_one_site(tmp_path: Path, mo
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search"), {"results": []})
     tool = _tool(paths, manager)
 
-    issue = json.loads(await tool.jira_get_issue(issue_key="PROJ-1"))
-    search = json.loads(await tool.confluence_search(cql="type = page"))
+    issue = json.loads(await tool.jira_read(action="get", issue_key="PROJ-1"))
+    search = json.loads(await tool.confluence_read(action="search", cql="type = page"))
 
     assert issue["status"] == search["status"] == "ok"
 
@@ -1114,7 +1142,7 @@ async def test_missing_page_is_reported_without_guessing(tmp_path: Path, monkeyp
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/content/search"), {"results": []})
 
-    result = json.loads(await tool.confluence_get_page(page_id="404"))
+    result = json.loads(await tool.confluence_read(action="get", page_id="404"))
 
     assert result["code"] == "page_not_found"
     assert "not be indexed by search yet" in result["message"]
@@ -1139,11 +1167,12 @@ async def test_content_that_is_not_a_page_is_named(
         {"results": [{"id": "321", "type": content_type, "title": "News", "body": {"storage": {"value": "<p>x</p>"}}}]},
     )
 
-    result = json.loads(await tool.confluence_get_page(page_id="321"))
+    result = json.loads(await tool.confluence_read(action="get", page_id="321"))
 
     assert result["code"] == "not_a_page"
     assert result["content_type"] == content_type
     assert described in result["message"]
+    assert 'confluence_read(action="get")' in result["message"]
     assert "body_storage" not in result
 
 
@@ -1153,6 +1182,42 @@ async def test_numeric_issue_ids_get_no_browse_link(tmp_path: Path, monkeypatch:
     tool, gateway = _connected(tmp_path, monkeypatch)
     gateway.route("PUT", gateway_url("jira", "/rest/api/3/issue/10001"))
 
-    result = json.loads(await tool.jira_update_issue(issue_key="10001", summary="Renamed"))
+    result = json.loads(await tool.jira_write(action="update", issue_key="10001", summary="Renamed"))
 
     assert result["issue"] == {"key": "10001", "id": None, "url": None}
+
+
+def test_atlassian_meta_schema_opt_outs_and_product_filtering(tmp_path: Path) -> None:
+    """Read functions opt into background/output meta-schemas; write functions opt out; filters omit disabled ones."""
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    paths = runtime_paths(tmp_path)
+    manager = save_client_config(paths)
+    offered = {fn.name: fn for fn in adapt_toolkit(_tool(paths, manager)).functions}
+    assert set(offered) == {"jira_read", "jira_write", "confluence_read", "confluence_write"}
+    for name in ("jira_read", "confluence_read"):
+        assert offered[name].offer_background_after is True
+        assert offered[name].offer_output_path is True
+    for name in ("jira_write", "confluence_write"):
+        assert offered[name].offer_background_after is False
+        assert offered[name].offer_output_path is False
+
+    read_only = {
+        fn.name
+        for fn in adapt_toolkit(AtlassianTools(runtime_paths=paths, credentials_manager=manager, write=False)).functions
+    }
+    assert read_only == {"jira_read", "confluence_read"}
+    no_jira = {
+        fn.name
+        for fn in adapt_toolkit(
+            AtlassianTools(runtime_paths=paths, credentials_manager=manager, jira_spaces=[]),
+        ).functions
+    }
+    assert no_jira == {"confluence_read", "confluence_write"}
+    no_confluence = {
+        fn.name
+        for fn in adapt_toolkit(
+            AtlassianTools(runtime_paths=paths, credentials_manager=manager, confluence_spaces=[]),
+        ).functions
+    }
+    assert no_confluence == {"jira_read", "jira_write"}

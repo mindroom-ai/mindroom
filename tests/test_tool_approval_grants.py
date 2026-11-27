@@ -3346,3 +3346,287 @@ def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) ->
         runtime_paths,
     )
     assert valid.agents["a"].tools[0].overrides == {"exclude_tools": ["view_file"]}
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "tool_name", "actions"),
+    [
+        ("atlassian", "jira_read", ("search", "get")),
+        ("atlassian", "jira_write", ("create", "update", "comment", "transition")),
+        ("atlassian", "confluence_read", ("search", "get", "list_attachments", "download_attachment")),
+        ("atlassian", "confluence_write", ("create", "update", "comment")),
+        ("slack", "slack_read", ("search", "recent", "read", "download")),
+        ("slack", "slack_send", ("post", "upload")),
+        ("slack", "slack_manage", ("edit", "delete", "react")),
+    ],
+)
+def test_atlassian_and_slack_action_scoped_grants_bind_per_action(
+    toolkit_name: str,
+    tool_name: str,
+    actions: tuple[str, ...],
+) -> None:
+    """Consolidated Atlassian and Slack tools bind timed approval grants per action."""
+    registry = builtin_tool_registry()
+    assert tool_name in registry.entries[toolkit_name].action_scoped_grants
+    config = Config()
+    ops = [
+        grant_operation(config, tool_name, {"action": action}, tools=registry, toolkit_name=toolkit_name)
+        for action in actions
+    ]
+    assert all(op is not None for op in ops)
+    assert len({op.key for op in ops if op is not None}) == len(actions)
+    assert grant_operation(config, tool_name, {}, tools=registry, toolkit_name=toolkit_name) is None
+
+
+@pytest.mark.parametrize(
+    ("tools", "rules", "error_pattern"),
+    [
+        (
+            ["atlassian"],
+            [{"match": "jira_create_issue", "action": "require_approval"}],
+            r"jira_create_issue.*jira_write",
+        ),
+        (["atlassian"], [{"match": "jira_*", "script": "check.py"}], r"check\.py.*jira_"),
+        (
+            ["atlassian"],
+            [
+                {"match": "jira_read", "script": "check.py"},
+                {"match": "jira_write", "script": "check.py"},
+                {"match": "jira_*", "script": "check.py"},
+            ],
+            None,
+        ),
+        (
+            ["slack"],
+            [
+                {"match": "slack_read", "action": "auto_approve"},
+                {"match": "slack_download", "action": "require_approval"},
+            ],
+            r"slack_download.*slack_read",
+        ),
+        (
+            ["slack"],
+            [
+                {"match": "slack_send", "action": "auto_approve"},
+                {"match": "slack_post", "action": "require_approval"},
+            ],
+            r"slack_post.*slack_send",
+        ),
+        (
+            ["slack"],
+            [
+                {"match": "slack_read", "action": "auto_approve"},
+                {"match": "slack_*", "action": "require_approval"},
+            ],
+            None,
+        ),
+        (["slack"], [{"match": "slack_*", "script": "check.py"}], r"check\.py.*slack_"),
+        (
+            ["slack"],
+            [
+                {"match": "slack_read", "script": "check.py"},
+                {"match": "slack_send", "script": "check.py"},
+                {"match": "slack_manage", "script": "check.py"},
+                {"match": "slack_*", "script": "check.py"},
+            ],
+            None,
+        ),
+    ],
+)
+def test_atlassian_and_slack_retired_approval_rules_fail_closed(
+    tmp_path: Path,
+    tools: list[str],
+    rules: list[dict[str, str]],
+    error_pattern: str | None,
+) -> None:
+    """Retired Atlassian/Slack approval rules, Slack name-reuse conflicts, and wildcard scripts fail closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"default": "auto_approve", "rules": rules},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert len(loaded.tool_approval.rules) == len(rules)
+
+
+def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_path: Path) -> None:
+    """Prefixed Atlassian connections get action-scoped grants and filtered fail-closed rules/overrides."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+
+    plugin_root = tmp_path / "plugins" / "partner_atlassian"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "partner_atlassian",
+                "mindroom_plugin_api": "1.35",
+                "tools_module": "tools.py",
+                "oauth_module": "oauth.py",
+            },
+        ),
+        encoding="utf-8",
+    )
+    connections_def = (
+        "from mindroom.tool_system.atlassian_connections import AtlassianConnectionConfig\n"
+        "PARTNER = AtlassianConnectionConfig(\n"
+        "    name='partner',\n"
+        "    display_name='Partner Confluence',\n"
+        "    site_url='https://partner.atlassian.net',\n"
+        "    products=('confluence',),\n"
+        "    write=True,\n"
+        ")\n"
+        "ARCHIVE = AtlassianConnectionConfig(\n"
+        "    name='archive',\n"
+        "    display_name='Archive Atlassian',\n"
+        "    site_url='https://archive.atlassian.net',\n"
+        "    write=False,\n"
+        ")\n"
+    )
+    (plugin_root / "oauth.py").write_text(
+        connections_def
+        + "from mindroom.tool_system.atlassian_connections import atlassian_connection_oauth_provider\n"
+        + "def register_oauth_providers():\n"
+        + "    return [atlassian_connection_oauth_provider(PARTNER), atlassian_connection_oauth_provider(ARCHIVE)]\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        connections_def
+        + "from mindroom.tool_system.atlassian_connections import register_atlassian_connection_tools\n"
+        + "register_atlassian_connection_tools(PARTNER)\n"
+        + "register_atlassian_connection_tools(ARCHIVE)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    def _cfg(tools: list[object], rules: list[dict[str, str]] | None = None) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            "plugins": [str(plugin_root)],
+            "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        }
+        if rules is not None:
+            payload["tool_approval"] = {"default": "auto_approve", "rules": rules}
+        return payload
+
+    # Single-product partner_atlassian fails closed on retired Confluence names and wildcard scripts,
+    # but does NOT complain about non-existent Jira functions.
+    with pytest.raises(ConfigRuntimeValidationError, match="partner_confluence_write"):
+        Config.validate_with_runtime(
+            _cfg(["partner_atlassian"], [{"match": "partner_confluence_create_page", "action": "require_approval"}]),
+            runtime_paths,
+        )
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*partner_confluence_"):
+        Config.validate_with_runtime(
+            _cfg(["partner_atlassian"], [{"match": "partner_confluence_*", "script": "check.py"}]),
+            runtime_paths,
+        )
+    Config.validate_with_runtime(
+        _cfg(["partner_atlassian"], [{"match": "partner_jira_search_issues", "action": "require_approval"}]),
+        runtime_paths,
+    )
+
+    # Read-only archive_atlassian fails closed on retired read names, but does NOT ask for non-existent write rules.
+    with pytest.raises(ConfigRuntimeValidationError, match="archive_jira_read"):
+        Config.validate_with_runtime(
+            _cfg(["archive_atlassian"], [{"match": "archive_jira_search_issues", "action": "require_approval"}]),
+            runtime_paths,
+        )
+    loaded = Config.validate_with_runtime(
+        _cfg(
+            ["partner_atlassian", "archive_atlassian"],
+            [
+                {"match": "archive_jira_create_issue", "action": "require_approval"},
+                {"match": "archive_jira_read", "script": "check.py"},
+                {"match": "archive_confluence_read", "script": "check.py"},
+                {"match": "archive_*", "script": "check.py"},
+            ],
+        ),
+        runtime_paths,
+    )
+
+    # include_tools / exclude_tools fail closed for prefixed retired functions and allow canonical ones.
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"partner_atlassian\.include_tools.*partner_confluence_read",
+    ):
+        Config.validate_with_runtime(
+            _cfg([{"partner_atlassian": {"include_tools": ["partner_confluence_search"]}}]),
+            runtime_paths,
+        )
+    Config.validate_with_runtime(
+        _cfg([{"partner_atlassian": {"include_tools": ["partner_confluence_read"]}}]),
+        runtime_paths,
+    )
+
+    # Action-scoped grants bind per action for prefixed functions.
+    registry = refresh_plugins(loaded, runtime_paths).tools
+    assert registry.entries["partner_atlassian"].action_scoped_grants == (
+        "partner_confluence_read",
+        "partner_confluence_write",
+    )
+    assert registry.entries["archive_atlassian"].action_scoped_grants == (
+        "archive_jira_read",
+        "archive_confluence_read",
+    )
+    get_op = grant_operation(
+        loaded,
+        "partner_confluence_read",
+        {"action": "get"},
+        tools=registry,
+        toolkit_name="partner_atlassian",
+    )
+    dl_op = grant_operation(
+        loaded,
+        "partner_confluence_read",
+        {"action": "download_attachment"},
+        tools=registry,
+        toolkit_name="partner_atlassian",
+    )
+    assert get_op is not None
+    assert dl_op is not None
+    assert get_op.key != dl_op.key
+
+
+@pytest.mark.parametrize(
+    ("tool_entry", "error_pattern"),
+    [
+        ({"atlassian": {"include_tools": ["jira_search_issues"]}}, r"atlassian\.include_tools.*jira_read"),
+        ({"atlassian": {"exclude_tools": ["confluence_update_page"]}}, r"atlassian\.exclude_tools.*confluence_write"),
+        ({"slack": {"include_tools": ["slack_post"]}}, r"slack\.include_tools.*slack_send"),
+        ({"slack": {"exclude_tools": ["slack_download"]}}, r"slack\.exclude_tools.*slack_read"),
+        ({"slack": {"exclude_tools": ["slack_watch"]}}, r"subscribe_event"),
+        ({"atlassian": {"exclude_tools": ["jira_write"]}}, None),
+        ({"slack": {"include_tools": ["slack_read"]}}, None),
+    ],
+)
+def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(
+    tmp_path: Path,
+    tool_entry: dict[str, object],
+    error_pattern: str | None,
+) -> None:
+    """include_tools/exclude_tools naming retired Atlassian/Slack functions fail fast with replacement guidance."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    Config.validate_with_runtime(data, runtime_paths)

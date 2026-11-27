@@ -185,7 +185,11 @@ def test_plugin_registers_prefixed_tools_and_providers_beside_the_builtin(tmp_pa
     assert partner.requires_primary_runtime is True
     assert partner.function_names == atlassian_function_names(("confluence",), prefix="partner_")
     assert archive.function_names == atlassian_function_names(write=False, prefix="archive_")
-    assert not any("create" in name or "update" in name for name in archive.function_names)
+    assert not any(name.endswith("_write") for name in archive.function_names)
+    assert partner.action_scoped_grants == partner.function_names
+    assert archive.action_scoped_grants == archive.function_names
+    assert set(partner.retired_functions.values()) == set(partner.function_names)
+    assert set(archive.retired_functions.values()) == set(archive.function_names)
     assert plugins.tools.entries["atlassian"].function_names == builtin_functions
     assert {"atlassian", "partner_atlassian", "archive_atlassian"} <= set(providers)
     assert providers["archive_atlassian"].shared_client_config_services == ("archive_atlassian_oauth_client",)
@@ -208,13 +212,13 @@ def test_connection_toolkit_exposes_only_its_prefixed_functions(tmp_path: Path) 
         paths,
         worker_target=worker_target(),
         runs_in_worker=False,
-        tool_config_overrides={"include_tools": ["partner_confluence_search"]},
+        tool_config_overrides={"include_tools": ["partner_confluence_read"]},
         tools=plugins.tools,
     )
 
     assert tuple(tool.functions) == plugins.tools.entries["partner_atlassian"].function_names
     assert tool.name == "partner_atlassian"
-    assert set(toolkit_function_names(filtered)) == {"partner_confluence_search"}
+    assert set(toolkit_function_names(filtered)) == {"partner_confluence_read"}
 
 
 @pytest.mark.asyncio
@@ -296,7 +300,12 @@ async def test_default_grant_never_authorizes_another_connection(
     )
 
     plugins = publish_test_plugins(config, paths)
-    result = await _call(_build("partner_atlassian", plugins), "partner_confluence_search", cql="type = page")
+    result = await _call(
+        _build("partner_atlassian", plugins),
+        "partner_confluence_read",
+        action="search",
+        cql="type = page",
+    )
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "partner_atlassian"
@@ -335,10 +344,11 @@ async def test_each_connection_uses_only_its_own_token_and_pinned_site(
     )
     partner_result = await _call(
         _build("partner_atlassian", plugins),
-        "partner_confluence_search",
+        "partner_confluence_read",
+        action="search",
         cql="type = page",
     )
-    default_result = await _call(default, "confluence_search", cql="type = page")
+    default_result = await _call(default, "confluence_read", action="search", cql="type = page")
 
     assert partner_result["site"]["cloud_id"] == OTHER_CLOUD_ID
     assert default_result["site"]["cloud_id"] == CLOUD_ID
@@ -359,7 +369,12 @@ async def test_connection_never_falls_back_to_another_reachable_site(
 
     plugins = publish_test_plugins(config, paths)
     publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
-    result = await _call(_build("partner_atlassian", plugins), "partner_confluence_search", cql="type = page")
+    result = await _call(
+        _build("partner_atlassian", plugins),
+        "partner_confluence_read",
+        action="search",
+        cql="type = page",
+    )
 
     assert result["code"] == "site_not_found"
     assert result["configured_cloud_id"] == OTHER_CLOUD_ID
@@ -377,7 +392,8 @@ async def test_requesters_never_share_a_connection(tmp_path: Path, monkeypatch: 
     publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
     result = await _call(
         _build("partner_atlassian", plugins, requester_id="@bob:example.org"),
-        "partner_confluence_get_page",
+        "partner_confluence_read",
+        action="get",
         page_id="1",
     )
 
@@ -407,7 +423,7 @@ async def test_connection_tools_take_space_limits_for_their_own_products(
     )
     assert isinstance(tool, AtlassianToolkit)
 
-    await _call(tool, "partner_confluence_search", cql="type = page")
+    await _call(tool, "partner_confluence_read", action="search", cql="type = page")
 
     assert gateway.product_requests()[0].url.params["cql"] == 'space in ("DOCS") AND (type = page)'
     assert tuple(tool.functions) == atlassian_function_names(("confluence",), write=False, prefix="partner_")
@@ -495,7 +511,7 @@ async def test_shared_connection_follows_the_agent_worker_scope(
         )
         assert isinstance(tool, AtlassianToolkit)
         assert ("currentUser() in JQL or CQL is that account" in (tool.instructions or "")) is bob_served
-        result = await _call(tool, "team_confluence_search", cql="type = page")
+        result = await _call(tool, "team_confluence_read", action="search", cql="type = page")
         if result.get("oauth_connection_required"):
             return False
         assert result["site"]["cloud_id"] == OTHER_CLOUD_ID

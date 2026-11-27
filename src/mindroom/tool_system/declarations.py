@@ -158,6 +158,7 @@ class ToolValidationInfo:
     requires_primary_runtime: bool = False
     runtime_loadable: bool = True
     unavailable_due_to_plugin_load_error: bool = False
+    retired_functions: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

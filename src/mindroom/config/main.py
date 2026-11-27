@@ -1763,6 +1763,7 @@ class Config(BaseModel):
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
                     renames=renames,
+                    reject_wildcard_scripts=True if declared_renames and toolkit_name.endswith("_atlassian") else None,
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)

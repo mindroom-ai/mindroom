@@ -168,6 +168,7 @@ class ToolRegistry:
                 requires_primary_runtime=metadata.requires_primary_runtime,
                 runtime_loadable=tool_name in self.entries and metadata.factory is not None,
                 unavailable_due_to_plugin_load_error=tool_name in self.unavailable,
+                retired_functions=dict(metadata.retired_functions),
             )
             for tool_name, metadata in {**self.entries, **self.unavailable}.items()
         }

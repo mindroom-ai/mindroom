@@ -98,21 +98,8 @@ if TYPE_CHECKING:
         "Each user connects their own Atlassian account. "
         "Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in the atlassian_oauth_client credential service."
     ),
-    function_names=(
-        "jira_search_issues",
-        "jira_get_issue",
-        "jira_create_issue",
-        "jira_update_issue",
-        "jira_add_comment",
-        "jira_transition_issue",
-        "confluence_search",
-        "confluence_get_page",
-        "confluence_list_attachments",
-        "confluence_download_attachment",
-        "confluence_create_page",
-        "confluence_update_page",
-        "confluence_add_comment",
-    ),
+    function_names=("jira_read", "jira_write", "confluence_read", "confluence_write"),
+    action_scoped_grants=("jira_read", "jira_write", "confluence_read", "confluence_write"),
 )
 def atlassian_tools() -> type[AtlassianTools]:
     """Return Jira and Confluence Cloud tools for the default Atlassian connection."""

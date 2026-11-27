@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.oauth.atlassian import (
     ATLASSIAN_PRODUCTS,
     AtlassianProduct,
@@ -152,6 +153,14 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
     products = " and ".join(product.capitalize() for product in connection.products)
     # Only the space limits of the connection's own products.
     space_fields = {f"{product}_spaces" for product in connection.products}
+    prefix = f"{connection.name}_"
+    names = atlassian_function_names(connection.products, write=connection.write, prefix=prefix)
+    name_set = set(names)
+    retired_functions = {
+        f"{prefix}{old}": f"{prefix}{new}"
+        for old, new in RETIRED_CONSOLIDATED_FUNCTIONS["atlassian"].items()
+        if f"{prefix}{new}" in name_set
+    }
     register_tool_with_metadata(
         name=connection.provider_id,
         display_name=connection.display_name,
@@ -179,9 +188,7 @@ def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -
             )
             + f"Store the Atlassian OAuth 2.0 (3LO) app client ID and secret in {connection.oauth_client_service}."
         ),
-        function_names=atlassian_function_names(
-            connection.products,
-            write=connection.write,
-            prefix=f"{connection.name}_",
-        ),
+        function_names=names,
+        action_scoped_grants=names,
+        retired_functions=retired_functions,
     )(_connection_tool_factory(connection))

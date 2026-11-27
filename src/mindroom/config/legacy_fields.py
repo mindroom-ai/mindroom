@@ -893,8 +893,36 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "register_attachment": "attachment",
         "inline_image": "attachment",
     },
+    "atlassian": {
+        "jira_search_issues": "jira_read",
+        "jira_get_issue": "jira_read",
+        "jira_create_issue": "jira_write",
+        "jira_update_issue": "jira_write",
+        "jira_add_comment": "jira_write",
+        "jira_transition_issue": "jira_write",
+        "confluence_search": "confluence_read",
+        "confluence_get_page": "confluence_read",
+        "confluence_list_attachments": "confluence_read",
+        "confluence_download_attachment": "confluence_read",
+        "confluence_create_page": "confluence_write",
+        "confluence_update_page": "confluence_write",
+        "confluence_add_comment": "confluence_write",
+    },
+    "slack": {
+        "slack_search": "slack_read",
+        "slack_recent": "slack_read",
+        "slack_download": "slack_read",
+        "slack_post": "slack_send",
+        "slack_upload": "slack_send",
+        "slack_react": "slack_manage",
+        "slack_edit": "slack_manage",
+        "slack_delete": "slack_manage",
+    },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments", "atlassian", "slack"})
+# Synthetic probe matching broad globs like `slack_*` without matching any retired Slack function name,
+# so explicit retired rules (e.g. `slack_download` or `slack_post`) still conflict with reused `slack_read`/`slack_send`.
+_BROAD_PROBE_BY_TOOLKIT: dict[str, str] = {"slack": "slack__probe"}
 
 
 def _effective_approval_decision(
@@ -1020,6 +1048,7 @@ def retired_slack_watch_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        # Probe historical broad globs like `slack_*` without matching `slack_w*`.
         broad_probe="slack_post",
     )
 
@@ -1030,6 +1059,9 @@ def retired_consolidated_approval_error(
     default: str,
     default_timeout_days: float = 7.0,
     renames: Mapping[str, str] | None = None,
+    *,
+    reject_wildcard_scripts: bool | None = None,
+    broad_probe: str | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
@@ -1040,7 +1072,12 @@ def retired_consolidated_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=toolkit_name in _STRICT_WILDCARD_SCRIPT_TOOLKITS,
+        reject_wildcard_scripts=(
+            toolkit_name in _STRICT_WILDCARD_SCRIPT_TOOLKITS
+            if reject_wildcard_scripts is None
+            else reject_wildcard_scripts
+        ),
+        broad_probe=_BROAD_PROBE_BY_TOOLKIT.get(toolkit_name) if broad_probe is None else broad_probe,
     )
 
 
@@ -1097,15 +1134,39 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     )
 
 
+def _retired_consolidated_filter_guidance(tool_name: str, key: str, new: str) -> str:
+    return (
+        f"use `{tool_name}: {{{key}: [{new}]}}` "
+        f"(or `tool_approval.rules` matching `{new}` if per-action gating is needed)"
+    )
+
+
 def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first retired Slack function filter in ``settings``, and its migration guidance."""
+    if (
+        retired := _retired_function_filter(
+            settings,
+            _RETIRED_SLACK_FUNCTIONS,
+            guidance_for=lambda _key, _new: (
+                '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
+                "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
+            ),
+        )
+    ) is not None:
+        return retired
     return _retired_function_filter(
         settings,
-        _RETIRED_SLACK_FUNCTIONS,
-        guidance_for=lambda _key, _new: (
-            '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
-            "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
-        ),
+        RETIRED_CONSOLIDATED_FUNCTIONS["slack"],
+        guidance_for=lambda key, new: _retired_consolidated_filter_guidance("slack", key, new),
+    )
+
+
+def _retired_atlassian_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired Atlassian function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_CONSOLIDATED_FUNCTIONS["atlassian"],
+        guidance_for=lambda key, new: _retired_consolidated_filter_guidance("atlassian", key, new),
     )
 
 
@@ -1113,15 +1174,33 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
     "filesystem": retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
+    "atlassian": _retired_atlassian_setting,
     "slack": _retired_slack_setting,
 }
 
 
-def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
+def retired_tool_override(
+    tool_name: str,
+    overrides: Mapping[str, object],
+    *,
+    retired_functions: Mapping[str, str] | None = None,
+) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None and (
         retired := checker(overrides)
     ) is not None:
+        return retired
+    if (
+        retired_functions
+        and (
+            retired := _retired_function_filter(
+                overrides,
+                retired_functions,
+                guidance_for=lambda key, new: _retired_consolidated_filter_guidance(tool_name, key, new),
+            )
+        )
+        is not None
+    ):
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

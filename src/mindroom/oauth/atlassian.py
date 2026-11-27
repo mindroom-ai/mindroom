@@ -32,48 +32,25 @@ class _AtlassianFunction:
 # Confluence page and comment writes exist only in the v2 API, which accepts granular scopes only.
 # An agent limited to some spaces reads an item's space before changing or downloading it.
 _ATLASSIAN_FUNCTIONS = (
-    _AtlassianFunction("jira_search_issues", "jira", writes=False, scopes=("read:jira-work",)),
-    _AtlassianFunction("jira_get_issue", "jira", writes=False, scopes=("read:jira-work",)),
-    _AtlassianFunction("jira_create_issue", "jira", writes=True, scopes=("write:jira-work",)),
-    _AtlassianFunction("jira_update_issue", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
-    _AtlassianFunction("jira_add_comment", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
-    _AtlassianFunction("jira_transition_issue", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
-    _AtlassianFunction("confluence_search", "confluence", writes=False, scopes=("search:confluence",)),
+    _AtlassianFunction("jira_read", "jira", writes=False, scopes=("read:jira-work",)),
+    _AtlassianFunction("jira_write", "jira", writes=True, scopes=("read:jira-work", "write:jira-work")),
     _AtlassianFunction(
-        "confluence_get_page",
-        "confluence",
-        writes=False,
-        scopes=("search:confluence", "read:confluence-content.all"),
-    ),
-    _AtlassianFunction(
-        "confluence_list_attachments",
-        "confluence",
-        writes=False,
-        scopes=("search:confluence", "read:confluence-content.all"),
-    ),
-    _AtlassianFunction(
-        "confluence_download_attachment",
+        "confluence_read",
         "confluence",
         writes=False,
         scopes=("search:confluence", "read:confluence-content.all", "readonly:content.attachment:confluence"),
     ),
     _AtlassianFunction(
-        "confluence_create_page",
+        "confluence_write",
         "confluence",
         writes=True,
-        scopes=("search:confluence", "read:confluence-content.all", "read:space:confluence", "write:page:confluence"),
-    ),
-    _AtlassianFunction(
-        "confluence_update_page",
-        "confluence",
-        writes=True,
-        scopes=("search:confluence", "read:confluence-content.all", "write:page:confluence"),
-    ),
-    _AtlassianFunction(
-        "confluence_add_comment",
-        "confluence",
-        writes=True,
-        scopes=("search:confluence", "read:confluence-content.all", "write:comment:confluence"),
+        scopes=(
+            "search:confluence",
+            "read:confluence-content.all",
+            "read:space:confluence",
+            "write:page:confluence",
+            "write:comment:confluence",
+        ),
     ),
 )
 

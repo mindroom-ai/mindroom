@@ -13,9 +13,9 @@ tool_approval:
   default: auto_approve
   timeout_days: 7
   rules:
-    - match: slack_post
+    - match: slack_send
       action: require_approval
-    - match: slack_react
+    - match: slack_manage
       action: require_approval
     - match: run_shell_command
       script: ./approval_scripts/shell_review.py

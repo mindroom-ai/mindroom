@@ -91,7 +91,7 @@ def _file(
 async def _download(tool: AtlassianTools, context: ToolRuntimeContext, **kwargs: str) -> dict[str, object]:
     with tool_runtime_context(context):
         arguments = {"page_id": "123", "attachment_id": "att456", **kwargs}
-        return json.loads(await tool.confluence_download_attachment(**arguments))
+        return json.loads(await tool.confluence_read(action="download_attachment", **arguments))
 
 
 def _download_requests(gateway: FakeGateway) -> list[httpx.Request]:
@@ -121,7 +121,7 @@ async def test_list_attachments_reports_metadata_and_next_cursor(
         },
     )
 
-    result = json.loads(await tool.confluence_list_attachments(page_id="123", limit=99))
+    result = json.loads(await tool.confluence_read(action="list_attachments", page_id="123", limit=99))
 
     params = gateway.product_requests()[0].url.params
     assert params["cql"] == "type = attachment AND container = 123"
@@ -160,7 +160,7 @@ async def test_list_attachments_flags_pages_without_a_usable_cursor(
     tool, gateway, _context, _paths = _setup(tmp_path, monkeypatch)
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/content/search"), {"results": [], "_links": links})
 
-    result = json.loads(await tool.confluence_list_attachments(page_id="123"))
+    result = json.loads(await tool.confluence_read(action="list_attachments", page_id="123"))
 
     assert (result["has_more"], result["next_cursor"], "warning" in result) == expected
 
@@ -176,7 +176,9 @@ async def test_download_registers_a_turn_scoped_context_attachment(
     gateway.route("GET", MEDIA_URL.split("?", maxsplit=1)[0], _file())
 
     with tool_runtime_context(context):
-        result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="456"))
+        result = json.loads(
+            await tool.confluence_read(action="download_attachment", page_id="123", attachment_id="456"),
+        )
         current = get_tool_runtime_context()
         assert current is not None
         available = list_tool_runtime_attachment_ids(current)
@@ -651,7 +653,7 @@ async def test_download_requires_attachment_storage_before_network(
     """Without a conversation context there is nowhere safe to put the file, so nothing is fetched."""
     tool, gateway, _context, _paths = _setup(tmp_path, monkeypatch)
 
-    result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="att456"))
+    result = json.loads(await tool.confluence_read(action="download_attachment", page_id="123", attachment_id="att456"))
 
     assert result["code"] == "attachment_context_unavailable"
     assert gateway.requests == []
@@ -865,7 +867,9 @@ async def test_failed_storage_is_reported(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(atlassian_module, "register_bytes_attachment", lambda *_args, **_kwargs: None)
 
     with tool_runtime_context(context):
-        result = json.loads(await tool.confluence_download_attachment(page_id="123", attachment_id="att456"))
+        result = json.loads(
+            await tool.confluence_read(action="download_attachment", page_id="123", attachment_id="att456"),
+        )
         current = get_tool_runtime_context()
         assert current is not None
         assert list_tool_runtime_attachment_ids(current) == []

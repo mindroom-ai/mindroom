@@ -376,7 +376,7 @@ async def _upload_to_slack(
     paths = slack_runtime_paths(tmp_path)
     connect_slack_requester(paths)
     tool = slack_tools(paths, tool_output_workspace_root=workspace, file_access=file_access)
-    result = json.loads(await tool.slack_upload(raw_path, CHANNEL))
+    result = json.loads(await tool.slack_send("upload", CHANNEL, path=raw_path))
     uploaded = [request.content for request in slack.requests if str(request.url) == UPLOAD_URL]
     return result["status"] == "ok" and uploaded == [_PNG]
 
@@ -390,7 +390,7 @@ _PROBES = (
     # These check and read uploads through the shared upload helpers.
     _ToolProbe("microsoft_files", "upload_file", _upload_to_microsoft_files, file_access_module),
     _ToolProbe("outlook_mail", "attachments", _attach_with_outlook_mail, file_access_module),
-    _ToolProbe("slack", "slack_upload", _upload_to_slack, file_access_module),
+    _ToolProbe("slack", "slack_send", _upload_to_slack, file_access_module),
     _ToolProbe("browser", "upload", _upload_in_browser, browser_module),
     _ToolProbe("e2b", "e2b_files", _upload_to_e2b, e2b_module),
     _ToolProbe("openai", "transcribe_audio", _transcribe_with_openai, openai_module),

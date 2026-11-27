@@ -290,7 +290,11 @@ def validate_authored_tool_entry_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    retired = retired_tool_override(tool_name, overrides)
+    retired = retired_tool_override(
+        tool_name,
+        overrides,
+        retired_functions=getattr(metadata, "retired_functions", None),
+    )
     if retired is not None:
         field_name, guidance = retired
         path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
@@ -1045,6 +1049,7 @@ def serialize_tool_validation_snapshot(
             "requires_primary_runtime": info.requires_primary_runtime,
             "runtime_loadable": info.runtime_loadable,
             "unavailable_due_to_plugin_load_error": info.unavailable_due_to_plugin_load_error,
+            "retired_functions": dict(info.retired_functions),
         }
         for tool_name, info in sorted(tool_validation_snapshot.items())
     }
@@ -1129,6 +1134,12 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
                 ("supports_toolkit_filters", False),
             )
         }
+        raw_retired = raw_info_mapping.get("retired_functions", {})
+        if not isinstance(raw_retired, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in raw_retired.items()
+        ):
+            msg = f"Tool validation snapshot entry for '{tool_name}' must set retired_functions to a string mapping."
+            raise TypeError(msg)
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1141,6 +1152,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             ),
             authored_override_validator=authored_override_validator,
             file_access=file_access,
+            retired_functions=dict(raw_retired),
             **flags,
         )
     return snapshot
