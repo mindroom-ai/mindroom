@@ -21,14 +21,14 @@ Workspace-local tools (`run_shell_command`, `filesystem`, `skill`, `view_file`, 
 
 ## Usage
 
-MindRoom logs are routed to `stderr` at `WARNING` by default so `stdout` is a clean Markdown table; pass `-v`/`--verbose` for full MindRoom logs on `stderr`.
+MindRoom logs are routed to `stderr` at `WARNING` by default so `stdout` is a clean Markdown table; pass `-v`/`--verbose` for full MindRoom logs on `stderr`. On a fresh environment, pass `--extra browser` to `uv run` so the `browser_control` toolkit is available.
 
 ```bash
 # Configured models from ~/.mindroom-chat/config.yaml:
-uv run python -m evals.tool_calling.run --model inkling-2:mini-vllm --model gemma4
+uv run --extra browser python -m evals.tool_calling.run --model inkling-2:mini-vllm --model gemma4
 
 # Local OpenAI-compatible server + OpenRouter baselines:
-uv run python -m evals.tool_calling.run \
+uv run --extra browser python -m evals.tool_calling.run \
   --model local:inkling-2:mini-vllm \
   --base-url http://llama.local/v1 \
   --model openrouter:google/gemma-4-31b-it \
@@ -36,7 +36,7 @@ uv run python -m evals.tool_calling.run \
   --out /tmp/tool-calling-eval.json
 
 # Run a subset of cases with custom turn cap:
-uv run python -m evals.tool_calling.run \
+uv run --extra browser python -m evals.tool_calling.run \
   --model local:inkling-2:mini-vllm \
   --cases canvas_dashboard,workflow_runs_check,shell_pipeline_logs \
   --max-turns 5 \

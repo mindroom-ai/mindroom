@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +93,23 @@ def _ends(v: object, suffix: str) -> bool:
     return _str(v) and Path(str(v)).as_posix().endswith(suffix)
 
 
+def parse_future_iso_seconds(raw: object) -> float | None:
+    """Return positive seconds until an ISO-8601 datetime string (naive treated as UTC), or None."""
+    if not isinstance(raw, str):
+        return None
+    s = raw.strip()
+    if not any(sep in s for sep in ("T", "t", " ")):
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    delta = (dt.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+    return delta if delta > 0 else None
+
+
 def _v_canvas(ws: Path, c: Sequence[CallTrace]) -> bool:
     def good(a: dict[str, Any]) -> bool:
         h, p = a.get("html"), a.get("path")
@@ -105,8 +123,18 @@ def _v_canvas(ws: Path, c: Sequence[CallTrace]) -> bool:
 def _v_sched(_ws: Path, c: Sequence[CallTrace]) -> bool:
     def good(a: dict[str, Any]) -> bool:
         d = a.get("delay_seconds")
-        timed = (isinstance(d, int) and not isinstance(d, bool) and 6000 <= d <= 8400) or _str(a.get("execute_at"))
-        return a.get("action") == "create" and _str(a.get("message")) and a.get("new_thread") is False and timed
+        delta = (
+            float(d)
+            if isinstance(d, int) and not isinstance(d, bool)
+            else parse_future_iso_seconds(a.get("execute_at"))
+        )
+        return (
+            a.get("action") == "create"
+            and _str(a.get("message"))
+            and a.get("new_thread") is False
+            and delta is not None
+            and 6000 <= delta <= 8400
+        )
 
     return _ok(c, "scheduler", good)
 
@@ -138,7 +166,7 @@ def _v_calc(ws: Path, c: Sequence[CallTrace]) -> bool:
     bin_dir, base_path = str(Path(sys.executable).parent), os.environ.get("PATH", "")
     env = {"PATH": f"{bin_dir}{os.pathsep}{base_path}" if base_path else bin_dir, "HOME": str(ws)}
     proc = subprocess.run(
-        [sys.executable, "check_calc.py"],
+        [sys.executable, "-B", "-c", _CALC["check_calc.py"]],
         cwd=ws,
         env=env,
         capture_output=True,
@@ -164,7 +192,11 @@ def _v_attach(_ws: Path, c: Sequence[CallTrace]) -> bool:
 
 def _v_view(_ws: Path, c: Sequence[CallTrace]) -> bool:
     viewed = _ok(c, "view_file", lambda a: _ends(a.get("path"), "assets/sample.png"))
-    sent = _ok(c, "matrix_message", lambda a: a.get("action", "send") == "send" and _str(a.get("message")))
+    sent = _ok(
+        c,
+        "matrix_message",
+        lambda a: a.get("action", "send") == "send" and _str(a.get("message")) and not a.get("new_thread"),
+    )
     return viewed and sent
 
 

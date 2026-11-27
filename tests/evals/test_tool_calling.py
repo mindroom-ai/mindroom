@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,8 @@ import pytest
 from evals.tool_calling.cases import CASES, CASES_BY_ID, CallTrace, EvalCase, _v_calc
 from evals.tool_calling.harness import CaseResult, _collect_traces, evaluate_case, has_shell_argv_syntax
 from evals.tool_calling.run import resolve_provider, run_cli
+from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import (
     Capabilities,
@@ -25,6 +28,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.pipeline.fallback import fallback_stream
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 
@@ -49,6 +53,10 @@ def _call(name: str, /, **kw: object) -> dict[str, Any]:
 
 def _ct(target: str, /, **kw: object) -> dict[str, Any]:
     return _tc("call_tool", {"name": target, "arguments": kw})
+
+
+def _sched(**kw: object) -> dict[str, Any]:
+    return _ct("scheduler", action="create", message="Check", **kw)
 
 
 @dataclass
@@ -106,26 +114,30 @@ async def _run(case_id: str, *turns: _Step, max_turns: int = 6) -> CaseResult:
     return await evaluate_case(CASES_BY_ID[case_id], _ScriptedProvider([*turns, "Done."]), max_turns=max_turns)
 
 
+def _unwrap(provider: object) -> tuple[object, list[object]]:
+    stages: list[object] = []
+    while isinstance(provider, WrappedProvider):
+        stages.append(provider.stage.func if isinstance(provider.stage, partial) else provider.stage)
+        provider = provider.inner
+    return provider, stages
+
+
+_VIEW = _call("view_file", path="assets/sample.png")
+_SEND = _call("matrix_message", action="send", message="Inspected.")
 _SCRIPTS: dict[str, list[_Step]] = {
     "canvas_dashboard": [
         [_call("tool_search", query="show_canvas")],
-        [_ct("show_canvas", title="Deploy", html="<div>staging=green prod=amber</div>")],
+        [_ct("show_canvas", title="Deploy", html="<div>staging=green prod=amber</div>", path="")],
     ],
     "workflow_runs_check": [[_call("tool_search", query="workflow runs")], [_ct("list_workflow_runs")]],
     "thread_tags_audit": [
         [_call("tool_search", query="thread tags")],
         [_ct("list_thread_tags"), _ct("tag_thread", tag="triage")],
     ],
-    "scheduler_reminder": [
-        [_call("tool_search", query="scheduler")],
-        [_ct("scheduler", action="create", message="Check staging", new_thread=False, delay_seconds=7200)],
-    ],
+    "scheduler_reminder": [[_call("tool_search", query="scheduler")], [_sched(new_thread=False, delay_seconds=7200)]],
     "memory_lookup_and_save": [
         [_call("tool_search", query="memory")],
-        [
-            _ct("memory", action="search", query="retry backoff"),
-            _ct("memory", action="add", content="Prod uses exponential backoff starting at 2s."),
-        ],
+        [_ct("memory", action="search", query="retry"), _ct("memory", action="add", content="Prod 2s backoff.")],
     ],
     "browser_inspect": [
         [_call("tool_search", query="browser")],
@@ -145,15 +157,13 @@ _SCRIPTS: dict[str, list[_Step]] = {
     "attachment_list_and_register": [
         [_call("attachment", action="list"), _call("attachment", action="register", path="reports/summary.txt")],
     ],
-    "view_image_and_notify": [
-        [_call("view_file", path="assets/sample.png"), _call("matrix_message", action="send", message="Inspected.")],
-    ],
+    "view_image_and_notify": [[_VIEW, _SEND]],
 }
 
 
 @pytest.mark.asyncio
-async def test_portable_surface_and_provider_resolution(tmp_path: Path) -> None:
-    """Real AgentBuild strips deferred tools, resolves provider specs, and disables configured fallbacks."""
+async def test_portable_surface_and_provider_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real AgentBuild strips deferred tools, resolves providers without default key leaks, and disables fallbacks."""
     provider = _ScriptedProvider(
         [*_SCRIPTS["workflow_runs_check"], "Done."],
         capabilities=Capabilities(native_tool_search=True),
@@ -180,16 +190,23 @@ async def test_portable_surface_and_provider_resolution(tmp_path: Path) -> None:
         f"    extra_kwargs:\n      base_url: {url}\n      api_key: sk-no-key-required\n",
         encoding="utf-8",
     )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     (tmp_path / ".env").write_text("OPENROUTER_API_KEY=sk-or-test-key\n", encoding="utf-8")
+    creds = get_runtime_shared_credentials_manager(resolve_runtime_paths(config_path=cfg_file))
+    creds.save_credentials("model:default", {"api_key": "sk-wrong-default-key"})
     or_p = resolve_provider("openrouter:google/gemma-4-31b-it", config_path=cfg_file, base_url=url)
     assert or_p.capabilities.native_tool_search is False
+    or_inner, _ = _unwrap(or_p)
+    assert isinstance(or_inner, ChatAdapter)
+    sdk_client = or_inner.clients.factory()
+    try:
+        assert sdk_client.api_key == "sk-or-test-key"
+    finally:
+        await sdk_client.close()
+
     cfg_p = resolve_provider("primary", config_path=cfg_file, base_url=url)
     assert (cfg_p.capabilities.native_tool_search, cfg_p.identity.id) == (False, "inkling-2:mini-vllm")
-    cur: object = cfg_p
-    while isinstance(cur, WrappedProvider):
-        fn = cur.stage.func if isinstance(cur.stage, partial) else cur.stage
-        assert fn is not fallback_stream
-        cur = cur.inner
+    assert fallback_stream not in _unwrap(cfg_p)[1]
 
 
 @pytest.mark.asyncio
@@ -197,43 +214,44 @@ async def test_portable_surface_and_provider_resolution(tmp_path: Path) -> None:
 async def test_all_12_cases_pass_first_try(case: EvalCase) -> None:
     """Every one of the 12 eval cases passes on first try through the real MindRoom loop."""
     assert len(CASES) == 12
-    result = await _run(case.case_id, *_SCRIPTS[case.case_id])
-    assert result.error is None
-    assert result.passed, f"{case.case_id} failed: {result.calls}"
-    assert result.first_try_passed
-    assert result.mis_calls == 0
-    assert result.failure_counts == {}
-    assert result.input_tokens > 0
-    assert result.output_tokens > 0
+    res = await _run(case.case_id, *_SCRIPTS[case.case_id])
+    assert res.passed, f"{case.case_id} failed: {res.calls}"
+    assert (res.error, res.first_try_passed, res.mis_calls, res.failure_counts) == (None, True, 0, {})
+    assert res.input_tokens > 0
+    assert res.output_tokens > 0
 
 
 @pytest.mark.asyncio
 async def test_alternative_paths_and_stripped_env_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Workspace-file canvas, shell sed config edit, and stripped env / isolated HOME in shell and _v_calc."""
+    """Workspace-file canvas, shell sed edit, stripped env/proxy/HOME, shell JSON stdout, and tamper-proof _v_calc."""
     w = [_call("write_file", path="widget.html", content="<div>staging=green</div>")]
-    assert (
-        await _run("canvas_dashboard", w, [_ct("show_canvas", title="Deploy", path="widget.html")])
-    ).first_try_passed
+    c = [_ct("show_canvas", title="Deploy", path="widget.html")]
+    assert (await _run("canvas_dashboard", w, c)).first_try_passed
     g = [_call("grep", pattern="LEGACY_PORT")]
     s = [_call("run_shell_command", args="sed -i 's/8080/9090/' src/config.py")]
     assert (await _run("grep_and_edit_config", g, s)).first_try_passed
 
     monkeypatch.setenv("EVAL_SECRET_SHOULD_NOT_LEAK", "super-secret")
-    (tmp_path / "check_calc.py").write_text(
-        "import os\nassert 'EVAL_SECRET_SHOULD_NOT_LEAK' not in os.environ\n"
-        f"assert os.environ['HOME'] == {str(tmp_path)!r}\n",
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@proxy:8080")
+    (src := tmp_path / "src").mkdir()
+    (src / "__init__.py").write_text("", encoding="utf-8")
+    (src / "calc.py").write_text("def apply_discount(p, d): return p + p * d / 100.0\n", encoding="utf-8")
+    (tmp_path / "check_calc.py").write_text('print("OK")\n', encoding="utf-8")
+    tr = CallTrace(1, "run_shell_command", {}, "run_shell_command", {"args": "python3 check_calc.py"}, False, None, "")
+    assert not _v_calc(tmp_path, (tr,))
+
+    (src / "calc.py").write_text(
+        "import os\ndef apply_discount(p, d):\n    assert 'EVAL_SECRET_SHOULD_NOT_LEAK' not in os.environ\n"
+        f"    assert os.environ['HOME'] == {str(tmp_path)!r}\n    return p - (p * d / 100.0)\n",
         encoding="utf-8",
     )
-    tr = CallTrace(1, "run_shell_command", {}, "run_shell_command", {"args": "python3 check_calc.py"}, False, None, "")
+    (tmp_path / "check_calc.py").write_text('raise AssertionError("must not run disk script")\n', encoding="utf-8")
     assert _v_calc(tmp_path, (tr,))
 
-    cmd = 'test -z "$EVAL_SECRET_SHOULD_NOT_LEAK" && test "$HOME" = "$PWD"'
-    shell_res = await _run(
-        "shell_pipeline_logs",
-        [_call("run_shell_command", args=cmd)],
-        [_call("run_shell_command", args=_LOG_CMD)],
-    )
-    assert shell_res.first_try_passed
+    env_cmd = 'test -z "$EVAL_SECRET_SHOULD_NOT_LEAK" && test -z "$HTTPS_PROXY" && test "$HOME" = "$PWD"'
+    json_cmd = """printf '{"error": 4}\\n'"""
+    s_t1 = [_call("run_shell_command", args=env_cmd), _call("run_shell_command", args=json_cmd)]
+    assert (await _run("shell_pipeline_logs", s_t1, [_call("run_shell_command", args=_LOG_CMD)])).first_try_passed
 
 
 @pytest.mark.asyncio
@@ -274,18 +292,14 @@ async def test_stateful_stubs_and_attachment_validation() -> None:
             _call("attachment", action="inline_image"),
             _call("attachment", action="inline_image", attachment_id="att_1", path="assets/sample.png"),
         ],
-        [
-            _call("attachment", action="inline_image", path="assets/sample.png"),
-            _call("view_file", path="assets/sample.png"),
-            _call("matrix_message", action="send", message="Inspected."),
-        ],
+        [_call("attachment", action="inline_image", path="assets/sample.png"), _VIEW, _SEND],
     )
-    assert view_att.passed
-    assert not view_att.first_try_passed
+    assert (view_att.passed, view_att.first_try_passed) == (True, False)
     assert view_att.calls[0].failure_kind == "missing_required_param"
     assert view_att.failure_counts == {"invalid_param_value": 1, "missing_required_param": 2}
 
 
+_TWO_HOURS_ISO = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
 _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
     "nested_call_tool_and_unknown": (
         "canvas_dashboard",
@@ -303,30 +317,33 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
         True,
         {"shell_argv_syntax": 1},
     ),
-    "hallucinated_action_deferred": (
+    "hallucinated_action_and_bad_output_path": (
         "workflow_runs_check",
-        [[_ct("list_workflow_runs", action="list")], [_ct("list_workflow_runs")]],
+        [
+            [_ct("list_workflow_runs", action="list"), _ct("list_workflow_runs", mindroom_output_path=123)],
+            [_ct("list_workflow_runs")],
+        ],
         True,
-        {"hallucinated_action": 1},
+        {"hallucinated_action": 1, "invalid_param_value": 1},
     ),
     "hallucinated_action_view_file": (
         "view_image_and_notify",
-        [
-            [_call("view_file", action="view", path="assets/sample.png")],
-            [_call("view_file", path="assets/sample.png"), _call("matrix_message", action="send", message="Done.")],
-        ],
+        [[_call("view_file", action="view", path="assets/sample.png")], [_VIEW, _SEND]],
         True,
         {"hallucinated_action": 1},
     ),
-    "scheduler_direct_enum_and_missing": (
+    "scheduler_direct_enum_missing_and_execute_at": (
         "scheduler_reminder",
         [
-            [_call("scheduler", action="list"), _ct("scheduler", action="bogus")],
-            [_ct("scheduler", action="create", message="Check")],
-            [_ct("scheduler", action="create", message="Check", new_thread=False, delay_seconds=7200)],
+            [_call("scheduler", action="list"), _ct("scheduler", action="bogus"), _sched()],
+            [
+                _sched(new_thread=False, execute_at="in 2 hours"),
+                _sched(new_thread=False, execute_at="2000-01-01T00:00:00Z"),
+            ],
+            [_sched(new_thread=False, execute_at=_TWO_HOURS_ISO)],
         ],
         True,
-        {"unknown_tool": 1, "invalid_param_value": 1, "missing_required_param": 1},
+        {"unknown_tool": 1, "invalid_param_value": 3, "missing_required_param": 1},
     ),
     "browser_unexpected_param": (
         "browser_inspect",
@@ -345,22 +362,15 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
     ),
     "silent_fs_and_view_errors": (
         "view_image_and_notify",
-        [
-            [_call("read_file", path="missing.txt"), _call("view_file", path="missing.png")],
-            [_call("view_file", path="assets/sample.png"), _call("matrix_message", action="send", message="Done.")],
-        ],
+        [[_call("read_file", path="missing.txt"), _call("view_file", path="missing.png")], [_VIEW, _SEND]],
         True,
         {"tool_error": 2},
     ),
-    "scheduler_rejects_new_thread_true": (
-        "scheduler_reminder",
-        [[_ct("scheduler", action="create", message="Check", new_thread=True, delay_seconds=7200)]],
-        False,
-        {},
-    ),
-    "scheduler_rejects_short_delay": (
-        "scheduler_reminder",
-        [[_ct("scheduler", action="create", message="Check", new_thread=False, delay_seconds=1)]],
+    "scheduler_rejects_new_thread": ("scheduler_reminder", [[_sched(new_thread=True, delay_seconds=7200)]], False, {}),
+    "scheduler_rejects_short_delay": ("scheduler_reminder", [[_sched(new_thread=False, delay_seconds=1)]], False, {}),
+    "view_rejects_new_thread_true": (
+        "view_image_and_notify",
+        [[_VIEW, _call("matrix_message", action="send", message="Done.", new_thread=True)]],
         False,
         {},
     ),
@@ -391,6 +401,7 @@ async def test_shell_syntax_plural_validation_raw_preview_trace_matching_and_ver
     assert has_shell_argv_syntax({"args": ["grep", "ERROR", "logs/service.log", "|", "wc", "-l"]})
     assert has_shell_argv_syntax({"args": ["ls", "~/logs"]})
     assert not has_shell_argv_syntax({"args": ["bash", "-c", "grep ERROR logs/service.log | wc -l"]})
+    assert not has_shell_argv_syntax({"args": ["bash", "-o", "pipefail", "-c", "grep ERROR logs/service.log | wc -l"]})
 
     bad_raw = '{"name": "show_canvas", "html": "<div>unterminated'
     res = await _run(

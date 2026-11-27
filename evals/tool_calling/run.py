@@ -75,12 +75,13 @@ def resolve_provider(model_spec: str, *, config_path: Path | None, base_url: str
         )
         authored = {
             "defaults": {"tools": []},
-            "agents": {"eval_agent": {"display_name": "Eval", "role": "Eval"}},
+            "router": {"model": "_eval_explicit"},
+            "agents": {"eval_agent": {"display_name": "Eval", "role": "Eval", "model": "_eval_explicit"}},
             "memory": {"backend": "none"},
-            "models": {"default": model_dict},
+            "models": {"_eval_explicit": model_dict},
             "timezone": "UTC",
         }
-        return build_model_provider(Config.validate_with_runtime(authored, rp), rp, "default")
+        return build_model_provider(Config.validate_with_runtime(authored, rp), rp, "_eval_explicit")
     if config_path is None or not config_path.is_file():
         msg = f"Configured model {model_spec!r} requires an existing --config file (got {config_path})."
         raise ValueError(msg)

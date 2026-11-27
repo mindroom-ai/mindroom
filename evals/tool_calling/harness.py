@@ -40,7 +40,7 @@ from mindroom.tool_system.toolkits import model_arguments
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
-from .cases import CallTrace, EvalCase, seed_workspace
+from .cases import CallTrace, EvalCase, parse_future_iso_seconds, seed_workspace
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -69,6 +69,11 @@ _EVAL_TOOLS: list[Any] = [
     {"chat_ui": {"defer": True, "enable_show_canvas": True}},
     *({n: {"defer": True}} for n in ("workflow", "thread_tags", "scheduler", "memory", "browser")),
 ]
+_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+_BASE_ENV = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PYTHONDONTWRITEBYTECODE": "1", **dict.fromkeys(_PROXY_KEYS, "")}
+_REQ_A = frozenset({"browser_control", "show_canvas", "list_workflow_runs", "list_thread_tags", "tag_thread"})
+_REQ_B = frozenset({"scheduler", "memory", "skill", "run_shell_command", "view_file", "attachment"})
+_REQUIRED_SURFACE = _REQ_A | _REQ_B | {"matrix_message", "tool_search", "call_tool"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,18 +140,20 @@ def _check_attachment(action: str, kw: Mapping[str, Any], ws: Path) -> None:
 def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) -> None:
     if name == "show_canvas":
         _need(bool(kw.get("canvas_event_id")) or _str(kw.get("title")), "Missing required parameter 'title'.")
-        html, path = kw.get("html"), kw.get("path")
-        _need(bool(html) != bool(path), "Missing required parameter: give exactly one of html or path.")
-        _need(html is None or _str(html), "Invalid value for parameter 'html'.")
-        if isinstance(path, str):
-            _require_file(ws, path, "Canvas")
+        html, path, has_path = kw.get("html"), kw.get("path"), _str(kw.get("path"))
+        _need(bool(html) != has_path, "Missing required parameter: give exactly one of html or path.")
+        _need(not html or _str(html), "Invalid value for parameter 'html'.")
+        if has_path:
+            _require_file(ws, str(path), "Canvas")
     elif name == "scheduler" and action == "create":
         _need(_str(kw.get("message")), "Missing required parameter 'message' for action='create'.")
         _need(kw.get("new_thread") is not None, "Missing required parameter 'new_thread' for action='create'.")
         timings = sum(kw.get(k) is not None for k in ("execute_at", "delay_seconds", "cron"))
         _need(timings == 1, "Missing required parameter: timing field.")
-        delay = kw.get("delay_seconds")
+        delay, ex_at = kw.get("delay_seconds"), kw.get("execute_at")
         _need(delay is None or delay >= 1, "Invalid value for parameter 'delay_seconds': must be >= 1.")
+        ok_at = ex_at is None or parse_future_iso_seconds(ex_at) is not None
+        _need(ok_at, "Invalid value for parameter 'execute_at': must be a future ISO-8601 datetime.")
     elif name == "memory" and action in {"search", "add", "get", "delete", "update"}:
         req = {"search": "query", "add": "content"}.get(action, "memory_id")
         _need(_str(kw.get(req)), f"Missing required parameter '{req}' for action={action!r}.")
@@ -223,9 +230,9 @@ def _validate_and_stub(call: ToolCall, workspace: Path, state: dict[str, Any]) -
     kw = model_arguments(call.arguments, call.function)
     sig, props = inspect.signature(call.function.entrypoint), call.function.parameters.get("properties", {})
     out = "mindroom_output_path"
-    if out in kw and out in props and out not in sig.parameters:
-        kw = {k: v for k, v in kw.items() if k != out}
-    sig.bind(**kw)
+    strip_out = out in kw and out in props and out not in sig.parameters
+    bind_kw = {k: v for k, v in kw.items() if k != out} if strip_out else kw
+    sig.bind(**bind_kw)
     for req in call.function.parameters.get("required", ()):
         _need(req in kw, f"Missing required parameter: '{req}'.")
     try:
@@ -234,17 +241,23 @@ def _validate_and_stub(call: ToolCall, workspace: Path, state: dict[str, Any]) -
         msg = f"Invalid value for parameter: {exc.__cause__ or exc}"
         raise ValueError(msg) from exc
     name = call.function.name
-    action = str(kw.get("action") or ("send" if name == "matrix_message" else ""))
-    _check_semantics(name, action, kw, workspace)
-    return json.dumps(_stateful_stub(name, action, kw, state))
+    action = str(bind_kw.get("action") or ("send" if name == "matrix_message" else ""))
+    _check_semantics(name, action, bind_kw, workspace)
+    return json.dumps(_stateful_stub(name, action, bind_kw, state))
 
 
 def _is_error_result(text: str, resolved_name: str) -> bool:
-    if resolved_name in _FS_TOOLS and text.startswith(_FS_ERR_PREFIXES):
-        return True
+    if resolved_name == "run_shell_command":
+        return False
+    if resolved_name in _FS_TOOLS:
+        return text.startswith(_FS_ERR_PREFIXES)
     if not text.lstrip().startswith("{") or not isinstance(d := _try_json(text), dict):
         return False
-    return d.get("status") == "error" or bool(d.get("error")) or d.get("view_status") == "error"
+    return (
+        d.get("status") == "error"
+        or (resolved_name == "skill" and bool(d.get("error")))
+        or (resolved_name == "view_file" and d.get("view_status") == "error")
+    )
 
 
 def _parse_raw_args(fn: object) -> dict[str, Any]:
@@ -258,19 +271,12 @@ def _parse_raw_args(fn: object) -> dict[str, Any]:
     return call_arguments(fn) or ({} if _try_json(raw) in ({}, []) else {"_raw": raw[:160]})
 
 
-def _has_valid_nested_call_tool_args(args: Mapping[str, Any]) -> bool:
-    nested = args.get("arguments")
-    if nested in (None, "") or isinstance(nested, dict):
-        return True
-    return isinstance(nested, str) and (isinstance(d := _try_json(nested), dict) or d == [])
-
-
 def has_shell_argv_syntax(args: Mapping[str, Any], *, is_error: bool = False) -> bool:
     """Return whether ``run_shell_command`` received a multi-item argv list containing shell syntax."""
     raw = args.get("args")
     if not isinstance(raw, list) or len(raw) <= 1 or not all(isinstance(x, str) for x in raw):
         return False
-    if Path(raw[0]).name in _SHELL_INTERPS and len(raw) >= 3 and raw[1] in _SHELL_FLAGS:
+    if Path(raw[0]).name in _SHELL_INTERPS and any(tok in _SHELL_FLAGS for tok in raw[1:-1]):
         return False
     return any(
         tok in _SHELL_OPS
@@ -294,15 +300,17 @@ def classify_failure(
 ) -> str | None:
     """Classify a failed or mis-routed tool call into one failure kind, or None when clean."""
     failed, lower = is_error or _is_error_result(result_text, resolved_name), result_text.lower()
-    if (
-        (deferred.portable and raw_name in deferred.names)
-        or result_text == MISSING_TOOL_ERROR_TEXT
-        or (failed and function is None)
-    ):
+    unknown = (deferred.portable and raw_name in deferred.names) or result_text == MISSING_TOOL_ERROR_TEXT
+    if unknown or (failed and function is None):
         return "unknown_tool"
     if raw_name == "call_tool" and resolved_name == "call_tool" and result_text != CUT_OFF_TOOL_CALL_RESULT:
-        target = args.get("name")
-        valid_target = _str(target) and target != "call_tool" and _has_valid_nested_call_tool_args(args)
+        target, nested = args.get("name"), args.get("arguments")
+        ok_nested = (
+            nested in (None, "")
+            or isinstance(nested, dict)
+            or (isinstance(nested, str) and (isinstance(d := _try_json(nested), dict) or d == []))
+        )
+        valid_target = _str(target) and target != "call_tool" and ok_nested
         bad_json = is_error and any(k in lower for k in _DECODE_KEYS)
         return "invalid_param_value" if bad_json else ("unknown_tool" if valid_target else "nested_call_tool_name")
     if resolved_name == "run_shell_command" and has_shell_argv_syntax(args, is_error=failed):
@@ -318,9 +326,8 @@ def classify_failure(
 def _build_eval_agent(root: Path, case: EvalCase, provider: ModelProvider) -> tuple[AgentBuild, Path]:
     storage = (root / "storage").resolve()
     ws = agent_workspace_root_path(storage, "eval_agent")
-    bin_dir, base_path = str(Path(sys.executable).parent), os.environ.get("PATH", "")
-    path_val = f"{bin_dir}{os.pathsep}{base_path}" if base_path else bin_dir
-    env = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PATH": path_val, **workspace_home_identity_env(ws)}
+    path_val = os.pathsep.join(x for x in (str(Path(sys.executable).parent), os.environ.get("PATH", "")) if x)
+    env = {**_BASE_ENV, "PATH": path_val, **workspace_home_identity_env(ws)}
     rp = resolve_runtime_paths(config_path=root / "config.yaml", storage_path=storage, process_env=env)
     agent = {
         "display_name": "EvalAgent",
@@ -351,7 +358,12 @@ def _build_eval_agent(root: Path, case: EvalCase, provider: ModelProvider) -> tu
     )
     tm, plugins = resolve_turn_model(config, rp, ModelScope(entity="eval_agent"), None), config_plugins(config, rp)
     wp = _PortableProvider(provider, portable_tool_search_stream, _PORTABLE_PROJ)
-    return create_agent("eval_agent", config, rp, identity, knowledge=None, model=tm, plugins=plugins, provider=wp), ws
+    build = create_agent("eval_agent", config, rp, identity, knowledge=None, model=tm, plugins=plugins, provider=wp)
+    if missing := sorted(_REQUIRED_SURFACE - build.spec.functions.keys()):
+        hint = " (install browser extra: uv run --extra browser ...)" if "browser_control" in missing else ""
+        msg = f"Eval agent missing required tool surface: {', '.join(missing)}{hint}"
+        raise RuntimeError(msg)
+    return build, ws
 
 
 def _collect_traces(
