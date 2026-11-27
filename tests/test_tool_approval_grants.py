@@ -3365,6 +3365,117 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
     assert [rule.match for rule in loaded.tool_approval.rules] == matches
 
 
+def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_skill_names(tmp_path: Path) -> None:
+    """A script-free shared prefix ahead of explicit `skill` loads, while a leading wildcard script still fails closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "review.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    base: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
+    }
+
+    allowed = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "agents": "trusted", "action": "require_approval"},
+                {"match": "skill", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(allowed, runtime_paths).tool_approval.rules) == 3
+
+    shared_argument_prefix = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "action": "require_approval"},
+                {"match": "skill", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(shared_argument_prefix, runtime_paths).tool_approval.rules) == 3
+
+    leading_argument_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "script": "review.py"},
+                {"match": "skill", "action": "auto_approve"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(leading_argument_script, runtime_paths)
+
+    leading_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "agents": "trusted", "script": "review.py"},
+                {"match": "skill", "action": "auto_approve"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(leading_script, runtime_paths)
+
+    grouped_script = {
+        **base,
+        "tool_approval": {
+            "rules": [{"match": ["skill", "get_*"], "script": "review.py"}],
+        },
+    }
+    assert len(Config.validate_with_runtime(grouped_script, runtime_paths).tool_approval.rules) == 1
+
+    agent_scoped_explicit_and_retired = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "script": "review.py"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(agent_scoped_explicit_and_retired, runtime_paths).tool_approval.rules) == 2
+
+    agent_scoped_explicit_action_and_retired_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "require_approval"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert (
+        len(
+            Config.validate_with_runtime(
+                agent_scoped_explicit_action_and_retired_script,
+                runtime_paths,
+            ).tool_approval.rules,
+        )
+        == 2
+    )
+
+    agent_scoped_explicit_before_unconditional_wildcard = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(agent_scoped_explicit_before_unconditional_wildcard, runtime_paths)
+
+
 @pytest.mark.parametrize(
     ("tools", "matches", "error_pattern"),
     [

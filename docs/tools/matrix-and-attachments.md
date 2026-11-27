@@ -356,7 +356,7 @@ tool_approval:
       action: require_approval
 ```
 
-A `script` rule can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](../tool-approval.md#auto-approval-for-a-few-minutes) or with [`!auto_approve`](../tool-approval.md#auto-approve-everything), covers later calls.
+A rule with `arguments` (or a `script` rule) can decide per call from the arguments, for example asking for `send` and letting `react` through, and an approval the owner gives for a period, [on a card](../tool-approval.md#auto-approval-for-a-few-minutes) or with [`!auto_approve`](../tool-approval.md#auto-approve-everything), covers later calls.
 
 | Action | Does |
 |--------|------|

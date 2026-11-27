@@ -23,6 +23,7 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
@@ -3333,3 +3334,104 @@ async def test_replacing_an_agent_unreadies_only_rooms_it_observes() -> None:
     assert set(orchestrator.agent_bots) == {ROUTER_AGENT_NAME, "other"}
     bots[ROUTER_AGENT_NAME].stop.assert_not_awaited()
     fence_every_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_approval_argument_bool_to_int_edit_publishes_reload_and_restarts_active_call(tmp_path: Path) -> None:
+    """Changing ``True`` to ``1`` reloads and restarts active calls, while reordering keys does neither."""
+    old_config = _runtime_bound_config(
+        _owner_reload_config(["lobby"]).model_copy(
+            update={
+                "calls": _delegated_calls_for("general", model=None, backend="cascaded"),
+                "tool_approval": ToolApprovalConfig(
+                    rules=[
+                        ApprovalRuleConfig(
+                            match="run_shell_command",
+                            arguments={"dry_run": True},
+                            action="require_approval",
+                        ),
+                    ],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    new_config = _runtime_bound_config(
+        old_config.model_copy(
+            update={
+                "tool_approval": ToolApprovalConfig(
+                    rules=[
+                        ApprovalRuleConfig(
+                            match="run_shell_command",
+                            arguments={"dry_run": 1},
+                            action="require_approval",
+                        ),
+                    ],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        bots=_call_bots(("general", "other"), in_call={"general"}),
+    )
+    assert "general" in plan.restart
+    assert "other" not in plan.restart
+
+    live_old = _runtime_bound_config(old_config.model_copy(update={"calls": CallsConfig()}), tmp_path)
+    live_new = _runtime_bound_config(new_config.model_copy(update={"calls": CallsConfig()}), tmp_path)
+    orchestrator, _, _ = await _reload_with_bots(live_old, live_new, (ROUTER_AGENT_NAME, "general", "other"))
+    published_args = orchestrator.config.tool_approval.rules[0].arguments
+    assert published_args is not None
+    assert type(published_args["dry_run"]) is int
+    assert published_args["dry_run"] == 1
+
+    # Reordering argument keys is semantically identical: neither restarts active calls nor publishes a reload.
+    ordered_a = _runtime_bound_config(
+        old_config.model_copy(
+            update={
+                "tool_approval": ToolApprovalConfig(
+                    rules=[
+                        ApprovalRuleConfig(
+                            match="run_shell_command",
+                            arguments={"a": 1, "b": 2},
+                            action="require_approval",
+                        ),
+                    ],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    ordered_b = _runtime_bound_config(
+        old_config.model_copy(
+            update={
+                "tool_approval": ToolApprovalConfig(
+                    rules=[
+                        ApprovalRuleConfig(
+                            match="run_shell_command",
+                            arguments={"b": 2, "a": 1},
+                            action="require_approval",
+                        ),
+                    ],
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    reorder_plan = build_config_update_plan(
+        current_config=ordered_a,
+        new_config=ordered_b,
+        bots=_call_bots(("general", "other"), in_call={"general"}),
+    )
+    assert reorder_plan.restart == frozenset()
+
+    live_a = _runtime_bound_config(ordered_a.model_copy(update={"calls": CallsConfig()}), tmp_path)
+    live_b = _runtime_bound_config(ordered_b.model_copy(update={"calls": CallsConfig()}), tmp_path)
+    reordered_orch = _MultiAgentOrchestrator(runtime_paths_for(live_a), config=live_a)
+    reordered_orch.running = True
+    with patch.object(reordered_orch.config_reload, "load_config", return_value=published_config_load(live_b)):
+        assert await reordered_orch.config_reload._update_config() is False

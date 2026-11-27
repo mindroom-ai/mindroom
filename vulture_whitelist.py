@@ -224,6 +224,8 @@ _._validate_single_api_key  # Pydantic model validator (src/mindroom/config/mode
 _.validate_history_settings  # unused method (src/mindroom/config/agent.py)
 _.serialize_model  # unused method (src/mindroom/config/agent.py)
 _.validate_match  # unused method (src/mindroom/config/approval.py)
+_.validate_agents  # unused method (src/mindroom/config/approval.py)
+_.validate_arguments  # unused method (src/mindroom/config/approval.py)
 _.validate_script  # unused method (src/mindroom/config/approval.py)
 _.reject_bool_timeout_days  # unused method (src/mindroom/config/approval.py)
 _.validate_threshold_choice  # unused method (src/mindroom/config/models.py)

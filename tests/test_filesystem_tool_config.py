@@ -339,3 +339,37 @@ def test_retired_file_approval_check_skips_configs_without_filesystem_and_checks
     }
     with pytest.raises(ConfigRuntimeValidationError, match="save_file is now write_file"):
         Config.validate_with_runtime(via_personal_agent, runtime_paths)
+
+
+def test_retired_file_approval_check_handles_match_lists_and_conditional_rules(tmp_path: Path) -> None:
+    """List matchers and agent/argument conditions enforce retired filesystem rename safety."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    base = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["filesystem"]}},
+    }
+    for rules in (
+        [{"match": ["save_file", "run_shell_command"], "action": "require_approval"}],
+        [{"match": "save_file", "agents": "research", "action": "require_approval"}],
+    ):
+        with pytest.raises(ConfigRuntimeValidationError, match="save_file is now write_file"):
+            Config.validate_with_runtime({**base, "tool_approval": {"rules": rules}}, runtime_paths)
+
+    for rules in (
+        [{"match": ["save_file", "write_file"], "action": "require_approval"}],
+        [{"match": "write_file", "arguments": {"path": "notes/*"}, "action": "auto_approve"}],
+        [
+            {"match": "*", "agents": "guest", "action": "require_approval"},
+            {"match": "write_file", "arguments": {"path": "private/*"}, "action": "require_approval"},
+        ],
+        [
+            {"match": "write_file", "agents": "docs", "action": "require_approval"},
+            {"match": "*", "agents": "guest", "action": "require_approval"},
+        ],
+        [
+            {"match": "*", "agents": "guest", "action": "require_approval"},
+            {"match": "write_file", "agents": "docs", "action": "require_approval"},
+        ],
+    ):
+        loaded = Config.validate_with_runtime({**base, "tool_approval": {"rules": rules}}, runtime_paths)
+        assert len(loaded.tool_approval.rules) == len(rules)

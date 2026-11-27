@@ -516,6 +516,14 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     assert "calculate" not in found
     await _assert_add_needs_approval(context)
 
+    other_agent_config = context.config.model_copy(deep=True)
+    other_agent_config.tool_approval.rules = [
+        ApprovalRuleConfig(match="run_shell_command", agents="other_agent", action="require_approval"),
+    ]
+    other_search = await gateway.search_tools(replace(context, config=other_agent_config), toolkit="calculator")
+    assert "error" not in other_search
+    assert "add" in {item["function"] for item in other_search["results"]}
+
 
 async def _assert_add_needs_approval(context: AgentToolContext) -> None:
     """Assert the gateway neither describes nor runs the calculator's ``add``, which needs approval."""

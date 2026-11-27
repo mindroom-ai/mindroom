@@ -7,7 +7,7 @@ import asyncio
 import contextvars
 import json
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -17,6 +17,7 @@ import yaml
 from pydantic import ValidationError
 
 from mindroom import redaction
+from mindroom.agents import _generated_function_visible, apply_tool_approval_capability
 from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.events import card_approvable
@@ -34,6 +35,7 @@ from mindroom.approval.tool_approval import (
     MatrixApprovalAction,
     ToolApprovalScriptError,
     ToolApprovalTransportError,
+    _rules_may_ask,
     evaluate_tool_approval,
     handle_matrix_approval_action,
     human_gate,
@@ -44,6 +46,7 @@ from mindroom.approval.tool_approval import (
 from mindroom.cli.config import _full_template
 from mindroom.cli.setup_matrix import unconfigured_self_hosted_matrix_selection
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import ModelConfig
@@ -2197,3 +2200,272 @@ async def test_expiring_a_decided_unsent_card_finishes_once_matrix_refused_it(tm
         await manager.shutdown()
 
     cards.approvals.retire_approval_card.assert_awaited_once_with(delivery_id="approval-card-1")
+
+
+def test_declarative_approval_rule_validation_and_type_sensitive_equality() -> None:
+    """Declarative match, agents, and arguments validate strictly, preserve shapes, and distinguish bool vs int."""
+    single = ApprovalRuleConfig(match="slack_post", agents="research_*", action="require_approval")
+    listed = ApprovalRuleConfig(
+        match=["slack_post", "slack_react"],
+        agents=["research", "analyst_*"],
+        arguments={
+            "empty": "",
+            "flag": True,
+            "count": 0,
+            "ratio": 1.5,
+            "nullable": None,
+            "choices": ["read", None, False, 2, 3.5],
+        },
+        action="auto_approve",
+    )
+    assert single.match == "slack_post"
+    assert single.agents == "research_*"
+    assert listed.match == ["slack_post", "slack_react"]
+    assert listed.agents == ["research", "analyst_*"]
+
+    invalid_payloads: list[dict[str, Any]] = [
+        {"match": "", "action": "require_approval"},
+        {"match": "   ", "action": "require_approval"},
+        {"match": [], "action": "require_approval"},
+        {"match": ["ok", "  "], "action": "require_approval"},
+        {"match": "ok", "agents": "", "action": "require_approval"},
+        {"match": "ok", "agents": "  ", "action": "require_approval"},
+        {"match": "ok", "agents": [], "action": "require_approval"},
+        {"match": "ok", "agents": ["ok", ""], "action": "require_approval"},
+        {"match": "ok", "arguments": {}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"": "x"}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"  ": "x"}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": []}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": [["nested"]]}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": {"nested": 1}}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": (1, 2)}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": {1, 2}}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": date(2026, 1, 1)}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": float("nan")}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": float("inf")}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": float("-inf")}, "action": "require_approval"},
+        {"match": "ok", "arguments": {"a": [1, float("nan")]}, "action": "require_approval"},
+    ]
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            ApprovalRuleConfig.model_validate(payload)
+
+    bool_rule = ApprovalRuleConfig(match="t", arguments={"flag": True}, action="require_approval")
+    int_rule = ApprovalRuleConfig(match="t", arguments={"flag": 1}, action="require_approval")
+    assert bool_rule != int_rule
+    assert ApprovalRuleConfig(match="t", arguments={"flag": False}, action="require_approval") != ApprovalRuleConfig(
+        match="t",
+        arguments={"flag": 0},
+        action="require_approval",
+    )
+    assert ApprovalRuleConfig(match="t", arguments={"flag": [True]}, action="require_approval") != ApprovalRuleConfig(
+        match="t",
+        arguments={"flag": [1]},
+        action="require_approval",
+    )
+    assert ApprovalRuleConfig(match="t", arguments={"a": 1, "b": True}, action="require_approval") == (
+        ApprovalRuleConfig(match="t", arguments={"b": True, "a": 1}, action="require_approval")
+    )
+    assert (bool_rule == {"match": "t", "arguments": {"flag": True}, "action": "require_approval"}) is False
+
+
+@pytest.mark.asyncio
+async def test_declarative_approval_rules_match_lists_agents_arguments_and_scripts(tmp_path: Path) -> None:
+    """Ordered rules filter by match lists, case-sensitive agent globs, strict argument matchers, and optional scripts."""
+    script_path = tmp_path / "review.py"
+    script_path.write_text(
+        "def check(tool_name, arguments, agent_name):\n"
+        "    assert agent_name == 'research_lead' and str(arguments.get('command', '')).startswith('rm')\n"
+        "    return arguments.get('ask') is True\n",
+        encoding="utf-8",
+    )
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        tool_approval=ToolApprovalConfig(
+            default="auto_approve",
+            rules=[
+                ApprovalRuleConfig(match=["slack_post", "slack_react"], action="require_approval"),
+                ApprovalRuleConfig(
+                    match="matrix_message",
+                    arguments={"action": ["read", "list"]},
+                    action="auto_approve",
+                ),
+                ApprovalRuleConfig(
+                    match="matrix_message",
+                    arguments={"action": "send", "dry_run": True, "limit": 1, "note": "", "target": None},
+                    action="auto_approve",
+                ),
+                ApprovalRuleConfig(match="matrix_message", action="require_approval"),
+                ApprovalRuleConfig(
+                    match="run_shell_command",
+                    agents=["research_*", "intern"],
+                    arguments={"command": "rm*"},
+                    script="review.py",
+                ),
+                ApprovalRuleConfig(match="run_shell_command", agents="research_*", action="require_approval"),
+            ],
+        ),
+    )
+
+    assert (await evaluate_tool_approval(config, paths, "slack_react", {}, "coder", None))[0] is True
+    assert (await evaluate_tool_approval(config, paths, "Slack_React", {}, "coder", None))[0] is False
+    assert (await evaluate_tool_approval(config, paths, "matrix_message", {"action": "read"}, "coder", None))[
+        0
+    ] is False
+    assert (await evaluate_tool_approval(config, paths, "matrix_message", {"action": "READ"}, "coder", None))[0] is True
+    assert (await evaluate_tool_approval(config, paths, "matrix_message", {}, "coder", None))[0] is True
+
+    # Strict bool vs int/float, 1 == 1.0, NaN -> False, and omitted None key does not match.
+    exact_args = {"action": "send", "dry_run": True, "limit": 1.0, "note": "", "target": None}
+    assert (await evaluate_tool_approval(config, paths, "matrix_message", exact_args, "coder", None))[0] is False
+    for mismatched in (
+        {**exact_args, "dry_run": 1},
+        {**exact_args, "limit": True},
+        {**exact_args, "limit": float("nan")},
+        {k: v for k, v in exact_args.items() if k != "target"},
+    ):
+        assert (await evaluate_tool_approval(config, paths, "matrix_message", mismatched, "coder", None))[0] is True
+
+    # Script runs only when declarative filters match; returning False still wins without falling through.
+    assert (
+        await evaluate_tool_approval(
+            config,
+            paths,
+            "run_shell_command",
+            {"command": "rm -rf /tmp/x", "ask": False},
+            "research_lead",
+            None,
+        )
+    )[0] is False
+    assert (
+        await evaluate_tool_approval(
+            config,
+            paths,
+            "run_shell_command",
+            {"command": "rm -rf /tmp/x", "ask": True},
+            "research_lead",
+            None,
+        )
+    )[0] is True
+    assert (
+        await evaluate_tool_approval(
+            config,
+            paths,
+            "run_shell_command",
+            {"command": "ls"},
+            "research_lead",
+            None,
+        )
+    )[0] is True
+    assert (
+        await evaluate_tool_approval(
+            config,
+            paths,
+            "run_shell_command",
+            {"command": "rm -rf /tmp/x", "ask": True},
+            "coder",
+            None,
+        )
+    )[0] is False
+
+
+@pytest.mark.asyncio
+async def test_static_approval_checks_scope_agents_arguments_timeouts_and_approved_egress(tmp_path: Path) -> None:
+    """Static checks respect agent barriers, argument fallthrough timeouts, approved egress, and agent build surfaces."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from mindroom.tool_system.authoring import Toolkit, tool  # noqa: PLC0415
+    from mindroom.tool_system.registry import ToolRegistry  # noqa: PLC0415
+    from mindroom.tool_system.tool_function import ToolFunction, ToolGate  # noqa: PLC0415
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    paths = replace(test_runtime_paths(tmp_path), process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"})
+    config = bind_runtime_paths(
+        Config(
+            tool_approval=ToolApprovalConfig(
+                default="auto_approve",
+                timeout_days=7,
+                rules=[
+                    ApprovalRuleConfig(
+                        match="matrix_message",
+                        arguments={"action": "read"},
+                        action="auto_approve",
+                    ),
+                    ApprovalRuleConfig(
+                        match="matrix_message",
+                        agents="guarded",
+                        action="require_approval",
+                        timeout_days=2,
+                    ),
+                    ApprovalRuleConfig(
+                        match="request_network_access",
+                        arguments={"host": "example.com"},
+                        action="auto_approve",
+                    ),
+                    ApprovalRuleConfig(
+                        match="request_network_access",
+                        action="require_approval",
+                        timeout_days=3,
+                    ),
+                    ApprovalRuleConfig(match="skill", agents="guarded", action="require_approval"),
+                ],
+            ),
+        ),
+        paths,
+    )
+
+    assert _rules_may_ask(config, "matrix_message", agent_name="guarded") == (True, 2 * 86400)
+    assert _rules_may_ask(config, "matrix_message", agent_name="free") == (False, 7 * 86400)
+    assert _rules_may_ask(config, "matrix_message") == (True, 2 * 86400)
+    # Approved egress cannot be bypassed by a conditional auto_approve and takes min(default, rule timeout).
+    assert _rules_may_ask(config, "request_network_access", agent_name="free") == (True, 3 * 86400)
+    assert await evaluate_tool_approval(
+        config,
+        paths,
+        "request_network_access",
+        {"host": "example.com", "hostnames": ["example.com"]},
+        "free",
+        None,
+    ) == (True, 7 * 86400)
+
+    class _DemoTools(Toolkit):
+        name = "demo"
+
+        @tool
+        def matrix_message(self, action: str = "read") -> str:
+            """Demo."""
+            return action
+
+    toolkit = _DemoTools()
+    adapted = adapt_toolkit(toolkit, key="demo")
+    guarded = apply_tool_approval_capability(
+        adapted,
+        toolkit,
+        config,
+        tools=ToolRegistry({}),
+        registered_tool_name="demo",
+        resumable=True,
+        approvals_as_jobs=False,
+        agent_name="guarded",
+    )
+    free = apply_tool_approval_capability(
+        adapted,
+        toolkit,
+        config,
+        tools=ToolRegistry({}),
+        registered_tool_name="demo",
+        resumable=True,
+        approvals_as_jobs=False,
+        agent_name="free",
+    )
+    assert guarded.functions[0].gate is ToolGate.POLICY
+    assert free.functions[0].gate is None
+
+    skill_fn = ToolFunction(
+        name="skill",
+        description="",
+        parameters={"type": "object", "properties": {}},
+        entrypoint=lambda: "",
+    )
+    assert _generated_function_visible(config, None, skill_fn, agent_name="guarded") is False
+    assert _generated_function_visible(config, None, skill_fn, agent_name="free") is True
