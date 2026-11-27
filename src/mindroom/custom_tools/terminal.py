@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -29,9 +30,11 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,  # noqa: TC001  # resolved by tool contract introspection
 )
+from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from mindroom.terminal.client import TerminalStream, WorkerTerminals
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _COLS, _ROWS = 120, 32
 _DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -44,23 +47,31 @@ _EXIT_SECONDS = 0.1
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
-_ABOUT = (
-    "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can "
-    "watch, and type in, where your config allows it, from a chat client that shows terminals."
-)
+_ABOUT = "Persistent shells in your workspace that people in the room can watch (and type in where config allows)."
+_ReadAction = Literal["list", "read"]
+_WriteAction = Literal["open", "run", "send"]
+_READ_ALLOWED: dict[str, frozenset[str]] = {
+    "list": frozenset(),
+    "read": frozenset({"session_id"}),
+}
+_WRITE_ALLOWED: dict[str, frozenset[str]] = {
+    "open": frozenset({"cwd"}),
+    "run": frozenset({"session_id", "command", "timeout_s"}),
+    "send": frozenset({"session_id", "keys"}),
+}
 _READ_ONLY = (
-    f"{_ABOUT} You can't type in them, because your run_shell_command calls may ask for approval: run commands with "
-    "run_shell_command. terminal_read shows a terminal's recent output; terminal_list shows them all."
+    f"{_ABOUT} You can't type because run_shell_command may ask for approval: run commands with "
+    "run_shell_command. Use terminal_read (`list`, `read`) to inspect terminals."
 )
 _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
     "or keys typed while a command ran may be queued); nothing was typed. To keep a running command, run this in "
-    "another terminal from terminal_open; otherwise send <ctrl-c> with terminal_send, which an idle prompt needs too "
-    "after such keys, then run it again."
+    'another terminal from terminal_write(action="open"); otherwise send <ctrl-c> with terminal_write(action="send"), '
+    "which an idle prompt needs too after such keys, then run it again."
 )
 # Keys that edit the line, complete, interrupt or end input, which a command line never holds.
 _KEYS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_EXITED = "Error: the terminal's shell has exited; open another with terminal_open."
+_EXITED = 'Error: the terminal\'s shell has exited; open another with terminal_write(action="open").'
 _SHELL_EXITED = "[The terminal's shell has exited.]"
 _DETACHED = "Error: the connection to the terminal ended; read it again before typing more."
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
@@ -169,7 +180,7 @@ async def _output(
 
 def _refused(error: TerminalError, session_id: str | None = None) -> str:
     if error.status_code == 404 and session_id is not None:
-        return f"Error: there is no terminal {session_id!r}; terminal_list shows yours."
+        return f'Error: there is no terminal {session_id!r}; terminal_read(action="list") shows yours.'
     return f"Error: {error.detail}"
 
 
@@ -178,10 +189,9 @@ class TerminalTools(Toolkit):
 
     name = "terminal"
     instructions = (
-        f"{_ABOUT} Use them for work that keeps state between commands or that people should see: a dev server, a "
-        "REPL, an interactive program, a long build. terminal_open starts one; terminal_run types one command line and "
-        "waits for its prompt; terminal_send types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends "
-        "a terminal; terminal_read shows recent output; terminal_list shows them all."
+        f"{_ABOUT} Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). "
+        "terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). "
+        "terminal_read: `read` shows recent output, `list` lists all."
     )
 
     def __init__(
@@ -198,61 +208,116 @@ class TerminalTools(Toolkit):
             else agent_terminals(agent_name, runtime_config, runtime_paths, identity, create=True)
         )
         self._restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
-        typing = () if self._restricted else (self.terminal_open, self.terminal_run, self.terminal_send)
+        offered = (self.terminal_read,) if self._restricted else (self.terminal_write, self.terminal_read)
         super().__init__(
-            tools=(*typing, self.terminal_read, self.terminal_list) if self._terminals is not None else (),
+            tools=offered if self._terminals is not None else (),
             instructions=_READ_ONLY if self._restricted else None,
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit `background_after` on fast terminal reads while keeping output-file redirection."""
+        if function.name == "terminal_read":
+            return replace(function, offer_background_after=False)
+        return function
 
     @property
     def _workspace_terminals(self) -> WorkerTerminals:
         assert self._terminals is not None
         return self._terminals
 
-    async def terminal_open(self, cwd: str | None = None) -> str:
-        """Open a new terminal in your workspace, which people in the room can watch where your config allows it.
+    async def terminal_write(
+        self,
+        action: _WriteAction,
+        session_id: str | None = None,
+        command: str | None = None,
+        keys: str | None = None,
+        cwd: str | None = None,
+        timeout_s: float | None = None,
+    ) -> str:
+        """Open a terminal, run one command line, or type keys.
+
+        - `open`: start a workspace terminal.
+        - `run`: run one command line at an empty prompt; if still running at timeout, read with `terminal_read(action="read")` or stop with `<ctrl-c>` (running commands stay alive; idle terminals end after 30m).
+        - `send`: type verbatim text/keys (`<enter|tab|esc|backspace|space|up|down|left|right|home|end|delete|ctrl-letter>`) without waiting; send `<ctrl-c>` alone.
 
         Args:
-            cwd: Folder to start in, relative to your workspace; the workspace by default.
-
-        Returns:
-            The new terminal's session ID, or why it could not open.
+            action: Action.
+            session_id: Terminal ID (run, send).
+            command: One command line; join with && or ; (run).
+            keys: Verbatim text/keys (send).
+            cwd: Workspace-relative dir (open).
+            timeout_s: Wait seconds (run, default 30, max 600).
 
         """
+        params: dict[str, object] = {
+            "session_id": session_id,
+            "command": command,
+            "keys": keys,
+            "cwd": cwd,
+            "timeout_s": timeout_s,
+        }
+        if (error := validate_action_params("terminal_write", action, _WRITE_ALLOWED, params)) is not None:
+            return f"Error: {error}"
+        if action == "open":
+            return await self._open_terminal(cwd=cwd)
+        if not isinstance(session_id, str) or not session_id.strip():
+            return f"Error: session_id is required for action={action!r}."
+        resolved_session_id = session_id.strip()
+        if action == "run":
+            return await self._run_command(
+                resolved_session_id,
+                command,
+                timeout_s=_DEFAULT_TIMEOUT_SECONDS if timeout_s is None else timeout_s,
+            )
+        return await self._send_keys(resolved_session_id, keys)
+
+    async def terminal_read(
+        self,
+        action: _ReadAction,
+        session_id: str | None = None,
+    ) -> str:
+        """Inspect workspace terminals.
+
+        - `list`: list terminals, including ones people opened.
+        - `read`: recent output and exit state.
+
+        Args:
+            action: Action.
+            session_id: Terminal ID (read).
+
+        """
+        if (
+            error := validate_action_params("terminal_read", action, _READ_ALLOWED, {"session_id": session_id})
+        ) is not None:
+            return f"Error: {error}"
+        if action == "list":
+            return await self._list_terminals()
+        if not isinstance(session_id, str) or not session_id.strip():
+            return "Error: session_id is required for action='read'."
+        return await self._read_terminal(session_id.strip())
+
+    async def _open_terminal(self, *, cwd: str | None = None) -> str:
         try:
             info = await self._workspace_terminals.open(cols=_COLS, rows=_ROWS, cwd=cwd or None)
         except TerminalError as error:
             return _refused(error)
         return f"Opened terminal {info.id}."
 
-    async def terminal_run(
+    async def _run_command(
         self,
         session_id: str,
-        command: str,
+        command: str | None,
+        *,
         timeout_s: float = _DEFAULT_TIMEOUT_SECONDS,
     ) -> str:
-        """Type one command line into a terminal, wait for its prompt, and return what it printed and its exit status.
-
-        It types only while the shell waits at an empty prompt; after keys typed while a command ran, such as an answer
-        to its prompt, send <ctrl-c> first. A command still running at the timeout keeps running: read on with
-        terminal_read, or stop it with terminal_send("<ctrl-c>"). Start servers and watchers here and leave them
-        running; a terminal nobody types in or watches ends 30 minutes after its last input.
-
-        Args:
-            session_id: The terminal, from terminal_open or terminal_list.
-            command: One command line; join several with && or ;.
-            timeout_s: Seconds to wait for the prompt, 30 by default.
-
-        Returns:
-            The command's output and exit status, or what it printed so far while it still runs.
-
-        """
+        if not isinstance(command, str) or not command.strip():
+            return "Error: command is required for action='run'."
         command = command.strip("\n")
         # One line of text, so the run ends at the prompt after it.
         if _KEYS.search(command):
             return (
                 "Error: a command is one line of plain text; join commands with && or ;, and type keys such as "
-                "<ctrl-c> or <tab> with terminal_send."
+                '<ctrl-c> or <tab> with terminal_write(action="send").'
             )
         timeout = max(0.1, min(float(timeout_s), _MAX_TIMEOUT_SECONDS))
         try:
@@ -276,21 +341,9 @@ class TerminalTools(Toolkit):
             status = _SHELL_EXITED
         return f"{shown}\n{status}" if shown else status
 
-    async def terminal_send(self, session_id: str, keys: str) -> str:
-        """Type keys into a terminal without waiting for a command: an answer to a prompt, or keys such as <ctrl-c>.
-
-        Text is typed as written; <enter>, <tab>, <esc>, <backspace>, <up>, <down>, <left>, <right>, <home>, <end>,
-        <delete> and <ctrl-c> (any <ctrl-letter>) are keys, so "y<enter>" answers a yes/no prompt. Send <ctrl-c> on its
-        own: the terminal may drop keys typed right after it.
-
-        Args:
-            session_id: The terminal, from terminal_open or terminal_list.
-            keys: The text and keys to type.
-
-        Returns:
-            What the terminal printed right after, or why the keys were not typed.
-
-        """
+    async def _send_keys(self, session_id: str, keys: str | None) -> str:
+        if not isinstance(keys, str) or keys == "":
+            return "Error: keys is required for action='send'."
         text = _keys_to_text(keys)
         if "\x03" in text.rstrip("\x03"):
             return "Error: send <ctrl-c> on its own, then the keys after it; the terminal may drop keys typed with it."
@@ -308,16 +361,7 @@ class TerminalTools(Toolkit):
         exited = f"\n{_SHELL_EXITED}" if ended else ""
         return f"Sent. New output:\n{shown}{exited}" if shown else f"Sent.{exited}"
 
-    async def terminal_read(self, session_id: str) -> str:
-        """Read a terminal's recent output as text.
-
-        Args:
-            session_id: The terminal, from terminal_open or terminal_list.
-
-        Returns:
-            Its recent output, and whether its shell has exited.
-
-        """
+    async def _read_terminal(self, session_id: str) -> str:
         try:
             async with self._workspace_terminals.attach(session_id) as stream:
                 output, _, exited, _ = await _output(stream, _OUTPUT_SECONDS)
@@ -328,20 +372,16 @@ class TerminalTools(Toolkit):
         shown = _plain_text(output).strip("\n")[-_MAX_TEXT_CHARS:]
         return f"{shown}\n{_SHELL_EXITED}" if exited else shown or "[No output yet.]"
 
-    async def terminal_list(self) -> str:
-        """List the terminals of your workspace, including ones people opened.
-
-        Returns:
-            Each terminal's session ID and whether its shell still runs.
-
-        """
+    async def _list_terminals(self) -> str:
         try:
             sessions = await self._workspace_terminals.sessions()
         except TerminalError as error:
             return _refused(error)
         if not sessions:
             return (
-                "No terminals are open." if self._restricted else "No terminals are open. Open one with terminal_open."
+                "No terminals are open."
+                if self._restricted
+                else 'No terminals are open. Open one with terminal_write(action="open").'
             )
         return "\n".join(
             f"- {info.id}: {'running' if info.alive else f'exited with status {info.exit_code}'}" for info in sessions

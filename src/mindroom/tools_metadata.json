@@ -2459,11 +2459,8 @@
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
-        "claude_end_session",
-        "claude_interrupt",
-        "claude_send",
-        "claude_session_status",
-        "claude_start_session"
+        "claude_agent_status",
+        "claude_agent_write"
       ],
       "helper_text": null,
       "icon": "Bot",
@@ -5925,11 +5922,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "start_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "cancel_script",
-        "list_scripts"
+        "script_read",
+        "script_write"
       ],
       "helper_text": null,
       "icon": "FileCode2",
@@ -6151,11 +6145,8 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "terminal_open",
-        "terminal_run",
-        "terminal_send",
         "terminal_read",
-        "terminal_list"
+        "terminal_write"
       ],
       "helper_text": null,
       "icon": "SquareTerminal",
@@ -7252,9 +7243,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "get_my_usage",
-        "get_my_private_usage",
-        "get_all_usage"
+        "usage_stats"
       ],
       "helper_text": null,
       "icon": "FaChartBar",
@@ -9547,10 +9536,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_models",
-        "get_thread_model",
-        "switch_thread_model",
-        "reset_thread_model"
+        "thread_model_read",
+        "thread_model_write"
       ],
       "helper_text": null,
       "icon": "Cpu",

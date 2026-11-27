@@ -6,9 +6,9 @@ import asyncio
 import collections
 import typing
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
-from typing import ClassVar, Literal, get_args
+from typing import TYPE_CHECKING, ClassVar, Literal, get_args
 from uuid import uuid4
 
 from claude_agent_sdk import (
@@ -32,8 +32,19 @@ from mindroom.runtime_shutdown import close_at_process_shutdown
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
+from mindroom.tools.native_helpers import validate_action_params
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
+_WriteAction = Literal["start", "send", "interrupt", "end"]
+_WRITE_ALLOWED: dict[str, frozenset[str]] = {
+    "start": frozenset({"session_label", "resume", "fork_session"}),
+    "send": frozenset({"prompt", "session_label", "resume", "fork_session"}),
+    "interrupt": frozenset({"session_label"}),
+    "end": frozenset({"session_label"}),
+}
 _VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
 _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
@@ -396,13 +407,16 @@ class ClaudeAgentTools(Toolkit):
         super().__init__(
             name="claude_agent",
             tools=[
-                self.claude_start_session,
-                self.claude_send,
-                self.claude_session_status,
-                self.claude_interrupt,
-                self.claude_end_session,
+                self.claude_agent_status,
+                self.claude_agent_write,
             ],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit unused meta-schema fields on the instant in-memory session status lookup."""
+        if function.name == "claude_agent_status":
+            return replace(function, offer_background_after=False, offer_output_path=False)
+        return function
 
     def _build_options(
         self,
@@ -546,7 +560,7 @@ class ClaudeAgentTools(Toolkit):
             elif normalized_resume or fork_session:
                 return (
                     f"Session `{session_key}` already exists; runtime `resume`/`fork_session` apply only when creating "
-                    "a new session. Use a different `session_label` or call `claude_end_session` first."
+                    'a new session. Use a different `session_label` or call `claude_agent_write(action="end")` first.'
                 )
         except Exception as exc:
             return self._format_session_error(
@@ -559,33 +573,66 @@ class ClaudeAgentTools(Toolkit):
             )
         return session, created, session_key, resolved_model
 
-    async def claude_start_session(
+    async def claude_agent_write(
         self,
+        action: _WriteAction,
+        prompt: str | None = None,
         session_label: str | None = None,
         resume: str | None = None,
-        fork_session: bool = False,
+        fork_session: bool | None = None,
     ) -> str:
-        """Start or reuse a persistent Claude coding session for this conversation."""
-        result = await self._get_or_create_session(
-            session_label=session_label,
-            resume=resume,
-            fork_session=fork_session,
-        )
-        if isinstance(result, str):
-            return result
-        _session, created, session_key, _resolved_model = result
-        action = "Started" if created else "Reusing"
-        return f"{action} Claude session `{session_key}`."
+        """Start, message, interrupt, or close a persistent Claude coding session.
 
-    async def claude_send(
+        - `start`: start or reuse session (`resume`/`fork_session` apply on creation only).
+        - `send`: send `prompt` and return response (creates session if needed).
+        - `interrupt`: interrupt active session.
+        - `end`: close active session.
+
+        Args:
+            action: Action.
+            prompt: Prompt text (send).
+            session_label: Optional label.
+            resume: Claude session ID to resume (start, send).
+            fork_session: Fork resumed session (start, send).
+
+        """
+        params: dict[str, object] = {
+            "prompt": prompt,
+            "session_label": session_label,
+            "resume": resume,
+            "fork_session": fork_session,
+        }
+        if (error := validate_action_params("claude_agent_write", action, _WRITE_ALLOWED, params)) is not None:
+            return error
+        if action == "start":
+            result = await self._get_or_create_session(
+                session_label=session_label,
+                resume=resume,
+                fork_session=False if fork_session is None else fork_session,
+            )
+            if isinstance(result, str):
+                return result
+            return f"{'Started' if result[1] else 'Reusing'} Claude session `{result[2]}`."
+        if action == "send":
+            return await self._send_prompt(
+                prompt,
+                session_label=session_label,
+                resume=resume,
+                fork_session=False if fork_session is None else fork_session,
+            )
+        if action == "interrupt":
+            return await self._interrupt_session(session_label=session_label)
+        return await self._end_session(session_label=session_label)
+
+    async def _send_prompt(
         self,
-        prompt: str,
+        prompt: str | None,
+        *,
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
     ) -> str:
-        """Send a prompt to a persistent Claude session and return Claude's response."""
-        trimmed_prompt = prompt.strip()
+        trimmed_prompt = prompt.strip() if isinstance(prompt, str) else ""
         if not trimmed_prompt:
             return "Prompt is required."
 
@@ -693,11 +740,11 @@ class ClaudeAgentTools(Toolkit):
             lines.append(f"[Claude tools used: {unique_tools}]")
         return "\n\n".join(line for line in lines if line)
 
-    async def claude_session_status(
+    async def claude_agent_status(
         self,
         session_label: str | None = None,
     ) -> str:
-        """Show status information for the current persistent Claude session."""
+        """Show age, idle time, and Claude session ID for the current persistent Claude session."""
         session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
@@ -714,11 +761,11 @@ class ClaudeAgentTools(Toolkit):
             f"- claude_session_id: {claude_id}"
         )
 
-    async def claude_interrupt(
+    async def _interrupt_session(
         self,
+        *,
         session_label: str | None = None,
     ) -> str:
-        """Send an interrupt signal to an active Claude session."""
         session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
@@ -731,11 +778,11 @@ class ClaudeAgentTools(Toolkit):
             return f"Failed to interrupt Claude session: {exc}"
         return f"Interrupt sent to Claude session `{session_key}`."
 
-    async def claude_end_session(
+    async def _end_session(
         self,
+        *,
         session_label: str | None = None,
     ) -> str:
-        """Close and remove an active Claude session."""
         session_key = self._session_key(session_label=session_label)
         removed = await self._session_manager.close(session_key)
         if not removed:

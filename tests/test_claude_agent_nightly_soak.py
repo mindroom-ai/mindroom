@@ -127,8 +127,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
             if turn % 24 == 0:
                 expected_failure_count += 1
                 failure = await asyncio.wait_for(
-                    tools.claude_send(
-                        f"fail:turn-{turn}",
+                    tools.claude_agent_write(
+                        action="send",
+                        prompt=f"fail:turn-{turn}",
                         session_label=label,
                     ),
                     timeout=3,
@@ -136,8 +137,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                 assert "Claude session error:" in failure
 
                 recovery = await asyncio.wait_for(
-                    tools.claude_send(
-                        f"recover-{turn}",
+                    tools.claude_agent_write(
+                        action="send",
+                        prompt=f"recover-{turn}",
                         session_label=label,
                     ),
                     timeout=3,
@@ -147,8 +149,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
 
             if turn % 10 == 0:
                 write = await asyncio.wait_for(
-                    tools.claude_send(
-                        f"write:file-{turn % 3}:line-{turn}",
+                    tools.claude_agent_write(
+                        action="send",
+                        prompt=f"write:file-{turn % 3}:line-{turn}",
                         session_label=label,
                     ),
                     timeout=3,
@@ -156,8 +159,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                 assert "wrote:file-" in write
 
                 read = await asyncio.wait_for(
-                    tools.claude_send(
-                        f"read:file-{turn % 3}",
+                    tools.claude_agent_write(
+                        action="send",
+                        prompt=f"read:file-{turn % 3}",
                         session_label=label,
                     ),
                     timeout=3,
@@ -169,8 +173,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                 burst_results = await asyncio.wait_for(
                     asyncio.gather(
                         *[
-                            tools.claude_send(
-                                f"parallel-{turn}-{idx}",
+                            tools.claude_agent_write(
+                                action="send",
+                                prompt=f"parallel-{turn}-{idx}",
                                 session_label=parallel_labels[idx],
                             )
                             for idx in range(len(parallel_labels))
@@ -183,8 +188,9 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
                 continue
 
             result = await asyncio.wait_for(
-                tools.claude_send(
-                    f"turn-{turn}",
+                tools.claude_agent_write(
+                    action="send",
+                    prompt=f"turn-{turn}",
                     session_label=label,
                 ),
                 timeout=3,
@@ -196,7 +202,7 @@ async def test_claude_agent_nightly_soak_loop(monkeypatch: pytest.MonkeyPatch) -
         assert _NightlySoakSDKClient.max_concurrent_queries >= 2
 
         for label in session_labels + parallel_labels:
-            await tools.claude_end_session(session_label=label)
+            await tools.claude_agent_write(action="end", session_label=label)
 
     await run_tool_call(
         ToolFunction(name="soak", description=None, parameters={"type": "object", "properties": {}}, entrypoint=soak),

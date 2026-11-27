@@ -31,7 +31,7 @@ Agents use them through the `terminal` toolkit, and chat clients through the rou
 
 ## Agent typing
 
-An agent types into terminals only while its `run_shell_command` calls never ask for approval; otherwise the toolkit offers it only `terminal_read` and `terminal_list`, and every path a call takes, the model loop, the agent CLI, scheduled calls, and scripts, calls only what the toolkit offers, so no approval card can ask for typing it may not do, as it would under `tool_approval.default: require_approval` if the typing functions were offered and refused when called.
+An agent types into terminals only while its `run_shell_command` calls never ask for approval; otherwise the toolkit offers it only `terminal_read` (`list` and `read`), and every path a call takes, the model loop, the agent CLI, scheduled calls, and scripts, calls only what the toolkit offers, so no approval card can ask for typing it may not do, as it would under `tool_approval.default: require_approval` if the typing functions were offered and refused when called.
 Approval rules judge a command's text, and what text typed into a persistent shell runs depends on what ran in it before: aliases and functions defined earlier, history expansion and other shell options, a shell started inside, and a program reading the keys instead of the shell.
 
 - Rejected: judging typing through approval aliases as the command its Enter runs, from a record of the terminal's line prepared before approval and checked at the run.
@@ -41,18 +41,18 @@ Approval rules judge a command's text, and what text typed into a persistent she
 
 ## The line record
 
-- The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`, so `terminal_run` types only at an empty prompt and knows which prompt ends its command.
+- The primary records every input it sends a terminal, an agent's and people's, one send at a time per terminal, in `mindroom.terminal.lines`, so `terminal_write(action="run")` types only at an empty prompt and knows which prompt ends its command.
   It sends all of a terminal's input on one connection, which it opens while anyone watches and closes with the last viewer, because the runner applies input from separate connections in no promised order, and a keystroke recorded before a run could otherwise reach the shell after it and join the command.
   When the runner has ended the input connection, the next send counts the line as holding typing, since what the old connection carried last may not have arrived.
 - The shell's prompt command prints an OSC 133 `D` mark with the last exit status and a prompt counter before each prompt, and the primary reads the marks from any stream attached to the terminal.
-  The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_run` reports.
+  The counter lets marks replayed with the scrollback count once, and the exit status is what `terminal_write(action="run")` reports.
   The prompt command removes itself from the environment of what the shell starts, because a shell started inside would print marks counting from 1 again; until it exits, the line waits for a prompt.
 - After an Enter or a Ctrl-C the shell is busy until its next prompt, because a running command or a continuation reads what is typed meanwhile; that prompt's line holds what was typed while busy, unless a Ctrl-C dropped it, and keys the shell reads first can keep it from printing that prompt.
   An Enter typed while busy keeps the shell busy past its prompts until a Ctrl-C, because the shell runs the typed-ahead lines one after another, and their prompts say nothing of whether more are queued.
   The line counts the prompts the shell owes, one after each Enter or Ctrl-C at the prompt, so a prompt owed from before a command, such as the one after a Ctrl-C, never ends that command.
-  `terminal_send` refuses keys after a Ctrl-C in the same send, since the terminal may drop part of them, and `terminal_run` types only once the shell prompts after it, which a person's keystroke landing just before can keep it from doing, so the agent sends another Ctrl-C.
+  `terminal_write(action="send")` refuses keys after a Ctrl-C in the same send, since the terminal may drop part of them, and `terminal_write(action="run")` types only once the shell prompts after it, which a person's keystroke landing just before can keep it from doing, so the agent sends another Ctrl-C.
 - Any other key at the prompt leaves the line holding typing until an Enter or a Ctrl-C; a send that may not have arrived, and a terminal the primary did not see open, such as after a primary restart, keep the shell busy until a Ctrl-C.
-- Limitations: output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the record, so `terminal_run` types while that program reads the keys, or make the record ignore later prompts, so `terminal_run` refuses until the terminal is replaced.
+- Limitations: output a program prints, such as a file it shows, can carry forged prompt marks, which can end a command early in the record, so `terminal_write(action="run")` types while that program reads the keys, or make the record ignore later prompts, so `terminal_write(action="run")` refuses until the terminal is replaced.
 
 ## Chat client routes
 

@@ -346,7 +346,7 @@ async def test_primary_runtime_tool_stays_local_after_real_materialization(
         agent_settings={"tools": ["usage_stats"], "worker_tools": worker_tools},
     )
 
-    result = json.loads(await _invoke(agent, "get_my_usage"))
+    result = json.loads(await _invoke(agent, "usage_stats", action="self"))
     assert result["code"] == "context_unavailable"
     assert "## Tool Execution Environment" not in agent.prompt.role
 

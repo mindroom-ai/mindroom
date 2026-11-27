@@ -850,8 +850,9 @@ async def test_mid_turn_switch_thread_model_after_toolcall_updates_streaming_mod
             "default": [
                 calls(
                     tool_call(
-                        "switch_thread_model",
+                        "thread_model_write",
                         "switch-1",
+                        action="switch",
                         model_name="large",
                         when="after-toolcall",
                     ),
@@ -920,7 +921,13 @@ async def test_mid_turn_switch_to_a_model_that_fails_to_build_reports_the_error_
         scripts={
             "default": [
                 calls(
-                    tool_call("switch_thread_model", "switch-1", model_name="large", when="after-toolcall"),
+                    tool_call(
+                        "thread_model_write",
+                        "switch-1",
+                        action="switch",
+                        model_name="large",
+                        when="after-toolcall",
+                    ),
                     content="Switching now. ",
                 ),
             ],

@@ -468,7 +468,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             reads no startup files, so it starts with exactly that environment, and no readline settings, so it
             starts with Bash's built-in key bindings. ``process_environ`` is the environment of the process a
             command runs from there, None for this one's.
-            The shell marks each prompt, which ``terminal_run`` waits for (``mindroom.terminal.lines``).
+            The shell marks each prompt, which ``terminal_write(action="run")`` waits for (``mindroom.terminal.lines``).
             """
             env = self._command_env(process_environ)
             env.update(TERM="xterm-256color", PROMPT_COMMAND=PROMPT_COMMAND, INPUTRC="/dev/null")

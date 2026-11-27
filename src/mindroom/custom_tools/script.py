@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManagerError
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tools.native_helpers import validate_action_params
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
     from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = ["ScriptTools"]
+
+_ReadAction = Literal["list", "get", "resource_profiles"]
+_WriteAction = Literal["start", "cancel"]
+_READ_ALLOWED: dict[str, frozenset[str]] = {
+    "list": frozenset({"include_finished"}),
+    "get": frozenset({"run_id"}),
+    "resource_profiles": frozenset(),
+}
+_WRITE_ALLOWED: dict[str, frozenset[str]] = {
+    "start": frozenset({"source", "path", "name", "resource_profile"}),
+    "cancel": frozenset({"run_id", "force"}),
+}
 
 
 class ScriptTools(Toolkit):
@@ -36,103 +51,118 @@ class ScriptTools(Toolkit):
         )
         super().__init__(
             name="script",
-            tools=[
-                self.start_script,
-                self.get_script_resource_profiles,
-                self.get_script,
-                self.cancel_script,
-                self.list_scripts,
-            ],
+            tools=[self.script_read, self.script_write],
         )
 
-    async def get_script_resource_profiles(self) -> str:
-        """Return the exact CPU and memory reservations available to background scripts."""
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit unused meta-schema fields on fast script status queries and small control responses."""
+        if function.name == "script_read":
+            return replace(function, offer_background_after=False)
+        if function.name == "script_write":
+            return replace(function, offer_output_path=False)
+        return function
+
+    async def script_read(
+        self,
+        action: _ReadAction,
+        run_id: str | None = None,
+        include_finished: bool | None = None,
+    ) -> str:
+        """Inspect background Python scripts.
+
+        - `list`: list owned runs.
+        - `get`: state and recent output for one run.
+        - `resource_profiles`: Kubernetes CPU/memory profiles.
+
+        Args:
+            action: Action.
+            run_id: Run ID (get).
+            include_finished: Include finished runs (list, default true).
+
+        """
+        if (
+            error := validate_action_params(
+                "script_read",
+                action,
+                _READ_ALLOWED,
+                {"run_id": run_id, "include_finished": include_finished},
+            )
+        ) is not None:
+            return _payload("error", message=error)
+        if action == "get":
+            if not isinstance(run_id, str) or not run_id.strip():
+                return _payload("error", message="run_id is required for action='get'.")
+            resolved_run_id = run_id.strip()
         try:
-            manager, _ = _runtime()
+            manager, context = _runtime()
+            if action == "list":
+                runs = await manager.list(
+                    context,
+                    include_finished=True if include_finished is None else include_finished,
+                )
+                return _payload("ok", action="list", runs=[_public_run(run) for run in runs])
+            if action == "get":
+                status = await manager.status(context, run_id=resolved_run_id)
+                return _payload("ok", action="status", run=_public_run(status.run), output=status.output)
+            return _payload("ok", action="resource_profiles", **manager.resource_profiles())
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
-        return _payload("ok", action="resource_profiles", **manager.resource_profiles())
 
-    async def start_script(
+    async def script_write(
         self,
+        action: _WriteAction,
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
         resource_profile: ScriptResourceProfileName | None = None,
+        run_id: str | None = None,
+        force: bool | None = None,
     ) -> str:
-        """Run a Python script in the background.
+        """Start or cancel a background Python script.
 
-        Provide exactly one of `source` or `path`.
-        A path is relative to this agent's workspace and is snapshotted before execution.
-        The script gets no command-line arguments.
-        It calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{"argument": "value"}'`,
-        which waits for the result, or with `from mindroom.script_sdk import MindRoomTools`
-        and `MindRoomTools().call("toolkit", "function", argument="value")`.
+        - `start`: provide exactly one of `source` or `path` (snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call("toolkit", "function", ...)`.
+        - `cancel`: revoke tool access and stop one owned run.
 
         Args:
-            source: Inline Python source code.
-            path: Workspace-relative path to a Python source file.
-            name: Optional short label shown by status and list operations.
-            resource_profile: Optional bounded Kubernetes profile. Call get_script_resource_profiles to inspect the
-                exact resources, or omit it to use the configured default.
+            action: Action.
+            source: Inline Python code (start).
+            path: Workspace-relative .py file (start).
+            name: Short label (start).
+            resource_profile: Profile from `script_read(action="resource_profiles")`; omit `resource_profile` for default (start).
+            run_id: Run ID (cancel).
+            force: Force-kill (cancel, default false).
 
         """
+        params: dict[str, object] = {
+            "source": source,
+            "path": path,
+            "name": name,
+            "resource_profile": resource_profile,
+            "run_id": run_id,
+            "force": force,
+        }
+        if (error := validate_action_params("script_write", action, _WRITE_ALLOWED, params)) is not None:
+            return _payload("error", message=error)
+        if action == "cancel":
+            if not isinstance(run_id, str) or not run_id.strip():
+                return _payload("error", message="run_id is required for action='cancel'.")
+            resolved_run_id = run_id.strip()
         try:
             manager, context = _runtime()
-            run = await manager.run(
-                context,
-                source=source,
-                path=path,
-                name=name,
-                resource_profile=resource_profile,
-                limits=self.limits,
-            )
+            if action == "start":
+                run = await manager.run(
+                    context,
+                    source=source,
+                    path=path,
+                    name=name,
+                    resource_profile=resource_profile,
+                    limits=self.limits,
+                )
+                return _payload("ok", action="run", run=_public_run(run))
+            run = await manager.cancel(context, run_id=resolved_run_id, force=False if force is None else force)
+            return _payload("ok", action="cancel", run=_public_run(run))
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
-        return _payload("ok", action="run", run=_public_run(run))
-
-    async def get_script(self, run_id: str) -> str:
-        """Return durable state and recent process output for one owned script.
-
-        Args:
-            run_id: Identifier returned by `start_script`.
-
-        """
-        try:
-            manager, context = _runtime()
-            status = await manager.status(context, run_id=run_id)
-        except ScriptRunManagerError as exc:
-            return _payload("error", message=str(exc))
-        return _payload("ok", action="status", run=_public_run(status.run), output=status.output)
-
-    async def cancel_script(self, run_id: str, force: bool = False) -> str:
-        """Cancel one owned background script after revoking its tool capability.
-
-        Args:
-            run_id: Identifier returned by `start_script`.
-            force: Force-kill the supervised process instead of requesting graceful termination.
-
-        """
-        try:
-            manager, context = _runtime()
-            run = await manager.cancel(context, run_id=run_id, force=force)
-        except ScriptRunManagerError as exc:
-            return _payload("error", message=str(exc))
-        return _payload("ok", action="cancel", run=_public_run(run))
-
-    async def list_scripts(self, include_finished: bool = True) -> str:
-        """List background scripts owned by this requester and agent.
-
-        Args:
-            include_finished: Include terminal runs in addition to active runs.
-
-        """
-        try:
-            manager, context = _runtime()
-        except ScriptRunManagerError as exc:
-            return _payload("error", message=str(exc))
-        runs = await manager.list(context, include_finished=include_finished)
-        return _payload("ok", action="list", runs=[_public_run(run) for run in runs])
 
 
 def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext]:

@@ -356,7 +356,7 @@ def test_workflow_refuses_plain_script_toolkit(tmp_path: Path) -> None:
     entries = policy_module._visible_script_tool_entries(context, context.config, workflow=True)
 
     assert "script" not in {entry.name for entry in entries}
-    assert resolve_current_script_tool(context, ScriptToolGrant("script", "start_script"), workflow=True) is None
+    assert resolve_current_script_tool(context, ScriptToolGrant("script", "script_write"), workflow=True) is None
     assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate"), workflow=True) is not None
 
 
