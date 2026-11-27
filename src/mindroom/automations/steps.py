@@ -4,16 +4,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
     from pathlib import Path
 
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.trace_audit.models import FailureCluster
+
+
+class AuditClusterReviewer(Protocol):
+    """Callback invoked by the built-in ``trace_audit`` automation to promote one failure cluster."""
+
+    async def __call__(
+        self,
+        config: Config,
+        *,
+        agent_name: str,
+        cluster: FailureCluster,
+        identity: ToolExecutionIdentity | None = None,
+        room_id: str | None = None,
+    ) -> object:
+        """Review one promoted failure cluster and return the bounded review outcome."""
+        ...
 
 
 def workspace_context_files(config: Config, agent_name: str) -> list[str]:
@@ -54,6 +71,14 @@ class AutomationContext:
     execution_identity: ToolExecutionIdentity | None
     workspace: Path
     state_dir: Path
+    # MindRoom-internal wiring excluded from the public plugin API surface.
+    _room_id: str | None = None
+    _review_audit_cluster: AuditClusterReviewer | None = None
+
+    @property
+    def room_id(self) -> str | None:
+        """Return the resolved Matrix room ID for this automation run, if known."""
+        return self._room_id
 
 
 @dataclass(frozen=True)
@@ -87,6 +112,16 @@ class Done:
     resolve: tuple[str, ...] = ()
     # Called on the event loop, for work that must be scheduled there, such as a background re-index.
     on_loop: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True)
+class Run:
+    """Async passive work run on the main loop under the automation's instance lock (built-in automations only)."""
+
+    execute: Callable[[], Awaitable[Done | None]]
+
+
+type CheckStep = Ask | Run | None
 
 
 # Every message the runner posts carries this hook source prefix, so the turns it starts are known as automation turns.

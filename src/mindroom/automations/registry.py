@@ -15,11 +15,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from types import ModuleType
 
-    from mindroom.automations.steps import Ask, AutomationContext
+    from mindroom.automations.steps import AutomationContext, CheckStep
     from mindroom.config.main import Config
     from mindroom.config.plugin import PluginEntryConfig
 
-    type CheckFn = Callable[[AutomationContext], Ask | None]
+    type CheckFn = Callable[[AutomationContext], CheckStep]
 
 _logger = get_logger(__name__)
 _NAME = re.compile(r"[a-z][a-z0-9_]*")
@@ -103,8 +103,11 @@ def _builtin_definitions() -> dict[str, AutomationDefinition]:
     from mindroom.automations.dreaming import check_dreaming  # noqa: PLC0415
     from mindroom.automations.exploration import check_exploration  # noqa: PLC0415
     from mindroom.automations.prompt_curation import check_curation  # noqa: PLC0415
+    from mindroom.automations.trace_audit import check_trace_audit  # noqa: PLC0415
 
-    definitions = [_definition(check, {}) for check in (check_curation, check_dreaming, check_exploration)]
+    definitions = [
+        _definition(check, {}) for check in (check_curation, check_dreaming, check_exploration, check_trace_audit)
+    ]
     return {definition.name: definition for definition in definitions}
 
 

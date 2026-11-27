@@ -1011,11 +1011,13 @@ visibility = [
     "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.delegation.execution",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
     "mindroom.memory._mem0_backend",
 ]
 
@@ -1042,11 +1044,14 @@ visibility = [
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice.handler",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge.chunk_context",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.trace_audit.auditor",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -3410,6 +3415,7 @@ visibility = [
     "mindroom.history.request_messages",
     "mindroom.history.summary_fork",
     "mindroom.participation_hook",
+    "mindroom.trace_audit.source",
 ]
 
 [[modules]]
@@ -4452,6 +4458,7 @@ visibility = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.conversation_text",
     "mindroom.listening.turn",
+    "mindroom.trace_audit.signals",
 ]
 
 [[modules]]
@@ -10871,12 +10878,13 @@ visibility = [
     "mindroom.config.resolution",
     "mindroom.config.models",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
 path = "mindroom.automations.threads"
 depends_on = ["mindroom.constants", "mindroom.path_confinement"]
-visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration"]
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration", "mindroom.automations.trace_audit"]
 
 [[modules]]
 path = "mindroom.automations.steps"
@@ -10889,6 +10897,8 @@ visibility = [
     "mindroom.automations.exploration",
     "mindroom.history.conversation_text",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.trace_audit.source",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -10898,6 +10908,7 @@ depends_on = [
     "mindroom.automations.prompt_curation",
     "mindroom.config.automations",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -11014,6 +11025,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
 ]
 visibility = [
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
 ]
@@ -11035,6 +11047,20 @@ depends_on = [
     "mindroom.tool_system.tool_schema",
     "mindroom.turn_model",
 ]
+visibility = ["mindroom.skill_learning.audit_reviewer", "mindroom.skill_learning.runner"]
+
+[[modules]]
+path = "mindroom.skill_learning.audit_reviewer"
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.helper_usage",
+    "mindroom.llm",
+    "mindroom.providers.registry",
+    "mindroom.session_storage.agent_storage",
+    "mindroom.skill_learning.reviewer",
+    "mindroom.skill_learning.tools",
+    "mindroom.turn_model",
+]
 visibility = ["mindroom.skill_learning.runner"]
 
 [[modules]]
@@ -11045,6 +11071,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_resolution",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.tools",
@@ -11225,6 +11252,23 @@ depends_on = [
     "mindroom.config.resolution",
 ]
 visibility = ["mindroom.automations.registry"]
+
+[[modules]]
+path = "mindroom.automations.trace_audit"
+depends_on = [
+    "mindroom.automations.registry",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
+    "mindroom.config.automations",
+    "mindroom.config.resolution",
+    "mindroom.contacts.turns",
+    "mindroom.helper_usage",
+    "mindroom.session_storage.agent_storage",
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.pipeline",
+]
+visibility = ["mindroom.automations.registry"]
 [[modules]]
 path = "mindroom.history.mid_turn_compaction"
 depends_on = [
@@ -11272,6 +11316,7 @@ visibility = [
     "mindroom.loop_hooks",
     "mindroom.response_turn",
     "mindroom.delegation.continuation",
+    "mindroom.trace_audit.signals",
 ]
 
 [[modules]]
@@ -11645,4 +11690,60 @@ depends_on = [
     "mindroom.custom_tools.triggers",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.trace_audit"
+depends_on = [
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.pipeline",
+    "mindroom.trace_audit.signals",
+    "mindroom.trace_audit.source",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.models"
+depends_on = []
+
+[[modules]]
+path = "mindroom.trace_audit.signals"
+depends_on = [
+    "mindroom.history.run_checkpoint",
+    "mindroom.hooks.enrichment",
+    "mindroom.prompt_message_tags",
+    "mindroom.trace_audit.models",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.source"
+depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.history.summary_message",
+    "mindroom.llm",
+    "mindroom.session_storage.schema",
+    "mindroom.trace_audit.models",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.auditor"
+depends_on = [
+    "mindroom.agent_loop.helper",
+    "mindroom.agent_loop.prompt",
+    "mindroom.agent_loop.structured",
+    "mindroom.helper_usage",
+    "mindroom.llm",
+    "mindroom.providers.registry",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.signals",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.pipeline"
+depends_on = [
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.signals",
+    "mindroom.trace_audit.source",
 ]

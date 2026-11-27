@@ -69,7 +69,7 @@ _CONVERSATION_BUDGET_SHARE = 4
 # Renders of a replayed review's transcript, each with a character budget shrunk by the last one's overshoot.
 _TRANSCRIPT_FIT_PASSES = 4
 # The skill tools a review runs, as the review prompt describes them, in the order it lists them.
-_SKILL_TOOL_LINES = {
+SKILL_TOOL_LINES = {
     "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
     '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
     '(file_path and file_content), or "remove_file" (file_path).',
@@ -134,7 +134,7 @@ def _review_transcript(
     )
 
 
-def _review_input_budget_tokens(config: Config, model_name: str) -> int:
+def review_input_budget_tokens(config: Config, model_name: str) -> int:
     """Return the aggregate input budget of one review."""
     context_window = config.models[model_name].context_window
     if context_window is None:
@@ -147,7 +147,7 @@ async def _run_in_review(call: ToolCall, call_next: ToolNext) -> object:
     return await call_next(application_arguments(call.arguments))
 
 
-def _review_tools(
+def review_tools(
     definitions: Sequence[ToolSpec],
     tools: SkillTools,
     *,
@@ -169,11 +169,11 @@ def _review_tools(
         "get_skill_script": validated_entrypoint(tools.get_skill_script),
     }
     answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
-    runnable = [name for name in _SKILL_TOOL_LINES if name in answered]
+    runnable = [name for name in SKILL_TOOL_LINES if name in answered]
 
     async def deny(**_arguments: object) -> str:
         verb = "runs" if len(runnable) == 1 else "run"
-        return f"This tool is not available during a skill review; only {_listing(runnable)} {verb} here."
+        return f"This tool is not available during a skill review; only {listing(runnable)} {verb} here."
 
     functions = {
         name: ToolFunction(
@@ -188,7 +188,8 @@ def _review_tools(
     return PreparedTools(functions=functions), runnable
 
 
-def _listing(names: Sequence[str]) -> str:
+def listing(names: Sequence[str]) -> str:
+    """Format tool names as an English list."""
     return " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
@@ -197,11 +198,11 @@ def _review_prompt(config: Config, catalog: SkillCatalog, runnable: Sequence[str
         f"- {entry.name} ({entry.owner}): {entry.description}"
         for entry in sorted(catalog.entries.values(), key=lambda item: item.name)
     )
-    tool_lines = "\n".join(f"- {_SKILL_TOOL_LINES[name]}" for name in runnable)
+    tool_lines = "\n".join(f"- {SKILL_TOOL_LINES[name]}" for name in runnable)
     return (
         f"{config.get_prompt('SKILL_REVIEW_PROMPT')}\nTools:\n{tool_lines}\n\n"
         f"Skills and their owners:\n{owners or '(none yet)'}\n\n"
-        f"You can only call {_listing(runnable)} in this review; every other tool answers that it is not available, "
+        f"You can only call {listing(runnable)} in this review; every other tool answers that it is not available, "
         "so do not call one."
     )
 
@@ -222,12 +223,12 @@ def _fork(
     # left no final answer to continue.
     if final is None or final.role != "assistant" or final.tool_calls or not final.content:
         return None
-    sent = _context_tokens(config, captured.model, captured.model_name, final.metrics)
-    if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
+    sent = context_tokens(config, captured.model, captured.model_name, final.metrics)
+    if sent * _CONVERSATION_BUDGET_SHARE > review_input_budget_tokens(config, captured.model_name):
         return None
     # A gated call pauses its run, asks as its job, or runs elsewhere.
     awaiting_decision = frozenset(function.name for function in captured.functions if function.gate is not None)
-    functions, runnable = _review_tools(request.tools, tools, awaiting_decision=awaiting_decision)
+    functions, runnable = review_tools(request.tools, tools, awaiting_decision=awaiting_decision)
     if "skill_manage" not in runnable:
         return None
     return _ReviewRequest(
@@ -249,7 +250,7 @@ def _fork(
     )
 
 
-def _agent_skill_definitions(
+def agent_skill_definitions(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
@@ -323,17 +324,17 @@ async def _replay(
         messages,
         session.summary.text if session.summary is not None else None,
         model.token_counter,
-        _review_input_budget_tokens(config, model_name) // _CONVERSATION_BUDGET_SHARE,
+        review_input_budget_tokens(config, model_name) // _CONVERSATION_BUDGET_SHARE,
     )
     definitions = await asyncio.to_thread(
-        _agent_skill_definitions,
+        agent_skill_definitions,
         config,
         runtime_paths,
         agent_name,
         skills_root,
         catalog,
     )
-    functions, runnable = _review_tools(definitions, tools)
+    functions, runnable = review_tools(definitions, tools)
     evidence = (
         "The conversation to review is supplied inside <conversation> tags as a transcript of the stored turns.\n"
         f"<conversation>\n{transcript}\n</conversation>"
@@ -349,7 +350,7 @@ async def _replay(
     )
 
 
-def _context_tokens(config: Config, model: ModelProvider, model_name: str, metrics: MessageMetrics | RunMetrics) -> int:
+def context_tokens(config: Config, model: ModelProvider, model_name: str, metrics: MessageMetrics | RunMetrics) -> int:
     """Return the input that requests reported, counting prompt-cache reads and writes."""
     identity = model.identity
     return (
@@ -371,11 +372,11 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
     Like an agent's reply, a review answers the tool calls of a response the output limit cut off instead of running
     them, so a truncated skill_manage call never writes a truncated skill.
     """
-    budget_tokens = _review_input_budget_tokens(config, review.model_name)
+    budget_tokens = review_input_budget_tokens(config, review.model_name)
 
     async def within_budget(_state: LoopState) -> RequestDecision:
         # Like Hermes, the review ends before its next request once the input it sent reached the budget.
-        if (spent := _context_tokens(config, review.model, review.model_name, metrics)) < budget_tokens:
+        if (spent := context_tokens(config, review.model, review.model_name, metrics)) < budget_tokens:
             return SendRequest()
         logger.info("Skill review reached its input budget", budget_tokens=budget_tokens, spent_tokens=spent)
         return EndRun()
@@ -469,6 +470,6 @@ async def review_conversation(
         "Skill review model run finished",
         forked=review.forked,
         model_requests=len(own_model_messages(record)),
-        input_tokens=_context_tokens(config, review.model, review.model_name, metrics),
+        input_tokens=context_tokens(config, review.model, review.model_name, metrics),
         cache_read_tokens=metrics.tokens.cache_read_tokens,
     )

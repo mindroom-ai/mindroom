@@ -35,6 +35,7 @@ type IndependentUsageKind = Literal[
     "room_topic",
     "team_mode",
     "thread_summary",
+    "trace_audit",
     "voice_dictation",
     "voice_normalization",
     "voice_transcription",

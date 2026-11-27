@@ -331,12 +331,14 @@ describe("automation entries", () => {
       "Prompt curation",
       "Dreaming",
       "Exploration",
+      "Trace audit",
       "Plugin automation",
     ]);
     expect(node.variants.map((variant) => variant.errorTag)).toEqual([
       "prompt_curation",
       "dreaming",
       "exploration",
+      "trace_audit",
       "plugin",
     ]);
   });
@@ -349,7 +351,7 @@ describe("automation entries", () => {
         { name: "weekly_digest", cron: "0 9 * * 1" },
         REAL,
       ),
-    ).toBe(3);
+    ).toBe(4);
     expect(matchUnionVariant(node, {}, REAL)).toBe(-1);
   });
 
