@@ -154,6 +154,8 @@ async def test_an_agent_whose_shell_runs_in_the_primary_gets_no_terminal_functio
         ({"rules": [{"match": "run_*", "script": "rm_review.py"}]}, True),
         ({}, False),
         ({"default": "require_approval", "rules": [{"match": "run_shell_command", "action": "auto_approve"}]}, False),
+        ({"rules": [{"match": "run_shell_command", "agents": "code", "action": "require_approval"}]}, True),
+        ({"rules": [{"match": "run_shell_command", "agents": "other", "action": "require_approval"}]}, False),
     ],
 )
 async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_ask(

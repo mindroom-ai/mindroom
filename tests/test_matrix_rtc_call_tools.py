@@ -2398,7 +2398,11 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
     config.agents[AGENT].tools = ["matrix_message"]
     assert matrix_message_available_during_call(config, AGENT)
     config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="matrix_message", agents="other", action="require_approval")],
+    )
+    assert matrix_message_available_during_call(config, AGENT)
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="matrix_message", agents=AGENT, action="require_approval")],
     )
     assert not matrix_message_available_during_call(config, AGENT)
 

@@ -40,6 +40,11 @@ _REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 
 
+def _effective_config_state(config: Config) -> tuple[dict[str, object], str]:
+    """Compare runtime config alongside JSON-typed approval rules so ``True`` vs ``1`` triggers reload."""
+    return config.runtime_model_dump(), config.tool_approval.model_dump_json()
+
+
 @dataclass
 class _ReplacementDrainState:
     """Track response-drain state for one replacement apply."""
@@ -268,9 +273,9 @@ class ConfigReloadLifecycle:
                     requested=describe_event_journal(new_config.event_journal, self.runtime_paths),
                 )
 
-            current_effective_config = current_config.runtime_model_dump()
-            new_effective_config = new_config.runtime_model_dump()
-            runtime_effective_config = runtime_config.runtime_model_dump()
+            current_effective_config = _effective_config_state(current_config)
+            new_effective_config = _effective_config_state(new_config)
+            runtime_effective_config = _effective_config_state(runtime_config)
             if (
                 self._incomplete_config is None
                 and current_effective_config == new_effective_config == runtime_effective_config
@@ -331,7 +336,7 @@ class ConfigReloadLifecycle:
                     self._incomplete_config = repair_config
                     updated = await self._apply_config_transition(repair_config, fully_applied_config)
                     self._incomplete_config = None
-                if fully_applied_config.runtime_model_dump() != requested_config.runtime_model_dump():
+                if _effective_config_state(fully_applied_config) != _effective_config_state(requested_config):
                     self._incomplete_config = requested_config
                     requested_updated = await self._apply_config_transition(
                         fully_applied_config,

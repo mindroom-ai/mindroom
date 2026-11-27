@@ -474,7 +474,7 @@ class _CallAgentCache:
             eager_deferred_tools=True,
             inline_tools=True,
         )
-        return _refuse_text_chat_functions(_spoken(build), self.config)
+        return _refuse_text_chat_functions(_spoken(build), self.config, agent_name=self.agent_name)
 
 
 async def build_call_tools(
@@ -650,7 +650,7 @@ async def build_call_tools(
     for toolkit in build.spec.toolkits:
         for function in toolkit.functions:
             # The build applied the call's function filter to the functions it built, not to ones added beside them.
-            if _function_requires_text_chat(function, config):
+            if _function_requires_text_chat(function, config, agent_name=agent_name):
                 logger.info("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
                 continue
             tools.append(
@@ -977,16 +977,21 @@ def _normalize_tool_result(result: object) -> str:
     return text
 
 
-def _function_requires_text_chat(function: ToolFunction, config: Config) -> bool:
+def _function_requires_text_chat(
+    function: ToolFunction,
+    config: Config,
+    *,
+    agent_name: str | None = None,
+) -> bool:
     """Return whether a function needs text-chat UI that a voice call lacks."""
     return (
         function.gate is not None
         or function.name in _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS
-        or tool_may_require_approval(config, function.name)
+        or tool_may_require_approval(config, function.name, agent_name=agent_name)
     )
 
 
-def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild:
+def _refuse_text_chat_functions(build: AgentBuild, config: Config, *, agent_name: str) -> AgentBuild:
     """Keep functions that need text chat visible, as chat offers them, but refuse them when called."""
     refused: set[str] = set()
 
@@ -994,7 +999,7 @@ def _refuse_text_chat_functions(build: AgentBuild, config: Config) -> AgentBuild
         if function.gate is ToolGate.DELEGATION:
             # Chat hands delegation to its driver; calls run the child turn directly.
             function = replace(function, gate=None)
-        if not _function_requires_text_chat(function, config):
+        if not _function_requires_text_chat(function, config, agent_name=agent_name):
             return function
         refused.add(function.name)
         # A gate pauses the run before any tool-call policy can refuse the call.
@@ -1020,6 +1025,7 @@ def matrix_message_available_during_call(config: Config, agent_name: str) -> boo
     return room_turn_offers(config, agent_name, "matrix_message") and not tool_may_require_approval(
         config,
         "matrix_message",
+        agent_name=agent_name,
     )
 
 
@@ -1030,7 +1036,7 @@ def _function_available_during_call(
     agent_name: str,
 ) -> bool:
     """Keep only functions whose execution can complete without text UI."""
-    unavailable = _function_requires_text_chat(function, config)
+    unavailable = _function_requires_text_chat(function, config, agent_name=agent_name)
     if unavailable:
         logger.debug("call_tool_hidden_needs_text_chat", tool=function.name, agent=agent_name)
     return not unavailable

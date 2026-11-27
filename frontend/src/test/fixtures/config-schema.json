@@ -941,9 +941,52 @@
       "description": "One ordered tool-approval rule.",
       "properties": {
         "match": {
-          "description": "Case-sensitive glob over exposed tool function names; the first matching rule wins",
-          "title": "Match",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Case-sensitive glob or non-empty list of globs over exposed tool function names; the first matching rule wins",
+          "title": "Match"
+        },
+        "agents": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional case-sensitive glob or non-empty list of globs over agent names; unset matches every agent",
+          "title": "Agents"
+        },
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional mapping of top-level argument names to scalar matchers or non-empty lists of matchers; every listed key must match",
+          "title": "Arguments"
         },
         "action": {
           "anyOf": [

@@ -192,21 +192,34 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
 @pytest.mark.parametrize(
-    ("rule_match", "should_refuse"),
+    ("initial_rules", "reloaded_rules", "should_refuse"),
     [
-        ("google_drive_*", False),
-        ("add", True),
+        ([], [ApprovalRuleConfig(match="google_drive_*", script="approval_other_agent_only.py")], False),
+        ([], [ApprovalRuleConfig(match="add", script="approval_other_agent_only.py")], True),
+        ([], [ApprovalRuleConfig(match="add", agents="other_agent", action="require_approval")], False),
+        (
+            [ApprovalRuleConfig(match="add", arguments={"flag": True}, action="require_approval")],
+            [ApprovalRuleConfig(match="add", arguments={"flag": 1}, action="require_approval")],
+            True,
+        ),
     ],
-    ids=["unrelated_rule_survives", "matching_rule_refuses_before_bind"],
+    ids=[
+        "unrelated_rule_survives",
+        "matching_rule_refuses_before_bind",
+        "other_agent_rule_survives",
+        "bool_to_int_argument_edit_refuses_before_bind",
+    ],
 )
 async def test_a_reload_adding_approval_rules_checks_only_the_called_tool_before_binding(
     tmp_path: Path,
-    rule_match: str,
+    initial_rules: list[ApprovalRuleConfig],
+    reloaded_rules: list[ApprovalRuleConfig],
     should_refuse: bool,
 ) -> None:
     runtime = _runtime_context(tmp_path)
+    runtime.config.tool_approval.rules = initial_rules
     current = runtime.config.model_copy(deep=True)
-    current.tool_approval.rules = [ApprovalRuleConfig(match=rule_match, script="approval_other_agent_only.py")]
+    current.tool_approval.rules = reloaded_rules
     runtime = replace(
         runtime,
         orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),

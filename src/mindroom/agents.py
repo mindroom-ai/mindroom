@@ -902,10 +902,17 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, registered_tool_name: str) -> bool:
+def _approval_may_gate(
+    config: Config,
+    tools: ToolRegistry,
+    function_name: str,
+    registered_tool_name: str,
+    *,
+    agent_name: str | None = None,
+) -> bool:
     """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     return any(
-        tool_may_require_approval(config, name)
+        tool_may_require_approval(config, name, agent_name=agent_name)
         for name in approval_policy_names(config, tools, registered_tool_name, function_name)
     )
 
@@ -919,6 +926,7 @@ def apply_tool_approval_capability(
     registered_tool_name: str,
     resumable: bool,
     approvals_as_jobs: bool,
+    agent_name: str | None = None,
 ) -> AdaptedToolkit:
     """Apply the approval rules to the functions of ``adapted``, the toolkit ``toolkit`` was adapted to.
 
@@ -931,7 +939,7 @@ def apply_tool_approval_capability(
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
-        may_gate = _approval_may_gate(config, tools, function.name, registered_tool_name)
+        may_gate = _approval_may_gate(config, tools, function.name, registered_tool_name, agent_name=agent_name)
         if not resumable:
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
         delegation = is_delegation_function(function)
@@ -1029,9 +1037,11 @@ def _generated_function_visible(
     config: Config,
     tool_function_filter: Callable[[ToolFunction], bool] | None,
     function: ToolFunction,
+    *,
+    agent_name: str | None = None,
 ) -> bool:
     """Hide generated functions an approval rule may gate, because they have no toolkit origin to pause and resume."""
-    return not tool_may_require_approval(config, function.name) and (
+    return not tool_may_require_approval(config, function.name, agent_name=agent_name) and (
         tool_function_filter is None or tool_function_filter(function)
     )
 
@@ -1091,6 +1101,7 @@ def _deferred_entry_has_schedulable_gated_function(
     room_tools: bool,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
+    agent_name: str | None = None,
 ) -> bool:
     """Return whether a CLI-deferred toolkit entry may offer any policy-gated schedulable function."""
     if (
@@ -1106,12 +1117,13 @@ def _deferred_entry_has_schedulable_gated_function(
         return False
     if functions is None:
         return config.tool_approval.default == "require_approval" or any(
-            rule.action != "auto_approve" for rule in config.tool_approval.rules
+            rule.action != "auto_approve" and (agent_name is None or rule.matches_agent(agent_name))
+            for rule in config.tool_approval.rules
         )
     return any(
         (room_tools or offered_without_room(entry.name, name))
         and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-        and _approval_may_gate(config, agent_tools.tools, name, entry.name)
+        and _approval_may_gate(config, agent_tools.tools, name, entry.name, agent_name=agent_name)
         for name in functions
     )
 
@@ -1143,6 +1155,7 @@ def _prompt_tool_capabilities(
     config: Config,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
+    agent_name: str | None = None,
 ) -> tuple[bool, bool]:
     """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
 
@@ -1168,7 +1181,10 @@ def _prompt_tool_capabilities(
         return any(
             (functions is None or name in functions)
             and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-            and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
+            and (
+                supports_native_tool_approval
+                or not _approval_may_gate(config, agent_tools.tools, name, entry.name, agent_name=agent_name)
+            )
             for name in candidates
         )
 
@@ -1339,6 +1355,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=toolkit_calls_as_jobs,
+            agent_name=agent_name,
         )
         # Instructions describe only the functions offered by the toolkit.
         adapted = with_offered_instructions(toolkit, adapted)
@@ -1470,6 +1487,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             registered_tool_name=peer_tools.name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=False,
+            agent_name=agent_name,
         )
         if peer_adapted.functions:
             entries.append(_ToolkitEntry(adapted=peer_adapted, toolkit=peer_tools))
@@ -1480,7 +1498,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             entries,
             knowledge,
             skills,
-            partial(_generated_function_visible, config, tool_function_filter),
+            partial(_generated_function_visible, config, tool_function_filter, agent_name=agent_name),
         ),
     ]
     offered, left_out = _offered_entries(built, agent_name=agent_name)
@@ -1506,6 +1524,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 room_tools=room_tools,
                 narrowed_tools=narrowed_tools,
                 supports_native_tool_approval=supports_native_tool_approval,
+                agent_name=agent_name,
             )
             for entry in deferred_configs.values()
         )

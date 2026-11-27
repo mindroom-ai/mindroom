@@ -197,7 +197,11 @@ class TerminalTools(Toolkit):
             if runtime_config is None or identity is None or agent_name is None
             else agent_terminals(agent_name, runtime_config, runtime_paths, identity, create=True)
         )
-        self._restricted = runtime_config is None or tool_may_require_approval(runtime_config, SHELL_FUNCTION)
+        self._restricted = runtime_config is None or tool_may_require_approval(
+            runtime_config,
+            SHELL_FUNCTION,
+            agent_name=agent_name,
+        )
         typing = () if self._restricted else (self.terminal_open, self.terminal_run, self.terminal_send)
         super().__init__(
             tools=(*typing, self.terminal_read, self.terminal_list) if self._terminals is not None else (),

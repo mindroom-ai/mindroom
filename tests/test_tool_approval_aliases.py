@@ -651,3 +651,33 @@ async def test_desktop_shell_approval_alias_preserves_mindroom_output_path(tmp_p
         alias,
     )
     assert asks_invalid is True
+
+
+@pytest.mark.asyncio
+async def test_alias_judged_as_rules_respect_agent_name(tmp_path: Path) -> None:
+    """Agent-scoped rules on an alias target gate only matching agents and avoid failing closed for others."""
+    config, paths = _config(
+        tmp_path,
+        {"match": "desktop", "agents": "guarded", "action": "require_approval", "timeout_days": 2},
+    )
+    alias = toolkit_approval_alias(config, builtin_tool_registry(), "desktop", "run_desktop_shell")
+    assert alias is not None
+
+    assert tool_may_require_approval(config, "run_desktop_shell", alias, agent_name="other") is False
+    assert tool_may_require_approval(config, "run_desktop_shell", alias, agent_name="guarded") is True
+    assert await evaluate_tool_approval(
+        config,
+        paths,
+        "run_desktop_shell",
+        {"args": "ls", "mindroom_output_path": 42},
+        "other",
+        alias,
+    ) == (False, 7 * 86400)
+    assert await evaluate_tool_approval(
+        config,
+        paths,
+        "run_desktop_shell",
+        {"args": "ls", "mindroom_output_path": 42},
+        "guarded",
+        alias,
+    ) == (True, 2 * 86400)

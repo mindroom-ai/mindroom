@@ -879,12 +879,26 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
             False,
         ),
         (["slack", "triggers"], [{"match": "slack_watch", "action": "require_approval"}], True),
+        (["slack", "triggers"], [{"match": ["slack_watch", "slack_post"], "action": "require_approval"}], True),
+        (
+            ["slack", "triggers"],
+            [{"match": "triggers", "arguments": {"action": "subscribe_event"}, "action": "require_approval"}],
+            False,
+        ),
+        (
+            ["slack", "triggers"],
+            [
+                {"match": "slack_watch", "action": "require_approval"},
+                {"match": "triggers", "arguments": {"action": "list"}, "action": "auto_approve"},
+            ],
+            True,
+        ),
     ],
 )
 def test_retired_slack_watch_approval_rules_fail_closed(
     tmp_path: Path,
     tools: list[str],
-    rules: list[dict[str, str]],
+    rules: list[dict[str, Any]],
     should_reject: bool,
 ) -> None:
     """Legacy slack_watch approval rules fail closed only when both slack and triggers are enabled."""
