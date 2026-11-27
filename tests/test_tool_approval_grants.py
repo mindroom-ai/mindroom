@@ -3481,7 +3481,11 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
                 "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
             },
         }
-        with pytest.raises(ConfigRuntimeValidationError, match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}"):
+        expected_verb = "enables" if "include_tools" in overrides else "disables"
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}.*{expected_verb} all of `{replacement}`'s actions",
+        ):
             Config.validate_with_runtime(bad, runtime_paths)
 
     # Kept name `terminal_read` in terminal include_tools still loads cleanly.

@@ -237,7 +237,7 @@ class TerminalTools(Toolkit):
         """Open a terminal, run one command line, or type keys.
 
         - `open`: start a workspace terminal.
-        - `run`: run one command line at an empty prompt; running commands stay alive, idle terminals end after 30m.
+        - `run`: run one command line at an empty prompt; if still running at timeout, read with `terminal_read(action="read")` or stop with `<ctrl-c>` (running commands stay alive; idle terminals end after 30m).
         - `send`: type verbatim text/keys (`<enter|tab|esc|backspace|space|up|down|left|right|home|end|delete|ctrl-letter>`) without waiting; send `<ctrl-c>` alone.
 
         Args:

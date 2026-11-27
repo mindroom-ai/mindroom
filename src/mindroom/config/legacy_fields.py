@@ -1159,8 +1159,10 @@ def _retired_consolidated_filter_checker(
             settings,
             renames,
             guidance_for=lambda key, new: (
-                f"use `{toolkit_name}: {{{key}: [{new}]}}` or remove the per-function filter and use "
-                f"`tool_approval.rules` matching `{new}` if per-action gating is needed"
+                f"use `{toolkit_name}: {{{key}: [{new}]}}` "
+                f"(filtering by `{new}` {'enables' if key == 'include_tools' else 'disables'} all of `{new}`'s actions) "
+                f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
+                "if per-action gating is needed"
             ),
         )
 

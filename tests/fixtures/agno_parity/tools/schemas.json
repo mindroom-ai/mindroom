@@ -17206,7 +17206,7 @@
       },
       {
         "name": "script_write",
-        "description": "Start or cancel a background Python script.\n- `start`: run `source` or workspace-relative `path` (not both; snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call(\"toolkit\", \"function\", ...)`.\n- `cancel`: revoke tool access and stop one owned run.",
+        "description": "Start or cancel a background Python script.\n- `start`: provide exactly one of `source` or `path` (snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call(\"toolkit\", \"function\", ...)`.\n- `cancel`: revoke tool access and stop one owned run.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17258,7 +17258,7 @@
                 "standard",
                 "large"
               ],
-              "description": "Profile from `script_read(action=\"resource_profiles\")` (start)."
+              "description": "Profile from `script_read(action=\"resource_profiles\")`; omit `resource_profile` for default (start)."
             },
             "run_id": {
               "anyOf": [
@@ -19406,7 +19406,7 @@
     "functions": [
       {
         "name": "thread_model_read",
-        "description": "Inspect models or this thread's override.\n- `list`: configured model aliases (works outside a thread).\n- `get`: active thread overrides and available models.",
+        "description": "List configured models or inspect this thread's model override.\n- `list`: list configured models, providers, and reasoning levels (works outside a thread).\n- `get`: inspect this thread's current active/stale model override.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19474,7 +19474,7 @@
             "action"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -21343,7 +21343,7 @@
     "functions": [
       {
         "name": "usage_stats",
-        "description": "Return retained token usage summaries (set `include_daily=True` for UTC-day breakdowns).\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.",
+        "description": "Return retained token usage summaries.\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -21352,10 +21352,12 @@
               "enum": [
                 "self",
                 "private"
-              ]
+              ],
+              "description": "Scope."
             },
             "include_daily": {
-              "type": "boolean"
+              "type": "boolean",
+              "description": "Include daily UTC totals and breakdowns."
             },
             "mindroom_output_path": {
               "anyOf": [

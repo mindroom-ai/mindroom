@@ -45,9 +45,9 @@ class ThreadModelTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Mark `thread_model_write` as able to stop the run, and allow redirecting `thread_model_read` output."""
+        """Mark `thread_model_write` non-strict and stop-capable, and allow redirecting `thread_model_read` output."""
         if function.name == "thread_model_write":
-            return replace(function, may_stop_run=True)
+            return replace(function, may_stop_run=True, strict=False)
         if function.name == "thread_model_read":
             return replace(function, offer_output_path=True)
         return function
@@ -75,10 +75,10 @@ class ThreadModelTools(Toolkit):
         )
 
     async def thread_model_read(self, action: _ReadAction) -> str:
-        """Inspect models or this thread's override.
+        """List configured models or inspect this thread's model override.
 
-        - `list`: configured model aliases (works outside a thread).
-        - `get`: active thread overrides and available models.
+        - `list`: list configured models, providers, and reasoning levels (works outside a thread).
+        - `get`: inspect this thread's current active/stale model override.
 
         """
         if action == "list":

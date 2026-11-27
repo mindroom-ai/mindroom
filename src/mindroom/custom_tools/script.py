@@ -120,7 +120,7 @@ class ScriptTools(Toolkit):
     ) -> str:
         """Start or cancel a background Python script.
 
-        - `start`: run `source` or workspace-relative `path` (not both; snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call("toolkit", "function", ...)`.
+        - `start`: provide exactly one of `source` or `path` (snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call("toolkit", "function", ...)`.
         - `cancel`: revoke tool access and stop one owned run.
 
         Args:
@@ -128,7 +128,7 @@ class ScriptTools(Toolkit):
             source: Inline Python code (start).
             path: Workspace-relative .py file (start).
             name: Short label (start).
-            resource_profile: Profile from `script_read(action="resource_profiles")` (start).
+            resource_profile: Profile from `script_read(action="resource_profiles")`; omit `resource_profile` for default (start).
             run_id: Run ID (cancel).
             force: Force-kill (cancel, default false).
 

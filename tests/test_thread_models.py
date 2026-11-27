@@ -34,6 +34,7 @@ from mindroom.llm.runs import RunStatus
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
+from mindroom.providers.openai.responses_wire import _tool_dicts
 from mindroom.thread_models import (
     _get_thread_model_override,
     _store_path,
@@ -1535,6 +1536,22 @@ def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
 
     assert OUTPUT_PATH_ARGUMENT not in functions["thread_model_write"].parameters["properties"]
     assert OUTPUT_PATH_ARGUMENT in functions["thread_model_read"].parameters["properties"]
+
+
+def test_thread_model_write_is_non_strict_on_openai_responses_wire(tmp_path: Path) -> None:
+    """`thread_model_write` explicitly sets strict=False so Responses API keeps optional switch args optional."""
+    direct = toolkit_offers(ThreadModelTools(), "thread_model_write")
+    assert direct.strict is False
+
+    functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
+    write_fn = functions["thread_model_write"]
+    assert write_fn.strict is False
+    assert OUTPUT_PATH_ARGUMENT not in write_fn.parameters["properties"]
+
+    [wire_tool] = _tool_dicts([write_fn.definition()])
+    assert wire_tool["name"] == "thread_model_write"
+    assert wire_tool["strict"] is False
+    assert wire_tool["parameters"]["required"] == ["action"]
 
 
 @pytest.mark.asyncio
