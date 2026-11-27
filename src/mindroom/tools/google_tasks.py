@@ -51,11 +51,12 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_tasks",
     function_names=(
-        "google_tasks_create_task",
-        "google_tasks_delete_task",
-        "google_tasks_list_task_lists",
-        "google_tasks_list_tasks",
-        "google_tasks_update_task",
+        "google_tasks_read",
+        "google_tasks_write",
+    ),
+    action_scoped_grants=(
+        "google_tasks_read",
+        "google_tasks_write",
     ),
 )
 def google_tasks_tools() -> type[GoogleTasksTools]:
