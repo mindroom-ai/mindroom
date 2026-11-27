@@ -24,12 +24,12 @@ from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
     matches_google_function,
-    restrict_google_actions,
     visible_google_function_map,
 )
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -116,37 +116,6 @@ _ManageAction = Literal[
     "delete_custom_label",
 ]
 
-_ALL_READ_ACTIONS: tuple[str, ...] = (
-    "latest",
-    "from_user",
-    "unread",
-    "starred",
-    "by_context",
-    "by_date",
-    "by_thread",
-    "search_emails",
-    "get_message",
-    "get_thread",
-    "search_threads",
-    "get_draft",
-    "list_drafts",
-    "list_custom_labels",
-)
-_ALL_DRAFT_ACTIONS: tuple[str, ...] = ("create", "update")
-_ALL_SEND_ACTIONS: tuple[str, ...] = ("send", "reply")
-_ALL_MANAGE_ACTIONS: tuple[str, ...] = (
-    "mark_read",
-    "mark_unread",
-    "star",
-    "unstar",
-    "apply_label",
-    "remove_label",
-    "delete_custom_label",
-)
-
-_GMAIL_DRAFT_READ_ACTIONS = frozenset({"get_draft", "list_drafts"})
-_GMAIL_MAILBOX_READ_ACTIONS = frozenset(_ALL_READ_ACTIONS) - _GMAIL_DRAFT_READ_ACTIONS
-
 _READ_ACTION_FIELDS: dict[str, str] = {
     "latest": "count page_token",
     "from_user": "user count page_token",
@@ -163,6 +132,8 @@ _READ_ACTION_FIELDS: dict[str, str] = {
     "list_drafts": "count page_token",
     "list_custom_labels": "",
 }
+_GMAIL_DRAFT_READ_ACTIONS = frozenset({"get_draft", "list_drafts"})
+_GMAIL_MAILBOX_READ_ACTIONS = frozenset(_READ_ACTION_FIELDS) - _GMAIL_DRAFT_READ_ACTIONS
 _DRAFT_ACTION_FIELDS: dict[str, str] = {
     "create": "to subject body cc bcc attachments thread_id message_id",
     "update": "draft_id to subject body cc bcc attachments thread_id message_id",
@@ -549,15 +520,15 @@ class GmailTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict Gmail action enums and parameters to enabled actions."""
-        restrictions: tuple[tuple[str, tuple[str, ...], tuple[str, ...], dict[str, str]], ...] = (
-            ("gmail_read", self._read_actions, _ALL_READ_ACTIONS, _READ_ACTION_FIELDS),
-            ("gmail_draft", self._draft_actions, _ALL_DRAFT_ACTIONS, _DRAFT_ACTION_FIELDS),
-            ("gmail_send", self._send_actions, _ALL_SEND_ACTIONS, _SEND_ACTION_FIELDS),
-            ("gmail_manage", self._manage_actions, _ALL_MANAGE_ACTIONS, _MANAGE_ACTION_FIELDS),
+        restrictions: tuple[tuple[str, tuple[str, ...], dict[str, str]], ...] = (
+            ("gmail_read", self._read_actions, _READ_ACTION_FIELDS),
+            ("gmail_draft", self._draft_actions, _DRAFT_ACTION_FIELDS),
+            ("gmail_send", self._send_actions, _SEND_ACTION_FIELDS),
+            ("gmail_manage", self._manage_actions, _MANAGE_ACTION_FIELDS),
         )
-        for base_name, enabled, all_actions, fields in restrictions:
-            if matches_google_function(function.name, base_name) and len(enabled) < len(all_actions):
-                return restrict_google_actions(function, enabled, fields)
+        for base_name, enabled, fields in restrictions:
+            if matches_google_function(function.name, base_name):
+                return restrict_actions(function, enabled, action_fields=fields)
         return function
 
     @property

@@ -19,7 +19,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -35,16 +35,6 @@ _WhatsAppSendAction = Literal[
     "location",
     "reaction",
 ]
-_ALL_SEND_ACTIONS: tuple[_WhatsAppSendAction, ...] = (
-    "text",
-    "template",
-    "reply_buttons",
-    "list",
-    "image",
-    "document",
-    "location",
-    "reaction",
-)
 
 
 _SEND_FIELDS = {
@@ -303,8 +293,13 @@ class _WhatsAppTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``whatsapp_send``'s action schema to enabled send actions."""
-        if function.name == "whatsapp_send" and len(self._enabled_actions) < len(_ALL_SEND_ACTIONS):
-            return restrict_actions(function, self._enabled_actions, _SEND_FIELDS, common=("recipient",))
+        if function.name == "whatsapp_send":
+            return restrict_actions(
+                function,
+                self._enabled_actions,
+                action_fields=_SEND_FIELDS,
+                common_fields=("recipient",),
+            )
         return function
 
     def _safe_error(self, exc: Exception) -> str:

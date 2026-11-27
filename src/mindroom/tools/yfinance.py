@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit
@@ -11,10 +10,10 @@ from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileA
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +30,11 @@ _YFinanceAction = Literal[
     "technical_indicators",
     "historical_prices",
 ]
+_YFINANCE_ACTION_FIELDS: dict[str, str] = {
+    "company_news": "num_stories",
+    "technical_indicators": "period",
+    "historical_prices": "period interval",
+}
 
 
 def _clean_company_info(info: dict[str, Any]) -> dict[str, Any]:
@@ -125,31 +129,12 @@ class _YFinanceTools(Toolkit):
         """Restrict ``yfinance_get`` schema and description to enabled actions."""
         if function.name != "yfinance_get":
             return function
-        narrowed = narrow_action_enum(function, self._enabled_actions)
-        enabled = set(self._enabled_actions)
-        unused_params = set()
-        if not (enabled & {"technical_indicators", "historical_prices"}):
-            unused_params.add("period")
-        if "historical_prices" not in enabled:
-            unused_params.add("interval")
-        if "company_news" not in enabled:
-            unused_params.add("num_stories")
-        props = {k: v for k, v in narrowed.parameters["properties"].items() if k not in unused_params}
-        action_docs = {
-            "stock_price": "- `stock_price`: current/regular market stock price.",
-            "company_info": "- `company_info`: company profile and key metrics.",
-            "fundamentals": "- `fundamentals`: valuation and summary fundamentals.",
-            "income_statements": "- `income_statements`: income statement table as JSON.",
-            "financial_ratios": "- `financial_ratios`: full ticker info/ratios JSON.",
-            "analyst_recommendations": "- `analyst_recommendations`: analyst recommendation history.",
-            "company_news": "- `company_news`: recent news items (capped by `num_stories`).",
-            "technical_indicators": "- `technical_indicators`: OHLCV history for `period` (default `3mo`).",
-            "historical_prices": "- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
-        }
-        desc = "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n" + "\n".join(
-            action_docs[a] for a in self._enabled_actions if a in action_docs
+        return restrict_actions(
+            function,
+            self._enabled_actions,
+            action_fields=_YFINANCE_ACTION_FIELDS,
+            common_fields=("symbol",),
         )
-        return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
 
     def _dispatch(
         self,

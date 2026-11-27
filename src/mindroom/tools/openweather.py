@@ -21,10 +21,10 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -98,7 +98,7 @@ class _OpenWeatherTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``openweather_get`` actions to the ones enabled on this instance."""
         if function.name == "openweather_get":
-            return narrow_action_enum(function, self._enabled_actions)
+            return restrict_actions(function, self._enabled_actions)
         return function
 
     def _request_json(self, url: str, params: dict[str, Any]) -> Any:  # noqa: ANN401 - JSON dict or list

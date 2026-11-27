@@ -16,7 +16,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from twilio.rest import Client
@@ -65,7 +65,7 @@ class _TwilioTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Advertise only the enabled read actions."""
-        if function.name != "twilio_read" or all(self._read_actions.values()):
+        if function.name != "twilio_read":
             return function
         return restrict_actions(function, tuple(action for action, enabled in self._read_actions.items() if enabled))
 

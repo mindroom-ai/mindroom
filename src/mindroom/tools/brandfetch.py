@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
@@ -24,8 +24,12 @@ from mindroom.tools.native_helpers import (
     json_dumps,
     require_non_empty,
     resolve_toggle,
+    restrict_actions,
     safe_path_segment,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _LookupAction = Literal["by_identifier", "by_brand"]
 
@@ -60,13 +64,22 @@ class _BrandfetchTools(Toolkit):
         self.search_url = f"{self.base_url}/search"
 
         enable_all = resolve_toggle(all, default=False)
-        self._allow_identifier = resolve_toggle(enable_search_by_identifier, default=True, enable_all=enable_all)
-        self._allow_brand = resolve_toggle(enable_search_by_brand, default=False, enable_all=enable_all)
-
-        tools: list[Any] = []
-        if self._allow_identifier or self._allow_brand:
-            tools.append(self.brandfetch_lookup)
+        self._enabled_actions: tuple[_LookupAction, ...] = tuple(
+            action
+            for action, value, default in (
+                ("by_identifier", enable_search_by_identifier, True),
+                ("by_brand", enable_search_by_brand, False),
+            )
+            if resolve_toggle(value, default=default, enable_all=enable_all)
+        )
+        tools: list[Any] = [self.brandfetch_lookup] if self._enabled_actions else []
         super().__init__(name="brandfetch", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``brandfetch_lookup`` schema and description to enabled actions."""
+        if function.name == "brandfetch_lookup":
+            return restrict_actions(function, self._enabled_actions)
+        return function
 
     def _status_error(self, status_code: int, *, action: _LookupAction, query: str) -> str:
         if status_code == 404:
@@ -108,14 +121,14 @@ class _BrandfetchTools(Toolkit):
     ) -> tuple[str, dict[str, str] | None, dict[str, str] | None]:
         safe_query = safe_path_segment(require_non_empty(query, "query"), "query")
         if action == "by_identifier":
-            if not self._allow_identifier:
+            if "by_identifier" not in self._enabled_actions:
                 msg = "Brandfetch search by identifier is disabled."
                 raise ValueError(msg)
             if not self.api_key:
                 msg = "API key is required for brand search by identifier."
                 raise ValueError(msg)
             return f"{self.brand_url}/{safe_query}", {"Authorization": f"Bearer {self.api_key}"}, None
-        if not self._allow_brand:
+        if "by_brand" not in self._enabled_actions:
             msg = "Brandfetch search by brand name is disabled."
             raise ValueError(msg)
         if not self.client_id:

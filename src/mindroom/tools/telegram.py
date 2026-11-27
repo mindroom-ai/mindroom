@@ -19,7 +19,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -27,18 +27,6 @@ if TYPE_CHECKING:
 _TelegramReadAction = Literal["get_chat", "get_file"]
 _TelegramSendAction = Literal["message", "photo", "document", "video", "audio", "animation", "sticker"]
 _TelegramManageAction = Literal["edit", "delete", "react", "pin"]
-
-_ALL_READ_ACTIONS: tuple[_TelegramReadAction, ...] = ("get_chat", "get_file")
-_ALL_SEND_ACTIONS: tuple[_TelegramSendAction, ...] = (
-    "message",
-    "photo",
-    "document",
-    "video",
-    "audio",
-    "animation",
-    "sticker",
-)
-_ALL_MANAGE_ACTIONS: tuple[_TelegramManageAction, ...] = ("edit", "delete", "react", "pin")
 
 
 _SEND_FIELDS = {
@@ -173,16 +161,20 @@ class _TelegramTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict action enums on offered Telegram functions to enabled actions."""
-        if function.name == "telegram_read" and len(self._read_actions) < len(_ALL_READ_ACTIONS):
-            return restrict_actions(function, self._read_actions, {"get_chat": "", "get_file": "file_id"})
-        if function.name == "telegram_send" and len(self._send_actions) < len(_ALL_SEND_ACTIONS):
-            return restrict_actions(function, self._send_actions, _SEND_FIELDS)
-        if function.name == "telegram_manage" and len(self._manage_actions) < len(_ALL_MANAGE_ACTIONS):
+        if function.name == "telegram_read":
+            return restrict_actions(
+                function,
+                self._read_actions,
+                action_fields={"get_file": "file_id"},
+            )
+        if function.name == "telegram_send":
+            return restrict_actions(function, self._send_actions, action_fields=_SEND_FIELDS)
+        if function.name == "telegram_manage":
             return restrict_actions(
                 function,
                 self._manage_actions,
-                {"edit": "text", "delete": "", "react": "emoji", "pin": "disable_notification"},
-                common=("message_id",),
+                action_fields={"edit": "text", "react": "emoji", "pin": "disable_notification"},
+                common_fields=("message_id",),
             )
         return function
 

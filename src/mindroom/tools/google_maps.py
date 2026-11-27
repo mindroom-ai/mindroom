@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 
 from mindroom.failure_text import failure_text
@@ -26,10 +26,26 @@ from mindroom.tools.native_helpers import (
     json_dumps,
     require_non_empty,
     resolve_toggle,
+    restrict_actions,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _PlacesAction = Literal["search_places", "geocode", "reverse_geocode", "validate_address", "elevation", "timezone"]
 _RoutesAction = Literal["directions", "distance_matrix"]
+_PLACES_ACTION_FIELDS: dict[str, str] = {
+    "search_places": "query",
+    "geocode": "address region",
+    "reverse_geocode": "lat lng result_type location_type",
+    "validate_address": "address region locality enable_usps_cass",
+    "elevation": "lat lng",
+    "timezone": "lat lng timestamp",
+}
+_ROUTES_ACTION_FIELDS: dict[str, str] = {
+    "directions": "origin destination",
+    "distance_matrix": "origins destinations",
+}
 _TravelMode = Literal["driving", "walking", "bicycling", "transit"]
 _GOOGLE_MAPS_BASE_URL = "https://maps.googleapis.com"
 _GOOGLE_PLACES_UNIVERSE = "googleapis.com"
@@ -88,25 +104,43 @@ class _GoogleMapTools(Toolkit):
         self.client: Any = googlemaps.Client(key=self.api_key, base_url=_GOOGLE_MAPS_BASE_URL)
         self._places_client: Any = None
 
-        self._places_flags: dict[str, bool] = {
-            "search_places": resolve_toggle(search_places, default=True),
-            "validate_address": resolve_toggle(validate_address, default=True),
-            "geocode": resolve_toggle(geocode_address, default=True),
-            "reverse_geocode": resolve_toggle(reverse_geocode, default=True),
-            "elevation": resolve_toggle(get_elevation, default=True),
-            "timezone": resolve_toggle(get_timezone, default=True),
-        }
-        self._routes_flags: dict[str, bool] = {
-            "directions": resolve_toggle(get_directions, default=True),
-            "distance_matrix": resolve_toggle(get_distance_matrix, default=True),
-        }
+        self._places_actions: tuple[_PlacesAction, ...] = tuple(
+            action
+            for action, value in (
+                ("search_places", search_places),
+                ("geocode", geocode_address),
+                ("reverse_geocode", reverse_geocode),
+                ("validate_address", validate_address),
+                ("elevation", get_elevation),
+                ("timezone", get_timezone),
+            )
+            if resolve_toggle(value, default=True)
+        )
+        self._routes_actions: tuple[_RoutesAction, ...] = tuple(
+            action
+            for action, value in (("directions", get_directions), ("distance_matrix", get_distance_matrix))
+            if resolve_toggle(value, default=True)
+        )
 
         tools: list[Any] = []
-        if any(self._places_flags.values()):
+        if self._places_actions:
             tools.append(self.google_maps_places)
-        if any(self._routes_flags.values()):
+        if self._routes_actions:
             tools.append(self.google_maps_routes)
         super().__init__(name="google_maps", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict Google Maps action schemas and descriptions to enabled actions."""
+        if function.name == "google_maps_places":
+            return restrict_actions(function, self._places_actions, action_fields=_PLACES_ACTION_FIELDS)
+        if function.name == "google_maps_routes":
+            return restrict_actions(
+                function,
+                self._routes_actions,
+                action_fields=_ROUTES_ACTION_FIELDS,
+                common_fields=("mode", "departure_time", "avoid"),
+            )
+        return function
 
     def _get_places_client(self) -> Any:  # noqa: ANN401
         if self._places_client is None:
@@ -210,7 +244,7 @@ class _GoogleMapTools(Toolkit):
         - `elevation`: Elevation at `lat`/`lng`.
         - `timezone`: Timezone at `lat`/`lng` (optional ISO-8601 `timestamp`).
         """
-        if not self._places_flags.get(action, False):
+        if action not in self._places_actions:
             return error_json(f"Google Maps action '{action}' is disabled.")
         try:
             return json_dumps(
@@ -248,7 +282,7 @@ class _GoogleMapTools(Toolkit):
         - `directions`: Route from `origin` to `destination` (`mode`, optional ISO-8601 `departure_time`, `avoid`).
         - `distance_matrix`: Travel time/distance between `origins` and `destinations` (`mode`, `departure_time`, `avoid`).
         """
-        if not self._routes_flags.get(action, False):
+        if action not in self._routes_actions:
             return error_json(f"Google Maps action '{action}' is disabled.")
         try:
             dep = _parse_optional_datetime(departure_time)

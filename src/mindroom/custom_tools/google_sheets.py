@@ -14,10 +14,10 @@ from mindroom.custom_tools.google_service import (
     filter_google_tools,
     google_http_error_result,
     matches_google_function,
-    restrict_google_actions,
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -36,7 +36,6 @@ _SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 _UNSET = object()
 
 _WriteAction = Literal["create", "update", "batch_update", "duplicate"]
-_ALL_WRITE_ACTIONS: tuple[str, ...] = ("create", "update", "batch_update", "duplicate")
 _WRITE_ACTION_FIELDS: dict[str, str] = {
     "create": "title",
     "update": "spreadsheet_id range_name data",
@@ -171,10 +170,8 @@ class GoogleSheetsTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``google_sheets_write``'s action enum and parameters to enabled actions."""
-        if matches_google_function(function.name, "google_sheets_write") and len(self._write_actions) < len(
-            _ALL_WRITE_ACTIONS,
-        ):
-            return restrict_google_actions(function, self._write_actions, _WRITE_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_sheets_write"):
+            return restrict_actions(function, self._write_actions, action_fields=_WRITE_ACTION_FIELDS)
         return function
 
     def google_sheets_read(

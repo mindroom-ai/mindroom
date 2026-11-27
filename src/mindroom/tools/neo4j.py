@@ -18,10 +18,10 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -77,7 +77,7 @@ class _Neo4jTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``neo4j_inspect`` actions to the ones enabled on this instance."""
         if function.name == "neo4j_inspect":
-            return narrow_action_enum(function, self._inspect_actions)
+            return restrict_actions(function, self._inspect_actions)
         return function
 
     def neo4j_inspect(self, action: _Neo4jInspectAction) -> str:

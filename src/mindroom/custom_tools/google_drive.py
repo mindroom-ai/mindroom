@@ -27,7 +27,6 @@ from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
     matches_google_function,
-    restrict_google_actions,
 )
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
@@ -41,6 +40,7 @@ from mindroom.path_confinement import (
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkits import toolkit_function_names
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Sequence
@@ -63,7 +63,6 @@ _FOLDER_MIME_TYPE = f"{_WORKSPACE_PREFIX}folder"
 
 _ReadAction = Literal["list", "search", "read", "download"]
 _WriteAction = Literal["upload", "update", "create_folder", "move", "trash"]
-_ALL_READ_ACTIONS: tuple[str, ...] = ("list", "search", "read", "download")
 _READ_ACTION_FIELDS: dict[str, str] = {
     "list": "query max_results page_token",
     "search": "query max_results page_token",
@@ -367,10 +366,8 @@ class GoogleDriveTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``google_drive_read``'s action enum and parameters to enabled read actions."""
-        if matches_google_function(function.name, "google_drive_read") and len(self._read_actions) < len(
-            _ALL_READ_ACTIONS,
-        ):
-            return restrict_google_actions(function, self._read_actions, _READ_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_drive_read"):
+            return restrict_actions(function, self._read_actions, action_fields=_READ_ACTION_FIELDS)
         return function
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401

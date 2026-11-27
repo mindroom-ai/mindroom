@@ -24,9 +24,9 @@ from mindroom.tools.native_helpers import (
     UNSET,
     first_sql_statement,
     format_tabular_rows,
-    narrow_action_enum,
     require_enabled_action,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -85,7 +85,7 @@ class _CsvTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``csv_inspect`` actions to the ones enabled on this instance."""
         if function.name == "csv_inspect":
-            return narrow_action_enum(function, self._inspect_actions)
+            return restrict_actions(function, self._inspect_actions)
         return function
 
     def _resolve_csv(self, csv_name: str | None) -> Path | None:

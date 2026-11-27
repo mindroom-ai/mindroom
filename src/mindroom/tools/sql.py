@@ -19,10 +19,10 @@ from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -183,7 +183,7 @@ class _SQLTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``sql_inspect`` actions to the ones enabled on this instance."""
         if function.name == "sql_inspect":
-            return narrow_action_enum(function, self._inspect_actions)
+            return restrict_actions(function, self._inspect_actions)
         return function
 
     def sql_inspect(

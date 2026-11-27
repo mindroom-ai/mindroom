@@ -18,18 +18,13 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools._comms import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 _DISCORD_API_BASE = "https://discord.com/api/v10"
 _DiscordReadAction = Literal["list_channels", "get_channel_info", "get_channel_messages"]
-_ALL_READ_ACTIONS: tuple[_DiscordReadAction, ...] = (
-    "list_channels",
-    "get_channel_info",
-    "get_channel_messages",
-)
 
 
 def _safe_http_error(exc: Exception, *, secret: str | None) -> str:
@@ -92,7 +87,7 @@ class _DiscordTools(Toolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``discord_read``'s action schema to configured read actions."""
-        if function.name == "discord_read" and len(self._read_actions) < len(_ALL_READ_ACTIONS):
+        if function.name == "discord_read":
             return restrict_actions(function, self._read_actions)
         return function
 
