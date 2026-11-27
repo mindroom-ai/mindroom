@@ -81,7 +81,7 @@ _ALLOWED_PARAMS: dict[str, frozenset[str]] = {
 _BOOL_PARAMS = frozenset({"canonical", "include_untagged"})
 
 
-def validate_thread_tags_params(action: str, args: Mapping[str, object]) -> str | None:
+def _validate_thread_tags_params(action: str, args: Mapping[str, object]) -> str | None:
     """Validate required and allowed parameters for one ``thread_tags`` action."""
     allowed = _ALLOWED_PARAMS.get(action)
     if allowed is None:
@@ -162,7 +162,7 @@ class ThreadTagsTools(Toolkit):
         Tags normalize to lowercase hyphenated slugs (canonical IDs <=50 chars preserved; new free-form tags <=25 chars, e.g. `"feature-request"`). Prefer existing tags (1-3 typical, <=5 max). Thread lifecycle state cannot be changed with this tool (use `thread_resolution` / `thread_snooze` when configured).
         """
         args = {k: v for k, v in locals().items() if k not in {"self", "action"}}
-        if err := validate_thread_tags_params(action, args):
+        if err := _validate_thread_tags_params(action, args):
             return self._payload("error", action=action, message=err)
         if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
             return context

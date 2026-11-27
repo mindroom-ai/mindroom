@@ -141,7 +141,7 @@ _REQUIRED_WORKFLOW_PARAMS: dict[str, tuple[str, ...]] = {
 }
 
 
-def validate_workflow_params(action: object, arguments: Mapping[str, Any]) -> str:
+def _validate_workflow_params(action: object, arguments: Mapping[str, Any]) -> str:
     """Validate workflow action and action-specific parameters, or raise WorkflowRunStoreError."""
     if not isinstance(action, str) or action not in _ALLOWED_WORKFLOW_PARAMS:
         msg = f"Unsupported workflow action {action!r}. Expected one of: start, get, cancel, resume, list, save."
@@ -224,7 +224,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
     ) -> str:
         """Run and manage durable background Python workflows."""
         arguments: dict[str, Any] = {k: v for k, v in locals().items() if k not in {"self", "action"}}
-        validated = validate_workflow_params(action, arguments)
+        validated = _validate_workflow_params(action, arguments)
         if validated == "start":
             return await self._start(arguments)
         if validated == "get":
@@ -384,7 +384,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if action not in ("start", "resume"):
             return None
         try:
-            validate_workflow_params(action, arguments)
+            _validate_workflow_params(action, arguments)
             engine, context = _runtime()
             # The plugins' hooks of a call, which the job's own task does not run for it: a decline reserves nothing.
             hooks = partial(
