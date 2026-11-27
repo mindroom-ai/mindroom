@@ -192,13 +192,13 @@ class _ExaTools(Toolkit):
         log_context: dict[str, Any],
         call: Callable[[], Any],
         *,
-        serialize: Callable[[Any], str] | None = None,
+        serializer: Callable[[Any], str] | None = None,
     ) -> str:
         try:
             if self.show_results:
                 logger.info(event, **log_context)
             raw = call()
-            serialized = self._parse_results(raw) if serialize is None else serialize(raw)
+            serialized = self._parse_results(raw) if serializer is None else serializer(raw)
             if self.show_results:
                 logger.info(f"{event}_results", results=serialized)
         except (TimeoutError, self._timeout_error_cls) as exc:
@@ -318,7 +318,7 @@ class _ExaTools(Toolkit):
             "exa_answer",
             {"query": query},
             lambda: self.exa.answer(query=query, **answer_kwargs),
-            serialize=_serialize_answer,
+            serializer=_serialize_answer,
         )
 
     @staticmethod
