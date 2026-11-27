@@ -60,16 +60,8 @@ async def _close_once_built(building: asyncio.Task[Toolkit]) -> None:
 
 
 def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
-    from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
     from mindroom.tool_system.toolkit_builder import build_agent_toolkit  # noqa: PLC0415
 
-    runtime = resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=context.execution_identity,
-        create=True,
-    )
     # The registry the request selected the entry from, so the build cannot meet another plugin generation.
     agent_tools = resolve_agent_tools(context.config, context.agent_name, context.plugins.tools)
     placement = tool_placement(context.runtime_paths, agent_tools.tools)
@@ -79,7 +71,6 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
         placement=placement,
         runtime_paths=context.runtime_paths,
         workspace_in_worker=agent_tools.workspace_in_worker([entry.name], placement),
-        agent_runtime=runtime,
         tool_config_overrides=entry.tool_config_overrides,
         execution_identity=context.execution_identity,
     )

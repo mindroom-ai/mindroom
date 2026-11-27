@@ -8626,7 +8626,6 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
     "mindroom.mcp_gateway.types",
-    "mindroom.runtime_resolution",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.agent_tools",

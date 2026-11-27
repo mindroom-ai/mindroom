@@ -6,13 +6,7 @@ agent context and is built in ``build_agent_toolkit()``, so it
 has no generic factory.
 """
 
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -23,8 +17,6 @@ register_builtin_tool_metadata(
         description="Persist, semantically search, update, and delete long-term memories across conversations",
         docs_url="https://docs.mindroom.chat/memory/#memory",
         category=ToolCategory.PRODUCTIVITY,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         icon="Brain",
         icon_color="text-violet-500",
         config_fields=[],

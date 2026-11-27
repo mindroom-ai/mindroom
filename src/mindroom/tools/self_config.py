@@ -6,13 +6,7 @@ requires ``agent_name`` at instantiation and is built in
 ``build_agent_toolkit()``, so its metadata has no generic factory.
 """
 
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -23,8 +17,6 @@ register_builtin_tool_metadata(
         description="Allow an agent to read and modify its own configuration",
         docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#self_config",
         category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         icon="Settings",
         icon_color="text-indigo-500",
         config_fields=[],

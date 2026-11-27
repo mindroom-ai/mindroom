@@ -1027,13 +1027,13 @@ def _deferred_entry_has_schedulable_gated_function(
     agent_tools: AgentTools,
     runtime_paths: constants.RuntimePaths,
     worker_target: ResolvedWorkerTarget,
-    config: Config,
     room_tools: bool,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
-    agent_name: str | None = None,
 ) -> bool:
     """Return whether a CLI-deferred toolkit entry may offer any policy-gated schedulable function."""
+    config = agent_tools.config
+    agent_name = agent_tools.agent_name
     if (
         not supports_native_tool_approval
         or entry.name in {"scheduler", "delegate"}
@@ -1047,8 +1047,7 @@ def _deferred_entry_has_schedulable_gated_function(
         return False
     if functions is None:
         return config.tool_approval.default == "require_approval" or any(
-            rule.action != "auto_approve" and (agent_name is None or rule.matches_agent(agent_name))
-            for rule in config.tool_approval.rules
+            rule.action != "auto_approve" and rule.matches_agent(agent_name) for rule in config.tool_approval.rules
         )
     return any(
         (room_tools or offered_without_room(entry.name, name))
@@ -1082,10 +1081,8 @@ def _prompt_tool_capabilities(
     runtime_paths: constants.RuntimePaths,
     worker_target: ResolvedWorkerTarget,
     portable_deferred_tools: bool,
-    config: Config,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
-    agent_name: str | None = None,
 ) -> tuple[bool, bool]:
     """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
 
@@ -1113,7 +1110,13 @@ def _prompt_tool_capabilities(
             and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
             and (
                 supports_native_tool_approval
-                or not _approval_may_gate(config, agent_tools.tools, name, entry.name, agent_name=agent_name)
+                or not _approval_may_gate(
+                    agent_tools.config,
+                    agent_tools.tools,
+                    name,
+                    entry.name,
+                    agent_name=agent_tools.agent_name,
+                )
             )
             for name in candidates
         )
@@ -1158,6 +1161,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     inline_tools: bool,
     persona: SubagentPersona | None,
     narrowed_tools: tuple[str, ...] | None,
+    output_file_policy: ToolOutputFilePolicy | None,
     plugins: ConfigPlugins,
     knowledge: AgentKnowledge | None,
     skills: SkillsToolkit | None,
@@ -1396,11 +1400,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         enabled=not disable_runtime_capabilities
         and narrowed_tools is None
         and background_tool_jobs_enabled(config, runtime_paths),
-        output_file_policy=ToolOutputFilePolicy.for_current_tools(
-            agent_runtime.workspace.root,
-            runtime_paths,
-            auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-        ),
+        output_file_policy=output_file_policy,
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
@@ -1450,11 +1450,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 agent_tools=agent_tools,
                 runtime_paths=runtime_paths,
                 worker_target=agent_runtime.execution.worker_target,
-                config=config,
                 room_tools=room_tools,
                 narrowed_tools=narrowed_tools,
                 supports_native_tool_approval=supports_native_tool_approval,
-                agent_name=agent_name,
             )
             for entry in deferred_configs.values()
         )
@@ -1526,10 +1524,8 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         runtime_paths=runtime_paths,
         worker_target=agent_runtime.execution.worker_target,
         portable_deferred_tools=portable_deferred_tools,
-        config=config,
         narrowed_tools=narrowed_tools,
         supports_native_tool_approval=supports_native_tool_approval,
-        agent_name=agent_name,
     )
     assembly = _AgentToolAssembly(
         entries=offered,
@@ -2001,6 +1997,7 @@ def create_agent(
         inline_tools=inline_tools,
         persona=persona,
         narrowed_tools=narrowed_tools,
+        output_file_policy=output_file_policy,
         plugins=plugins,
         knowledge=enabled_knowledge,
         skills=offered_skills,
