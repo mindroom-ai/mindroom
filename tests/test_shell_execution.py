@@ -18,6 +18,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.shell._process_target import (
+    ProcessScope,
+    _parse_proc_stat,
+    _resolve_scope_cgroup_dir,
+    _scan_session_members,
+)
 from mindroom.shell.execution import (
     ProcessRecord,
     _idle_io_launcher,
@@ -34,6 +40,7 @@ from mindroom.shell.execution import (
     signal_record,
 )
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -547,7 +554,7 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Systemd slice uses the backend bus for systemd-run, restores caller bus vars/omissions, and skips missing commands."""
+    """Systemd slice uses the backend bus for systemd-run, assigns unique scope units, restores caller bus vars, and skips missing commands."""
     program = tmp_path / "run-me"
     program.write_text("#!/bin/sh\n")
     program.chmod(0o755)
@@ -559,13 +566,16 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
         "--description=MindRoom shell",
         "--expand-environment=no",
         "--slice=s.slice",
-        "--",
+        "--property=OOMPolicy=kill",
     )
+    slice_cg = Path("/sys/fs/cgroup/user.slice/s.slice")
     xdg, bus = "/run/user/42", "unix:path=/run/user/42/bus"
     launcher = _SystemdSliceLauncher(
         prefix=prefix,
+        slice_name="s.slice",
         env_bin="/env",
         bus_env=(("XDG_RUNTIME_DIR", xdg), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+        slice_cgroup_dir=slice_cg,
     )
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: "/chrt")
     monkeypatch.setattr("mindroom.shell.execution._idle_io_launcher", lambda: "/ionice")
@@ -575,8 +585,15 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     argv = ["run-me", "$$", "$VAR"]
     launch = _idle_launch_argv(argv, caller_env, str(tmp_path))
 
+    assert launch.scope is not None
+    assert launch.scope.unit_name.startswith("mindroom-shell-")
+    assert launch.scope.unit_name.endswith(".scope")
+    assert launch.scope.slice_name == "s.slice"
+    assert launch.scope.slice_cgroup_dir == slice_cg
     assert launch.argv == [
         *prefix,
+        f"--unit={launch.scope.unit_name}",
+        "--",
         "/env",
         "-u",
         "XDG_RUNTIME_DIR",
@@ -597,9 +614,13 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
     assert caller_env == {"PATH": str(tmp_path)}
 
     custom = _idle_launch_argv(argv, {**caller_env, "XDG_RUNTIME_DIR": "/custom"}, str(tmp_path))
+    assert custom.scope is not None
+    assert custom.scope.unit_name != launch.scope.unit_name
     assert custom.env == {"PATH": str(tmp_path), "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}
     assert custom.argv == [
         *prefix,
+        f"--unit={custom.scope.unit_name}",
+        "--",
         "/env",
         "-u",
         "DBUS_SESSION_BUS_ADDRESS",
@@ -620,18 +641,34 @@ def test_systemd_slice_wraps_before_chrt_and_ionice_and_preserves_caller_env(
         {**caller_env, "XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus},
         str(tmp_path),
     )
-    assert exact.argv == [*prefix, "/chrt", "-i", "0", "/ionice", "-c", "3", "--", *argv]
+    assert exact.scope is not None
+    assert exact.argv == [
+        *prefix,
+        f"--unit={exact.scope.unit_name}",
+        "--",
+        "/chrt",
+        "-i",
+        "0",
+        "/ionice",
+        "-c",
+        "3",
+        "--",
+        *argv,
+    ]
 
     missing = ["./no-such-program"]
     missing_launch = _idle_launch_argv(missing, caller_env, str(tmp_path))
-    assert missing_launch == (missing, caller_env, False)
+    assert missing_launch == (missing, caller_env, False, None)
     assert missing_launch.argv is missing
     assert missing_launch.env is caller_env
 
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
     no_chrt = _idle_launch_argv(argv, caller_env, str(tmp_path))
+    assert no_chrt.scope is not None
     assert no_chrt.argv == [
         *prefix,
+        f"--unit={no_chrt.scope.unit_name}",
+        "--",
         "/env",
         "-u",
         "XDG_RUNTIME_DIR",
@@ -651,9 +688,17 @@ def _stub_systemd_tools(
     monkeypatch: pytest.MonkeyPatch,
     show_response: Callable[[], tuple[int, str]],
     probe_rc: Callable[[], int] = lambda: 0,
+    *,
+    cat_bin: str | None = "/cat",
+    probe_stdout: Callable[[list[str]], str] | None = None,
 ) -> tuple[list[tuple[list[str], dict[str, str]]], list[tuple[list[str], dict[str, str]]]]:
     real_which = shutil.which
-    bins = {"systemctl": "/systemctl", "systemd-run": "/systemd-run", "env": "/env"}
+    bins: dict[str, str | None] = {
+        "systemctl": "/systemctl",
+        "systemd-run": "/systemd-run",
+        "env": "/env",
+        "cat": cat_bin,
+    }
 
     def fake_which(name: str, *args: object, **kwargs: object) -> str | None:
         return bins[name] if name in bins else real_which(name, *args, **kwargs)  # type: ignore[arg-type]
@@ -669,7 +714,8 @@ def _stub_systemd_tools(
             rc, stdout = show_response()
             return subprocess.CompletedProcess(cmd, rc, stdout=stdout)
         probe_calls.append((cmd, dict(run_env)))
-        return subprocess.CompletedProcess(cmd, probe_rc())
+        stdout = probe_stdout(cmd) if probe_stdout is not None else ""
+        return subprocess.CompletedProcess(cmd, probe_rc(), stdout=stdout)
 
     monkeypatch.setattr("mindroom.shell.execution.shutil.which", fake_which)
     monkeypatch.setattr("mindroom.shell.execution.subprocess.run", fake_run)
@@ -680,12 +726,18 @@ def _stub_systemd_tools(
 def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_rejected_slice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The probe checks user-manager generation, keys cache on bus env, and fails open on errors."""
+    """The probe checks user-manager generation, discovers slice cgroup dir, falls back without cat, and fails open."""
     probe_rc = 0
+
+    def fake_probe_stdout(cmd: list[str]) -> str:
+        unit = next(arg.removeprefix("--unit=") for arg in cmd if arg.startswith("--unit="))
+        return f"0::/user.slice/user-1000.slice/user@1000.service/s.slice/{unit}\n"
+
     show_calls, probe_calls = _stub_systemd_tools(
         monkeypatch,
         lambda: (0, "UserspaceTimestampMonotonic=100\nSystemState=running\n"),
         lambda: probe_rc,
+        probe_stdout=fake_probe_stdout,
     )
     _probe_systemd_slice_launcher.cache_clear()
     try:
@@ -709,38 +761,43 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
             "--expand-environment=no",
             "--slice=s.slice",
             "--property=OOMPolicy=kill",
-            "--",
         )
+        expected_slice_dir = Path("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/s.slice")
         expected = _SystemdSliceLauncher(
             prefix=expected_prefix,
+            slice_name="s.slice",
             env_bin="/env",
             bus_env=(("XDG_RUNTIME_DIR", xdg), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+            slice_cgroup_dir=expected_slice_dir,
         )
 
         assert _systemd_slice_launcher() == expected
         assert _systemd_slice_launcher() == expected
         assert show_calls == [(expected_show, {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus})] * 2
-        assert probe_calls == [
-            (
-                [
-                    *expected_prefix,
-                    "/env",
-                    "-u",
-                    "MINDROOM_PROBE_UNSET",
-                    "--",
-                    "MINDROOM_PROBE_SET=1",
-                    "/systemd-run",
-                    "--version",
-                ],
-                {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus},
-            ),
+        assert len(probe_calls) == 1
+        probe_cmd, probe_env = probe_calls[0]
+        assert probe_env == {"XDG_RUNTIME_DIR": xdg, "DBUS_SESSION_BUS_ADDRESS": bus}
+        assert probe_cmd[: len(expected_prefix)] == list(expected_prefix)
+        assert probe_cmd[len(expected_prefix)].startswith("--unit=mindroom-shell-probe-")
+        assert probe_cmd[len(expected_prefix)].endswith(".scope")
+        assert probe_cmd[len(expected_prefix) + 1 :] == [
+            "--",
+            "/env",
+            "-u",
+            "MINDROOM_PROBE_UNSET",
+            "--",
+            "MINDROOM_PROBE_SET=1",
+            "/cat",
+            "/proc/self/cgroup",
         ]
 
         monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/99")
         assert _systemd_slice_launcher() == _SystemdSliceLauncher(
             prefix=expected_prefix,
+            slice_name="s.slice",
             env_bin="/env",
             bus_env=(("XDG_RUNTIME_DIR", "/run/user/99"), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+            slice_cgroup_dir=expected_slice_dir,
         )
         assert len(show_calls) == 3
         assert len(probe_calls) == 2
@@ -754,6 +811,26 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
         probe_rc = 1
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
         assert _systemd_slice_launcher() is None
+
+        # Without cat, the probe falls back cleanly to `systemd-run --version` with slice_cgroup_dir=None.
+        probe_rc = 0
+        _, fallback_probes = _stub_systemd_tools(
+            monkeypatch,
+            lambda: (0, "UserspaceTimestampMonotonic=100\nSystemState=running\n"),
+            lambda: probe_rc,
+            cat_bin=None,
+        )
+        _probe_systemd_slice_launcher.cache_clear()
+        monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "s.slice")
+        fallback = _systemd_slice_launcher()
+        assert fallback == _SystemdSliceLauncher(
+            prefix=expected_prefix,
+            slice_name="s.slice",
+            env_bin="/env",
+            bus_env=(("XDG_RUNTIME_DIR", "/run/user/99"), ("DBUS_SESSION_BUS_ADDRESS", bus)),
+            slice_cgroup_dir=None,
+        )
+        assert fallback_probes[0][0][-2:] == ["/systemd-run", "--version"]
     finally:
         _probe_systemd_slice_launcher.cache_clear()
 
@@ -1058,3 +1135,269 @@ async def test_a_running_command_reports_its_latest_output_as_progress(
     assert reports[0] == "one"
     assert reports[-1] == "one\ntwo\nStderr:\nwarn"
     assert all(earlier != later for earlier, later in itertools.pairwise(reports))
+
+
+def test_proc_stat_parsing_and_session_scan_filters_zombies_and_guards_self(tmp_path: Path) -> None:
+    """/proc/<pid>/stat parsing handles spaces/parens in comm, skips zombies/dead, and refuses unsafe leader PIDs."""
+    assert _parse_proc_stat("123 (foo (bar) ) baz) S 1 456 789 0") == ("S", 456, 789)
+    assert _parse_proc_stat("123 (zombie) Z 1 456 789 0") == ("Z", 456, 789)
+    for bad in ("", "no-paren", "1 (x) S 1", "1 (x) S 1 nope 789"):
+        assert _parse_proc_stat(bad) is None
+
+    leader_pid = 900_001
+    fake_entries = {
+        "900002": f"900002 (timeout child) S 900001 900002 {leader_pid} 0",
+        "900003": f"900003 (dead (z)) Z 900001 900003 {leader_pid} 0",
+        "900004": f"900004 (exiting) X 900001 900004 {leader_pid} 0",
+        "900005": "900005 (other) S 1 900005 900005 0",
+        str(os.getpid()): f"{os.getpid()} (self) R 1 {os.getpgrp()} {leader_pid} 0",
+        "not-a-pid": "ignored",
+    }
+    for name, content in fake_entries.items():
+        entry = tmp_path / name
+        entry.mkdir()
+        (entry / "stat").write_text(content, encoding="utf-8")
+
+    assert _scan_session_members(leader_pid, proc_root=tmp_path) == [(900_002, 900_002)]
+    unsafe_leaders = [0, 1, os.getpid(), os.getpgrp()]
+    if sys.platform == "linux":
+        unsafe_leaders.append(os.getsid(0))
+    for unsafe in unsafe_leaders:
+        assert _scan_session_members(unsafe, proc_root=tmp_path) == []
+
+
+def test_resolve_scope_cgroup_dir_enforces_safety_invariants(tmp_path: Path) -> None:
+    """Scope resolution rejects self/ancestor cgroups, wrong names, symlinks, traversal, and unreadable self cgroup."""
+    cg_root = tmp_path / "cg"
+    slice_dir = cg_root / "user.slice" / "app.slice"
+    scope_name = "mindroom-shell-0123456789abcdef.scope"
+    scope_dir = slice_dir / scope_name
+    scope_dir.mkdir(parents=True)
+    self_cg = tmp_path / "self_cgroup"
+    self_cg.write_text("0::/user.slice/mindroom.service\n", encoding="utf-8")
+
+    valid = ProcessScope(unit_name=scope_name, slice_name="app.slice", slice_cgroup_dir=slice_dir)
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) == scope_dir.resolve()
+
+    # Own cgroup and ancestor of own cgroup are rejected.
+    self_cg.write_text(f"0::/user.slice/app.slice/{scope_name}\n", encoding="utf-8")
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    self_cg.write_text(f"0::/user.slice/app.slice/{scope_name}/nested.service\n", encoding="utf-8")
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    self_cg.write_text("0::/user.slice/mindroom.service\n", encoding="utf-8")
+
+    # Wrong unit name, wrong slice name, traversal, and missing slice dir are rejected.
+    for bad_unit in (
+        "app.slice",
+        "mindroom.service",
+        "run-p1234.scope",
+        "mindroom-shell-.scope",
+        f"../app.slice/{scope_name}",
+        "mindroom-shell-a/b.scope",
+        "mindroom-shell-a..b.scope",
+        "mindroom-shell-a b.scope",
+    ):
+        bad = ProcessScope(unit_name=bad_unit, slice_name="app.slice", slice_cgroup_dir=slice_dir)
+        assert _resolve_scope_cgroup_dir(bad, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    wrong_slice = ProcessScope(unit_name=scope_name, slice_name="other.slice", slice_cgroup_dir=slice_dir)
+    assert _resolve_scope_cgroup_dir(wrong_slice, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    outside = ProcessScope(unit_name=scope_name, slice_name="app.slice", slice_cgroup_dir=tmp_path / "outside")
+    assert _resolve_scope_cgroup_dir(outside, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+
+    # Symlink leaf and symlink intermediate directory are rejected.
+    sym_name = "mindroom-shell-fedcba9876543210.scope"
+    (slice_dir / sym_name).symlink_to(scope_dir)
+    sym_leaf = ProcessScope(unit_name=sym_name, slice_name="app.slice", slice_cgroup_dir=slice_dir)
+    assert _resolve_scope_cgroup_dir(sym_leaf, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+
+    sym_slice = cg_root / "user.slice" / "linked.slice"
+    sym_slice.symlink_to(slice_dir)
+    sym_parent = ProcessScope(unit_name=scope_name, slice_name="linked.slice", slice_cgroup_dir=sym_slice)
+    assert _resolve_scope_cgroup_dir(sym_parent, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+
+    # Unreadable or non-v2 /proc/self/cgroup fails closed.
+    self_cg.write_text("1:name=systemd:/user.slice\n", encoding="utf-8")
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=self_cg) is None
+    assert _resolve_scope_cgroup_dir(valid, cgroup_root=cg_root, self_cgroup_path=tmp_path / "missing") is None
+
+
+def _timeout_child_argv(info_file: Path, *, ignore_term: bool) -> list[str]:
+    term_setup = "signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_term else ""
+    script = (
+        f"import os, pathlib, signal, sys, time; {term_setup}"
+        "tmp = pathlib.Path(sys.argv[1] + '.tmp'); "
+        "tmp.write_text(f'{os.getpid()} {os.getpgid(0)} {os.getsid(0)}'); "
+        "os.replace(tmp, sys.argv[1]); time.sleep(30)"
+    )
+    py = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} {shlex.quote(str(info_file))}"
+    # Trailing `; true` prevents bash from exec-replacing itself with `timeout`, so `timeout` creates a new PGID.
+    return ["bash", "-c", f"echo $$ > {shlex.quote(str(info_file.with_suffix('.leader')))}; timeout 60 {py}; true"]
+
+
+async def _wait_for_child_info(info_file: Path) -> tuple[int, int, int, int]:
+    leader_file = info_file.with_suffix(".leader")
+    for _ in range(400):
+        if info_file.exists() and leader_file.exists() and leader_file.read_text().strip():
+            pid, pgid, sid = (int(tok) for tok in info_file.read_text().split()[:3])
+            return int(leader_file.read_text().strip()), pid, pgid, sid
+        await asyncio.sleep(0.01)
+    msg = f"child info never appeared: {info_file}"
+    raise AssertionError(msg)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux session scan is Linux-only")
+@pytest.mark.parametrize("mode", ["timeout", "cancel", "signal_term", "signal_kill", "kill_all"])
+@pytest.mark.asyncio
+async def test_linux_session_scan_stops_new_pgid_timeout_children(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """With systemd slicing unset, Linux session scan kills new-PGID `timeout` children across every stop path."""
+    if shutil.which("timeout") is None:
+        pytest.skip("requires GNU timeout")
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
+    env = {"PATH": os.environ["PATH"]}
+    info = tmp_path / f"{mode}.info"
+    argv = _timeout_child_argv(info, ignore_term=(mode != "signal_term"))
+    child_pgid: int | None = None
+    try:
+        if mode == "timeout":
+            result = await run_command(
+                registry,
+                namespace="test",
+                argv=argv,
+                env=env,
+                cwd=str(tmp_path),
+                tail=100,
+                timeout=0.6,
+                on_timeout="kill",
+            )
+            assert result.timed_out
+            leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
+        elif mode == "cancel":
+            task = asyncio.create_task(
+                run_command(
+                    registry,
+                    namespace="test",
+                    argv=argv,
+                    env=env,
+                    cwd=str(tmp_path),
+                    tail=100,
+                    timeout=30,
+                    on_timeout="kill",
+                ),
+            )
+            leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            bg = await run_command(
+                registry,
+                namespace="test",
+                argv=argv,
+                env=env,
+                cwd=str(tmp_path),
+                tail=100,
+                timeout=0.1,
+            )
+            assert bg.handle is not None
+            leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
+            if mode == "signal_term":
+                assert signal_record(registry[bg.handle], force=False) is True
+            elif mode == "signal_kill":
+                assert signal_record(registry[bg.handle], force=True) is True
+            else:
+                kill_all_records(registry)
+        assert child_pgid != leader_pid
+        assert child_sid == leader_pid
+        await assert_linux_pid_not_running(child_pid)
+    finally:
+        if child_pgid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child_pgid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux session scan is Linux-only")
+@pytest.mark.asyncio
+async def test_foreground_nohup_child_survives_clean_exit_without_systemd_slice(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanly exited `nohup ... & exit 0` still survives foreground exit when `kill_group_after_exit=False`."""
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
+    nohup_file = tmp_path / "nohup.pid"
+    await _run(
+        registry,
+        ["bash", "-c", f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(nohup_file))}; exit 0"],
+        tmp_path,
+    )
+    nohup_pid = int(nohup_file.read_text().strip())
+    try:
+        os.kill(nohup_pid, 0)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="systemd scopes are Linux-only")
+@pytest.mark.asyncio
+async def test_systemd_scope_kills_setsid_sigterm_ignoring_child_on_timeout(
+    registry: dict[str, ProcessRecord],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `setsid()` SIGTERM-ignoring child that escapes both PGID and SID is still killed atomically by its named systemd scope."""
+    if not os.environ.get("XDG_RUNTIME_DIR") and Path(f"/run/user/{os.getuid()}/bus").exists():
+        monkeypatch.setenv("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
+    _probe_systemd_slice_launcher.cache_clear()
+    try:
+        launcher = _systemd_slice_launcher()
+        if launcher is None or launcher.slice_cgroup_dir is None:
+            pytest.skip("requires a live systemd --user bus with cgroup v2 scope support")
+
+        info_file = tmp_path / "setsid.info"
+        grandchild = (
+            "import os, pathlib, signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "cg = pathlib.Path('/proc/self/cgroup').read_text().strip(); "
+            "tmp = pathlib.Path(sys.argv[1] + '.tmp'); "
+            "tmp.write_text(f'{os.getpid()} {os.getpgid(0)} {os.getsid(0)} {cg}'); "
+            "os.replace(tmp, sys.argv[1]); time.sleep(30)"
+        )
+        parent = (
+            "import os, pathlib, subprocess, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); "
+            "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[3]], start_new_session=True); "
+            "time.sleep(30)"
+        )
+        child_pid: int | None = None
+        try:
+            result = await run_command(
+                registry,
+                namespace="test",
+                argv=[sys.executable, "-c", parent, str(info_file.with_suffix(".leader")), grandchild, str(info_file)],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=100,
+                timeout=0.8,
+                on_timeout="kill",
+            )
+            assert result.timed_out
+            leader_pid = int(info_file.with_suffix(".leader").read_text().strip())
+            parts = info_file.read_text().split(maxsplit=3)
+            child_pid, child_pgid, child_sid, child_cg = int(parts[0]), int(parts[1]), int(parts[2]), parts[3]
+            assert child_pgid != leader_pid
+            assert child_sid != leader_pid
+            assert "/app.slice/mindroom-shell-" in child_cg
+            await assert_linux_pid_not_running(child_pid)
+        finally:
+            if child_pid is not None:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(child_pid, signal.SIGKILL)
+    finally:
+        _probe_systemd_slice_launcher.cache_clear()
