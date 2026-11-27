@@ -824,12 +824,12 @@
       "enable_canvas_remote_assets": true,
       "enable_show_canvas": true
     },
-    "instructions": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load images, styles, fonts, media and scripts from any https: address, so a preview can use the real assets of the site it shows. Fetching data, workers and nested frames stay blocked.",
-    "guidance": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load images, styles, fonts, media and scripts from any https: address, so a preview can use the real assets of the site it shows. Fetching data, workers and nested frames stay blocked.",
+    "instructions": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.\n- To show a real website, open it in your worker browser (first call shows the Computer panel); a canvas cannot.\n- Canvas pages may load images, styles, fonts, media, and scripts from any https: address (e.g. real site assets); data fetches, workers, and nested frames stay blocked.",
+    "guidance": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.\n- To show a real website, open it in your worker browser (first call shows the Computer panel); a canvas cannot.\n- Canvas pages may load images, styles, fonts, media, and scripts from any https: address (e.g. real site assets); data fetches, workers, and nested frames stay blocked.",
     "functions": [
       {
         "name": "open_settings",
-        "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
+        "description": "Open MindRoom Chat Settings at one section. Changes no setting (user decides). Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -854,7 +854,7 @@
       },
       {
         "name": "open_panel",
-        "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+        "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -864,7 +864,7 @@
                 "members",
                 "computer"
               ],
-              "description": "'computer' (worker browser) or 'members' (default; room members)."
+              "description": "computer (worker browser) or members (default)."
             }
           },
           "required": []
@@ -875,41 +875,41 @@
       },
       {
         "name": "show_canvas",
-        "description": "Show an interactive HTML canvas you wrote, inline in the conversation or in the side panel.\nWhen to use: use when seeing/clicking beats text. Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a quick choice, just ask in reply. Cannot load real websites. Pass `html` or workspace-relative `path` (e.g. `slides/deck.html`), up to 4 MB. Show only pages you wrote (appears as yours; typed data could leave the page).\n\nInline vs Panel & Raw: prefer `inline=True` (~700px desktop / 360px phone) for in-flow items: charts, diagrams, mockups, pickers, short forms, multi-step flows. Use panel for persistent views (dashboards, slides, long docs). New canvases post separately and appear below your reply text (refer to them as below, or by title on quiet turns). Inline themed rules: no background, card, title banner, or side padding on `html`/`body`; fixed pixel heights for charts; no `vh` or `height:100%` on `html`/`body`; restarts when scrolled away (give fields `id`/`name` or use `saveState`); use themed mode (not `raw`/`width`) for forms; show next step as new inline canvas or update. For realistic website/app previews, use `inline=True`, `raw=True` (no Chat styles/vars), and target `width` (e.g. 1440/390, scaled to fit)—overrides inline rules, rendered up to 16:10 tall (568-1080px) where `vh` and scrolling work (panel uses panel width).\n\nTheme & Sandbox: design like a responsive web app; prefer SVG/CSS over embedded images, summarize large data, skip unneeded interactivity. Fetch/XHR/WebSockets always blocked; external images/scripts/styles/fonts blocked unless instructions name an allowed source (embed images as `data:` URLs). For Chart.js/D3/Mermaid/KaTeX pass `libraries` (never a CDN). Cannot see user account/messages. Theme CSS vars: `--mr-bg`, `--mr-surface`, `--mr-surface-raised`, `--mr-border`, `--mr-text`, `--mr-text-muted`, `--mr-accent`, `--mr-accent-text`, `--mr-success`, `--mr-warning`, `--mr-danger`, `--mr-radius`, `--mr-font`; `window.mindroom.colorScheme` is `'light'` or `'dark'`.\n\nSubmitting & State: nothing reaches you until committed. Commit via `window.mindroom.submit(data, {label: \"short summary\"})` (< 512 KB JSON; decimals arrive as text) or `<form>` (`data-mindroom-label` sets label). Chat confirms with user, delivering `Canvas response (<canvas_event_id>, revision <event_id>): <label>` + JSON (older revision = earlier version). Runtime/blocked errors can be sent as `Canvas error (<canvas_event_id>, revision <event_id>):` + lines. Inputs/selects/textareas with stable `id`/`name` auto-persist across reloads/updates (except passwords, hidden, `autocomplete=\"off\"`; change id if meaning changes; redraw on restored `input` events). For other state, call `window.mindroom.saveState(value)` on change (<= 256K chars JSON; larger throws); reloads read `window.mindroom.state` (`undefined` if unset; read defensively across versions). Local to device (100 most recent canvases) unless `share_state=True` (set at creation; Chat notifies user, stores room-readable copy for `read_canvas_state`—never store secrets in `saveState`).\n\nUpdating: pass `canvas_event_id` to replace in place (omit for a separate canvas; users switch canvases from room header). `show_canvas` reads `path` immediately and parallel tool calls run concurrently—call it ONLY after file-writing calls/jobs finish, never alongside them, or the user sees stale HTML. Success means request sent, not opened/answered.",
+        "description": "Create/replace HTML canvas you wrote (charts, diagrams, mockups, pickers, forms, dashboards, slides) inline or panel.\nNew: title + html or path. Replace: original canvas_event_id + html or path. Reopen unchanged: no call; user picks in room header.\nUse when seeing/clicking beats text (quick choice: ask in reply). Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams.\n\nLayout: prefer inline=true (~700px desktop/360px phone) for in-flow/multi-step flows; panel (default) for persistent views/slides/long docs. New canvases appear below your reply text (refer as below/title).\nInline themed: html/body has no background/card/title banner/side padding/vh/height:100%; fixed px chart heights; keep forms themed (no raw/width); scroll-away restarts (use id/name or saveState); next step: update or new.\nSite/app preview: inline=true, raw=true (no Chat styles/vars), width (320-2560, e.g. 1440/390, scaled; overrides inline rules; <=16:10, 568-1080px, vh/scroll work; panel uses own width).\n\nSandbox & theme: responsive, SVG/CSS over images, summarize large data, skip needless interactivity, <=4 MB; only your HTML (appears as yours; typed data could leave; no real websites). Blocked: fetch/XHR/WebSockets, user data, external assets unless instructions allow (embed data: images; pass libraries for Chart.js/D3/Mermaid/KaTeX, never CDN).\nVars (--mr-*, e.g. var(--mr-bg)): bg, surface, surface-raised, border, text, text-muted, accent, accent-text, success, warning, danger, radius, font; window.mindroom.colorScheme (light|dark).\n\nSubmit & state: nothing reaches you until commit via window.mindroom.submit(data, {label: \"short summary\"}) (<512KB JSON; decimals as text) or <form data-mindroom-label=\"...\">. User confirms before Canvas response (<canvas_event_id>, revision <event_id>): <label> + JSON (older = earlier) or Canvas error (<canvas_event_id>, revision <event_id>): + lines.\nAuto-persist inputs/selects/textareas via stable id/name (not type=password/hidden/autocomplete=\"off\"; rename id if meaning changes; redraw on restored input). Other state: call window.mindroom.saveState(v) on change (<=256K chars JSON; larger throws); restore from window.mindroom.state on load (undefined if unset; read defensively). Device-local (100 recent) unless share_state=true (at creation; user notified; room-readable via read_canvas_state without submit; no secrets).\n\npath reads immediately: call ONLY after file writes finish, never in parallel. Success = request sent, not opened/answered.",
         "parameters": {
           "type": "object",
           "properties": {
             "title": {
               "type": "string",
-              "description": "Short single-line title (omit on update to keep original)."
+              "description": "Required on create (1 line <=120 chars); omit on update to keep original."
             },
             "html": {
               "type": "string",
-              "description": "Inline HTML/CSS/JS (pass `html` or `path`)."
+              "description": "Inline HTML; pass html or path, never both (one required on update)."
             },
             "path": {
               "type": "string",
-              "description": "Workspace-relative HTML file path (instead of `html`)."
+              "description": "Workspace HTML path instead of html; finish writes first (one required on update)."
             },
             "canvas_event_id": {
               "type": "string",
-              "description": "Existing canvas event ID in this conversation to update in place."
+              "description": "Original $ID in this conversation to replace in place; still needs html or path, cannot reopen unchanged."
             },
             "share_state": {
               "type": "boolean",
-              "description": "Expose state to `read_canvas_state` (set on creation; preserved on update)."
+              "description": "Expose state to read_canvas_state (on create; kept on update)."
             },
             "inline": {
               "type": "boolean",
-              "description": "Show inline instead of side panel (set on creation; preserved on update)."
+              "description": "Show inline vs side panel (on create; kept on update)."
             },
             "raw": {
               "type": "boolean",
-              "description": "Omit Chat styles/theme vars (per revision; re-pass on updates)."
+              "description": "Omit Chat styles/vars (per revision; re-pass on update)."
             },
             "width": {
               "type": "integer",
-              "description": "Target viewport width in CSS px (320-2560; per revision; panel uses its own width)."
+              "description": "Target width px, 320-2560 (per revision; panel uses own)."
             },
             "libraries": {
               "type": "array",
@@ -922,7 +922,7 @@
                   "katex"
                 ]
               },
-              "description": "Bundled libraries for this revision (re-pass on updates)."
+              "description": "Bundled libs (re-pass on update)."
             }
           },
           "required": []
@@ -933,13 +933,13 @@
       },
       {
         "name": "read_canvas_state",
-        "description": "Read the latest state from a `share_state=True` canvas: `window.mindroom.saveState` value, kept inputs (by `#id`/name), and timestamp. Empty until the user changes something; call anytime (e.g. from scheduled tasks) without needing a submit.",
+        "description": "Read latest state from a share_state=true canvas: saveState, kept inputs (#id/name), timestamp. Empty until user changes something; ok anytime (incl. scheduled tasks) without needing submit.",
         "parameters": {
           "type": "object",
           "properties": {
             "canvas_event_id": {
               "type": "string",
-              "description": "Event ID of a `share_state=True` canvas in this conversation."
+              "description": "Event ID ($...) of a share_state=true canvas in this conversation."
             },
             "mindroom_output_path": {
               "anyOf": [

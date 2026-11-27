@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     display_name="Chat UI",
     description=(
         "Show MindRoom Chat UI: Computer/Members panels, Settings, or interactive HTML/chart/diagram Canvases "
-        "with live state (when enabled); never controls the user's browser"
+        "with live state (when enabled)"
     ),
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
