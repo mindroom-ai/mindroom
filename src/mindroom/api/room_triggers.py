@@ -28,15 +28,18 @@ from mindroom.reactive_triggers.management import (
 from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomMessageSourceSpec,
+    ScriptCheckSourceSpec,
     SourceType,
     ThreadTagSourceSpec,
 )
+from mindroom.reactive_triggers.script_check import agent_supports_script_check
 from mindroom.reactive_triggers.store import (
     ReactiveTriggerLimitError,
     ReactiveTriggerStore,
     ReactiveTriggerStoreError,
 )
 from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.script_runs.manager import workflow_placement
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -148,18 +151,31 @@ async def update_room_trigger(
     record = matched.record
 
     refreshed_tag_present: bool | None = None
-    if (
-        isinstance(record, ReactiveTriggerRecord)
-        and body.enabled
-        and not record.enabled
-        and isinstance(source := record.source, ThreadTagSourceSpec)
-    ):
-        refreshed_tag_present = await read_in_room(
-            request.app,
-            resolve_room_id(source.room_id, runtime_paths),
-            lambda client: read_thread_tag_present(client, source),
-            "Watched thread tags could not be read; try again.",
-        )
+    if isinstance(record, ReactiveTriggerRecord) and body.enabled and not record.enabled:
+        if isinstance(source := record.source, ThreadTagSourceSpec):
+            refreshed_tag_present = await read_in_room(
+                request.app,
+                resolve_room_id(source.room_id, runtime_paths),
+                lambda client: read_thread_tag_present(client, source),
+                "Watched thread tags could not be read; try again.",
+            )
+        elif isinstance(source, ScriptCheckSourceSpec):
+            pol = config.external_trigger_policy
+            if not (
+                pol.enabled and pol.reactive_enabled and pol.script_check_enabled
+            ) or not agent_supports_script_check(
+                config,
+                source.agent,
+            ):
+                raise HTTPException(
+                    403,
+                    "Scheduled script_check trigger cannot be re-enabled because policy or agent capability is disabled.",
+                )
+            if workflow_placement(config, runtime_paths) not in {"worker", "local"}:
+                raise HTTPException(
+                    409,
+                    "Scheduled script_check trigger cannot be re-enabled because script execution placement is unavailable.",
+                )
 
     updated = await _run_store(
         lambda: set_trigger_enabled_sync(

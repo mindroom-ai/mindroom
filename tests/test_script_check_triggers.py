@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import nio
@@ -21,16 +21,21 @@ import pytest
 from agno.tools import Toolkit
 from agno.tools.function import Function
 from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from httpx import ASGITransport
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api import room_triggers
+from mindroom.api.app_state import ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.script_gateway import bind_script_tool_broker, serve_script_gateway_listener
 from mindroom.api.script_gateway import router as script_gateway_router
-from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision, evaluate_tool_approval
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.custom_tools.triggers import TriggersTools
+from mindroom.delegation.state import SubagentPersona
 from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.script_checks import build_script_check_tick_runner
@@ -72,7 +77,11 @@ from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.shell.supervisor import _ShellSupervisorManager
+from mindroom.tool_system.catalog import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from tests.access_schema_support import joined_members_response
+from tests.api.test_plugin_room_readers import _bound, _client
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -82,9 +91,10 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.test_plugin_routes import _api_state, _signed_in
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -1451,3 +1461,486 @@ async def test_dispatch_check_reactive_source_access_for_script_check(tmp_path: 
     )
     assert res_dis is not None
     assert res_dis.status == "skipped"
+
+
+def _tool_context_for_triggers(
+    tmp_path: Path,
+    *,
+    agent_name: str = "coder",
+    requester_id: str = _OWNER,
+    agents: dict[str, Any] | None = None,
+    policy: dict[str, Any] | None = None,
+    allow_local: bool = True,
+    with_script_manager: bool = True,
+    tool_function_filter: Callable[[object], bool] | None = None,
+    persona: SubagentPersona | None = None,
+    session_id: str | None = "sess-1",
+) -> tuple[ToolRuntimeContext, MagicMock, ScriptRunManager | None]:
+    env = {"MATRIX_HOMESERVER": "https://example.org", "MATRIX_SERVER_NAME": "example.org"}
+    if allow_local:
+        env["MINDROOM_SANDBOX_EXECUTION_MODE"] = "local"
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env=env,
+    )
+    agent_defs = agents or {
+        "coder": {
+            "display_name": "Coder",
+            "include_default_tools": False,
+            "tools": ["triggers", "script"],
+            "rooms": [_ROOM],
+        },
+        "watcher": {
+            "display_name": "Watcher",
+            "include_default_tools": False,
+            "tools": ["triggers"],
+            "rooms": [_ROOM],
+        },
+    }
+    raw: dict[str, Any] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "defaults": {"tools": [], "allow_shell_without_worker": allow_local},
+        "agents": agent_defs,
+        "external_trigger_policy": policy or {},
+    }
+    cfg = bind_runtime_paths(Config.model_validate(raw), paths)
+    client = make_matrix_client_mock(user_id=f"@mindroom_{agent_name}:example.org")
+    client.rooms = {_ROOM: SimpleNamespace(users={requester_id: object(), client.user_id: object()}, encrypted=False)}
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            events=[{"type": "m.room.member", "state_key": requester_id, "content": {"membership": "join"}}],
+            room_id=_ROOM,
+        ),
+    )
+    notify_mock = MagicMock()
+    manager: ScriptRunManager | None = None
+    if with_script_manager:
+        s_store = ScriptRunStore(runtime_paths_for(cfg))
+        broker = ScriptToolBroker(store=s_store, runtime_resolver=SimpleNamespace())  # type: ignore[arg-type]
+        manager = ScriptRunManager(
+            store=s_store,
+            broker=broker,
+            worker_client=ScriptWorkerClient(),
+            worker_backend=None,
+            gateway_url="http://127.0.0.1:8765/api/script-gateway",
+        )
+    memberships = AgentReplyMembershipIndex()
+    bot_stub = SimpleNamespace(running=True, client=client, agent_name=agent_name)
+    orch = SimpleNamespace(
+        agent_bots=dict.fromkeys(cfg.agents, bot_stub),
+        agent_reply_memberships=memberships,
+        reactive_triggers=SimpleNamespace(notify_work=notify_mock),
+        script_runtime=SimpleNamespace(tool_manager=manager),
+    )
+    target = MessageTarget(
+        room_id=_ROOM,
+        source_thread_id="$thread:example.org",
+        resolved_thread_id="$thread:example.org",
+        reply_to_event_id="$e:example.org",
+        session_id=session_id or "placeholder",
+    )
+    if session_id is None:
+        object.__setattr__(target, "session_id", None)
+    ctx = make_test_tool_runtime_context(
+        agent_name=agent_name,
+        target=target,
+        requester_id=requester_id,
+        client=client,
+        config=cfg,
+        runtime_paths=runtime_paths_for(cfg),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        hooks=HookBindings(registry=HookRegistry.empty()),
+        orchestrator=orch,
+        agent_reply_memberships=memberships,
+        tool_function_filter=tool_function_filter,
+        persona=persona,
+    )
+    return ctx, notify_mock, manager
+
+
+@pytest.mark.asyncio
+async def test_triggers_tool_watch_script_create_source_path_and_capability_guards(tmp_path: Path) -> None:
+    """watch_script supports inline source & workspace path and enforces capability, filter, persona, and placement guards."""
+    tool = TriggersTools()
+    ctx, notify, manager = _tool_context_for_triggers(tmp_path / "ok")
+    assert manager is not None
+
+    # 1. Inline source creation: defaults once=False, clamps poll_interval_seconds, stores checkpoint & wakes poller
+    with tool_runtime_context(ctx):
+        res = json.loads(
+            await tool.triggers(
+                action="watch_script",
+                trigger_id="sc_inline",
+                prompt="Review check output",
+                source="def check():\n    return {'ok': True}\n",
+                poll_interval_seconds=10,
+            ),
+        )
+    assert res["status"] == "ok"
+    assert res["trigger"]["once"] is False
+    assert res["trigger"]["source"]["poll_interval_seconds"] == 60
+    assert res["trigger"]["source"]["agent"] == "coder"
+    assert "source_utf8" not in json.dumps(res)
+    assert notify.call_count == 1
+    store = ReactiveTriggerStore(ctx.runtime_paths)
+    cp = _require_cp(store, "sc_inline")
+    assert cp.revision == 1
+    assert cp.state == {}
+    assert cp.identity_json["session_id"] == "sess-1"
+    assert cp.identity_json["room_id"] == _ROOM
+
+    # 2. Workspace path creation snapshots once (later edits to file do not alter stored source_utf8)
+    ws = ctx.agent_workspace_root(create=True)
+    script_file = ws / "check_feed.py"
+    script_file.write_text("def check():\n    return {'v': 1}\n", encoding="utf-8")
+    with tool_runtime_context(ctx):
+        res_path = json.loads(
+            await tool.triggers(
+                action="watch_script",
+                trigger_id="sc_path",
+                prompt="Handle feed",
+                path="check_feed.py",
+            ),
+        )
+    assert res_path["status"] == "ok"
+    script_file.write_text("def check():\n    return {'v': 999}\n", encoding="utf-8")
+    assert "{'v': 1}" in _require_cp(store, "sc_path").source_utf8
+
+    # 3. Unsupported param rejected
+    with tool_runtime_context(ctx):
+        res_bad = json.loads(
+            await tool.triggers(action="watch_script", prompt="x", source=_SAMPLE_SOURCE, repo="o/r"),
+        )
+    assert res_bad["status"] == "error"
+    assert "Unsupported parameter" in res_bad["message"]
+
+    # 4. triggers-only agent, filtered turn, restricted persona, missing session_id, bad placement, unready runtime
+    guard_cases = [
+        ("watcher_agent", {"agent_name": "watcher"}, "requires 'triggers' plus 'script' or 'workflow'"),
+        ("filtered_turn", {"tool_function_filter": lambda _f: True}, "tool-filtered turn"),
+        (
+            "restricted_persona",
+            {
+                "persona": SubagentPersona(
+                    source_kind="configured",
+                    source_name="p",
+                    system_prompt="",
+                    tools=("triggers",),
+                ),
+            },
+            "persona without script or workflow",
+        ),
+        ("no_session", {"session_id": None}, "active session identity"),
+        ("no_placement", {"allow_local": False}, "worker"),
+        ("unready_runtime", {"with_script_manager": False}, "not ready"),
+        ("policy_disabled", {"policy": {"script_check_enabled": False}}, "disabled by policy"),
+    ]
+    for label, kwargs, expected_msg in guard_cases:
+        g_ctx, _, _ = _tool_context_for_triggers(tmp_path / label, **kwargs)
+        with (
+            patch.object(
+                ScriptRunManager,
+                "resolve_source",
+                AsyncMock(side_effect=AssertionError("must not read path")),
+            ),
+            tool_runtime_context(g_ctx),
+        ):
+            out = json.loads(
+                await tool.triggers(action="watch_script", prompt="p", path="check_feed.py"),
+            )
+        assert out["status"] == "error", label
+        assert expected_msg.lower() in out["message"].lower(), (label, out["message"])
+
+
+@pytest.mark.asyncio
+async def test_triggers_tool_script_check_list_owner_health_and_admin_redaction(tmp_path: Path) -> None:
+    """update, set_enabled, list, history, and synthetic test enforce all script_check contracts and redaction."""
+    tool = TriggersTools()
+    ctx, _, _ = _tool_context_for_triggers(
+        tmp_path,
+        policy={"admin_users": [_OTHER_OWNER]},
+    )
+    with tool_runtime_context(ctx):
+        created = json.loads(
+            await tool.triggers(
+                action="watch_script",
+                trigger_id="sc_u",
+                prompt="Alert",
+                source="def check():\n    return None\n",
+                triage_instructions="Only fire on urgent alerts",
+                triage_model="default",
+            ),
+        )
+    assert created["status"] == "ok"
+    store = ReactiveTriggerStore(ctx.runtime_paths)
+    rule = store.get_trigger("sc_u")
+    assert rule is not None
+
+    # Seed non-empty state & error counters in checkpoint plus a firing for history tests
+    cp0 = _require_cp(store, "sc_u")
+    store.upsert_script_check_checkpoint(
+        "sc_u",
+        cp0.model_copy(
+            update={"state": {"secret_cursor": "tok-123"}, "consecutive_errors": 2, "last_error_code": "timeout"},
+        ),
+        expected_rule_uid=rule.rule_uid,
+    )
+    ev = TriggerEvent(
+        source_type="script_check",
+        source_id="sc_u",
+        kind=SCRIPT_CHECK_EVENT_KIND,
+        event_id="sc:tick:r1",
+        timestamp=1234.0,
+        title="Alert",
+        data={"hits": 3},
+    )
+    store.update_script_check_checkpoint_and_enqueue(
+        "sc_u",
+        _require_cp(store, "sc_u").model_copy(update={"last_run_at": 1234.0}),
+        event=ev,
+        expected_rule_uid=rule.rule_uid,
+        expected_revision=1,
+    )
+
+    # 1. list: owner gets compact health, never source_utf8/identity_json/state; non-owner admin gets metadata only
+    with tool_runtime_context(ctx):
+        owner_list = json.loads(await tool.triggers(action="list"))
+    owner_item = next(t for t in owner_list["reactive_triggers"] if t["trigger_id"] == "sc_u")
+    assert owner_item["health"] == {"consecutive_errors": 2, "last_error_code": "timeout", "last_run_at": 1234.0}
+    raw_owner = json.dumps(owner_list)
+    assert all(secret not in raw_owner for secret in ("source_utf8", "identity_json", "secret_cursor", "def check"))
+
+    admin_ctx, _, _ = _tool_context_for_triggers(
+        tmp_path,
+        requester_id=_OTHER_OWNER,
+        policy={"admin_users": [_OTHER_OWNER]},
+    )
+    with tool_runtime_context(admin_ctx):
+        admin_list = json.loads(await tool.triggers(action="list"))
+    admin_item = next(t for t in admin_list["reactive_triggers"] if t["trigger_id"] == "sc_u")
+    assert "health" not in admin_item
+    assert admin_item["source"]["agent"] == "coder"
+    raw_admin = json.dumps(admin_list)
+    assert all(secret not in raw_admin for secret in ("source_utf8", "identity_json", "secret_cursor", "def check"))
+
+
+@pytest.mark.asyncio
+async def test_triggers_tool_script_check_update_reenable_history_and_test(tmp_path: Path) -> None:
+    """update, set_enabled, history, and synthetic test enforce script_check invariants and never run Python."""
+    tool = TriggersTools()
+    ctx, _, _ = _tool_context_for_triggers(tmp_path)
+    with tool_runtime_context(ctx):
+        assert (
+            json.loads(
+                await tool.triggers(
+                    action="watch_script",
+                    trigger_id="sc_u",
+                    prompt="Alert",
+                    source="def check():\n    return None\n",
+                    triage_instructions="Only fire on urgent alerts",
+                    triage_model="default",
+                ),
+            )["status"]
+            == "ok"
+        )
+    store = ReactiveTriggerStore(ctx.runtime_paths)
+    rule = store.get_trigger("sc_u")
+    assert rule is not None
+    ev = TriggerEvent(
+        source_type="script_check",
+        source_id="sc_u",
+        kind=SCRIPT_CHECK_EVENT_KIND,
+        event_id="sc:tick:r1",
+        timestamp=1234.0,
+        title="Alert",
+        data={"hits": 3},
+    )
+    store.update_script_check_checkpoint_and_enqueue(
+        "sc_u",
+        _require_cp(store, "sc_u").model_copy(
+            update={"state": {"old": 1}, "consecutive_errors": 2, "last_error_code": "timeout"},
+        ),
+        event=ev,
+        expected_rule_uid=rule.rule_uid,
+        expected_revision=1,
+    )
+
+    # 2. update source resets state/errors & increments revision; poll_interval_seconds clamps cleanly
+    new_src = "def check():\n    return {'v': 2}\n"
+    with tool_runtime_context(ctx):
+        upd = json.loads(
+            await tool.triggers(action="update", trigger_id="sc_u", source=new_src, poll_interval_seconds=15),
+        )
+    assert upd["status"] == "ok"
+    assert upd["trigger"]["source"]["poll_interval_seconds"] == 60
+    assert upd["trigger"]["source"]["source_digest"] == hashlib.sha256(new_src.encode()).hexdigest()
+    cp_after = _require_cp(store, "sc_u")
+    assert (cp_after.revision, cp_after.state, cp_after.consecutive_errors, cp_after.last_error_code) == (
+        3,
+        {},
+        0,
+        None,
+    )
+    assert cp_after.source_utf8 == new_src
+
+    # 3. Disable & re-enable preserves state when authorized, refuses when policy/capability/placement revoked
+    store.upsert_script_check_checkpoint(
+        "sc_u",
+        cp_after.model_copy(update={"state": {"keep": 1}}),
+        expected_rule_uid=rule.rule_uid,
+    )
+    with tool_runtime_context(ctx):
+        assert json.loads(await tool.triggers(action="set_enabled", trigger_id="sc_u", enabled=False))["status"] == "ok"
+    dis_ctx, _, _ = _tool_context_for_triggers(tmp_path, policy={"script_check_enabled": False})
+    with tool_runtime_context(dis_ctx):
+        assert (
+            json.loads(await tool.triggers(action="set_enabled", trigger_id="sc_u", enabled=True))["status"] == "error"
+        )
+    with tool_runtime_context(ctx):
+        assert json.loads(await tool.triggers(action="set_enabled", trigger_id="sc_u", enabled=True))["status"] == "ok"
+    assert _require_cp(store, "sc_u").state == {"keep": 1}
+
+    # 4. history: visible when authorized, refused when script_check disabled
+    with tool_runtime_context(ctx):
+        hist_ok = json.loads(await tool.triggers(action="history", trigger_id="sc_u"))
+    assert hist_ok["status"] == "ok"
+    assert len(hist_ok["firings"]) == 1
+    with tool_runtime_context(dis_ctx):
+        hist_denied = json.loads(await tool.triggers(action="history", trigger_id="sc_u"))
+    assert hist_denied["status"] == "error"
+
+    # 5. test: synthetic dry-run evaluates triage without executing Python or mutating state
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="urgent match"))
+    with (
+        patch("mindroom.custom_tools.triggers.evaluate_triage", triage_mock),
+        tool_runtime_context(ctx),
+    ):
+        tested = json.loads(
+            await tool.triggers(
+                action="test",
+                trigger_id="sc_u",
+                text="Urgent",
+                actor=_OWNER,
+                sample_data={"title": "Page", "hits": 5},
+            ),
+        )
+    assert tested["status"] == "ok"
+    assert tested["matched"] is True
+    assert tested["would_fire"] is True
+    assert tested["triage_decision"] is True
+    assert "without executing the script" in tested["note"]
+    assert triage_mock.await_count == 1
+    assert _require_cp(store, "sc_u").state == {"keep": 1}
+
+
+@pytest.mark.asyncio
+async def test_triggers_approval_alias_and_room_triggers_api_for_script_check(tmp_path: Path) -> None:
+    """ApprovalAlias judges watch_script and code-bearing update as start_script; Room Triggers API guards re-enable & redacts."""
+    triggers_meta = builtin_tool_registry().get("triggers")
+    assert triggers_meta is not None
+    assert triggers_meta.executes_code is False
+    alias = triggers_meta.approval_aliases["triggers"]
+    assert alias.judged_as == "start_script"
+    assert alias.judge({"action": "watch_script", "source": "def check(): return None", "trigger_id": "t1"}) == [
+        {"source": "def check(): return None", "path": None, "name": "t1"},
+    ]
+    assert alias.judge({"action": "update", "trigger_id": "t1", "path": "c.py"}) == [
+        {"source": None, "path": "c.py", "name": "t1"},
+    ]
+    for non_code in (
+        {"action": "update", "trigger_id": "t1", "prompt": "new"},
+        {"action": "watch_pr", "repo": "o/r", "number": 1},
+        {"action": "watch_room", "prompt": "p"},
+        {"action": "list"},
+        {"action": "history"},
+        {"action": "test", "trigger_id": "t1"},
+    ):
+        assert alias.judge(non_code) == []
+    for bad in ({}, {"action": None}, {"action": "  "}, {"action": 42}):
+        assert alias.judge(bad) is None
+
+    # End-to-end through evaluate_tool_approval with a start_script require_approval rule
+    ctx_app = _script_context(
+        tmp_path / "app",
+        tools=["triggers", "script"],
+        tool_approval={"default": "auto_approve", "rules": [{"match": "start_script", "action": "require_approval"}]},
+    )
+    for args, expected in (
+        ({"action": "watch_script", "source": _SAMPLE_SOURCE}, True),
+        ({"action": "update", "trigger_id": "t1", "path": "a.py"}, True),
+        ({"action": "update", "trigger_id": "t1", "prompt": "p"}, False),
+        ({"action": "watch_pr", "repo": "o/r", "number": 1}, False),
+        ({"action": ""}, True),
+    ):
+        asks, _ = await evaluate_tool_approval(ctx_app.config, ctx_app.runtime_paths, "triggers", args, "coder", alias)
+        assert asks is expected
+
+    # Room Triggers API: GET redacts source/state; PATCH enforces live policy/capability/placement on re-enable
+    ctx_api = _script_context(tmp_path / "api", tools=["triggers", "script"], allow_local=True)
+    store = ReactiveTriggerStore(ctx_api.runtime_paths)
+    rule = ReactiveTriggerRecord(
+        trigger_id="sc_api",
+        owner_user_id=_OWNER,
+        source=ScriptCheckSourceSpec(agent="coder", room_id=_ROOM, source_digest=_SAMPLE_DIGEST),
+        target=TriggerTargetSpec(agent="coder", room_id=_ROOM, prompt="Check"),
+        enabled=False,
+        disabled_reason="manual",
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    cp = ScriptCheckCheckpoint(
+        revision=1,
+        source_utf8="def check():\n    return {'secret_code': 1}\n",
+        identity_json={"session_id": "s1"},
+        state={"secret_state": 9},
+        next_poll_at=1000.0,
+        updated_at=1000.0,
+    )
+    store.create_trigger(rule, initial_script_check_checkpoint=cp)
+
+    client = _client(joined_rooms=(_ROOM,))
+    client.joined_members.side_effect = lambda rid: joined_members_response(rid, client.user_id, _OWNER)
+    app = _bound(client)
+    app.include_router(room_triggers.router)
+    app_state = ensure_app_state(app)
+    app_state.external_trigger_runtime = ExternalTriggerRuntime(
+        target_bot=lambda _n: None,
+        config_generation=1,
+        on_reactive_event=MagicMock(),
+    )
+    app_state.api_state = _api_state(ctx_api.config, ctx_api.runtime_paths)
+
+    with TestClient(app) as tc:
+        headers = _signed_in(app, _OWNER)
+        listed = tc.get(f"/api/rooms/{_ROOM}/triggers", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["triggers"][0]["kind"] == "script_check"
+        assert all(s not in listed.text for s in ("secret_code", "secret_state", "source_utf8", "identity_json"))
+
+        # Policy disabled -> 403
+        cfg_dis = _script_context(
+            tmp_path / "api",
+            tools=["triggers", "script"],
+            policy={"script_check_enabled": False},
+            allow_local=True,
+        ).config
+        app_state.api_state = _api_state(cfg_dis, ctx_api.runtime_paths)
+        assert (
+            tc.patch(f"/api/rooms/{_ROOM}/triggers/sc_api", json={"enabled": True}, headers=headers).status_code == 403
+        )
+
+        # Placement unavailable -> 409
+        ctx_no_place = _script_context(tmp_path / "api", tools=["triggers", "script"], allow_local=False)
+        app_state.api_state = _api_state(ctx_no_place.config, ctx_no_place.runtime_paths)
+        assert (
+            tc.patch(f"/api/rooms/{_ROOM}/triggers/sc_api", json={"enabled": True}, headers=headers).status_code == 409
+        )
+
+        # Authorized & placement ready -> 200
+        app_state.api_state = _api_state(ctx_api.config, ctx_api.runtime_paths)
+        ok = tc.patch(f"/api/rooms/{_ROOM}/triggers/sc_api", json={"enabled": True}, headers=headers)
+        assert ok.status_code == 200
+        assert ok.json()["enabled"] is True

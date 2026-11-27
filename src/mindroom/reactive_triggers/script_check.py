@@ -23,7 +23,7 @@ from mindroom.reactive_triggers.models import (
 from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -173,6 +173,51 @@ def normalize_script_check_event(
         summary=env["summary"],
         text=env["text"],
         data=event_data,
+    )
+
+
+def clamp_script_check_poll_interval(raw: int | None, *, min_seconds: int) -> int:
+    """Validate and clamp a script_check poll_interval_seconds value."""
+    if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int)):
+        msg = "poll_interval_seconds must be an integer."
+        raise TypeError(msg)
+    return max(min_seconds, min(300 if raw is None else raw, 86400))
+
+
+def script_check_health_summary(checkpoint: ScriptCheckCheckpoint | None) -> dict[str, object] | None:
+    """Return owner-visible script_check health counters without exposing code, identity, or state."""
+    if checkpoint is None:
+        return None
+    return {
+        "consecutive_errors": checkpoint.consecutive_errors,
+        "last_error_code": checkpoint.last_error_code,
+        "last_run_at": checkpoint.last_run_at,
+    }
+
+
+def build_script_check_dry_run_event(
+    trigger_id: str,
+    *,
+    actor: str | None,
+    text: str | None,
+    sample_data: Mapping[str, Any] | None,
+    now: float,
+) -> TriggerEvent:
+    """Build a synthetic script_check TriggerEvent for dry-run triage without running Python."""
+    data = dict(sample_data) if sample_data is not None else {}
+    raw_title = data.get("title")
+    raw_summary = data.get("summary")
+    return TriggerEvent(
+        source_type="script_check",
+        source_id=trigger_id,
+        kind=SCRIPT_CHECK_EVENT_KIND,
+        event_id="dry_run",
+        timestamp=now,
+        actor=actor,
+        title=raw_title if isinstance(raw_title, str) else None,
+        summary=raw_summary if isinstance(raw_summary, str) else None,
+        text=text,
+        data=data,
     )
 
 

@@ -2203,6 +2203,7 @@ depends_on = [
     "mindroom.plugin_http",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.store",
 ]
 
@@ -11632,10 +11633,12 @@ depends_on = [
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.store",
     "mindroom.reactive_triggers.triage",
     "mindroom.thread_tags",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
