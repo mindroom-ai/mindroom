@@ -58,7 +58,6 @@ __all__ = [
     "parse_thread_tag_record",
     "parse_thread_tag_state_key",
     "remove_thread_tag",
-    "reopen_resolved_thread_record",
     "reopen_thread_if_resolved",
     "set_thread_tag",
     "set_thread_tags_if_empty",
@@ -1109,92 +1108,6 @@ async def _remove_thread_tag_under_lock(
         f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
     )
     raise ThreadTagsError(msg)
-
-
-async def _read_single_tag_record(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_root_id: str,
-    tag: str,
-    *,
-    removal_accepted: bool,
-) -> ThreadTagRecord | None:
-    """Read one tag record by state key; after an accepted tombstone write, a failed read treats it as cleared."""
-    try:
-        content = await get_thread_tag_content(client, room_id, thread_root_id, tag)
-    except Exception:
-        if not removal_accepted:
-            raise
-        logger.warning("Thread tag removal accepted but not verified", room_id=room_id, tag=tag)
-        return None
-    return parse_thread_tag_record(tag, content)
-
-
-async def reopen_resolved_thread_record(
-    client: nio.AsyncClient,
-    room_id: str,
-    thread_root_id: str,
-    *,
-    expected_record: ThreadTagRecord,
-    requester_user_id: str | None = None,
-) -> bool:
-    """Conditionally clear ``resolved`` via single-key state GETs for tag reads (never ``room_get_state``).
-
-    Permission checks for Matrix room v12 creators may still read room state when power levels fall short.
-    Returns ``True`` when ``resolved`` is cleared (or already absent), ``False`` when room state now holds a
-    different ``resolved`` record that must be preserved.
-    """
-    normalized_thread_root_id = _require_non_empty_string(
-        thread_root_id,
-        field_name="thread_root_id",
-    )
-    async with _thread_tag_mutation_lock(room_id, normalized_thread_root_id):
-        await _assert_thread_tags_write_allowed(
-            client,
-            room_id,
-            requester_user_id=requester_user_id,
-        )
-        removal_accepted = False
-        for _ in range(_MAX_THREAD_TAG_WRITE_ATTEMPTS):
-            current_record = await _read_single_tag_record(
-                client,
-                room_id,
-                normalized_thread_root_id,
-                RESOLVED_THREAD_TAG,
-                removal_accepted=removal_accepted,
-            )
-            if current_record is None:
-                return True
-            if not _thread_tag_records_match(expected_record, current_record):
-                return False
-
-            await _put_thread_tag_state(
-                client,
-                room_id,
-                normalized_thread_root_id,
-                RESOLVED_THREAD_TAG,
-                None,
-                error_prefix="Failed to update thread tags state",
-            )
-            removal_accepted = True
-
-            verified_record = await _read_single_tag_record(
-                client,
-                room_id,
-                normalized_thread_root_id,
-                RESOLVED_THREAD_TAG,
-                removal_accepted=True,
-            )
-            if verified_record is None:
-                return True
-            if not _thread_tag_records_match(expected_record, verified_record):
-                return False
-
-        msg = (
-            f"Failed to remove thread tag {RESOLVED_THREAD_TAG!r} for {normalized_thread_root_id} in {room_id} "
-            f"after {_MAX_THREAD_TAG_WRITE_ATTEMPTS} concurrent-write attempts."
-        )
-        raise ThreadTagsError(msg)
 
 
 async def reopen_thread_if_resolved(

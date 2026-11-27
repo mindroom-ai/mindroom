@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import nio
 
@@ -35,7 +35,7 @@ from mindroom.thread_tags import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping
     from datetime import datetime
     from typing import Any
 
@@ -47,15 +47,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class RoomStateRestoreObserver(Protocol):
-    """Receives room state events already fetched while restoring thread snoozes."""
-
-    def begin_restore(self, room_id: str) -> None: ...  # noqa: D102
-    def restore_room_events(self, room_id: str, events: Sequence[Mapping[str, object]]) -> None: ...  # noqa: D102
-    def end_restore(self, room_id: str) -> None: ...  # noqa: D102
-    def forget_room(self, room_id: str) -> None: ...  # noqa: D102
-
-
 @dataclass
 class ThreadSnoozeRuntimeCoordinator:
     """Feed the snooze index from room state and live tag events, and wake threads through the running bots."""
@@ -64,7 +55,6 @@ class ThreadSnoozeRuntimeCoordinator:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
     bots: Callable[[], Mapping[str, AgentBot]]
-    room_state_observer: RoomStateRestoreObserver | None = None
     _runtime: ThreadSnoozeRuntime = field(init=False)
     _loop: SupervisedLoop = field(init=False)
     _restored_rooms: set[str] = field(default_factory=set, init=False)
@@ -136,15 +126,19 @@ class ThreadSnoozeRuntimeCoordinator:
             # No other bot synced this room, so tag changes made meanwhile reached no callback: read it again.
             self._restored_rooms.discard(room_id)
             live_roots = self._live_during_restore[room_id] = set()
-            if self.room_state_observer is not None:
-                self.room_state_observer.begin_restore(room_id)
             try:
                 response = await client.room_get_state(room_id)
                 if not isinstance(response, nio.RoomGetStateResponse):
                     logger.warning("thread_snooze_room_state_unread", room_id=room_id, error=str(response))
                     self._retry_restore_later(room_id)
                     return
-                self._apply_restored_events(room_id, response.events, live_roots)
+                for event in response.events:
+                    parsed = self._parse_state_event(room_id, event)
+                    if parsed is not None and parsed[0] not in live_roots:
+                        self._apply_state_event(room_id, parsed)
+                # The same read gives the room's settings, which plugins and replies read before any turn does.
+                seed_room_settings(self.runtime_paths, room_id, response.events)
+                self._restored_rooms.add(room_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -152,24 +146,6 @@ class ThreadSnoozeRuntimeCoordinator:
                 self._retry_restore_later(room_id)
             finally:
                 del self._live_during_restore[room_id]
-                if self.room_state_observer is not None:
-                    self.room_state_observer.end_restore(room_id)
-
-    def _apply_restored_events(
-        self,
-        room_id: str,
-        events: Sequence[Mapping[str, object]],
-        live_roots: set[str],
-    ) -> None:
-        for event in events:
-            parsed = self._parse_state_event(room_id, event)
-            if parsed is not None and parsed[0] not in live_roots:
-                self._apply_state_event(room_id, parsed)
-        # The same read gives the room's settings, which plugins and replies read before any turn does.
-        seed_room_settings(self.runtime_paths, room_id, events)
-        if self.room_state_observer is not None:
-            self.room_state_observer.restore_room_events(room_id, events)
-        self._restored_rooms.add(room_id)
 
     def _retry_restore_later(self, room_id: str) -> None:
         """Read the room's state again after the retry delay, unless another retry is already pending."""
@@ -220,8 +196,6 @@ class ThreadSnoozeRuntimeCoordinator:
             # No running bot sees the room, so its snoozes are gone for us; the next bot to start or join reads its
             # state again, even if bots restored from stored rooms see each other and no sync repeats the snooze.
             self._restored_rooms.discard(room_id)
-            if self.room_state_observer is not None:
-                self.room_state_observer.forget_room(room_id)
             return None
         try:
             return await get_thread_tag_content(joined[1], room_id, thread_root_id, tag)

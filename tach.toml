@@ -5563,7 +5563,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.thread_snooze",
-    "mindroom.thread_tags",
 ]
 
 [[modules]]

@@ -1226,10 +1226,6 @@ class AgentBot:
         except Exception:
             self.logger.exception("thread_snooze_observe_failed", room_id=room.room_id)
         try:
-            self.orchestrator.thread_auto_reopen.observe_state_event(room.room_id, event.source)
-        except Exception:
-            self.logger.exception("thread_auto_reopen_observe_failed", room_id=room.room_id)
-        try:
             self.orchestrator.reactive_triggers.observe_state_event(room.room_id, event.source)
         except Exception:
             self.logger.exception("reactive_triggers_observe_failed", room_id=room.room_id)
@@ -1594,7 +1590,6 @@ class AgentBot:
             if (runtime := get_background_runtime(self.runtime_paths)) is not None:
                 # Nobody here can see or cancel the work this entity leaves behind.
                 await cancel_room_jobs(runtime, agent_name=self.agent_name, room_id=room_id)
-            self.orchestrator.thread_auto_reopen.room_left(room_id)
             await self._room_lifecycle.forget_invited_room(room_id)
             await self._room_lifecycle.on_contact_room_left(room_id)
 

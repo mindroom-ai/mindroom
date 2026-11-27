@@ -334,7 +334,7 @@ async def _mark_source_moved(
     if await send_message_result(context.client, context.room_id, notice, operation="thread_move") is None:
         warnings.append("Could not post the move notice in the original thread.")
     try:
-        state = await set_thread_tag(
+        await set_thread_tag(
             context.client,
             context.room_id,
             prepared.root_id,
@@ -343,14 +343,8 @@ async def _mark_source_moved(
         )
     except ThreadTagsError as exc:
         warnings.append(f"Could not mark the original thread resolved: {exc}")
-        return
-    context.resolved_thread_ids.add(prepared.root_id)
-    if (
-        context.orchestrator is not None
-        and state is not None
-        and (resolved_record := state.tags.get(RESOLVED_THREAD_TAG)) is not None
-    ):
-        context.orchestrator.thread_auto_reopen.resolved(context.room_id, prepared.root_id, resolved_record)
+    else:
+        context.resolved_thread_ids.add(prepared.root_id)
 
 
 def _lost_content(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
