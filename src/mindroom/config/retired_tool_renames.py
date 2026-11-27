@@ -13,16 +13,21 @@ from __future__ import annotations
 #   (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote,
 #   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, Google Docs /
 #   Google Tasks (google_docs, google_tasks, including prefixed secondary Google Workspace plugin copies for all Google
-#   Workspace toolkits), and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model, usage_stats)
-#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs or
-#   include_tools/exclude_tools overrides.
+#   Workspace toolkits), Google BigQuery (google_bigquery), Hacker News (hackernews), and runtime/session/thread
+#   toolkits including script, terminal, claude_agent, thread_model, thread_snooze, thread_resolution, and usage_stats
+#   previously exposed individual per-operation function names (and second-generation split names such as
+#   thread_model_read/thread_model_write, knowledge_graph_read/knowledge_graph_write, serper_search, and scrape_webpage)
+#   that could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
 #   workflow/thread_tags: v2026.11.658; google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659;
-#   Wave 2/4: v2026.11.663); replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   Wave 2/4: v2026.11.663; 7-toolkit collapse including thread_snooze, thread_resolution, hackernews, google_bigquery,
+#   and second-generation thread_model/knowledge_graph/serper splits shipped in v2026.11.665-v2026.11.668: v2026.11.668);
+#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
 #   reject tool_approval.rules when a retired strict-wildcard toolkit function (skills, attachments, Microsoft 365,
-#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, usage_stats) is decided by a wildcard
+#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, thread_snooze, thread_resolution,
+#   hackernews, google_bigquery, usage_stats) is decided by a wildcard
 #   approval script or any retired function's effective decision differs from the replacement's effective decision
 #   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
 #   consolidated toolkit entry (both authored overrides and stored dashboard settings), directing operators to the
@@ -92,9 +97,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "search_news": "google_search",
     },
     "serper": {
-        "search_web": "serper_search",
-        "search_news": "serper_search",
-        "search_scholar": "serper_search",
+        "search_web": "serper",
+        "search_news": "serper",
+        "search_scholar": "serper",
+        "serper_search": "serper",
+        "scrape_webpage": "serper",
+    },
+    "hackernews": {
+        "get_top_hackernews_stories": "hackernews",
+        "get_user_details": "hackernews",
+    },
+    "google_bigquery": {
+        "list_tables": "google_bigquery_inspect",
+        "describe_table": "google_bigquery_inspect",
     },
     "youtube": {
         "get_youtube_video_captions": "youtube_video",
@@ -751,11 +766,13 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
     # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
     # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
-    #   naming any of the 26 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
-    #   and email_invite (including the renamed single-verb reads shared_directories_read, contacts_read, and
-    #   email_invite_read; agent_settings remains the kept zero-arg read).
-    # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
-    #   functions with ToolMetadata.action_scoped_grants.
+    #   naming any of the 28 retired functions across shared_directories, contacts, knowledge_graph (including retired
+    #   second-generation knowledge_graph_read and knowledge_graph_write), agent_manager, and email_invite (including
+    #   the renamed single-verb reads shared_directories_read, contacts_read, and email_invite_read; agent_settings
+    #   remains the kept zero-arg read).
+    # Last legacy release: v2026.11.662 (second-generation knowledge_graph_read/knowledge_graph_write shipped in
+    #   v2026.11.665-v2026.11.668: v2026.11.668); replacement: unreleased; consolidated into action-dispatched functions
+    #   (unified `knowledge_graph` and read/write splits for the others) with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
     #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
     #   in include_tools/exclude_tools at config load.
@@ -780,12 +797,14 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "remove_contact": "contacts_write",
     },
     "knowledge_graph": {
-        "search_graph": "knowledge_graph_read",
-        "graph_entity": "knowledge_graph_read",
-        "delete_graph_fact": "knowledge_graph_write",
-        "delete_graph_entity": "knowledge_graph_write",
-        "merge_graph_entities": "knowledge_graph_write",
-        "update_graph_entity_summary": "knowledge_graph_write",
+        "search_graph": "knowledge_graph",
+        "graph_entity": "knowledge_graph",
+        "delete_graph_fact": "knowledge_graph",
+        "delete_graph_entity": "knowledge_graph",
+        "merge_graph_entities": "knowledge_graph",
+        "update_graph_entity_summary": "knowledge_graph",
+        "knowledge_graph_read": "knowledge_graph",
+        "knowledge_graph_write": "knowledge_graph",
     },
     "agent_manager": {
         "create_agent": "agent_manager_write",
@@ -820,10 +839,20 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "claude_end_session": "claude_agent_write",
     },
     "thread_model": {
-        "list_models": "thread_model_read",
-        "get_thread_model": "thread_model_read",
-        "switch_thread_model": "thread_model_write",
-        "reset_thread_model": "thread_model_write",
+        "list_models": "thread_model",
+        "get_thread_model": "thread_model",
+        "switch_thread_model": "thread_model",
+        "reset_thread_model": "thread_model",
+        "thread_model_read": "thread_model",
+        "thread_model_write": "thread_model",
+    },
+    "thread_snooze": {
+        "snooze_thread": "thread_snooze",
+        "unsnooze_thread": "thread_snooze",
+    },
+    "thread_resolution": {
+        "resolve_thread": "thread_resolution",
+        "reopen_thread": "thread_resolution",
     },
     "usage_stats": {
         "get_my_usage": "usage_stats",
@@ -871,6 +900,10 @@ STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
         "terminal",
         "claude_agent",
         "thread_model",
+        "thread_snooze",
+        "thread_resolution",
+        "hackernews",
+        "google_bigquery",
         "usage_stats",
     },
 )

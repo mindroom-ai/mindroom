@@ -84,7 +84,8 @@ if TYPE_CHECKING:
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_bigquery",
     helper_text="Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
-    function_names=("describe_table", "list_tables", "run_sql_query"),
+    function_names=("google_bigquery_inspect", "run_sql_query"),
+    action_scoped_grants=("google_bigquery_inspect",),
 )
 def google_bigquery_tools() -> type[GoogleBigQueryTools]:
     """Return Google BigQuery tools for data analytics."""

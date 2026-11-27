@@ -42,7 +42,8 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/research-sources/#hackernews",
-    function_names=("get_top_hackernews_stories", "get_user_details"),
+    function_names=("hackernews",),
+    action_scoped_grants=("hackernews",),
 )
 def hackernews_tools() -> type[HackerNewsTools]:
     """Return Hacker News tools for getting stories and user details."""

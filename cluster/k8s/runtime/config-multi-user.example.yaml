@@ -116,7 +116,9 @@ memory:
 
 tool_approval:
   rules:
-    - match: resolve_thread
+    - match: thread_resolution
+      arguments:
+        action: resolve
       action: require_approval
     - match: matrix_user_write
       action: require_approval

@@ -218,7 +218,7 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
             0,
             calls(
                 tool_call(
-                    "thread_model_write",
+                    "thread_model",
                     "switch-model",
                     action="switch",
                     model_name="alternate",
@@ -235,7 +235,7 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
         turns.append(
             calls(
                 tool_call(
-                    "thread_model_write",
+                    "thread_model",
                     "switch-model",
                     action="switch",
                     model_name="default",
@@ -409,7 +409,7 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
             calls(tool_call("calculate", "approved-add", action="add", a=1, b=2)),
             calls(
                 tool_call(
-                    "thread_model_write",
+                    "thread_model",
                     "switch-model",
                     action="switch",
                     model_name="alternate",

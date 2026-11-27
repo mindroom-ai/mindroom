@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     icon="AlarmClock",
     icon_color="text-amber-500",
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_snooze",
-    function_names=("snooze_thread", "unsnooze_thread"),
+    function_names=("thread_snooze",),
+    action_scoped_grants=("thread_snooze",),
     requires_room_context=True,
 )
 def thread_snooze_tools() -> type[ThreadSnoozeTools]:

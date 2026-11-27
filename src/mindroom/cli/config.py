@@ -1450,7 +1450,9 @@ authorization:
 
 tool_approval:
   rules:
-    - match: resolve_thread
+    - match: thread_resolution
+      arguments:
+        action: resolve
       action: require_approval
     # Ask before config_manager changes the configuration; its inspect and validate calls never ask.
     - match: manage_config

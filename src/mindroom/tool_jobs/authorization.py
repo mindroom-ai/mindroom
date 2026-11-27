@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_READ_ACTIONS
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.desktop.credentials import has_ready_self_service_desktop
@@ -20,6 +20,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+# LEGACY_COMPAT: Pre-upgrade read-only knowledge_graph function names retained so saved read jobs
+# stay authorized when `knowledge_graph_edits=False`, while unknown or retired edit jobs fail closed.
+_RETIRED_KNOWLEDGE_GRAPH_READ_FUNCTIONS = frozenset({"knowledge_graph_read", "search_graph", "graph_entity"})
 
 
 def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
@@ -120,8 +125,11 @@ def locally_allowed(
         entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
     if entry is None:
         return False
-    # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
-    edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+    # Graph edits are actions of the knowledge_graph tool that only an agent allowed to edit its graph gets.
+    is_graph_read = (
+        tool_name == "knowledge_graph" and origin.get("action") in KNOWLEDGE_GRAPH_READ_ACTIONS
+    ) or tool_name in _RETIRED_KNOWLEDGE_GRAPH_READ_FUNCTIONS
+    edits_graph = entry.name == "knowledge_graph" and not is_graph_read
     if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
         return False
     return _configured_tool_allowed(config, tools, entry, tool_name, origin, construction)

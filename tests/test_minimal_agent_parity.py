@@ -924,7 +924,7 @@ async def test_model_switch_timing_actual_minimal_requests(response_harness, mon
     install_model_providers(monkeypatch, models)
     steps.extend(
         [
-            _bash_call("thread_model", "thread_model_write", {"action": "switch", "model_name": "other", "when": when}),
+            _bash_call("thread_model", "thread_model", {"action": "switch", "model_name": "other", "when": when}),
             "done",
         ],
     )

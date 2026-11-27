@@ -772,6 +772,20 @@ def _stored_consolidated_filter_guidance(tool_name: str, key: str, old: str, new
     )
 
 
+def _stored_toggle_filter_guidance(
+    tool_name: str,
+    toggle_hint: str,
+    _key: str,
+    _old: str,
+    new: str,
+) -> str:
+    return (
+        f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+        f"disable unwanted actions via `{tool_name}`'s {toggle_hint} (or `tool_approval.rules` "
+        f"matching `{new}`) so permissions are not broadened"
+    )
+
+
 def _retired_fallback_filter_guidance(
     tool_name: str,
     key: str,
@@ -846,7 +860,17 @@ _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str,
             "terminal",
             "claude_agent",
             "thread_model",
+            "thread_snooze",
+            "thread_resolution",
             "usage_stats",
+        )
+    },
+    **{
+        name: ((RETIRED_CONSOLIDATED_FUNCTIONS[name], partial(_stored_toggle_filter_guidance, name, hint)),)
+        for name, hint in (
+            ("serper", "`enable_*` settings"),
+            ("hackernews", "`enable_*` settings"),
+            ("google_bigquery", "`list_tables`/`describe_table` settings"),
         )
     },
 }

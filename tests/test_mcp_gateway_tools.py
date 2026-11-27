@@ -163,7 +163,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("matrix_room", "matrix_room"),
         ("report_publishing", "publish_report"),
         ("scheduler", "scheduler"),
-        ("thread_model", "thread_model_read"),
+        ("thread_model", "thread_model"),
         ("thread_summary", "set_thread_summary"),
         ("triggers", "triggers"),
         ("usage_stats", "usage_stats"),
@@ -916,17 +916,17 @@ async def test_native_deferred_filters_remain_authoritative(context: AgentToolCo
     """Deferred discovery must not remove authored function restrictions."""
     raw = context.config.model_dump()
     raw["agents"]["personal"]["tools"] = [
-        {"hackernews": {"defer": True, "include_tools": ["get_top_hackernews_stories"]}},
+        {"reasoning": {"defer": True, "include_tools": ["think"]}},
     ]
     context = replace(context, config=Config.model_validate(raw))
-    result = await gateway.search_tools(context, toolkit="hackernews")
+    result = await gateway.search_tools(context, toolkit="reasoning")
     assert "error" not in result
-    assert [item["function"] for item in result["results"]] == ["get_top_hackernews_stories"]
+    assert [item["function"] for item in result["results"]] == ["think"]
     result = await gateway.invoke_tool(
         context,
-        toolkit="hackernews",
-        function="get_user_details",
-        arguments={"username": "pg"},
+        toolkit="reasoning",
+        function="analyze",
+        arguments={"title": "Check", "result": "ok", "analysis": "done"},
     )
     assert "result" not in result
     assert "error" in result

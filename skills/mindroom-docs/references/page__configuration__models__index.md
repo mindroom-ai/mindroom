@@ -805,7 +805,7 @@ models:
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
 `sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
-`!model list` and the `thread_model` tool's `thread_model_read(action="list")` show each model's levels and default.
+`!model list` and `thread_model(action="list")` show each model's levels and default.
 
 MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
 
@@ -908,11 +908,11 @@ agents:
       - thread_model
 ```
 
-- `thread_model_read(action="list")` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
-- `thread_model_read(action="get")` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `thread_model_write(action="switch", model_name=..., when=...)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
+- `thread_model(action="list")` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
+- `thread_model(action="get")` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
+- `thread_model(action="switch", model_name=..., when=...)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
-- `thread_model_write(action="reset")` removes the thread override so room-level selection applies again.
+- `thread_model(action="reset")` removes the thread override so room-level selection applies again.
 
-All operations except `thread_model_read(action="list")` require an active thread and return an error outside one.
+All operations except `thread_model(action="list")` require an active thread and return an error outside one.
 Overrides set by the tool follow the same entity scope and team rules as [`!model`](#model) and are stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.

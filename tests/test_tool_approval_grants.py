@@ -1241,10 +1241,22 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("claude_agent", "claude_send", "claude_agent_write"),
         ("claude_agent", "claude_interrupt", "claude_agent_write"),
         ("claude_agent", "claude_end_session", "claude_agent_write"),
-        ("thread_model", "list_models", "thread_model_read"),
-        ("thread_model", "get_thread_model", "thread_model_read"),
-        ("thread_model", "switch_thread_model", "thread_model_write"),
-        ("thread_model", "reset_thread_model", "thread_model_write"),
+        ("thread_model", "list_models", "thread_model"),
+        ("thread_model", "get_thread_model", "thread_model"),
+        ("thread_model", "switch_thread_model", "thread_model"),
+        ("thread_model", "reset_thread_model", "thread_model"),
+        ("thread_model", "thread_model_read", "thread_model"),
+        ("thread_model", "thread_model_write", "thread_model"),
+        ("thread_snooze", "snooze_thread", "thread_snooze"),
+        ("thread_snooze", "unsnooze_thread", "thread_snooze"),
+        ("thread_resolution", "resolve_thread", "thread_resolution"),
+        ("thread_resolution", "reopen_thread", "thread_resolution"),
+        ("serper", "serper_search", "serper"),
+        ("serper", "scrape_webpage", "serper"),
+        ("hackernews", "get_top_hackernews_stories", "hackernews"),
+        ("hackernews", "get_user_details", "hackernews"),
+        ("google_bigquery", "list_tables", "google_bigquery_inspect"),
+        ("google_bigquery", "describe_table", "google_bigquery_inspect"),
         ("usage_stats", "get_my_usage", "usage_stats"),
         ("usage_stats", "get_my_private_usage", "usage_stats"),
         ("usage_stats", "get_all_usage", "usage_stats"),
@@ -1318,7 +1330,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
                 {"match": "mem0_add", "action": "require_approval"},
                 {"match": "search_web", "action": "require_approval"},
                 {"match": "searxng_search", "action": "auto_approve"},
-                {"match": "serper_search", "action": "auto_approve"},
+                {"match": "serper", "action": "auto_approve"},
             ],
         },
     }
@@ -1329,7 +1341,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
         "mem0_add",
         "search_web",
         "searxng_search",
-        "serper_search",
+        "serper",
     ]
 
 
@@ -1481,7 +1493,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     plugin_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="custom_plugin",
-        function_name="scrape_webpage",
+        function_name="read_url",
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1492,7 +1504,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
             "agents": {
                 "code": {
                     "display_name": "Code",
-                    "tools": ["serper", "custom_plugin"],
+                    "tools": ["website", "custom_plugin"],
                     "include_default_tools": False,
                 },
             },
@@ -1501,46 +1513,59 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
         runtime_paths,
     )
     registry = refresh_plugins(config, runtime_paths).tools
-    assert "serper" in registry.entries
+    assert "website" in registry.entries
     assert "custom_plugin" in registry.entries
-    assert "scrape_webpage" not in registry.entries["serper"].action_scoped_grants
-    assert "scrape_webpage" in registry.entries["custom_plugin"].action_scoped_grants
+    assert "read_url" not in registry.entries["website"].action_scoped_grants
+    assert "read_url" in registry.entries["custom_plugin"].action_scoped_grants
 
     # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
-    serper_op = grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="serper")
-    assert serper_op is not None
-    assert serper_op.tool_name == "scrape_webpage"
-    assert serper_op.mcp_server_id is None
-    assert serper_op.mcp_tool_name is None
+    website_op = grant_operation(
+        config,
+        "read_url",
+        {"url": "https://example.com"},
+        tools=registry,
+        toolkit_name="website",
+    )
+    assert website_op is not None
+    assert website_op.tool_name == "read_url"
+    assert website_op.mcp_server_id is None
+    assert website_op.mcp_tool_name is None
     assert scheduled_call_offers_any_arguments(
         config,
-        "scrape_webpage",
-        {"query": "x"},
+        "read_url",
+        {"url": "https://example.com"},
         requester_id="@human:test",
         approver_id="@human:test",
         authored_confirmation=False,
         tools=registry,
-        toolkit_name="serper",
+        toolkit_name="website",
     )
 
     # The owning plugin gets per-action scoping and fails closed when action is missing.
     plugin_op = grant_operation(
         config,
-        "scrape_webpage",
+        "read_url",
         {"action": "read"},
         tools=registry,
         toolkit_name="custom_plugin",
     )
     assert plugin_op is not None
-    assert plugin_op.tool_name == "scrape_webpage"
+    assert plugin_op.tool_name == "read_url"
     assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
     assert (
-        grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+        grant_operation(
+            config,
+            "read_url",
+            {"url": "https://example.com"},
+            tools=registry,
+            toolkit_name="custom_plugin",
+        )
+        is None
     )
     assert not scheduled_call_offers_any_arguments(
         config,
-        "scrape_webpage",
+        "read_url",
         {"action": "read"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1550,38 +1575,38 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     )
 
     # timed_grant_operation threads call.toolkit_name into grant_operation.
-    serper_tool = ToolExecution(
-        tool_call_id="call-serper",
-        tool_name="scrape_webpage",
-        tool_args={"query": "x"},
+    website_tool = ToolExecution(
+        tool_call_id="call-website",
+        tool_name="read_url",
+        tool_args={"url": "https://example.com"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
-    serper_call = ApprovalCall(
-        tool_call_id="call-serper",
-        tool_name="scrape_webpage",
+    website_call = ApprovalCall(
+        tool_call_id="call-website",
+        tool_name="read_url",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
-        toolkit_name="serper",
+        toolkit_name="website",
     )
-    assert timed_grant_operation(config, serper_tool, serper_call, tools=registry) == serper_op
+    assert timed_grant_operation(config, website_tool, website_call, tools=registry) == website_op
 
     plugin_tool = ToolExecution(
         tool_call_id="call-plugin",
-        tool_name="scrape_webpage",
+        tool_name="read_url",
         tool_args={"action": "read"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     plugin_call = ApprovalCall(
         tool_call_id="call-plugin",
-        tool_name="scrape_webpage",
+        tool_name="read_url",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="custom_plugin",
     )
     assert timed_grant_operation(config, plugin_tool, plugin_call, tools=registry) == plugin_op
-    assert timed_grant_operation(config, serper_tool, plugin_call, tools=registry) is None
+    assert timed_grant_operation(config, website_tool, plugin_call, tools=registry) is None
 
 
 @pytest.mark.asyncio
@@ -3617,8 +3642,12 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
 @pytest.mark.parametrize(
     ("tools", "matches", "error_pattern"),
     [
-        (["serper"], ["skill", "*"], r"check\.py.*serper_search"),
-        (["serper"], ["serper_search", "skill", "*"], None),
+        (["serper"], ["skill", "*"], r"check\.py.*serper"),
+        (["serper"], ["serper", "skill", "*"], None),
+        (["hackernews"], ["skill", "*"], r"check\.py.*hackernews"),
+        (["hackernews"], ["hackernews", "skill", "*"], None),
+        (["google_bigquery"], ["skill", "*"], r"check\.py.*google_bigquery_inspect"),
+        (["google_bigquery"], ["google_bigquery_inspect", "skill", "*"], None),
         (["browserbase"], ["skill", "*"], r"check\.py.*browserbase"),
         (["browserbase"], ["browserbase", "skill", "*"], None),
     ],
@@ -3765,8 +3794,11 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ("terminal", "terminal_read", "list", "read"),
         ("terminal", "terminal_write", "open", "run"),
         ("claude_agent", "claude_agent_write", "start", "send"),
-        ("thread_model", "thread_model_read", "list", "get"),
-        ("thread_model", "thread_model_write", "switch", "reset"),
+        ("thread_model", "thread_model", "list", "switch"),
+        ("thread_snooze", "thread_snooze", "snooze", "unsnooze"),
+        ("thread_resolution", "thread_resolution", "resolve", "reopen"),
+        ("hackernews", "hackernews", "top_stories", "user"),
+        ("google_bigquery", "google_bigquery_inspect", "list_tables", "describe_table"),
         ("usage_stats", "usage_stats", "self", "all"),
     )
     for toolkit_name, tool_name, first_action, second_action in action_cases:
@@ -3818,7 +3850,9 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ("claude_agent", ["claude_agent_read", "claude_agent_write"]),
         ("google_docs", ["google_docs_read", "google_docs_write"]),
         ("twilio", ["twilio_send", "twilio_read"]),
-        ("thread_model", ["thread_model_read", "thread_model_write"]),
+        ("thread_model", ["thread_model"]),
+        ("thread_snooze", ["thread_snooze"]),
+        ("thread_resolution", ["thread_resolution"]),
         ("usage_stats", ["usage_stats"]),
     )
     for toolkit_name, explicit_matches in wildcard_cases:
@@ -3853,7 +3887,10 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
         ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
         ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
-        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model"),
+        ("thread_model", {"exclude_tools": ["thread_model_write"]}, "thread_model"),
+        ("thread_snooze", {"exclude_tools": ["snooze_thread"]}, "thread_snooze"),
+        ("thread_resolution", {"exclude_tools": ["resolve_thread"]}, "thread_resolution"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
     )
     for toolkit_name, overrides, replacement in retired_filter_cases:
@@ -3888,6 +3925,30 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
             Config.validate_with_runtime(bad, runtime_paths)
 
+    # Retired filters on toggleable toolkits point to their actual toggle names and tool_approval.rules.
+    for toolkit_name, overrides, replacement, expected_toggle in (
+        ("serper", {"include_tools": ["scrape_webpage"]}, "serper", "`enable_*` settings"),
+        ("hackernews", {"include_tools": ["get_user_details"]}, "hackernews", "`enable_*` settings"),
+        (
+            "google_bigquery",
+            {"include_tools": ["describe_table"]},
+            "google_bigquery_inspect",
+            "`list_tables`/`describe_table` settings",
+        ),
+    ):
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=replacement) as exc_info:
+            Config.validate_with_runtime(bad, runtime_paths)
+        message = str(exc_info.value)
+        assert expected_toggle in message
+        assert "tool_approval.rules" in message
+        assert "no per-action allowlist filter" not in message
+
     # Kept name `terminal_read` in terminal include_tools still loads cleanly.
     valid_terminal = Config.validate_with_runtime(
         {
@@ -3915,8 +3976,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
     for toolkit, fn, first_action, second_action in (
         ("shared_directories", "shared_directories_write", "create", "delete"),
         ("contacts", "contacts_write", "request", "remove"),
-        ("knowledge_graph", "knowledge_graph_read", "search", "entity"),
-        ("knowledge_graph", "knowledge_graph_write", "update_summary", "delete_fact"),
+        ("knowledge_graph", "knowledge_graph", "search", "delete_fact"),
         ("agent_manager", "agent_manager_write", "create", "delete"),
         ("email_invite", "email_invite_write", "invite", "revoke"),
     ):
@@ -3973,9 +4033,9 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
                     },
                 },
             },
-            "delete_graph_fact",
-            "delete_graph_*",
-            ["knowledge_graph_read", "knowledge_graph_write"],
+            "knowledge_graph_write",
+            "knowledge_graph_*",
+            ["knowledge_graph"],
         ),
         (
             {
@@ -4057,13 +4117,13 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
         ({"users": {"@alice:example.org": {"contacts": {}}}}, {}, "remove_contact", "contacts_write"),
         ({"agent_extra": {"contacts": {}}}, {}, "list_contacts", "contacts_read"),
         # Knowledge graph enabled on template, defaults, or per-user override.
-        ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph_read"),
-        ({}, {"knowledge_graph": True}, "graph_entity", "knowledge_graph_read"),
+        ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph"),
+        ({}, {"knowledge_graph": True}, "knowledge_graph_read", "knowledge_graph"),
         (
             {"users": {"@alice:example.org": {"knowledge_graph": True}}},
             {},
-            "merge_graph_entities",
             "knowledge_graph_write",
+            "knowledge_graph",
         ),
         # Tools enabled via template.users overrides.
         (
@@ -4130,8 +4190,9 @@ def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
         ("shared_directories", "list_shared_directories", "shared_directories_read", None),
         ("contacts", "request_contact", "contacts_write", None),
         ("contacts", "list_contacts", "contacts_read", None),
-        ("knowledge_graph", "search_graph", "knowledge_graph_read", None),
-        ("knowledge_graph", "delete_graph_fact", "knowledge_graph_write", None),
+        ("knowledge_graph", "search_graph", "knowledge_graph", None),
+        ("knowledge_graph", "knowledge_graph_read", "knowledge_graph", None),
+        ("knowledge_graph", "knowledge_graph_write", "knowledge_graph", None),
         ("agent_manager", "create_agent", "agent_manager_write", None),
         ("email_invite", "invite_by_email", "email_invite_write", "email_invite_read"),
         ("email_invite", "list_email_invites", "email_invite_read", None),

@@ -64,7 +64,8 @@ def test_thread_snooze_tool_registered_and_instantiates(tmp_path: Path) -> None:
     metadata = builtin_tool_registry().entries["thread_snooze"]
 
     assert metadata.requires_room_context
-    assert metadata.function_names == ("snooze_thread", "unsnooze_thread")
+    assert metadata.function_names == ("thread_snooze",)
+    assert metadata.action_scoped_grants == ("thread_snooze",)
     assert isinstance(
         get_tool_by_name("thread_snooze", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ThreadSnoozeTools,
@@ -81,7 +82,9 @@ async def test_snooze_thread_writes_the_tag_and_tells_the_runtime(tmp_path: Path
         patch(f"{_MODULE}.set_thread_tag", new=AsyncMock()) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().snooze_thread("2099-11-14T10:00:00+02:00", note="check CI"))
+        payload = json.loads(
+            await ThreadSnoozeTools().thread_snooze("snooze", "2099-11-14T10:00:00+02:00", note="check CI"),
+        )
 
     assert payload == {
         "action": "snooze",
@@ -135,7 +138,7 @@ async def test_snooze_thread_refuses_a_past_time_and_a_non_timestamp(
         patch(f"{_MODULE}.set_thread_tag", new=AsyncMock()) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().snooze_thread(until))  # type: ignore[arg-type]
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("snooze", until))  # type: ignore[arg-type]
 
     assert payload["status"] == "error"
     assert payload["message"] == message
@@ -153,7 +156,7 @@ async def test_snooze_thread_treats_a_naive_time_as_utc(tmp_path: Path) -> None:
         patch(f"{_MODULE}.set_thread_tag", new=AsyncMock()) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().snooze_thread(naive))
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("snooze", naive))
 
     assert payload["status"] == "ok"
     assert payload["until"] == naive + "+00:00"
@@ -170,7 +173,7 @@ async def test_snooze_thread_reports_a_tag_error(tmp_path: Path) -> None:
         patch(f"{_MODULE}.set_thread_tag", new=AsyncMock(side_effect=ThreadTagsError("state failed"))),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().snooze_thread(_future().isoformat()))
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("snooze", _future().isoformat()))
 
     assert payload["status"] == "error"
     assert payload["action"] == "snooze"
@@ -187,7 +190,7 @@ async def test_snooze_thread_works_without_an_orchestrator(tmp_path: Path) -> No
         patch(f"{_MODULE}.set_thread_tag", new=AsyncMock()) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().snooze_thread(_future().isoformat()))
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("snooze", _future().isoformat()))
 
     assert payload["status"] == "ok"
     mock_set.assert_awaited_once()
@@ -204,7 +207,7 @@ async def test_unsnooze_thread_removes_the_tag_and_tells_the_runtime(tmp_path: P
         patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().unsnooze_thread())
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("unsnooze"))
 
     assert payload == {
         "action": "unsnooze",
@@ -246,7 +249,7 @@ async def test_unsnooze_thread_keeps_a_snooze_set_again_meanwhile(tmp_path: Path
         patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock(return_value=resnoozed)),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().unsnooze_thread())
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("unsnooze"))
 
     assert payload["status"] == "ok"
     assert payload["snoozed"] is True
@@ -263,8 +266,30 @@ async def test_unsnooze_thread_on_a_thread_that_is_not_snoozed(tmp_path: Path) -
         patch(f"{_MODULE}.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await ThreadSnoozeTools().unsnooze_thread())
+        payload = json.loads(await ThreadSnoozeTools().thread_snooze("unsnooze"))
 
     assert payload["status"] == "error"
     assert payload["message"] == "Thread is not snoozed."
     mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thread_snooze_validates_action_and_parameters(tmp_path: Path) -> None:
+    """Invalid actions, missing until on snooze, and unexpected params on unsnooze fail before writing."""
+    context = _context(tmp_path)
+    tool = ThreadSnoozeTools()
+
+    with tool_runtime_context(context):
+        bad_action = json.loads(await tool.thread_snooze("bogus"))  # type: ignore[arg-type]
+        missing_until = json.loads(await tool.thread_snooze("snooze"))
+        unsnooze_until = json.loads(await tool.thread_snooze("unsnooze", until=_future().isoformat()))
+        unsnooze_note = json.loads(await tool.thread_snooze("unsnooze", note="later"))
+
+    assert bad_action["status"] == "error"
+    assert "Unsupported thread_snooze action" in bad_action["message"]
+    assert missing_until["status"] == "error"
+    assert "until is required" in missing_until["message"]
+    assert unsnooze_until["status"] == "error"
+    assert "'until'" in unsnooze_until["message"]
+    assert unsnooze_note["status"] == "error"
+    assert "'note'" in unsnooze_note["message"]

@@ -179,7 +179,9 @@ authorization:
   config_command_enabled: false
 tool_approval:
   rules:
-  - match: resolve_thread
+  - match: thread_resolution
+    arguments:
+      action: resolve
     action: require_approval
   - match: manage_config
     action: require_approval
