@@ -16,14 +16,13 @@ from mindroom.history.types import HistoryScope
 from mindroom.tool_system.authoring import (
     CurrentCall,
     Toolkit,
-    authored_offer_background_after,
-    authored_offer_output_path,
     current_call,
     passthrough_tool,
     tool,
+    tool_mark,
     toolkit_functions,
 )
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, get_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -723,12 +722,15 @@ def test_meta_schema_opt_out_flags_inherit_and_override_in_order() -> None:
             return "ok"
 
     mixed = _MixedTools()
-    assert authored_offer_background_after(mixed.inherited) is None
-    assert authored_offer_output_path(mixed.inherited) is None
-    assert authored_offer_background_after(mixed.opted_in) is True
-    assert authored_offer_output_path(mixed.opted_in) is True
-    assert authored_offer_background_after(mixed.passthrough) is True
-    assert authored_offer_output_path(mixed.passthrough) is None
+    inherited_mark = tool_mark(mixed.inherited)
+    opted_in_mark = tool_mark(mixed.opted_in)
+    passthrough_mark = tool_mark(mixed.passthrough)
+    assert inherited_mark is not None
+    assert (inherited_mark.offer_background_after, inherited_mark.offer_output_path) == (None, None)
+    assert opted_in_mark is not None
+    assert (opted_in_mark.offer_background_after, opted_in_mark.offer_output_path) == (True, True)
+    assert passthrough_mark is not None
+    assert (passthrough_mark.offer_background_after, passthrough_mark.offer_output_path) == (True, None)
 
     by_name = _by_name(adapt_toolkit(mixed).functions)
     assert (by_name["inherited"].offer_background_after, by_name["inherited"].offer_output_path) == (False, False)
@@ -765,7 +767,6 @@ def test_toolkit_directly_owns_finishing_and_construction_without_leaking_across
     assert first.function_finishing is None
     assert first.tool_construction is None
     assert toolkit_worker_stand_ins(first) is None
-    assert get_toolkit_construction(first) is None
     assert toolkit_function_names(first) == ("ping",)
 
     def stand_in(_name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
@@ -773,16 +774,14 @@ def test_toolkit_directly_owns_finishing_and_construction_without_leaking_across
 
     construction = ToolConstruction("custom_init", None)
     configure_toolkit_functions(first, offered=(), to_worker=stand_in)
-    bind_toolkit_construction(first, construction)
+    first.tool_construction = construction
 
     assert first.function_finishing is not None
     assert first.tool_construction == construction
     assert toolkit_function_names(first) == ()
     assert toolkit_worker_stand_ins(first) is stand_in
-    assert get_toolkit_construction(first) == construction
 
     assert second.function_finishing is None
     assert second.tool_construction is None
     assert toolkit_function_names(second) == ("ping",)
     assert toolkit_worker_stand_ins(second) is None
-    assert get_toolkit_construction(second) is None

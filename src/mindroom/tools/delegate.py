@@ -7,13 +7,7 @@ has no generic factory.
 """
 
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -24,8 +18,6 @@ register_builtin_tool_metadata(
         description="Start allowed subagents, continue their conversations, and return their results",
         docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#delegate",
         category=ToolCategory.PRODUCTIVITY,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         icon="Users",
         icon_color="text-blue-500",
         config_fields=[],

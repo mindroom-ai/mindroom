@@ -35,7 +35,6 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.event_journal import EventJournalStore
     from mindroom.event_journal.opening import event_journal_sqlite_path
     from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
-    from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.toolkits import toolkit_function
     from mindroom.tool_system.metadata import get_tool_by_name
     from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
@@ -80,7 +79,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             toolkit=toolkit,
             authority=toolkit_authority(authority_snapshot(config, "lead"), toolkit),
         )
-        construction = get_toolkit_construction(toolkit)
+        construction = toolkit.tool_construction
         identity = {
             "factory": tools.origin("stable_plugin"),
             "construction": list(construction.factory_origin),

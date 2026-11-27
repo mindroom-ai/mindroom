@@ -19,7 +19,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import baidusearch as baidusearch_module
 from mindroom.custom_tools import ddgs_search as ddgs_search_module
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.authoring import Toolkit, authored_description
+from mindroom.tool_system.authoring import Toolkit, tool_mark
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters
@@ -96,7 +96,10 @@ def test_duckduckgo_and_googlesearch_share_one_ddgs_implementation() -> None:
 def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
     """Native search tool methods preserve their descriptions and non-null optional schemas."""
     baidu_fn = baidusearch_tools()().functions["baidu_search"]
-    assert (authored_description(baidu_fn) or tool_description(baidu_fn)) == "Execute Baidu search and return results"
+    baidu_mark = tool_mark(baidu_fn)
+    assert ((baidu_mark.description if baidu_mark is not None else None) or tool_description(baidu_fn)) == (
+        "Execute Baidu search and return results"
+    )
     baidu_schema = tool_parameters(baidu_fn)
     assert baidu_schema["required"] == ["query"]
     assert set(baidu_schema["properties"]) == {"query", "max_results", "language"}

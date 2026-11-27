@@ -60,7 +60,6 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.call_record import record_call
-from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -144,7 +143,7 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
 
 def _is_background_job_excluded(tool: JobTool, context: ToolRuntimeContext) -> bool:
     """Share exact tool exclusions between definition projection and execution."""
-    construction = get_toolkit_construction(tool.toolkit)
+    construction = tool.toolkit.tool_construction
     return construction is not None and toolkit_is_background_excluded(
         construction.name,
         context.config,

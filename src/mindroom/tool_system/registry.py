@@ -36,6 +36,11 @@ class ToolMetadataValidationError(ValueError):
     """Raised when runtime tool metadata derived from authored config is invalid."""
 
 
+def factory_origin(factory: object) -> tuple[str, str] | None:
+    """Return one tool factory's stable ``(module, qualname)`` provenance, or None for non-function factories."""
+    return (factory.__module__, factory.__qualname__) if inspect.isfunction(factory) else None
+
+
 def record_plugin_root(root: Path) -> None:
     """Remember that a config names a plugin at ``root``: a module there registers tools only inside a plugin load."""
     _PLUGIN_ROOTS.add(root)
@@ -146,7 +151,7 @@ class ToolRegistry:
         """Return one tool factory's stable provenance without importing or constructing its tool."""
         metadata = self.entries.get(name)
         factory = metadata.factory if metadata is not None else None
-        return [factory.__module__, factory.__qualname__] if inspect.isfunction(factory) else None
+        return list(origin) if (origin := factory_origin(factory)) is not None else None
 
     def mcp_server_id(self, name: str) -> str | None:
         """Return the MCP server one tool name stands for, or None when it names no configured MCP server."""

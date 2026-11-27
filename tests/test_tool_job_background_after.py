@@ -31,7 +31,7 @@ from mindroom.tool_jobs.results import encode_tool_result
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tools.shell import shell_tools
@@ -458,7 +458,7 @@ class _ConnectedTools(Toolkit):
 def _excluded_tool() -> JobTool:
     """A function of a toolkit built as shell, which the test settings exclude."""
     toolkit = Toolkit(name="shell", tools=[_ordinary])
-    bind_toolkit_construction(toolkit, ToolConstruction("shell", None))
+    toolkit.tool_construction = ToolConstruction("shell", None)
     return toolkit_job_tools(toolkit, authored_name="shell")["_ordinary"]
 
 

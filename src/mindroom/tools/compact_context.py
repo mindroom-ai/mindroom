@@ -6,13 +6,7 @@ requires agent context and is built in ``build_agent_toolkit()``, so it
 has no generic factory.
 """
 
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -23,8 +17,6 @@ register_builtin_tool_metadata(
         description="Compact conversation context mid-turn in this conversation scope",
         docs_url="https://docs.mindroom.chat/configuration/history/#manual-compaction",
         category=ToolCategory.PRODUCTIVITY,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         icon="Minimize2",
         icon_color="text-amber-500",
         config_fields=[],

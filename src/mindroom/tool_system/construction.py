@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-    from mindroom.tool_system.authoring import Toolkit
+    from collections.abc import Mapping
 
 
 def tool_config_signature(overrides: Mapping[str, object] | None) -> str:
@@ -32,26 +29,3 @@ class ToolConstruction:
     name: str
     factory_origin: tuple[str, str] | None
     config_signature: str = tool_config_signature(None)
-
-    @classmethod
-    def from_factory(
-        cls,
-        name: str,
-        factory: Callable[[], type[Toolkit]],
-        *,
-        tool_config_overrides: Mapping[str, object] | None = None,
-    ) -> ToolConstruction:
-        """Snapshot the selected callable before any factory or constructor can run."""
-        origin = (factory.__module__, factory.__qualname__) if inspect.isfunction(factory) else None
-        return cls(name, origin, tool_config_signature(tool_config_overrides))
-
-
-def bind_toolkit_construction[T: Toolkit](toolkit: T, construction: ToolConstruction) -> T:
-    """Retain selected construction evidence on the toolkit instance."""
-    toolkit.tool_construction = construction
-    return toolkit
-
-
-def get_toolkit_construction(toolkit: Toolkit) -> ToolConstruction | None:
-    """Read evidence captured by construction without looking at the current registry."""
-    return toolkit.tool_construction
