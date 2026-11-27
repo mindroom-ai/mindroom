@@ -28,7 +28,7 @@ from mindroom.tool_system.output_files import (
     saved_output_envelope,
 )
 from mindroom.tool_system.runtime_context import current_execution_identity
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -65,10 +65,12 @@ async def _finish_staged_result(staging: StagedConsumptions, result: object) -> 
         await staging.commit()
         return result
     finalized = finalize_tool_output_file(output_request, result)
+    saved = finalized.saved_output if isinstance(finalized, ToolOutcome) else saved_output_envelope(finalized)
     output_errored = (
-        saved_output_envelope(finalized) is None
+        saved is None
         if output_request.path is not None
-        else finalized is not result and is_tool_output_error(finalized)
+        else finalized is not result
+        and (is_tool_output_error(finalized) or (isinstance(finalized, ToolOutcome) and finalized.saved_output is None))
     )
     if output_errored:
         await staging.release()
@@ -114,14 +116,11 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
         await staging.stage(runtime, job, claim)
         (prepared,) = staging.prepare_values()
         failure = job_failure(job, prepared.value, prepared.payload)
-        if failure is None:
-            return await _finish_staged_result(staging, prepared.value)
-        outcome = job_failure_outcome(failure, prepared.value, prepared.payload)
-        await staging.commit()
+        result = prepared.value if failure is None else job_failure_outcome(failure, prepared.value, prepared.payload)
+        return await _finish_staged_result(staging, result)
     except BaseException:
         await staging.release()
         raise
-    return ToolOutputFileHandled(outcome) if active_tool_output_file_request() is not None else outcome
 
 
 async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - Tool value.
