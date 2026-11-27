@@ -316,6 +316,8 @@ def test_tool_entries_that_cannot_be_deferred_reject_lazy_flags_however_they_are
         ToolConfigEntry(name="openclaw_compat", defer=True)
     with pytest.raises(ValidationError, match="'delegate' is a control-plane tool and cannot be deferred"):
         AgentConfig(display_name="Code", tools=[{"delegate": {"initial": False}}])
+    # skill_manage is allowed to opt into lazy loading.
+    assert ToolConfigEntry.model_validate({"skill_manage": {"defer": True}}).defer is True
 
 
 def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: Path) -> None:

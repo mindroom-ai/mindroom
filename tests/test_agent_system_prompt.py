@@ -222,6 +222,7 @@ def test_matrix_automation_facts_absent_outside_matrix_and_for_personas(
         ({"tools": ["filesystem", "skill_manage"]}, False, "standard", False),
         ({"tools": ["filesystem"], "skill_learning": {"enabled": True}}, False, "standard", False),
         ({"tools": [{"shell": {"defer": True}}, "skill_manage"]}, False, "minimal", False),
+        ({"tools": [{"shell": {"defer": True}}, {"skill_manage": {"defer": True}}]}, False, "minimal", False),
     ],
 )
 def test_workspace_skill_authoring_gating(
@@ -244,6 +245,7 @@ def test_workspace_skill_authoring_gating(
         (["filesystem"], set(), ("write_file", "edit_file"), "standard", False),
         ([{"shell": {"defer": True}}], set(), ("run_shell_command",), "minimal", False),
         (["filesystem", "skill_manage"], set(), ("skill_manage",), "standard", True),
+        ([{"shell": {"defer": True}}, {"skill_manage": {"defer": True}}], set(), ("skill_manage",), "minimal", True),
         ([{"filesystem": {"defer": True}}], {"tool_search", "call_tool"}, (), "standard", False),
     ],
 )

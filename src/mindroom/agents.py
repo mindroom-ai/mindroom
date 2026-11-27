@@ -93,7 +93,7 @@ from mindroom.workers.named import named_workers_refusal
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -1155,6 +1155,34 @@ def _without_unneeded_scheduled_call_helpers(
     )
 
 
+def _deferred_entry_offers_function(
+    entry: EffectiveToolConfig,
+    function_name: str,
+    *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+    config: Config,
+    narrowed_tools: tuple[str, ...] | None,
+    supports_native_tool_approval: bool,
+) -> bool:
+    """Return whether a CLI-deferred toolkit entry still offers ``function_name`` after filters and approval."""
+    if agent_tools.tools.get(entry.name) is None:
+        return False
+    try:
+        functions, _ = agent_tools.functions_for(entry, runtime_paths, worker_target)
+    except (OSError, ValueError, TypeError):
+        return False
+    return (
+        (functions is None or function_name in functions)
+        and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, function_name))
+        and (
+            supports_native_tool_approval
+            or not _approval_may_gate(config, agent_tools.tools, function_name, entry.name)
+        )
+    )
+
+
 def _prompt_tool_capabilities(
     offered: Sequence[_ToolkitEntry],
     deferred_configs: Mapping[str, EffectiveToolConfig],
@@ -1171,6 +1199,18 @@ def _prompt_tool_capabilities(
     discoverable = _discoverable_functions(offered, portable_deferred_tools=portable_deferred_tools)
     has_skill_manage = any(
         function.registered_toolkit == "skill_manage" and function.name == "skill_manage" for function in discoverable
+    ) or (
+        (skill_manage_entry := deferred_configs.get("skill_manage")) is not None
+        and _deferred_entry_offers_function(
+            skill_manage_entry,
+            "skill_manage",
+            agent_tools=agent_tools,
+            runtime_paths=runtime_paths,
+            worker_target=worker_target,
+            config=config,
+            narrowed_tools=narrowed_tools,
+            supports_native_tool_approval=supports_native_tool_approval,
+        )
     )
     has_workspace_skill_writer = any(
         _is_workspace_writer(function, agent_tools.tools) for function in discoverable
@@ -1389,21 +1429,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
 
     dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
+    # Auto-injected skill_manage (from skill_learning.enabled, not authored) piggybacks on active tool search.
+    auto_skill_manage_entry = (
+        resolved_tool_configs.pop("skill_manage", None) if "skill_manage" not in agent_tools.facts.tool_names else None
+    )
 
-    def tool_entries() -> Iterator[tuple[str, EffectiveToolConfig]]:
-        yield from resolved_tool_configs.items()
-        # The search toolkit comes after every deferred toolkit it searches, and only portable tool search rewrites
-        # call_tool, so an authored dynamic_tools entry is ignored everywhere else.
-        if (
-            dynamic_tools_entry is not None
-            and portable_deferred_tools
-            and any(entry.deferral is not None for entry in entries)
-        ):
-            yield dynamic_tools_entry.name, dynamic_tools_entry
-
-    for tool_name, tool_entry in tool_entries():
+    def try_build_entry(tool_entry: EffectiveToolConfig) -> _ToolkitEntry | None:
         try:
-            entry = build_entry(tool_entry)
+            return build_entry(tool_entry)
         except Exception as exc:
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
@@ -1412,18 +1445,44 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 ) from exc
             logger.warning(
                 "Could not load tool for agent construction",
-                tool=tool_name,
+                tool=tool_entry.name,
                 agent=agent_name,
                 error=str(exc),
                 exc_info=not isinstance(exc, ValueError | ImportError),
             )
-            continue
-        if entry is not None:
-            entries.append(entry)
-            target_names = (
-                worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
-            )
-            target_names.append(tool_name)
+            return None
+
+    def record_entry(tool_name: str, entry: _ToolkitEntry) -> None:
+        entries.append(entry)
+        target_names = (
+            worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
+        )
+        target_names.append(tool_name)
+
+    for tool_name, tool_entry in resolved_tool_configs.items():
+        if (entry := try_build_entry(tool_entry)) is not None:
+            record_entry(tool_name, entry)
+
+    has_other_deferred = any(entry.deferral is not None for entry in entries)
+    # Only portable tool search rewrites call_tool, so dynamic_tools is ignored everywhere else and when nothing defers.
+    built_dynamic_tools = (
+        try_build_entry(dynamic_tools_entry)
+        if dynamic_tools_entry is not None and portable_deferred_tools and has_other_deferred
+        else None
+    )
+    if auto_skill_manage_entry is not None:
+        can_use_portable_search = built_dynamic_tools is not None and {"tool_search", "call_tool"}.issubset(
+            {function.name for function in built_dynamic_tools.adapted.functions if function.gate is None},
+        )
+        effective_skill_manage = (
+            replace(auto_skill_manage_entry, defer=True)
+            if wire_deferred_tools and has_other_deferred and (not portable_deferred_tools or can_use_portable_search)
+            else auto_skill_manage_entry
+        )
+        if (entry := try_build_entry(effective_skill_manage)) is not None:
+            record_entry(effective_skill_manage.name, entry)
+    if built_dynamic_tools is not None and dynamic_tools_entry is not None:
+        record_entry(dynamic_tools_entry.name, built_dynamic_tools)
     if not disable_runtime_capabilities:
         for tool_name in deferred_configs:
             if config.is_tool_preset(tool_name):
