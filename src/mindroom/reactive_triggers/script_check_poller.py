@@ -329,7 +329,7 @@ class ScriptCheckPoller:
         now: float,
     ) -> None:
         errors = cp.consecutive_errors + 1
-        backoff = min(_MAX_BACKOFF_SECONDS, interval * (2 ** min(errors, 5)))
+        backoff = min(max(_MAX_BACKOFF_SECONDS, interval), interval * (2 ** min(errors, 5)))
         await self._save_non_ok(
             rule,
             cp,

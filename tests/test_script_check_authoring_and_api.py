@@ -118,6 +118,7 @@ def _make_ctx(
         env["MINDROOM_ALLOW_UNSAFE_LOCAL_SCRIPTS"] = "1"
     if worker_placement_mode:
         env["MINDROOM_WORKER_BACKEND"] = "docker"
+        env["MINDROOM_SCRIPT_GATEWAY_URL"] = "http://script-gateway.test/api/script-gateway"
     if extra_env:
         env.update(extra_env)
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env=env)
@@ -293,6 +294,22 @@ async def test_watch_script_create_source_path_team_target_and_authoring_guards(
         err = await _call(tool, bad_ctx, action="watch_script", prompt="Alert", source=_SRC)
         assert err["status"] == "error"
         assert needle in err["message"]
+
+    # Source that parses into an AST but cannot compile (e.g. await inside sync def check()) fails immediately.
+    ctx_bad_compile, _ = _make_ctx(tmp_path / "bad_compile")
+    bad_store = ReactiveTriggerStore(ctx_bad_compile.runtime_paths)
+    err_compile = await _call(
+        tool,
+        ctx_bad_compile,
+        action="watch_script",
+        trigger_id="sc_bad_compile",
+        prompt="Alert",
+        source='def check():\n    return await tool("feed", "fetch_items")\n',
+    )
+    assert err_compile["status"] == "error"
+    assert "Invalid Python syntax" in err_compile["message"]
+    assert bad_store.list_triggers(include_disabled=True) == []
+    assert bad_store.get_script_check_checkpoint("sc_bad_compile") is None
 
 
 @pytest.mark.asyncio
@@ -911,6 +928,11 @@ async def test_unsupported_worker_backend_rejected_at_create_and_reenable(tmp_pa
             {"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true"},
             "gateway-only listener",
         ),
+        (
+            "docker_no_gateway",
+            {"MINDROOM_WORKER_BACKEND": "docker"},
+            "MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL",
+        ),
     ]
     for label, env_overrides, expected_error in rejected_cases:
         ctx, _ = _make_ctx(tmp_path / label, allow_local=False, extra_env=env_overrides)
@@ -973,9 +995,22 @@ async def test_unsupported_worker_backend_rejected_at_create_and_reenable(tmp_pa
         assert cp_after is not None, label
         assert cp_after.revision == 2, label
 
-    # Positive controls: dedicated Docker (even with worker_backend=None) and isolated Kubernetes succeed.
+    # Positive controls: dedicated Docker with gateway/public URL and isolated Kubernetes succeed.
     allowed_cases = [
-        ("docker_static_ok", {"MINDROOM_WORKER_BACKEND": "docker"}),
+        (
+            "docker_gateway_url_ok",
+            {
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_SCRIPT_GATEWAY_URL": "http://script-gateway.test/api/script-gateway",
+            },
+        ),
+        (
+            "docker_public_url_ok",
+            {
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_PUBLIC_URL": "https://mindroom.example.org",
+            },
+        ),
         (
             "k8s_isolated_ok",
             {

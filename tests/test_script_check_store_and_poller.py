@@ -211,6 +211,7 @@ def test_validate_source_state_and_normalize_event() -> None:
         b"async def check():\n    return None\n",
         b"def check(a):\n    return None\n",
         b"def check(:\n",
+        b"def check():\n    return await tool('feed', 'fetch_items')\n",
         b"\xff",
         b"#" * (65 * 1024),
     ):
@@ -509,6 +510,37 @@ async def test_script_check_poller_outcomes_concurrency_and_live_recheck(tmp_pat
     assert await poller.poll_due_once(now=5000.0) == 0
     cp_unauth = _req_cp(store, "sc_ok")
     assert (cp_unauth.consecutive_errors, cp_unauth.last_error_code) == (1, "owner_not_authorized")
+
+    # Daily (>1h) check error backoff must never shorten the configured interval down to 3600s.
+    daily_paths = _paths(tmp_path / "daily", allow_local=True)
+    daily_store = ReactiveTriggerStore(daily_paths)
+    daily_cfg = _cfg(daily_paths, allow_local=True)
+    daily_store.create_trigger(
+        _sc_rule("sc_daily", poll_s=86400),
+        initial_script_check_checkpoint=_sc_cp(next_poll_at=100.0),
+    )
+
+    async def daily_err_runner(
+        _rule: ReactiveTriggerRecord,
+        _cp: ScriptCheckCheckpoint,
+        _cfg: Config,
+        _now: float,
+    ) -> ScriptCheckTickOutcome:
+        return ScriptCheckTickOutcome(status="error", run_id="r_daily", error_code="timeout")
+
+    daily_poller = ScriptCheckPoller(
+        store=daily_store,
+        config_provider=lambda: daily_cfg,
+        runtime_paths=daily_paths,
+        tick_runner=daily_err_runner,
+    )
+    assert await daily_poller.poll_due_once(now=2000.0) == 0
+    cp_daily = _req_cp(daily_store, "sc_daily")
+    assert (cp_daily.consecutive_errors, cp_daily.last_error_code, cp_daily.next_poll_at) == (
+        1,
+        "timeout",
+        2000.0 + 86400.0,
+    )
 
 
 @pytest.mark.asyncio

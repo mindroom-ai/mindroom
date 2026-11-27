@@ -21,6 +21,7 @@ from mindroom.config.tool_aliases import TOOL_ALIASES
 from mindroom.constants import subprocess_path_with_prepends
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
+from mindroom.origins import configured_public_url
 from mindroom.path_confinement import (
     open_directory_within_root,
     read_regular_file_within_root,
@@ -120,6 +121,9 @@ _KUBERNETES_GATEWAY_SCRIPT_ERROR = (
     "Kubernetes background scripts require a gateway-only listener; "
     "use Docker or explicit unsafe-local mode until that boundary is configured."
 )
+_MISSING_SCRIPT_GATEWAY_URL_ERROR = (
+    "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
+)
 
 
 class ScriptRunManagerError(ValueError):
@@ -170,6 +174,7 @@ def script_execution_uses_worker(
 def workflow_placement(config: Config, runtime_paths: RuntimePaths) -> str:
     """Return where a workflow attempt runs, `worker` or `local`, or the sentence that refuses it.
 
+    Returns `"worker"`, `"local"`, or a refusal message string explaining why placement is unavailable.
     A configured dedicated backend or sandbox proxy always wins, so a backend that is down fails the launch
     instead of moving the script to the host.
     """
@@ -401,8 +406,7 @@ class ScriptRunManager:
         if self._launches_on_worker(context, workflow=managed_run):
             _require_supported_private_script_worker_scope(context)
             if not self.gateway_url:
-                msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
-                raise ScriptRunManagerError(msg)
+                raise ScriptRunManagerError(_MISSING_SCRIPT_GATEWAY_URL_ERROR)
             _require_script_launch_backend(self.worker_backend, context.runtime_paths)
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
@@ -1393,6 +1397,10 @@ def _unsupported_script_worker_backend_for_kind(
         return _STATIC_RUNNER_SCRIPT_ERROR
     if backend_kind is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(runtime_paths):
         return _KUBERNETES_GATEWAY_SCRIPT_ERROR
+    if not (
+        (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip() or configured_public_url(runtime_paths)
+    ):
+        return _MISSING_SCRIPT_GATEWAY_URL_ERROR
     return None
 
 

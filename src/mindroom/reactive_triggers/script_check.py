@@ -53,6 +53,7 @@ def validate_script_check_source(source_bytes: bytes) -> tuple[str, str]:
         _reject("script_check source must not be empty")
     try:
         tree = ast.parse(source_text, filename="<script_check>")
+        compile(tree, "<script_check>", "exec")
     except (SyntaxError, ValueError) as exc:
         msg = f"Invalid Python syntax in script_check source: {exc}"
         raise ValueError(msg) from exc
