@@ -570,7 +570,7 @@ Matrix sync callback
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |
 | `terminal/client.py` | The primary's client for an agent's terminals, reached with the request its worker-routed shell toolkit would send |
-| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_run` types only at an empty prompt |
+| `terminal/lines.py` | Each terminal's input line as the primary saw it typed and prompted, so `terminal_write(action="run")` types only at an empty prompt |
 | `terminal/resolution.py` | The terminals of an agent's workspace as its turn for one requester resolves them |
 | `custom_tools/terminal.py` | The agent's terminal toolkit: open, run, type keys, read, and list, offering typing only while its shell commands never ask for approval |
 | `api/agent_terminals.py` | Chat clients' routes to the terminals of the agents they may use in a room, and the rechecked terminal stream |
