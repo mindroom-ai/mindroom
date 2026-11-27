@@ -27,6 +27,7 @@ from mindroom.script_runs.launch_contract import RUN_ID_ENV
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 _CALL_TIMEOUT_SECONDS = 30
+_HTTP_TIMEOUT_SECONDS = 30.0
 # How long a command in a named worker may run when `workers run` names no limit.
 _WORKER_COMMAND_TIMEOUT_SECONDS = 3600
 # `workers run` exits with its command's exit code, so its own failures use codes commands rarely do, as `timeout` and
@@ -229,15 +230,36 @@ def _exit_code(result: dict[str, object]) -> int:
     return 0
 
 
-def _wait(client: AgentCliClient, call_id: str, result: dict[str, object], timeout: int) -> dict[str, object]:
-    """Poll a pending receipt until it settles or ``timeout`` seconds pass."""
-    deadline = time.monotonic() + timeout
-    while _exit_code(result) == 3 and time.monotonic() < deadline:
-        time.sleep(min(0.2, max(0, deadline - time.monotonic())))
-        if time.monotonic() >= deadline:
+def _progress_revision(result: dict[str, object] | None) -> int | None:
+    revision = None if result is None else result.get("progress_revision")
+    return revision if type(revision) is int and revision >= 0 else None
+
+
+def _wait(client: AgentCliClient, call_id: str, result: dict[str, object] | None, timeout: int) -> dict[str, object]:
+    """Long-poll a pending receipt until it settles or ``timeout`` seconds pass."""
+    started_at = time.monotonic()
+    deadline = started_at + timeout
+    while result is None or _exit_code(result) == 3:
+        if (remaining := deadline - started_at) <= 0:
             break
-        result = client.receipt(call_id)
-    return result
+        after_progress = _progress_revision(result)
+        result = client.receipt(
+            call_id,
+            timeout=min(remaining + 5.0, _HTTP_TIMEOUT_SECONDS),
+            wait=remaining,
+            after_progress=after_progress,
+        )
+        if _exit_code(result) != 3 or (remaining := deadline - (now := time.monotonic())) <= 0:
+            break
+        next_progress = _progress_revision(result)
+        if now - started_at < 0.05 and (
+            after_progress is None or next_progress is None or next_progress == after_progress
+        ):
+            time.sleep(min(0.2, remaining))
+            started_at = time.monotonic()
+        else:
+            started_at = now
+    return client.receipt(call_id) if result is None else result
 
 
 class _WorkerSignal(BaseException):
@@ -750,9 +772,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "calls":
             call_id = str(args.call_id)
             client = AgentCliClient()
-            result = client.receipt(call_id)
-            if args.action == "wait":
-                result = _wait(client, call_id, result, args.timeout)
+            result = _wait(client, call_id, None, args.timeout) if args.action == "wait" else client.receipt(call_id)
         else:
             payload = {
                 key: value for key, value in vars(args).items() if key not in _LOCAL_ARGUMENTS and value is not None
