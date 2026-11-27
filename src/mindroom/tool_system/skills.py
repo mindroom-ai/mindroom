@@ -194,19 +194,12 @@ class SkillsToolkit(Toolkit):
         name: str,
         path: str | None = None,
     ) -> str:
-        """Load a skill's instructions, reference document, or script without running it.
-
-        - `instructions`: load a skill's `SKILL.md` instructions and list its available `references/` and `scripts/` files (`path` must be omitted).
-        - `reference`: load one listed reference document (`path` required).
-        - `script`: read one listed script without running it; run scripts with shell if available (`path` required).
+        """Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).
 
         Args:
-            action: What to load (`instructions`, `reference`, or `script`).
-            name: The skill name.
-            path: Listed filename under `references/` or `scripts/` (required for `reference` and `script`; omit for `instructions`).
-
-        Returns:
-            A JSON string with the requested skill content or an error listing valid choices.
+            action: What to load.
+            name: Skill name.
+            path: Listed filename under references/ or scripts/ (required for reference/script; omit for instructions).
 
         """
         if action == "instructions":

@@ -3222,9 +3222,7 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     assert star_op != del_op
 
 
-def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_openclaw_compat(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_openclaw_compat() -> None:
     """Action-scoped grants and scheduled_any_arguments stay per-action when attachments is implied or preset."""
     from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
 
@@ -3301,40 +3299,6 @@ def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_open
         is True
     )
 
-    # Implier fallback in _action_scoped_tool also resolves non-_ACTION_SCOPED_TOOLS action-scoped owners.
-    monkeypatch.setitem(Config.IMPLIED_TOOLS, "matrix_message", ("attachments", "matrix_room", "gmail"))
-    star_op = grant_operation(
-        config,
-        "gmail_manage",
-        {"action": "star"},
-        tools=registry,
-        toolkit_name="matrix_message",
-    )
-    delete_op = grant_operation(
-        config,
-        "gmail_manage",
-        {"action": "delete_custom_label"},
-        tools=registry,
-        toolkit_name="matrix_message",
-    )
-    assert star_op is not None
-    assert delete_op is not None
-    assert star_op.mcp_server_id == "gmail"
-    assert star_op.key != delete_op.key
-    assert (
-        scheduled_call_offers_any_arguments(
-            config,
-            "gmail_manage",
-            {"action": "star"},
-            requester_id="@alice:example.org",
-            approver_id="@alice:example.org",
-            authored_confirmation=False,
-            tools=registry,
-            toolkit_name="matrix_message",
-        )
-        is False
-    )
-
 
 def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names(tmp_path: Path) -> None:
     """A wildcard approval script rule fails config load until explicit replacement rules are authored."""
@@ -3407,6 +3371,18 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
         runtime_paths,
     )
     assert [rule.match for rule in loaded_both.tool_approval.rules] == ["attachment", "skill", "*"]
+
+    # Already-released consolidations (e.g. memory) keep loading under a matching wildcard script rule.
+    loaded_memory = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            "agents": {"a": {"display_name": "A", "tools": ["memory"], "include_default_tools": False}},
+            "tool_approval": {"rules": [{"match": "*memor*", "script": "check.py"}]},
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in loaded_memory.tool_approval.rules] == ["*memor*"]
 
 
 @pytest.mark.parametrize(

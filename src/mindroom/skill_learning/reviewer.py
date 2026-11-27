@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -180,7 +182,6 @@ def _review_tools(
         if "tool_search" in answered:
 
             async def review_tool_search(query: str = "", max_results: int = 5, **_extra: object) -> str:
-                del query, max_results
                 matches = [
                     {
                         "name": definition.name,
@@ -188,7 +189,7 @@ def _review_tools(
                         "parameters": dict(definition.parameters),
                         "toolkit": definition.name,
                     }
-                    for definition in deferred_runnable
+                    for definition in _review_search_matches(deferred_runnable, query, max_results)
                 ]
                 return json.dumps(
                     {
@@ -233,6 +234,33 @@ def _review_tools(
         for name, definition in answered.items()
     }
     return PreparedTools(functions=functions), runnable, frozenset(d.name for d in deferred_runnable)
+
+
+_REVIEW_SEARCH_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _review_search_tokens(text: str) -> set[str]:
+    return set(_REVIEW_SEARCH_WORD_RE.findall(text.lower()))
+
+
+def _review_search_matches(
+    deferred_runnable: Sequence[ToolSpec],
+    query: str,
+    max_results: int,
+) -> list[ToolSpec]:
+    query_tokens = _review_search_tokens(query)
+    if not query_tokens:
+        return list(deferred_runnable)[: max(1, max_results)]
+    matched: list[ToolSpec] = []
+    for definition in deferred_runnable:
+        searchable = _review_search_tokens(definition.name) | _review_search_tokens(definition.description or "")
+        properties = definition.parameters.get("properties")
+        if isinstance(properties, Mapping):
+            for param_name in properties:
+                searchable |= _review_search_tokens(str(param_name))
+        if query_tokens & searchable:
+            matched.append(definition)
+    return matched[: max(1, max_results)]
 
 
 def _listing(names: Sequence[str]) -> str:

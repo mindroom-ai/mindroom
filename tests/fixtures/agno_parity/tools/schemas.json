@@ -934,7 +934,7 @@
     "functions": [
       {
         "name": "attachment",
-        "description": "List, inspect, save, view, register, or inline-embed conversation attachments.\n- `list`: list attachments in the current context (optional `attachment_id` to filter to one).\n- `get`: inspect metadata for `attachment_id`, save bytes to `mindroom_output_path`, or pass `view=True` to\n  send image, audio, video, or document content (up to 20 MiB) to the model (`view` and\n  `mindroom_output_path` cannot be combined).\n- `register`: register a local file at `path` into the current context and return its `attachment_id`.\n- `inline_image`: upload an image by `attachment_id` or `path` (pass exactly one; optional `alt`) and return\n  embeddable `markdown` for a reply or `matrix_message`. When refused, send it with\n  `matrix_message(attachments=[...])` instead. Never link an image to a placeholder or made-up address.",
+        "description": "Manage conversation attachments.\n- `list`: list context attachments (optional `attachment_id` filter).\n- `get`: inspect `attachment_id` metadata, save raw bytes to `mindroom_output_path`, or pass `view=True` to load image/audio/video/document (<=20 MiB) into model context.\n- `register`: register a local file at `path` as a context `attachment_id`.\n- `inline_image`: upload an image by `attachment_id` or `path` (not both; optional `alt`) and return `markdown` for a reply or `matrix_message` (on refusal, use `matrix_message(attachments=[...])`; never use placeholder URLs).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -946,7 +946,7 @@
                 "register",
                 "inline_image"
               ],
-              "description": "Operation to perform (`list`, `get`, `register`, or `inline_image`)."
+              "description": "Operation to perform."
             },
             "attachment_id": {
               "anyOf": [
@@ -957,7 +957,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Context-scoped attachment ID (`list` filter, `get`, or `inline_image`)."
+              "description": "Context attachment ID (list filter, get, or inline_image)."
             },
             "path": {
               "anyOf": [
@@ -968,11 +968,11 @@
                   "type": "null"
                 }
               ],
-              "description": "Workspace or accessible local file path (`register` or `inline_image`)."
+              "description": "Local file path (register or inline_image)."
             },
             "view": {
               "type": "boolean",
-              "description": "Send image, audio, video, or document content (up to 20 MiB) to the model (`get` only; incompatible with `mindroom_output_path`)."
+              "description": "Load media into model context (get only; incompatible with mindroom_output_path)."
             },
             "alt": {
               "anyOf": [
@@ -983,7 +983,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional alt text for the returned markdown image (`inline_image` only)."
+              "description": "Markdown alt text (inline_image)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -995,7 +995,7 @@
                 }
               ],
               "default": null,
-              "description": "Save attachment bytes to a workspace-relative file instead of returning metadata (only for action=\"get\"; cannot be combined with view=True)."
+              "description": "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
             }
           },
           "required": [

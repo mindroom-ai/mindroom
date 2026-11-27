@@ -1429,10 +1429,12 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
 
     dynamic_tools_entry = resolved_tool_configs.pop("dynamic_tools", None)
-    # Auto-injected skill_manage (from skill_learning.enabled, not authored) piggybacks on active tool search.
-    auto_skill_manage_entry = (
-        resolved_tool_configs.pop("skill_manage", None) if "skill_manage" not in agent_tools.facts.tool_names else None
+    # Auto-injected skill_manage (from skill_learning.enabled, not authored) is built eagerly first and deferred only
+    # after collision resolution if another deferred toolkit still survives with offered functions.
+    auto_injected_skill_manage = (
+        "skill_manage" in resolved_tool_configs and "skill_manage" not in agent_tools.facts.tool_names
     )
+    auto_skill_manage_toolkit: AnyToolkit | None = None
 
     def try_build_entry(tool_entry: EffectiveToolConfig) -> _ToolkitEntry | None:
         try:
@@ -1462,25 +1464,16 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
     for tool_name, tool_entry in resolved_tool_configs.items():
         if (entry := try_build_entry(tool_entry)) is not None:
             record_entry(tool_name, entry)
+            if auto_injected_skill_manage and tool_name == "skill_manage":
+                auto_skill_manage_toolkit = entry.toolkit
 
-    has_other_deferred = any(entry.deferral is not None for entry in entries)
+    has_pre_collision_deferred = any(entry.deferral is not None for entry in entries)
     # Only portable tool search rewrites call_tool, so dynamic_tools is ignored everywhere else and when nothing defers.
     built_dynamic_tools = (
         try_build_entry(dynamic_tools_entry)
-        if dynamic_tools_entry is not None and portable_deferred_tools and has_other_deferred
+        if dynamic_tools_entry is not None and portable_deferred_tools and has_pre_collision_deferred
         else None
     )
-    if auto_skill_manage_entry is not None:
-        can_use_portable_search = built_dynamic_tools is not None and {"tool_search", "call_tool"}.issubset(
-            {function.name for function in built_dynamic_tools.adapted.functions if function.gate is None},
-        )
-        effective_skill_manage = (
-            replace(auto_skill_manage_entry, defer=True)
-            if wire_deferred_tools and has_other_deferred and (not portable_deferred_tools or can_use_portable_search)
-            else auto_skill_manage_entry
-        )
-        if (entry := try_build_entry(effective_skill_manage)) is not None:
-            record_entry(effective_skill_manage.name, entry)
     if built_dynamic_tools is not None and dynamic_tools_entry is not None:
         record_entry(dynamic_tools_entry.name, built_dynamic_tools)
     if not disable_runtime_capabilities:
@@ -1576,6 +1569,35 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 else:
                     pruned_offered.append(entry)
             offered = tuple(pruned_offered)
+    has_surviving_deferred = any(entry.deferral is not None and bool(entry.adapted.functions) for entry in offered)
+    if auto_skill_manage_toolkit is not None and wire_deferred_tools and has_surviving_deferred:
+        can_use_portable_search = any(
+            built_dynamic_tools is not None
+            and entry.toolkit is built_dynamic_tools.toolkit
+            and {"tool_search", "call_tool"}.issubset(
+                {function.name for function in entry.adapted.functions if function.gate is None},
+            )
+            for entry in offered
+        )
+        if not portable_deferred_tools or can_use_portable_search:
+            skill_manage_meta = agent_tools.tools.get("skill_manage")
+            skill_manage_desc = skill_manage_meta.description if skill_manage_meta else ""
+            deferred_offered: list[_ToolkitEntry] = []
+            for entry in offered:
+                if entry.toolkit is auto_skill_manage_toolkit and entry.deferral is None and entry.adapted.functions:
+                    deferral, adapted = defer_toolkit(
+                        "skill_manage",
+                        skill_manage_desc,
+                        entry.adapted,
+                        portable_search=portable_deferred_tools,
+                    )
+                    deferred_offered.append(replace(entry, adapted=adapted, deferral=deferral))
+                else:
+                    deferred_offered.append(entry)
+            offered = tuple(deferred_offered)
+    elif not has_surviving_deferred and built_dynamic_tools is not None:
+        offered = tuple(entry for entry in offered if entry.toolkit is not built_dynamic_tools.toolkit)
+        local_tool_names = [name for name in local_tool_names if name != "dynamic_tools"]
     cli_deferred = []
     for deferred_entry in deferred_configs.values():
 

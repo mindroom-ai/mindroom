@@ -528,8 +528,9 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["mindroom_output_path"]["default"] is None
-    assert 'only for action="get"' in schema["mindroom_output_path"]["description"]
-    assert "cannot be combined with view=True" in schema["mindroom_output_path"]["description"]
+    assert schema["mindroom_output_path"]["description"] == (
+        "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
+    )
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
 
@@ -2120,18 +2121,15 @@ async def test_attachment_rejects_irrelevant_params_before_side_effects(tmp_path
             {"action": "list", "path": "note.txt"},
             {"action": "list", "view": True},
             {"action": "list", "alt": "x"},
-            {"action": "list", "mindroom_output_path": "out.txt"},
             {"action": "get", "attachment_id": "att_1", "path": "note.txt"},
             {"action": "get", "attachment_id": "att_1", "alt": "x"},
             {"action": "get", "attachment_id": "att_1", "view": True, "mindroom_output_path": "out.txt"},
             {"action": "register", "path": "note.txt", "attachment_id": "att_1"},
             {"action": "register", "path": "note.txt", "view": True},
             {"action": "register", "path": "note.txt", "alt": "x"},
-            {"action": "register", "path": "note.txt", "mindroom_output_path": "out.txt"},
             {"action": "inline_image"},
             {"action": "inline_image", "attachment_id": "att_1", "path": "note.txt"},
             {"action": "inline_image", "path": "note.txt", "view": True},
-            {"action": "inline_image", "path": "note.txt", "mindroom_output_path": "out.txt"},
         ):
             payload = json.loads(await tool.attachment(**kwargs))  # type: ignore[arg-type]
             assert payload["status"] == "error", kwargs
@@ -2171,17 +2169,12 @@ async def test_inline_image_strictly_separates_attachment_id_and_path(tmp_path: 
         upload.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_raw_bytes(tmp_path: Path) -> None:
-    """Large non-redirected attachment results honor tool_output_auto_save_threshold_bytes; get saves raw bytes."""
+def _bulk_attachment_context(tmp_path: Path) -> tuple[ToolRuntimeContext, list[str], bytes]:
     from mindroom.config.models import DefaultsConfig  # noqa: PLC0415
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     sample_file = tmp_path / "binary-payload.bin"
     raw_bytes = b"\x00\x01\x02PNG_RAW_BYTES" * 40
     sample_file.write_bytes(raw_bytes)
-
     attachment_ids: list[str] = []
     for idx in range(6):
         record = register_local_attachment(
@@ -2193,19 +2186,34 @@ async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_
         )
         assert record is not None
         attachment_ids.append(record.attachment_id)
-
     base_context = _tool_context(tmp_path, attachment_ids=tuple(attachment_ids))
     small_threshold_config = base_context.config.model_copy(
         update={"defaults": DefaultsConfig(tool_output_auto_save_threshold_bytes=120)},
     )
-    context = dataclasses.replace(base_context, config=small_threshold_config)
+    return dataclasses.replace(base_context, config=small_threshold_config), attachment_ids, raw_bytes
+
+
+@pytest.mark.asyncio
+async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_raw_bytes(tmp_path: Path) -> None:
+    """Attachment list supports output-file redirect and auto-save while get keeps binary saves."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    context, attachment_ids, raw_bytes = _bulk_attachment_context(tmp_path)
     tool = AttachmentTools(
         runtime_paths=context.runtime_paths,
-        runtime_config=small_threshold_config,
+        runtime_config=context.config,
         tool_output_workspace_root=workspace,
     )
 
     with tool_runtime_context(context):
+        manifest_result = await tool.attachment("list", mindroom_output_path="manifest.json")
+        assert isinstance(manifest_result, dict)
+        manifest_receipt = manifest_result["mindroom_tool_output"]
+        assert isinstance(manifest_receipt, dict)
+        assert manifest_receipt["status"] == "saved_to_file"
+        assert manifest_receipt["path"] == "manifest.json"
+        assert json.loads((workspace / "manifest.json").read_text(encoding="utf-8"))["attachment_ids"] == attachment_ids
+
         list_result = await tool.attachment("list")
         assert isinstance(list_result, dict)
         receipt = list_result["mindroom_tool_output"]
@@ -2213,13 +2221,9 @@ async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_
         assert receipt["status"] == "saved_to_file"
         assert receipt["auto_saved"] is True
         assert receipt["threshold_bytes"] == 120
-        saved_file = workspace / str(receipt["path"])
-        assert saved_file.exists()
-        saved_payload = json.loads(saved_file.read_text(encoding="utf-8"))
-        assert saved_payload["status"] == "ok"
+        saved_payload = json.loads((workspace / str(receipt["path"])).read_text(encoding="utf-8"))
         assert saved_payload["attachment_ids"] == attachment_ids
 
-        # Explicit mindroom_output_path on action="get" still writes raw binary bytes unchanged.
         get_result = await tool.attachment("get", attachment_id="att_bulk_0", mindroom_output_path="out/data.bin")
         assert isinstance(get_result, str)
         get_payload = json.loads(get_result)
@@ -2227,20 +2231,52 @@ async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_
         assert get_payload["mindroom_tool_output"]["format"] == "binary"
         assert (workspace / "out/data.bin").read_bytes() == raw_bytes
 
-    # Worker mode must not write auto-saved output into the unreachable local primary workspace.
-    worker_workspace = tmp_path / "worker-primary-workspace"
+
+@pytest.mark.asyncio
+async def test_attachment_output_files_worker_and_no_workspace_behavior(tmp_path: Path) -> None:
+    """Attachment list errors cleanly without a workspace and auto-saves in worker mode while get transfers bytes."""
+    context, _attachment_ids, raw_bytes = _bulk_attachment_context(tmp_path)
+
+    no_ws_tool = AttachmentTools(runtime_paths=context.runtime_paths, runtime_config=context.config)
+    with tool_runtime_context(context):
+        no_ws_err = await no_ws_tool.attachment("list", mindroom_output_path="manifest.json")
+        assert isinstance(no_ws_err, str)
+        no_ws_payload = json.loads(no_ws_err)
+        assert no_ws_payload["status"] == "error"
+        assert "mindroom_output_path requires an agent workspace" in no_ws_payload["message"]
+
+    worker_workspace = tmp_path / "worker-workspace"
     worker_workspace.mkdir()
     worker_tool = AttachmentTools(
         runtime_paths=context.runtime_paths,
-        runtime_config=small_threshold_config,
+        runtime_config=context.config,
+        worker_target=_shared_worker_target(),
         tool_output_workspace_root=worker_workspace,
         workspace_in_worker=True,
     )
-    with tool_runtime_context(context):
+    with (
+        tool_runtime_context(context),
+        patch(
+            "mindroom.custom_tools.attachments.save_attachment_to_worker",
+            return_value=SimpleNamespace(worker_path="out/worker.bin", size_bytes=len(raw_bytes), sha256="sha256"),
+        ) as mocked_save,
+    ):
         worker_list = await worker_tool.attachment("list")
-        assert isinstance(worker_list, str)
-        assert json.loads(worker_list)["status"] == "ok"
-    assert not any(worker_workspace.rglob("*"))
+        assert isinstance(worker_list, dict)
+        worker_receipt = worker_list["mindroom_tool_output"]
+        assert isinstance(worker_receipt, dict)
+        assert worker_receipt["status"] == "saved_to_file"
+        assert worker_receipt["auto_saved"] is True
+        assert (worker_workspace / str(worker_receipt["path"])).exists()
+
+        worker_get = await worker_tool.attachment(
+            "get",
+            attachment_id="att_bulk_0",
+            mindroom_output_path="out/worker.bin",
+        )
+        assert isinstance(worker_get, str)
+        assert json.loads(worker_get)["attachment"]["save_path"] == "out/worker.bin"
+        mocked_save.assert_called_once()
 
 
 @pytest.mark.asyncio

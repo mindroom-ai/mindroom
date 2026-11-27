@@ -1750,6 +1750,8 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferre
 
     inner.script = [
         ("tool_search", {"query": "shell"}),
+        ("tool_search", {"query": "skill_manage"}),
+        ("tool_search", {"query": ""}),
         ("call_tool", {"name": "shell", "arguments": {"cmd": "id"}}),
         ("call_tool", {"name": "deploy", "arguments": {"target": "prod"}}),
         (
@@ -1765,7 +1767,16 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferre
     await _review(config, paths, captured=capture.latest)
 
     replay_spy.assert_not_called()
-    primary_wire, fork_wire, after_search, after_denied_shell, after_gated_deploy, after_create = inner.received[:6]
+    (
+        primary_wire,
+        fork_wire,
+        after_shell_search,
+        after_skill_search,
+        after_empty_search,
+        after_denied_shell,
+        after_gated_deploy,
+        after_create,
+    ) = inner.received[:8]
     # Prompt-cache hit: identical wire tool schemas (without deferred tools) and identical leading messages.
     assert fork_wire.tools == primary_wire.tools
     assert "skill_manage" not in {tool.name for tool in fork_wire.tools}
@@ -1773,9 +1784,14 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferre
     assert fork_wire.messages[: len(primary_wire.messages)] == primary_wire.messages
     assert 'call_tool(name="skill_manage", arguments={...})' in str(fork_wire.messages[-1].content)
 
-    # tool_search exposes ONLY skill_manage, never other deferred tools.
-    search_result = json.loads(str(after_search.messages[-1].content))
-    assert [match["name"] for match in search_result["matches"]] == ["skill_manage"]
+    # tool_search filters by query over deferred runnable skill tools only (empty query lists them).
+    assert json.loads(str(after_shell_search.messages[-1].content))["matches"] == []
+    assert [match["name"] for match in json.loads(str(after_skill_search.messages[-1].content))["matches"]] == [
+        "skill_manage",
+    ]
+    assert [match["name"] for match in json.loads(str(after_empty_search.messages[-1].content))["matches"]] == [
+        "skill_manage",
+    ]
 
     # Both ungated and gated non-skill deferred tools go straight to review_call_tool without probing answered tools.
     assert "'shell' was not called" in str(after_denied_shell.messages[-1].content)
@@ -1905,6 +1921,15 @@ def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
         approval_rules=[ApprovalRuleConfig(match="call_tool", action="require_approval")],
     )
     assert "skill_manage" not in gated_search.request_template.deferred_tools.names
+
+    # 7. When an eager tool shadows every function of the only deferred tool, skill_manage stays eager and
+    # dynamic_tools is not offered.
+    shadowed = build_agent(tools=["duckduckgo", {"googlesearch": {"defer": True}}], native_tool_search=False)
+    assert shadowed.request_template.deferred_tools.names == frozenset()
+    shadowed_fn_names = {fn.name for tk in shadowed.spec.toolkits for fn in tk.functions}
+    assert "skill_manage" in shadowed_fn_names
+    assert "tool_search" not in shadowed_fn_names
+    assert "call_tool" not in shadowed_fn_names
 
 
 @pytest.mark.asyncio

@@ -667,7 +667,7 @@
         },
         {
           "name": "skill",
-          "description": "Load a skill's instructions, reference document, or script without running it.\n- `instructions`: load a skill's `SKILL.md` instructions and list its available `references/` and `scripts/` files (`path` must be omitted).\n- `reference`: load one listed reference document (`path` required).\n- `script`: read one listed script without running it; run scripts with shell if available (`path` required).",
+          "description": "Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -678,11 +678,11 @@
                   "reference",
                   "script"
                 ],
-                "description": "What to load (`instructions`, `reference`, or `script`)."
+                "description": "What to load."
               },
               "name": {
                 "type": "string",
-                "description": "The skill name."
+                "description": "Skill name."
               },
               "path": {
                 "anyOf": [
@@ -693,7 +693,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Listed filename under `references/` or `scripts/` (required for `reference` and `script`; omit for `instructions`)."
+                "description": "Listed filename under references/ or scripts/ (required for reference/script; omit for instructions)."
               },
               "mindroom_output_path": {
                 "anyOf": [
@@ -1387,7 +1387,7 @@
         },
         {
           "name": "skill",
-          "description": "Load a skill's instructions, reference document, or script without running it.\n- `instructions`: load a skill's `SKILL.md` instructions and list its available `references/` and `scripts/` files (`path` must be omitted).\n- `reference`: load one listed reference document (`path` required).\n- `script`: read one listed script without running it; run scripts with shell if available (`path` required).",
+          "description": "Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).",
           "parameters": {
             "type": "object",
             "properties": {
@@ -1398,11 +1398,11 @@
                   "reference",
                   "script"
                 ],
-                "description": "What to load (`instructions`, `reference`, or `script`)."
+                "description": "What to load."
               },
               "name": {
                 "type": "string",
-                "description": "The skill name."
+                "description": "Skill name."
               },
               "path": {
                 "anyOf": [
@@ -1413,7 +1413,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Listed filename under `references/` or `scripts/` (required for `reference` and `script`; omit for `instructions`)."
+                "description": "Listed filename under references/ or scripts/ (required for reference/script; omit for instructions)."
               },
               "mindroom_output_path": {
                 "anyOf": [

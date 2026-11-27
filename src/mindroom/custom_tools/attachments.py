@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -43,6 +43,8 @@ from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     current_tool_workdir,
     finalize_tool_output_file,
+    normalize_output_path_argument,
+    prepare_tool_output_file,
     saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
@@ -369,11 +371,19 @@ def _resolve_inline_image_source(
 
 
 _ALLOWED_ATTACHMENT_PARAMS: dict[str, frozenset[str]] = {
-    "list": frozenset({"attachment_id"}),
+    "list": frozenset({"attachment_id", "mindroom_output_path"}),
     "get": frozenset({"attachment_id", "view", "mindroom_output_path"}),
-    "register": frozenset({"path"}),
-    "inline_image": frozenset({"attachment_id", "path", "alt"}),
+    "register": frozenset({"path", "mindroom_output_path"}),
+    "inline_image": frozenset({"attachment_id", "path", "alt", "mindroom_output_path"}),
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedAttachmentArgs:
+    attachment_id: str | None
+    path: str | None
+    alt: str | None
+    mindroom_output_path: str | None
 
 
 def _non_empty(value: str | None) -> str | None:
@@ -383,21 +393,25 @@ def _non_empty(value: str | None) -> str | None:
     return stripped or None
 
 
-def _validate_inline_image_args(attachment_id: str | None, path: str | None) -> str | None:
-    resolved_id = _non_empty(attachment_id)
-    resolved_path = _non_empty(path)
+def _validate_inline_image_args(
+    *,
+    resolved_id: str | None,
+    resolved_path: str | None,
+    raw_attachment_id: str | None,
+    raw_path: str | None,
+) -> str | None:
     if resolved_id is not None and resolved_path is not None:
         return "Pass either attachment_id or path for action='inline_image', not both."
     if resolved_id is not None or resolved_path is not None:
         return None
-    if attachment_id is not None and path is None:
+    if raw_attachment_id is not None and raw_path is None:
         return "attachment_id must be a non-empty string."
-    if path is not None and attachment_id is None:
+    if raw_path is not None and raw_attachment_id is None:
         return "path must be a non-empty string."
     return "action='inline_image' requires either attachment_id or path."
 
 
-def _validate_attachment_params(  # noqa: PLR0911
+def _parse_attachment_args(  # noqa: PLR0911
     action: str,
     *,
     attachment_id: str | None,
@@ -405,35 +419,54 @@ def _validate_attachment_params(  # noqa: PLR0911
     view: bool,
     alt: str | None,
     mindroom_output_path: str | None,
-) -> str | None:
-    """Validate required and allowed parameters for ``action`` before any side effects."""
+) -> _NormalizedAttachmentArgs | str:
+    """Normalize and validate parameters for ``action`` once before any side effects."""
     allowed = _ALLOWED_ATTACHMENT_PARAMS.get(action)
     if allowed is None:
         return f"Unsupported attachment action {action!r}. Expected one of: list, get, register, inline_image."
     # Treat empty/whitespace-only strings on irrelevant optional parameters as unset so callers emitting "" for unused
     # schema fields do not get spurious errors; allowed/required parameters still validate blank values below.
+    resolved_id = _non_empty(attachment_id)
+    resolved_path = _non_empty(path)
+    resolved_alt = alt if alt is not None and alt.strip() else None
+    # On action="get", keep explicitly passed blank mindroom_output_path (e.g. "") so unsafe-path validation rejects it
+    # consistently with view=True and get_attachment; on other actions, blank strings act as unset like output_files.
+    raw_output_path = mindroom_output_path if action == "get" else normalize_output_path_argument(mindroom_output_path)
+    resolved_output_path = raw_output_path if isinstance(raw_output_path, str) else None
     provided = (
-        ("attachment_id", _non_empty(attachment_id) is not None),
-        ("path", _non_empty(path) is not None),
+        ("attachment_id", resolved_id is not None),
+        ("path", resolved_path is not None),
         ("view", view),
-        ("alt", _non_empty(alt) is not None),
-        ("mindroom_output_path", _non_empty(mindroom_output_path) is not None),
+        ("alt", resolved_alt is not None),
+        ("mindroom_output_path", resolved_output_path is not None),
     )
     unexpected = [name for name, is_set in provided if is_set and name not in allowed]
     if unexpected:
         names = ", ".join(f"'{name}'" for name in unexpected)
         return f"Parameter(s) {names} cannot be used with action={action!r}."
     if action == "get":
-        if _non_empty(attachment_id) is None:
+        if resolved_id is None:
             return "attachment_id must be a non-empty string."
-        if view and mindroom_output_path is not None:
+        if view and resolved_output_path is not None:
             return "view cannot be combined with mindroom_output_path."
     elif action == "register":
-        if _non_empty(path) is None:
+        if resolved_path is None:
             return "path must be a non-empty string."
-    elif action == "inline_image":
-        return _validate_inline_image_args(attachment_id, path)
-    return None
+    elif action == "inline_image" and (
+        error := _validate_inline_image_args(
+            resolved_id=resolved_id,
+            resolved_path=resolved_path,
+            raw_attachment_id=attachment_id,
+            raw_path=path,
+        )
+    ):
+        return error
+    return _NormalizedAttachmentArgs(
+        attachment_id=resolved_id,
+        path=resolved_path,
+        alt=resolved_alt,
+        mindroom_output_path=resolved_output_path,
+    )
 
 
 def _too_large_detail(outcome: object) -> str | None:
@@ -582,23 +615,31 @@ class AttachmentTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Offer ``attachment``'s output path with ``action="get"``-specific guidance."""
+        """Offer ``attachment``'s output path for binary saves and JSON redirects."""
         if function.name != "attachment":
             return function
         parameters = with_optional_output_path(function.parameters)
         parameters["properties"]["mindroom_output_path"] = {
             **parameters["properties"]["mindroom_output_path"],
             "description": (
-                "Save attachment bytes to a workspace-relative file instead of returning metadata "
-                '(only for action="get"; cannot be combined with view=True).'
+                "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
             ),
         }
         return replace(function, parameters=parameters)
 
-    def _auto_save_output(self, context: ToolRuntimeContext, result: str) -> str | dict[str, object]:
-        """Apply MindRoom's auto-save threshold to non-redirected string results when using a local workspace."""
-        if self._tool_output_workspace_root is None or self._workspace_in_worker:
-            return result
+    def _prepare_output_request(
+        self,
+        context: ToolRuntimeContext,
+        output_path: str | None,
+    ) -> ToolOutputFileRequest | dict[str, object] | str | None:
+        """Prepare the shared output-file request matching ``get_tool_by_name`` whenever a workspace is configured."""
+        if self._tool_output_workspace_root is None:
+            if output_path is not None:
+                return _attachment_tool_payload(
+                    "error",
+                    message="mindroom_output_path requires an agent workspace in this runtime path.",
+                )
+            return None
         runtime_paths = self._runtime_paths or context.runtime_paths
         config = self._runtime_config or context.config
         policy = ToolOutputFilePolicy.from_runtime(
@@ -607,13 +648,30 @@ class AttachmentTools(Toolkit):
             auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
             tools_use_workdir=current_tool_workdir() is not None,
         )
-        finalized = finalize_tool_output_file(
-            ToolOutputFileRequest(policy=policy, tool_name="attachment", path=None),
-            result,
-        )
-        return finalized if isinstance(finalized, (str, dict)) else result
+        return prepare_tool_output_file(policy, tool_name="attachment", output_path=output_path)
 
-    async def attachment(  # noqa: PLR0911
+    async def _dispatch_attachment_action(
+        self,
+        action: Literal["list", "get", "register", "inline_image"],
+        context: ToolRuntimeContext,
+        parsed: _NormalizedAttachmentArgs,
+    ) -> str | ToolValue:
+        if action == "list":
+            return self._list_attachments(context, parsed.attachment_id)
+        if action == "get":
+            assert parsed.attachment_id is not None
+            return await self._get_attachment(context, parsed.attachment_id, mindroom_output_path=None, view=False)
+        if action == "register":
+            assert parsed.path is not None
+            return self._register_attachment(context, parsed.path)
+        return await self._inline_image(
+            context,
+            attachment_id=parsed.attachment_id,
+            path=parsed.path,
+            alt=parsed.alt,
+        )
+
+    async def attachment(
         self,
         action: Literal["list", "get", "register", "inline_image"],
         attachment_id: str | None = None,
@@ -622,68 +680,54 @@ class AttachmentTools(Toolkit):
         alt: str | None = None,
         mindroom_output_path: str | None = None,
     ) -> str | dict[str, object] | ToolValue:
-        """List, inspect, save, view, register, or inline-embed conversation attachments.
+        """Manage conversation attachments.
 
-        - `list`: list attachments in the current context (optional `attachment_id` to filter to one).
-        - `get`: inspect metadata for `attachment_id`, save bytes to `mindroom_output_path`, or pass `view=True` to
-          send image, audio, video, or document content (up to 20 MiB) to the model (`view` and
-          `mindroom_output_path` cannot be combined).
-        - `register`: register a local file at `path` into the current context and return its `attachment_id`.
-        - `inline_image`: upload an image by `attachment_id` or `path` (pass exactly one; optional `alt`) and return
-          embeddable `markdown` for a reply or `matrix_message`. When refused, send it with
-          `matrix_message(attachments=[...])` instead. Never link an image to a placeholder or made-up address.
+        - `list`: list context attachments (optional `attachment_id` filter).
+        - `get`: inspect `attachment_id` metadata, save raw bytes to `mindroom_output_path`, or pass `view=True` to load image/audio/video/document (<=20 MiB) into model context.
+        - `register`: register a local file at `path` as a context `attachment_id`.
+        - `inline_image`: upload an image by `attachment_id` or `path` (not both; optional `alt`) and return `markdown` for a reply or `matrix_message` (on refusal, use `matrix_message(attachments=[...])`; never use placeholder URLs).
 
         Args:
-            action: Operation to perform (`list`, `get`, `register`, or `inline_image`).
-            attachment_id: Context-scoped attachment ID (`list` filter, `get`, or `inline_image`).
-            path: Workspace or accessible local file path (`register` or `inline_image`).
-            view: Send image, audio, video, or document content (up to 20 MiB) to the model (`get` only; incompatible with `mindroom_output_path`).
-            alt: Optional alt text for the returned markdown image (`inline_image` only).
-            mindroom_output_path: Save attachment bytes to a workspace-relative file (`get` only; incompatible with `view=True`).
+            action: Operation to perform.
+            attachment_id: Context attachment ID (list filter, get, or inline_image).
+            path: Local file path (register or inline_image).
+            view: Load media into model context (get only; incompatible with mindroom_output_path).
+            alt: Markdown alt text (inline_image).
+            mindroom_output_path: Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt.
 
         """
-        if param_error := _validate_attachment_params(
+        parsed = _parse_attachment_args(
             action,
             attachment_id=attachment_id,
             path=path,
             view=view,
             alt=alt,
             mindroom_output_path=mindroom_output_path,
-        ):
-            return _attachment_tool_payload("error", message=param_error)
+        )
+        if isinstance(parsed, str):
+            return _attachment_tool_payload("error", message=parsed)
         context = get_tool_runtime_context()
         if context is None:
             return _attachment_tool_payload(
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        resolved_id = _non_empty(attachment_id)
-        resolved_path = _non_empty(path)
-        if action == "list":
-            return self._auto_save_output(context, self._list_attachments(context, resolved_id))
-        if action == "get":
-            assert resolved_id is not None
-            result = await self._get_attachment(
+        if action == "get" and (parsed.mindroom_output_path is not None or view):
+            assert parsed.attachment_id is not None
+            return await self._get_attachment(
                 context,
-                resolved_id,
-                mindroom_output_path=mindroom_output_path,
+                parsed.attachment_id,
+                mindroom_output_path=parsed.mindroom_output_path,
                 view=view,
             )
-            if mindroom_output_path is None and isinstance(result, str):
-                return self._auto_save_output(context, result)
-            return result
-        if action == "register":
-            assert resolved_path is not None
-            return self._auto_save_output(context, self._register_attachment(context, resolved_path))
-        return self._auto_save_output(
-            context,
-            await self._inline_image(
-                context,
-                attachment_id=resolved_id,
-                path=resolved_path,
-                alt=alt,
-            ),
-        )
+        prepared = self._prepare_output_request(context, parsed.mindroom_output_path)
+        if isinstance(prepared, (dict, str)):
+            return prepared
+        result = await self._dispatch_attachment_action(action, context, parsed)
+        if prepared is not None and isinstance(result, str):
+            finalized = finalize_tool_output_file(prepared, result)
+            return finalized if isinstance(finalized, (str, dict)) else result
+        return result
 
     def _list_attachments(self, context: ToolRuntimeContext, target: str | None) -> str:
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(

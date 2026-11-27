@@ -905,12 +905,13 @@ def _retired_approval_pair_error(
     new: str,
     default: str,
     default_timeout_days: float,
+    reject_wildcard_scripts: bool = False,
 ) -> str | None:
     first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
     if first_new is not None and rules[first_new].match == new:
         return None
     first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
-    if first_old is not None and rules[first_old].script is not None:
+    if reject_wildcard_scripts and first_old is not None and rules[first_old].script is not None:
         return (
             f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs approval script "
             f"{rules[first_old].script!r} for retired tool {old}; {old} is now {new}; "
@@ -969,6 +970,8 @@ def retired_consolidated_approval_error(
     default: str,
     default_timeout_days: float = 7.0,
     renames: Mapping[str, str] | None = None,
+    *,
+    reject_wildcard_scripts: bool = False,
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
@@ -982,6 +985,7 @@ def retired_consolidated_approval_error(
                 new=new,
                 default=default,
                 default_timeout_days=default_timeout_days,
+                reject_wildcard_scripts=reject_wildcard_scripts,
             )
         ) is not None:
             return error

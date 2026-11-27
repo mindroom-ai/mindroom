@@ -8678,7 +8678,6 @@ expose = [
     "MAX_WORKSPACE_SKILL_NAME_CHARS",
     "SKILL_FILENAME",
     "SKILL_FUNCTION_NAMES",
-    "SKILL_READ_FUNCTION_NAMES",
     "Skill",
     "SkillMarkdownError",
     "SkillsToolkit",

@@ -1748,6 +1748,7 @@ class Config(BaseModel):
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
                     renames=renames,
+                    reject_wildcard_scripts=toolkit_name in {"skills", "attachments"},
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)

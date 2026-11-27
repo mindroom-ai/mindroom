@@ -100,35 +100,9 @@ def _toolkit_dispatch_scope(
     return None
 
 
-def _toolkit_action_scope(
-    tool_name: str,
-    *,
-    config: Config,
-    tools: ToolRegistry,
-    toolkit_name: str,
-) -> tuple[str, str] | None:
-    metadata = tools.entries.get(toolkit_name)
-    if metadata is not None and tool_name in metadata.action_scoped_grants:
-        return toolkit_name, "action"
-    if metadata is not None and tool_name in metadata.function_names:
-        return None
-    for owner_name in config.expand_tool_names([toolkit_name]):
-        if owner_name == toolkit_name:
-            continue
-        owner_meta = tools.entries.get(owner_name)
-        if (
-            owner_meta is not None
-            and tool_name in owner_meta.function_names
-            and tool_name in owner_meta.action_scoped_grants
-        ):
-            return owner_name, "action"
-    return None
-
-
 def _action_scoped_tool(
     tool_name: str,
     *,
-    config: Config,
     tools: ToolRegistry | None,
     toolkit_name: str | None,
 ) -> tuple[str, str] | None:
@@ -142,7 +116,8 @@ def _action_scoped_tool(
     if tools is None:
         return None
     if toolkit_name is not None:
-        return _toolkit_action_scope(tool_name, config=config, tools=tools, toolkit_name=toolkit_name)
+        metadata = tools.entries.get(toolkit_name)
+        return (toolkit_name, "action") if metadata is not None and tool_name in metadata.action_scoped_grants else None
     if any(tool_name in metadata.action_scoped_grants for metadata in tools.entries.values()):
         return tool_name, "action"
     return _toolkit_dispatch_scope(tool_name, tools=tools, toolkit_name=None)
@@ -164,9 +139,7 @@ def grant_operation(
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
-    if (
-        action_scope := _action_scoped_tool(tool_name, config=config, tools=tools, toolkit_name=toolkit_name)
-    ) is not None:
+    if (action_scope := _action_scoped_tool(tool_name, tools=tools, toolkit_name=toolkit_name)) is not None:
         scope_owner, dispatch_arg = action_scope
         dispatch_value = arguments.get(dispatch_arg)
         if not isinstance(dispatch_value, str) or not dispatch_value.strip():
