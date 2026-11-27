@@ -57,6 +57,7 @@ from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
     DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
     DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+    DESKTOP_SHELL_PROTOCOL_VERSION,
     DesktopCommand,
     DesktopPairingAccepted,
     DesktopPairingClaim,
@@ -811,7 +812,12 @@ def _shell_event(
 ) -> AuthenticatedToDeviceEvent:
     return _bridge_event(
         "run_shell",
-        {"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
+        {
+            "command": command,
+            "cwd": str(cwd),
+            "timeout_seconds": timeout_seconds,
+            "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+        },
         request_id=request_id,
         sequence=sequence,
     )
@@ -1388,6 +1394,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
             "run_shell",
             command='echo $$ >> pids; printf once >> marker; printf "$MINDROOM_CAPTURED"',
             cwd=str(work),
+            shell_protocol=DESKTOP_SHELL_PROTOCOL_VERSION,
         )
         pending = await _wait_for_native_pending(host)
         assert (pending["request_id"], pending["cwd"]) == (once, str(work))
@@ -1405,7 +1412,12 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         assert (receipt.result["state"], receipt.result["response"]) == ("completed", ran.to_content())
 
         # Approving once is single use: the next request waits again, and its decision grants a timed lease.
-        leased = await send("run_shell", command="echo $$ >> pids; printf leased >> marker", cwd=str(work))
+        leased = await send(
+            "run_shell",
+            command="echo $$ >> pids; printf leased >> marker",
+            cwd=str(work),
+            shell_protocol=DESKTOP_SHELL_PROTOCOL_VERSION,
+        )
         assert (await _wait_for_native_pending(host))["request_id"] == leased
         assert marker.read_text() == "once"
         assert not _replied(bridge_transport, leased)
@@ -1421,6 +1433,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
             command="echo $$ >> pids; while [ ! -f release ]; do sleep 0.05; done; yes attachment | head -n 8000",
             cwd=str(work),
             timeout_seconds=1,
+            shell_protocol=DESKTOP_SHELL_PROTOCOL_VERSION,
         )
         assert (running.result["state"], running.result["exit_code"]) == ("running", None)
         handle = running.result["handle"]
@@ -1448,7 +1461,12 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
         # The lease ends on the monotonic clock, and revoking rejects the request waiting after it.
         monotonic[0] += 301
         assert host.status()["shell"]["auto_approve_remaining_seconds"] == 0
-        expired = await send("run_shell", command="echo $$ >> pids; printf expired >> marker", cwd=str(work))
+        expired = await send(
+            "run_shell",
+            command="echo $$ >> pids; printf expired >> marker",
+            cwd=str(work),
+            shell_protocol=DESKTOP_SHELL_PROTOCOL_VERSION,
+        )
         assert (await _wait_for_native_pending(host))["request_id"] == expired
         await _native(host, "revoke_shell")
         assert "did not run" in str((await _reply(bridge_transport, expired)).error)
@@ -1462,6 +1480,7 @@ async def test_saved_folder_and_shell_access_run_end_to_end_through_the_native_r
             command="sleep 3600 & echo $! >> pids; echo $$ >> pids; wait",
             cwd=str(work),
             timeout_seconds=1,
+            shell_protocol=DESKTOP_SHELL_PROTOCOL_VERSION,
         )
         assert background.result["state"] == "running"
         assert [entry["handle"] for entry in host.status()["shell"]["handles"]] == [background.result["handle"]]

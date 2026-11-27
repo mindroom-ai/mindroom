@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import functools
 import inspect
-import json
 import os
 import re
 import shlex
@@ -12,7 +11,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -26,6 +25,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.background_scope import BackgroundLogPolicy, current_shell_background_scope
 from mindroom.shell.execution import (
     default_run_timeout_seconds,
+    normalize_shell_args,
     run_command,
     shell_call_timeout,
 )
@@ -94,10 +94,6 @@ _LOCAL_SHELL_PASSTHROUGH_ENV_KEYS = frozenset(
         "no_proxy",
     },
 )
-_SHELL_ARGS_ERROR = (
-    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
-)
-_SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 _WORKSPACE_CWD_NOTE = (
     "CWD is your agent workspace. Always use relative paths or `$MINDROOM_AGENT_WORKSPACE` instead of `~` "
     "(worker-routed execution maps `~` to the workspace; local execution maps it to the host home)."
@@ -144,52 +140,10 @@ _NO_WORKER_ERROR = (
 _SHELL_NAMESPACE = "shell"
 
 
-def _normalize_shell_command_line(command: str) -> list[str]:
-    """Run natural shell command strings through bash."""
-    stripped = command.strip()
-    if not stripped:
-        raise ValueError(_SHELL_ARGS_ERROR)
-    return ["bash", "-c", command]
-
-
-def _looks_like_shell_command_line(command: str) -> bool:
-    """Return whether a single argv item is probably a shell command line."""
-    if any(char.isspace() for char in command):
-        return True
-    return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
-
-
 def _not_started(refusal: str) -> str:
     """Answer a call refused before any command ran, and report that, so a caller that stores results can tell."""
     report_tool_metadata(not_started=True)
     return refusal
-
-
-def _normalize_shell_args(args: object) -> list[str]:
-    """Normalize natural shell command strings and explicit argv lists."""
-    if isinstance(args, str):
-        stripped = args.strip()
-        if not stripped:
-            raise ValueError(_SHELL_ARGS_ERROR)
-        if stripped[0] not in "[{":
-            return _normalize_shell_command_line(args)
-        try:
-            args = json.loads(args)
-        except json.JSONDecodeError as exc:
-            if any(char.isspace() for char in stripped):
-                return _normalize_shell_command_line(args)
-            raise ValueError(_SHELL_ARGS_ERROR) from exc
-
-    if not isinstance(args, list):
-        raise ValueError(_SHELL_ARGS_ERROR)  # noqa: TRY004
-
-    if any(not isinstance(item, str) for item in args):
-        raise ValueError(_SHELL_ARGS_ERROR)
-
-    normalized_args = cast("list[str]", args)
-    if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
-        return _normalize_shell_command_line(normalized_args[0])
-    return normalized_args
 
 
 def shell_refuses_commands(runtime_paths: RuntimePaths, *, allow_without_worker: bool) -> bool:
@@ -533,7 +487,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 msg = "timeout must be a positive number of seconds; omit it for the default limit."
                 raise ValueError(msg)
             env = self._command_env(process_environ)
-            argv = _shell_subprocess_args(_normalize_shell_args(call["args"]), env)
+            argv = _shell_subprocess_args(normalize_shell_args(call["args"]), env)
             launch = TerminalLaunch(argv=tuple(argv), env=env, cwd=str(self.base_dir) if self.base_dir else None)
             return launch, shell_call_timeout(timeout)
 
@@ -610,7 +564,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             if refusal is not None:
                 return _not_started(refusal)
             try:
-                command_args = _normalize_shell_args(args)
+                command_args = normalize_shell_args(args)
             except ValueError as exc:
                 refused = _not_started(f"Error: {exc}")
                 if worker is not None:

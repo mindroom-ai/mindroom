@@ -72,6 +72,7 @@ _EXPORTS = [
     "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
+    "Audio",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
@@ -84,6 +85,7 @@ _EXPORTS = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "File",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
@@ -92,6 +94,7 @@ _EXPORTS = [
     "HookContext",
     "HookMatrixAdmin",
     "HookMessageSender",
+    "Image",
     "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
@@ -139,6 +142,7 @@ _EXPORTS = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "Video",
     "WorkerService",
     "WorkerServiceError",
     "WorkerServiceState",
@@ -210,6 +214,7 @@ _SIGNATURES = {
         "state_dir)"
     ),
     "AtlassianConnectionConfig": "(*, name, display_name, site_url, cloud_id, products, write, requester_scoped, client_config_service)",
+    "Audio": "(*, id, url, filepath, content, format, mime_type, duration, sample_rate, channels, transcript, expires_at, metadata)",
     "BeforeResponseContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "CancelledResponseContext": f"({_HOOK}, info, *, {_HOOK_HELPERS})",
     "CompactionHookContext": (
@@ -232,6 +237,7 @@ _SIGNATURES = {
     ),
     "Done": "(notice, resolve, on_loop)",
     "EnrichmentItem": "(key, text, cache_policy, persist, minimal_required)",
+    "File": "(*, id, url, filepath, content, mime_type, file_type, filename, size, format, name, metadata)",
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "GoogleWorkspaceConfig": "(*, name, display_name, client_config_service, allowed_hosted_domains, services)",
@@ -241,6 +247,7 @@ _SIGNATURES = {
         "agent_message_snapshot_reader, runtime_started_at)"
     ),
     "HookContext": f"({_HOOK}, *, {_HOOK_HELPERS})",
+    "Image": "(*, id, url, filepath, content, format, mime_type, detail, original_prompt, revised_prompt, alt_text, metadata)",
     "ManagedEntity": "(name, kind, display_name, tool_names)",
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
@@ -319,6 +326,7 @@ _SIGNATURES = {
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
+    "Video": "(*, id, url, filepath, content, format, mime_type, duration, width, height, fps, eta, original_prompt, revised_prompt, metadata)",
     "WorkerService": "(name, module, idle_timeout_seconds)",
     "WorkerServiceState": "(state, port, exit_code)",
     "TurnOrigin": (
@@ -376,7 +384,7 @@ _SIGNATURES = {
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "shared_room_ids": "(context, *, contact_room_ok)",
     "stop_worker_service": "(context, service, target)",
-    "tool": "(function, /, *, name, description)",
+    "tool": "(function, /, *, name, description, offer_background_after, offer_output_path)",
     "toolkit_functions": "(toolkit)",
     "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
@@ -618,7 +626,7 @@ _MANIFEST = {
 }
 
 # What docs/plugins.md has plugins and their tests import from other modules, which `mindroom.plugin_api` cannot re-export without
-# loading FastAPI or Agno, with each one's parameters written as `_SIGNATURES` writes them.
+# loading FastAPI or heavier runtime dependencies, with each one's parameters written as `_SIGNATURES` writes them.
 _HTTP_EXPORTS = [
     "AgentWorkspace",
     "ClientUser",
@@ -683,7 +691,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 35), "9d9a2904c400cf06c02a2d9fdc2a6aa7903faeef54098b847f4b7566b25ffb48")
+_PINNED_VERSION = ((1, 37), "861010646d1d6fe5caeceda69a8bf2a948c82d2b115276566b8656c4abb27f72")
 
 
 def _is_enum(obj: object) -> bool:

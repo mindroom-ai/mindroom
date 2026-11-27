@@ -90,19 +90,24 @@ async def settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, objec
     return receipt
 
 
-PLUGIN = """from hashlib import sha256
-from agno.tools import Toolkit
-from agno.tools.function import ToolResult
-from agno.media import Image, File
+PLUGIN = """from dataclasses import replace
+from hashlib import sha256
+from mindroom.llm.media import File, Image
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate, ToolValue
 from tests.fakes.token_counter import fake_token_counter
 
 class ParityTools(Toolkit):
     def __init__(self, api_key: str):
         self.key = api_key
         super().__init__(name="parity", tools=[self.integration, self.approved, self.media])
-        self.get_async_functions()["approved"].requires_confirmation = True
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        if function.name == "approved":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     def integration(self, digest: str) -> str:
         assert sha256(self.key.encode()).hexdigest() == digest
@@ -111,11 +116,11 @@ class ParityTools(Toolkit):
     def approved(self, value: str) -> str:
         return "approved:" + value
 
-    def media(self) -> ToolResult:
+    def media(self) -> ToolValue:
         import base64
         png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
-        return ToolResult(content="image and file", images=[Image(content=png, mime_type="image/png")],
-                          files=[File(content=b"same-agent file", mime_type="text/plain", filename="report.txt")])
+        return ToolValue(content="image and file", images=(Image(content=png, mime_type="image/png"),),
+                         files=(File(content=b"same-agent file", mime_type="text/plain", filename="report.txt"),))
 
 @register_tool_with_metadata(name="parity", display_name="Local parity", description="Fake local credential integration",
     category=ToolCategory.DEVELOPMENT, default_execution_target=ToolExecutionTarget.PRIMARY,

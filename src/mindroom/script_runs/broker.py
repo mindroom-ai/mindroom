@@ -40,7 +40,6 @@ from mindroom.script_runs.store import (
     ScriptRunStore,
     script_capability_hash,
 )
-from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
@@ -64,6 +63,7 @@ from mindroom.tool_system.toolkit_connections import (
     run_toolkit_lifecycle,
     toolkit_call_lifetime,
 )
+from mindroom.tool_system.toolkits import requires_connect
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
@@ -207,7 +207,7 @@ class _PreparedExecution:
     context: ToolRuntimeContext
     correlation_id: str
     source_config: Config
-    toolkit: AnyToolkit
+    toolkit: Toolkit
     function: ToolFunction
     approval_config: Config
 
@@ -843,7 +843,7 @@ class ScriptToolBroker:
             approval_config=_background_approval_config(context, run),
         )
 
-    def _close_rejected_toolkit(self, toolkit: AnyToolkit) -> None:
+    def _close_rejected_toolkit(self, toolkit: Toolkit) -> None:
         """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
         if requires_connect(toolkit):
             asyncio.run(run_toolkit_lifecycle(toolkit.close))

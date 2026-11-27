@@ -22,6 +22,8 @@ logger = get_logger(__name__)
 class CompactContextTools(Toolkit):
     """Tool that triggers scoped mid-turn context compaction."""
 
+    offer_output_path = False
+
     def __init__(
         self,
         agent_name: str,

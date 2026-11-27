@@ -146,8 +146,8 @@ async def test_visualization_scatter_dict_series_passes_validated_tool_entrypoin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Calling create_chart('scatter', data={'x': [1, 2], 'y': [3, 4]}) passes schema and runtime validation."""
-    from mindroom.tool_system.agno_toolkits import adapt_toolkit  # noqa: PLC0415
     from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call  # noqa: PLC0415
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
 
     monkeypatch.chdir(tmp_path)
     workspace = tmp_path / "workspace"

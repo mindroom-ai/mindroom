@@ -30,8 +30,9 @@ from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestina
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
+    from mindroom.shell.output_capture import CapturedShellStream
+
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
-_MIN_INLINE_WAIT_SECONDS = 1.0
 _MAX_COMMAND = 8_192
 # Letters, marks, and symbols that render as nothing or as empty space: every default-ignorable code point outside
 # the control and format categories, which approval surfaces already escape, plus two blank symbols.
@@ -75,52 +76,87 @@ class DesktopShellRequest:
     expires_at_ms: int
     timeout_seconds: int = 30
     controller_key: str = ""
+    max_runtime_seconds: float | None = None
 
 
 class DesktopShellOutput(ShellOutputCapture):
-    """Spool one command's combined output privately until the bridge transfers it."""
+    """Spool one command's stdout and stderr privately until the bridge transfers them."""
 
     def __init__(self, directory: str) -> None:
         super().__init__(ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES))
         self.exit_code: int | None = None
         self.completed = False
 
+    def _stream_size(self, stream: CapturedShellStream) -> int:
+        stream.file.flush()
+        return os.fstat(stream.file.fileno()).st_size
+
+    def _stream_read(self, stream: CapturedShellStream, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        size = self._stream_size(stream)
+        return os.pread(stream.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
+
+    def _stream_tail(self, stream: CapturedShellStream, max_bytes: int) -> bytes:
+        return self._stream_read(stream, max(0, self._stream_size(stream) - max_bytes))
+
+    def _check_stream_offset(self, stream: CapturedShellStream, offset: int, *, label: str) -> None:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            message = f"Shell {label} offset must be a nonnegative integer."
+            raise DesktopShellError(message)
+        size = self._stream_size(stream)
+        if offset > size:
+            message = f"Shell {label} offset is past the captured {label} ({size} bytes)."
+            raise DesktopShellError(message)
+        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
+        if offset < size and self._stream_read(stream, offset, 1)[0] & 0xC0 == 0x80:
+            message = f"Shell {label} offset must be at the start of a UTF-8 character."
+            raise DesktopShellError(message)
+
     @property
     def size(self) -> int:
-        """Return the retained UTF-8 bytes, at most the capture cap."""
-        self.stdout.file.flush()
-        return os.fstat(self.stdout.file.fileno()).st_size
+        """Return the retained stdout UTF-8 bytes, at most the capture cap."""
+        return self._stream_size(self.stdout)
 
     @property
     def truncated(self) -> bool:
-        """Report output dropped past the cap or lost to a capture error."""
+        """Report stdout dropped past the cap or lost to a capture error."""
         return self.stdout.error is not None
 
     def read(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        """Return retained output from byte *offset*, at most *max_bytes* of it.
+        """Return retained stdout from byte *offset*, at most *max_bytes* of it.
 
         ``pread`` leaves the file position where the engine's next write appends.
         """
-        size = self.size
-        return os.pread(self.stdout.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
+        return self._stream_read(self.stdout, offset, max_bytes)
 
     def tail(self, max_bytes: int) -> bytes:
-        """Return at most the newest *max_bytes* bytes; the first character may be partial."""
-        return self.read(max(0, self.size - max_bytes))
+        """Return at most the newest *max_bytes* bytes of stdout; the first character may be partial."""
+        return self._stream_tail(self.stdout, max_bytes)
 
     def check_offset(self, offset: int) -> None:
-        """Reject an offset that is negative, past the retained output, or inside a character."""
-        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
-            message = "Shell output offset must be a nonnegative integer."
-            raise DesktopShellError(message)
-        size = self.size
-        if offset > size:
-            message = f"Shell output offset is past the captured output ({size} bytes)."
-            raise DesktopShellError(message)
-        # UTF-8 continuation bytes are 0b10xxxxxx; every other byte starts a character.
-        if offset < size and self.read(offset, 1)[0] & 0xC0 == 0x80:
-            message = "Shell output offset must be at the start of a UTF-8 character."
-            raise DesktopShellError(message)
+        """Reject a stdout offset that is negative, past the retained output, or inside a character."""
+        self._check_stream_offset(self.stdout, offset, label="output")
+
+    @property
+    def stderr_size(self) -> int:
+        """Return the retained stderr UTF-8 bytes, at most the capture cap."""
+        return self._stream_size(self.stderr)
+
+    @property
+    def stderr_truncated(self) -> bool:
+        """Report stderr dropped past the cap or lost to a capture error."""
+        return self.stderr.error is not None
+
+    def read_stderr(self, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        """Return retained stderr from byte *offset*, at most *max_bytes* of it."""
+        return self._stream_read(self.stderr, offset, max_bytes)
+
+    def tail_stderr(self, max_bytes: int) -> bytes:
+        """Return at most the newest *max_bytes* bytes of stderr; the first character may be partial."""
+        return self._stream_tail(self.stderr, max_bytes)
+
+    def check_stderr_offset(self, offset: int) -> None:
+        """Reject a stderr offset that is negative, past the retained stderr, or inside a character."""
+        self._check_stream_offset(self.stderr, offset, label="stderr")
 
     def publish(self, return_code: int | None) -> str:
         """Record completion; the bridge transfers the spool instead of writing a workspace file."""
@@ -142,13 +178,15 @@ class DesktopShellOutput(ShellOutputCapture):
 class DesktopShellResult:
     """One command's state; a finished result's output stays behind its handle until ``DesktopShell.hand_over``.
 
-    ``killed`` means ``kill_shell`` stopped the command; ``completed`` means it exited on its own.
+    ``killed`` means ``kill_shell`` or ``max_runtime_seconds`` stopped the command; ``completed`` means it exited on
+    its own.
     """
 
     state: Literal["completed", "killed", "running"]
     handle: str | None
     exit_code: int | None
     output: DesktopShellOutput
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -160,11 +198,20 @@ class _ShellHandle:
     output: DesktopShellOutput
     killed: bool = False
     controller_key: str = ""
+    request_id: str = ""
 
     def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
         if not record.finished:
             return "running"
-        return "killed" if self.killed else "completed"
+        return "killed" if (self.killed or record.timed_out) else "completed"
+
+
+def _validate_max_runtime_seconds(value: object) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0
+    ):
+        message = "Shell max_runtime_seconds must be a positive finite number."
+        raise DesktopShellError(message)
 
 
 def _validate_command(command: object) -> None:
@@ -211,6 +258,7 @@ class DesktopShell:
         self._monotonic_clock = monotonic_clock
         self._leases: dict[str, float] = {}
         self._pending: DesktopShellRequest | None = None
+        self._admitted_request: DesktopShellRequest | None = None
         # True from the moment a request needs a decision, including while it is held back behind agent input.
         self._awaiting_decision = False
         self._decision: asyncio.Future[str] | None = None
@@ -255,6 +303,7 @@ class DesktopShell:
         ):
             message = "Shell timeout must be an integer from 1 to 60 seconds."
             raise DesktopShellError(message)
+        _validate_max_runtime_seconds(request.max_runtime_seconds)
         if not isinstance(request.expires_at_ms, int) or isinstance(request.expires_at_ms, bool):
             message = "Shell approval expiry is invalid."
             raise DesktopShellError(message)
@@ -477,6 +526,7 @@ class DesktopShell:
             raise DesktopShellError(message)
         self._check_handle_capacity()
         self._used_ids.add(used_key)
+        self._admitted_request = request
         self._active_controller_key = request.controller_key
         self._busy = True
         self._finished.clear()
@@ -528,9 +578,10 @@ class DesktopShell:
             self._active_owner = (request.controller_key, request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.
             remaining = deadline - self._monotonic_clock() - _INLINE_WAIT_SAFETY_SECONDS
-            return await self._run(request, max(_MIN_INLINE_WAIT_SECONDS, min(request.timeout_seconds, remaining)))
+            return await self._run(request, max(0.0, min(request.timeout_seconds, remaining)))
         finally:
             self._pending = None
+            self._admitted_request = None
             self._decision = None
             self._active_controller_key = None
             self._active_request_id = None
@@ -539,6 +590,8 @@ class DesktopShell:
             self._finished.set()
 
     async def _run(self, request: DesktopShellRequest, inline_wait: float) -> DesktopShellResult:
+        if request.max_runtime_seconds is not None:
+            inline_wait = min(inline_wait, request.max_runtime_seconds)
         output = DesktopShellOutput(self._spool_directory())
         started_at = time.monotonic()
         run = asyncio.create_task(
@@ -553,10 +606,11 @@ class DesktopShell:
                 timeout=inline_wait,
                 output_capture=output,
                 stdin=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 kill_group_after_exit=True,
                 # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
                 register_finished=True,
+                max_runtime_seconds=request.max_runtime_seconds,
             ),
         )
         cancelled = asyncio.create_task(self._cancel_event.wait())
@@ -590,10 +644,17 @@ class DesktopShell:
             started_at,
             output,
             controller_key=request.controller_key,
+            request_id=request.request_id,
         )
         self._handles[result.handle] = entry
         record = self._records[result.handle]
-        return DesktopShellResult(entry.state(record), result.handle, record.return_code, output)
+        return DesktopShellResult(
+            entry.state(record),
+            result.handle,
+            record.return_code,
+            output,
+            timed_out=record.finished and record.timed_out,
+        )
 
     def check(
         self,
@@ -602,19 +663,29 @@ class DesktopShell:
         handle: str,
         *,
         offset: int | None = None,
+        stderr_offset: int | None = None,
         controller_key: str | None = None,
     ) -> DesktopShellResult:
         """Report the caller's own handle; a finished one stays until ``hand_over`` confirms its output arrived.
 
-        An invalid output ``offset`` is rejected without changing the handle, so a corrected check still gets the output.
+        An invalid output ``offset`` or ``stderr_offset`` is rejected without changing the handle, so a corrected check
+        still gets the output.
         """
         record = self._caller_record(requester_id, agent_name, handle, controller_key=controller_key)
         entry = self._handles[handle]
         if offset is not None:
             entry.output.check_offset(offset)
+        if stderr_offset is not None:
+            entry.output.check_stderr_offset(stderr_offset)
         if not record.finished:
             return DesktopShellResult("running", handle, None, entry.output)
-        return DesktopShellResult(entry.state(record), handle, record.return_code, entry.output)
+        return DesktopShellResult(
+            entry.state(record),
+            handle,
+            record.return_code,
+            entry.output,
+            timed_out=record.timed_out,
+        )
 
     def hand_over(self, result: DesktopShellResult) -> None:
         """Forget a finished result's handle and release its output once the rest of it reached the caller."""
@@ -639,6 +710,60 @@ class DesktopShell:
             force=force,
         )
 
+    def cancel_request(
+        self,
+        requester_id: str,
+        agent_name: str,
+        request_id: str,
+        *,
+        controller_key: str | None = None,
+    ) -> Literal["cancelled", "killed", "completed", "not_found"]:
+        """Cancel a caller's pending approval or stop its active/retained command by ``request_id``."""
+
+        def _matches(req_id: str, req_user: str, req_agent: str, req_controller: str) -> bool:
+            return (
+                req_id == request_id
+                and (req_user, req_agent) == (requester_id, agent_name)
+                and (controller_key is None or req_controller == controller_key)
+            )
+
+        pending = self._pending
+        decision = self._decision
+        if (
+            pending is not None
+            and decision is not None
+            and not decision.done()
+            and _matches(pending.request_id, pending.requester_id, pending.agent_name, pending.controller_key)
+        ):
+            decision.set_result("cancelled")
+            self._pending = None
+            return "cancelled"
+        admitted = self._admitted_request
+        if (
+            self._awaiting_decision
+            and admitted is not None
+            and _matches(admitted.request_id, admitted.requester_id, admitted.agent_name, admitted.controller_key)
+        ):
+            self._cancel_event.set()
+            return "cancelled"
+        if (
+            self._active_request_id is not None
+            and self._active_owner is not None
+            and _matches(
+                self._active_request_id,
+                self._active_owner[1],
+                self._active_owner[2],
+                self._active_owner[0],
+            )
+        ):
+            self._cancel_event.set()
+            return "killed"
+        self._prune()
+        for handle, entry in self._handles.items():
+            if _matches(entry.request_id, entry.requester_id, entry.agent_name, entry.controller_key):
+                return self._signal(self._records[handle], handle, force=True)
+        return "not_found"
+
     def kill_handle(self, handle: str) -> None:
         """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""
         self._prune()
@@ -651,7 +776,7 @@ class DesktopShell:
         if record.process.returncode is None and signal_record(record, force=force):
             self._handles[handle] = replace(self._handles[handle], killed=True)
         # An earlier kill stays the reason it ended, matching what the next check reports.
-        return "killed" if self._handles[handle].killed else "completed"
+        return "killed" if (self._handles[handle].killed or record.timed_out) else "completed"
 
     def _caller_record(
         self,

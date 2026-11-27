@@ -24,7 +24,6 @@ import nio
 import pytest
 import structlog
 import uvicorn
-from agno.utils import log as agno_log
 from fastapi import FastAPI, WebSocket
 from mem0 import AsyncMemory
 
@@ -761,72 +760,15 @@ def _stderr_records(stderr: bytes) -> list[dict[str, object]]:
     return [json.loads(line) for line in stderr.decode().splitlines()]
 
 
-@pytest.mark.parametrize("level", ["INFO", "WARNING"])
-def test_agno_records_follow_configured_format_and_level(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    level: str,
-) -> None:
-    """Agno's own loggers render through the configured handler instead of printing plain text at INFO."""
-    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
-    setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
-    capsys.readouterr()
-
-    agno_log.agent_logger.info("Upserting 2 documents")
-    agno_log.agent_logger.warning("Skipping one document")
-
-    records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
-    expected = [("Upserting 2 documents", "info")] if level == "INFO" else []
-    expected.append(("Skipping one document", "warning"))
-    assert [(record["event"], record["level"]) for record in records] == expected
-    assert {record["logger"] for record in records} == {"agno"}
-
-
-@pytest.mark.parametrize(
-    ("level", "logger_levels", "expected"),
-    [
-        # The default nio:WARNING override lowers the handler threshold below ERROR.
-        ("ERROR", "", ["agno_error"]),
-        ("WARNING", "httpx:DEBUG", ["agno_warning", "agno_error"]),
-        ("WARNING", "agno:DEBUG", ["agno_info", "agno_warning", "agno_error"]),
-    ],
-)
-def test_agno_records_keep_the_resolved_level_after_agno_resets_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    level: str,
-    logger_levels: str,
-    expected: list[str],
-) -> None:
-    """Agno's per-run level resets and lower overrides for other loggers do not let Agno records through."""
-    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
-    monkeypatch.setenv("MINDROOM_LOGGER_LEVELS", logger_levels)
-    # A later setup replaces the earlier level instead of stacking on top of it.
-    setup_logging(level="CRITICAL", runtime_paths=_runtime_paths(tmp_path))
-    setup_logging(level=level, runtime_paths=_runtime_paths(tmp_path))
-    capsys.readouterr()
-
-    # Agno's own Agent, Team, and Workflow runs reset its loggers to INFO this way.
-    agno_log.set_log_level_to_info()
-    agno_log.agent_logger.info("agno_info")
-    agno_log.agent_logger.warning("agno_warning")
-    agno_log.agent_logger.error("agno_error")
-
-    records = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
-    assert [record["event"] for record in records] == expected
-
-
 def test_subprocess_logging_matches_parent_format_and_level(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A child configured from the parent's env logs JSON to stderr at the parent's level, Agno included."""
+    """A child configured from the parent's env logs JSON to stderr at the parent's level."""
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
     setup_logging(level="WARNING", runtime_paths=_runtime_paths(tmp_path))
     child = """
-from agno.utils.log import log_info, log_warning
+import logging
 from mindroom.logging_config import get_logger, setup_subprocess_logging
 
 setup_subprocess_logging()
@@ -834,8 +776,9 @@ logger = get_logger("tests.child")
 logger.debug("child_debug")
 logger.info("child_info")
 logger.warning("child_warning")
-log_info("Found 3 documents")
-log_warning("Skipping a knowledge file above the read cap")
+stdlib_logger = logging.getLogger("tests.stdlib")
+stdlib_logger.info("Found 3 documents")
+stdlib_logger.warning("Skipping a knowledge file above the read cap")
 """
 
     completed = subprocess.run(
@@ -850,7 +793,7 @@ log_warning("Skipping a knowledge file above the read cap")
     records = _stderr_records(completed.stderr)
     assert [(record["event"], record["level"], record["logger"]) for record in records] == [
         ("child_warning", "warning", "tests.child"),
-        ("Skipping a knowledge file above the read cap", "warning", "agno"),
+        ("Skipping a knowledge file above the read cap", "warning", "tests.stdlib"),
     ]
     assert all("timestamp" in record for record in records)
 

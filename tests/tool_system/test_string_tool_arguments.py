@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Literal, Optional
 
 import pytest
-from agno.tools.function import Function
 
 from mindroom.tool_system.invocation import parse_tool_arguments
 from mindroom.tool_system.tool_function import ToolFunction
-from tests.agent_tool_helpers import offered_agno_function
+from mindroom.tool_system.toolkits import adapt_callable
 
 LITERAL_WORDS = ("none", "None", "null", "NULL", "true", "True", "false", " FALSE ")
 BOOLEAN_WORDS = ("true", "True", "false", " FALSE ")
@@ -30,9 +30,15 @@ def note(
 
 
 def _note(*, strict: bool = False) -> ToolFunction:
-    function = Function.from_callable(note)
-    function.strict = strict or None
-    return offered_agno_function(function)
+    function = adapt_callable(note)
+    if not strict:
+        return function
+    parameters = {
+        **function.parameters,
+        "required": list(function.parameters["properties"]),
+        "additionalProperties": False,
+    }
+    return replace(function, parameters=parameters, strict=True)
 
 
 def _hand_written(properties: dict[str, object], **schema: object) -> ToolFunction:
@@ -95,7 +101,7 @@ def test_a_string_with_a_default_reads_null_words_as_left_out(list_page: object,
 
     Agno leaves null out of the schema of ``Optional[str]`` and of a plain default, so the default decides.
     """
-    function = offered_agno_function(Function.from_callable(list_page))
+    function = adapt_callable(list_page)
 
     assert _parsed(function, json.dumps({"page_token": word})) == {"page_token": None}
 

@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 import jwt
 import pytest
-from agno.tools import Toolkit
 from fastapi.testclient import TestClient
 
 from mindroom import agents
@@ -25,6 +24,7 @@ from mindroom.api import config_lifecycle
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
 from tests.api.test_mcp_gateway_api import (

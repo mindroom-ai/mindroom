@@ -12,8 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
-from agno.media import Image
-from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
@@ -63,6 +61,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.hooks import MessageEnvelope
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
+from mindroom.llm.media import Image
 from mindroom.llm.messages import Message as OwnedMessage
 from mindroom.llm.messages import is_queued_notice_message
 from mindroom.llm.runs import AnyRunRecord, RunRecord
@@ -96,6 +95,7 @@ from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclai
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
@@ -3033,9 +3033,9 @@ async def test_queued_notice_logs_once_per_response_turn() -> None:
 async def test_notice_follows_a_tool_batch_media_follow_up_message() -> None:
     """The loop appends a tool's media follow-up before the batch hooks run, so the queued notice stays last."""
 
-    def generate() -> ToolResult:
+    def generate() -> ToolValue:
         """Generate an image."""
-        return ToolResult(content="generated image", images=[Image(url="https://example.com/image.png")])
+        return ToolValue(content="generated image", images=(Image(url="https://example.com/image.png"),))
 
     model = ScriptedModel([calls(tool_call("generate", "call_1")), answer("Done")])
     with queued_message_signal_context(_StaticQueuedState(pending=True)):

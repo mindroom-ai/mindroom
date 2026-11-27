@@ -88,12 +88,12 @@ from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.shell.supervisor import _ShellSupervisorManager
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction, ToolGate
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.tools.triggers import _NON_CODE_TRIGGER_ACTIONS
 from tests.access_schema_support import joined_members_response

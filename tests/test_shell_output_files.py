@@ -19,10 +19,10 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.shell.execution import kill_all_records, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
 from tests.api.sandbox_runner_support import execute_call
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
     from mindroom.shell.execution import ShellRunResult
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
     from mindroom.workers.protocol import ExecuteResponse
 
 
@@ -43,7 +43,7 @@ class _Executed:
     result: object
 
 
-async def _run(toolkit: AnyToolkit, arguments: dict[str, object]) -> _Executed:
+async def _run(toolkit: Toolkit, arguments: dict[str, object]) -> _Executed:
     """Run ``run_shell_command`` with ``arguments`` as an agent's run calls it."""
     function = toolkit_function(toolkit, "run_shell_command")
     assert function is not None
@@ -58,7 +58,7 @@ def shell_toolkit(
     request: pytest.FixtureRequest,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[AnyToolkit]:
+) -> Iterator[Toolkit]:
     """Build the registered tool, optionally backed by a real worker supervisor."""
     manager = _ShellSupervisorManager()
     monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
@@ -86,7 +86,7 @@ def shell_toolkit(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start_fails", [False, True])
 async def test_output_ownership_is_independent_of_message_wording(
-    shell_toolkit: AnyToolkit,
+    shell_toolkit: Toolkit,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     start_fails: bool,
@@ -124,7 +124,7 @@ async def test_output_ownership_is_independent_of_message_wording(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("lines", "failure"), [(125000, False), (250000, False), (125000, True)])
 async def test_redirect_saves_complete_shell_output(
-    shell_toolkit: AnyToolkit,
+    shell_toolkit: Toolkit,
     tmp_path: Path,
     lines: int,
     failure: bool,
@@ -143,7 +143,7 @@ async def test_redirect_saves_complete_shell_output(
 
 
 @pytest.mark.asyncio
-async def test_plain_shell_output_still_honors_tail(shell_toolkit: AnyToolkit) -> None:
+async def test_plain_shell_output_still_honors_tail(shell_toolkit: Toolkit) -> None:
     """An explicit redirect must not change later ordinary calls on the same toolkit."""
     result = await _run(shell_toolkit, {"args": "printf 'one\\ntwo\\nthree\\n'", "tail": 2})
 
@@ -156,7 +156,7 @@ async def test_plain_shell_output_still_honors_tail(shell_toolkit: AnyToolkit) -
 
 
 @pytest.mark.asyncio
-async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) -> None:
+async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: Toolkit) -> None:
     """A failed command states its exit code before both output streams, locally and on a worker."""
     result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
 
@@ -166,7 +166,7 @@ async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) 
 
 @pytest.mark.asyncio
 async def test_a_saved_success_keeps_stdout_in_the_file_and_names_its_stderr_in_the_receipt(
-    shell_toolkit: AnyToolkit,
+    shell_toolkit: Toolkit,
     tmp_path: Path,
 ) -> None:
     """The file holds stdout exactly, and the receipt says how much stderr there was and nothing else of it."""
@@ -203,7 +203,7 @@ async def test_a_saved_success_counts_all_its_stderr_past_the_capture_cap(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """Redirected nonterminal CLI output must use the same complete failure formatting."""
     result = await _run(
         shell_toolkit,
@@ -280,7 +280,7 @@ async def test_capture_limit_error_keeps_the_exit_code(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """A command killed by a signal, such as the OOM killer's SIGKILL, saves no file but reports its exit code."""
     destination = tmp_path / "killed.txt"
     destination.write_text("keep existing")
@@ -297,7 +297,7 @@ async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: AnyT
 
 
 @pytest.mark.asyncio
-async def test_publication_rechecks_destination(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_publication_rechecks_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """Replacing a destination parent with an escaping symlink while running cannot write outside the workspace."""
     parent = tmp_path / "reports"
     parent.mkdir()
@@ -326,7 +326,7 @@ async def test_publication_rechecks_destination(shell_toolkit: AnyToolkit, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_cancelled_capture_does_not_publish(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """Cancellation kills an active process and cannot publish its incomplete output."""
     function = toolkit_function(shell_toolkit, "run_shell_command")
     assert function is not None
@@ -356,7 +356,7 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: AnyToolkit, tmp
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """A command stopped at its timeout keeps the destination and reports its output so far in the receipt."""
     destination = tmp_path / "killed.txt"
     destination.write_text("keep existing")
@@ -612,7 +612,7 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-async def test_spawn_error_preserves_generic_redirection(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+async def test_spawn_error_preserves_generic_redirection(shell_toolkit: Toolkit, tmp_path: Path) -> None:
     """A command that cannot start still redirects its ordinary shell error result."""
     result = await _run(
         shell_toolkit,
@@ -664,7 +664,7 @@ async def test_publication_io_failure_settles_capture(
 
 @pytest.mark.asyncio
 async def test_inherited_pipe_cannot_publish_partial_capture(
-    shell_toolkit: AnyToolkit,
+    shell_toolkit: Toolkit,
     tmp_path: Path,
 ) -> None:
     """A descendant retaining a pipe beyond the existing grace period must not overwrite the destination."""
@@ -692,7 +692,7 @@ async def test_inherited_pipe_cannot_publish_partial_capture(
 
 @pytest.mark.asyncio
 async def test_capture_includes_descendant_output_within_grace(
-    shell_toolkit: AnyToolkit,
+    shell_toolkit: Toolkit,
     tmp_path: Path,
 ) -> None:
     """A short-lived descendant can finish writing within the grace after its command exits."""

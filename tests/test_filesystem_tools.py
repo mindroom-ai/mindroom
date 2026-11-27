@@ -35,11 +35,11 @@ from mindroom.path_safety import (
     resolve_base_dir_path,
     split_search_pattern,
 )
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_parameters, validated_entrypoint
+from mindroom.tool_system.toolkits import adapt_toolkit
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager

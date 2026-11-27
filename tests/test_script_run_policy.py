@@ -7,8 +7,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 
 import mindroom.agents as agents_module
 import mindroom.tool_system.plugins as plugins_module
@@ -24,7 +22,8 @@ from mindroom.script_runs.policy import (
     resolve_script_launch_grants,
     resolve_script_launch_toolkit_names,
 )
-from mindroom.tool_system import agno_toolkits
+from mindroom.tool_system import toolkits
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -101,7 +100,13 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
     assert all(grant.toolkit_name != "workflow" for grant in grants)
 
 
-def _echo(text: str) -> str:
+def echo(text: str) -> str:
+    """Echo text."""
+    return text
+
+
+def other(text: str) -> str:
+    """Echo text under another name."""
     return text
 
 
@@ -152,8 +157,8 @@ def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
     )
 
     def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
-        # Agno's own name for the toolkit differs from the configured one the grant names.
-        return Toolkit(name="arithmetic", tools=[Function(name="echo", entrypoint=_echo)])
+        # The toolkit's own name differs from the configured one the grant names.
+        return Toolkit(name="arithmetic", tools=[echo])
 
     monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
 
@@ -178,30 +183,6 @@ def test_script_filters_see_an_implied_tools_function_under_the_authored_toolkit
 
     assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "get_attachment"),)
     assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "get_attachment")) is not None
-
-
-def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A function setting a field MindRoom refuses costs the grants nothing when the context's filter drops it."""
-    context = _context_for_config(
-        tmp_path,
-        Config(
-            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
-            defaults=DefaultsConfig(tools=[]),
-            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-        ),
-    )
-    context = replace(context, tool_function_filter=lambda function: function.name != "hooked")
-
-    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
-        hooked = Function(name="hooked", entrypoint=_echo, pre_hook=_echo)
-        return Toolkit(name=tool_name, tools=[hooked, Function(name="echo", entrypoint=_echo)])
-
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
-
-    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
 
 
 @pytest.mark.parametrize(
@@ -436,18 +417,18 @@ def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: py
     def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
         return Toolkit(
             name=tool_name,
-            tools=[Function(name="echo", entrypoint=_echo), Function(name="other", entrypoint=_echo)],
+            tools=[echo, other],
         )
 
     adapted: list[str] = []
-    adapt = agno_toolkits._adapt
+    adapt = toolkits._adapt_function
 
-    def counting_adapt(function: Function, finishing: object) -> object:
-        adapted.append(function.name)
-        return adapt(function, finishing)
+    def counting_adapt(toolkit: Toolkit, name: str, finishing: object) -> object:
+        adapted.append(name)
+        return adapt(toolkit, name, finishing)
 
     monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
-    monkeypatch.setattr(agno_toolkits, "_adapt", counting_adapt)
+    monkeypatch.setattr(toolkits, "_adapt_function", counting_adapt)
 
     resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo"))
 

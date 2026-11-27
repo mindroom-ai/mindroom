@@ -17,8 +17,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import MagicMock
 
-from agno.tools import Toolkit
-
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
@@ -32,6 +30,7 @@ from mindroom.streaming import ReplacementStreamingResponse
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (

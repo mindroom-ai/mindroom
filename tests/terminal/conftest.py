@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.authoring import Toolkit
 
 RUNNER_TOKEN = "runner-token"  # noqa: S105
 # Alice's turn of the agent `code` in a room.
@@ -90,7 +90,7 @@ def primary_paths(tmp_path: Path, runner_url: str, **env: str) -> RuntimePaths:
     )
 
 
-def agent_toolkit(tool_name: str, config: Config, paths: RuntimePaths) -> AnyToolkit:
+def agent_toolkit(tool_name: str, config: Config, paths: RuntimePaths) -> Toolkit:
     """Build the agent `code`'s toolkit ``tool_name`` as its turn for ``IDENTITY`` builds it."""
     registry = builtin_tool_registry()
     toolkit = build_agent_toolkit(

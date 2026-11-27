@@ -18,7 +18,6 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
     job_summary,
 )
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -29,6 +28,7 @@ from mindroom.tool_system.output_files import (
 )
 from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import configure_toolkit_functions
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -163,9 +163,9 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Tools with `background_after` can continue as background jobs without cancelling: "
-                "omit/null waits until completion or a newer message you answer (or the tool's default cap), "
-                "0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
+                "Tools with `background_after` accept an optional wait time in seconds before continuing as background "
+                "jobs without cancelling: omit/null waits until completion or a newer message you answer (or the "
+                "tool's default cap), 0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
             ),
         )
 

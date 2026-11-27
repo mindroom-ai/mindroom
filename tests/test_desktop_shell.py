@@ -29,6 +29,7 @@ def request(
     requester_id: str = REQUESTER,
     agent_name: str = AGENT,
     lifetime_ms: int = 60_000,
+    max_runtime_seconds: float | None = None,
 ) -> DesktopShellRequest:
     """Build one short-lived request for real subprocess tests."""
     return DesktopShellRequest(
@@ -39,6 +40,7 @@ def request(
         str(cwd),
         int(time.time() * 1000) + lifetime_ms,
         timeout,
+        max_runtime_seconds=max_runtime_seconds,
     )
 
 
@@ -141,13 +143,47 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_commands_use_the_captured_environment_and_merge_output(tmp_path: Path) -> None:
-    """The login environment reaches commands, stdin is detached, and stderr keeps terminal order."""
+async def test_commands_use_the_captured_environment_and_split_streams(tmp_path: Path) -> None:
+    """Commands run with the captured environment and always capture stdout and stderr separately."""
     shell = local_shell()
     shell.grant(60)
     command = 'printf "$MINDROOM_TEST_LOGIN_VALUE\\n"; printf "warning\\n" >&2; cat; printf "last"'
-    result = await shell.execute(request(command, tmp_path))
-    assert completed_output(result) == "from-login\nwarning\nlast"
+
+    result = await shell.execute(request(command, tmp_path, request_id="r-split"))
+    assert result.state == "completed"
+    assert result.exit_code == 0
+    assert result.output.read().decode() == "from-login\nlast"
+    assert result.output.read_stderr().decode() == "warning\n"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_late_approval_near_ttl_backgrounds_immediately_without_overwaiting(tmp_path: Path) -> None:
+    """When remaining TTL is within the safety margin, execute starts and backgrounds immediately."""
+    shell = local_shell()
+    shell.grant(60)
+    started = time.monotonic()
+    result = await shell.execute(request("sleep 30", tmp_path, timeout=30, lifetime_ms=400))
+    elapsed = time.monotonic() - started
+    assert result.state == "running"
+    assert result.handle is not None
+    assert elapsed < 0.5
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_stderr_offset_is_rejected_without_dropping_handle(tmp_path: Path) -> None:
+    """An invalid stderr_offset fails without modifying or handing over a completed handle."""
+    shell = local_shell()
+    shell.grant(60)
+    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path))
+    assert result.handle is not None
+    for bad in (-1, 99, 1):
+        with pytest.raises(DesktopShellError, match="stderr offset"):
+            shell.check(REQUESTER, AGENT, result.handle, stderr_offset=bad)
+    checked = shell.check(REQUESTER, AGENT, result.handle, offset=0, stderr_offset=0)
+    assert checked.output.read().decode() == "ok"
+    assert checked.output.read_stderr().decode() == "é"
     await shell.close()
 
 
@@ -1072,4 +1108,87 @@ async def test_unapproved_or_invalid_shell_request_does_not_evict_finished_handl
     checked = shell.check(REQUESTER, AGENT, finished.handle)
     assert checked.output.read() == b"keep-me\n"
     shell.hand_over(checked)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_request_dismisses_pending_approval_and_kills_handle(tmp_path: Path) -> None:
+    """cancel_request dismisses a caller's pending approval immediately (never running) or force-kills its handle."""
+    shell = local_shell()
+    marker = tmp_path / "never-created"
+    pending_task = asyncio.create_task(
+        shell.execute(request(f"touch {marker}", tmp_path, request_id="req-pending")),
+    )
+    await wait_pending(shell)
+
+    # Wrong caller or wrong request_id cannot dismiss the pending prompt.
+    assert shell.cancel_request("@other:example.org", AGENT, "req-pending") == "not_found"
+    assert shell.cancel_request(REQUESTER, AGENT, "req-other") == "not_found"
+    assert shell.status()["pending"] is not None
+
+    # Exact caller dismisses the prompt immediately and the command never runs.
+    assert shell.cancel_request(REQUESTER, AGENT, "req-pending") == "cancelled"
+    assert shell.status()["pending"] is None
+    with pytest.raises(DesktopShellError, match="cancelled before approval"):
+        await asyncio.wait_for(pending_task, timeout=2)
+    assert not marker.exists()
+
+    # After a command starts and returns a handle, cancel_request(request_id=...) force-kills that handle.
+    shell.grant(60)
+    running = await shell.execute(request("sleep 30", tmp_path, request_id="req-bg", timeout=1))
+    assert running.state == "running"
+    assert running.handle is not None
+    assert shell.cancel_request("@other:example.org", AGENT, "req-bg") == "not_found"
+    assert shell.cancel_request(REQUESTER, AGENT, "req-bg") == "killed"
+    finished = await check_until_finished(shell, running.handle)
+    assert finished.state == "killed"
+    assert finished.exit_code == -signal.SIGKILL
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_max_runtime_seconds_enforced_locally_and_kills_process_group(tmp_path: Path, pids: Path) -> None:
+    """DesktopShell validates max_runtime_seconds, enforces it locally, kills the process group, and sets timed_out."""
+    shell = local_shell()
+    shell.grant(60)
+
+    for idx, bad_value in enumerate((0, -1, True, float("nan"), float("inf"), "5")):
+        with pytest.raises(DesktopShellError, match="max_runtime_seconds"):
+            await shell.execute(
+                request("echo nope", tmp_path, request_id=f"bad-{idx}", max_runtime_seconds=bad_value),  # type: ignore[arg-type]
+            )
+
+    fast = await shell.execute(
+        request("printf 'fast'", tmp_path, request_id="fast-ok", timeout=5, max_runtime_seconds=5.0),
+    )
+    assert fast.state == "completed"
+    assert fast.timed_out is False
+    assert fast.output.read() == b"fast"
+    shell.hand_over(fast)
+
+    child_pid_file = pids / "child.pid"
+    command = f"sleep 30 & echo $! > {shlex.quote(str(child_pid_file))}; printf 'before\n'; wait"
+    started_at = time.monotonic()
+    result = await shell.execute(
+        request(command, tmp_path, request_id="timed-out", timeout=30, max_runtime_seconds=0.35),
+    )
+    assert time.monotonic() - started_at < 5.0
+    assert result.handle is not None
+    finished = result if result.state != "running" else await check_until_finished(shell, result.handle)
+    assert finished.state == "killed"
+    assert finished.timed_out is True
+    assert finished.output.read() == b"before\n"
+    shell.hand_over(finished)
+
+    # Child process in the same process group must be gone.
+    child_pid = int(child_pid_file.read_text().strip())
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.05)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
     await shell.close()

@@ -42,7 +42,6 @@ from mindroom.hooks import (
 from mindroom.redaction import REDACTED
 from mindroom.secret_requests import _TemporarySecrets, secret_holder
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -51,6 +50,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths

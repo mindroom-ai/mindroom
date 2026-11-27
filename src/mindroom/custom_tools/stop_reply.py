@@ -16,6 +16,8 @@ from mindroom.tool_system.authoring import Toolkit
 class StopReplyTools(Toolkit):
     """Stop the reply another agent or team is writing."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(name="stop_reply", tools=[self.stop_agent_reply])
 
