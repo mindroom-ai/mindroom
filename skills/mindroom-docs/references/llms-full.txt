@@ -5114,11 +5114,11 @@ Skills without `metadata.openclaw` are always eligible.
 
 Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
-- `get_skill_reference(skill_name, reference_path)` reads a reference document, and lists the skill's references when called without a path
-- `get_skill_script(skill_name, script_path)` reads a script, and lists the skill's scripts when called without a path
+- `skill(action="instructions", name=...)` loads the full instructions for a skill and lists its references and scripts (`path` must be omitted)
+- `skill(action="reference", name=..., path=...)` reads a listed reference document, and lists the skill's references when called without `path`
+- `skill(action="script", name=..., path=...)` reads a listed script, and lists the skill's scripts when called without `path`
 
-`get_skill_script` never runs a script, whichever skill it comes from.
+`skill(action="script", ...)` never runs a script, whichever skill it comes from.
 Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
@@ -5193,7 +5193,8 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 ### The skill_manage tool
 
 Agents with skill learning enabled get a `skill_manage` tool, and the review writes skills with the same tool.
-Other agents can list `skill_manage` in `tools` to save skills from chat.
+When an agent with skill learning also has active tool search (at least one other deferred toolkit), auto-injected `skill_manage` is automatically deferred behind tool search while still preserving forked review prompt-cache reuse.
+Other agents can list `skill_manage` in `tools` (inline or with `defer: true`) to save skills from chat.
 Its actions are `create` a skill from a full `SKILL.md`, `patch` text in `SKILL.md` or a support file, `edit` to replace `SKILL.md`, and `write_file` or `remove_file` for one support file directly under `references/` or `scripts/`.
 It cannot delete a skill; unused learned skills are archived, and you remove any skill by deleting its directory.
 
@@ -6597,19 +6598,20 @@ agents:
 
 | Function | What it does |
 |----------|--------------|
-| `list_attachments(target=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; `target` returns one attachment |
-| `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
+| `attachment(action="list", attachment_id=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; pass `attachment_id` to filter to one |
+| `attachment(action="get", attachment_id=..., mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
+| `attachment(action="register", path=...)` | Turn a local file into a new attachment ID for this conversation |
+| `attachment(action="inline_image", ...)` (`attachment_id=...` or `path=...`, `alt=None`) | Upload an image (by context `attachment_id` or local `path`) and return Markdown to embed it in a reply |
 | `view_file(path)` | Show an image from the workspace to the model |
-| `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
-| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply |
 
 ```python
-list_attachments()
-get_attachment("att_abc123")
-get_attachment("att_abc123", view=True)
-get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
+attachment(action="list")
+attachment(action="get", attachment_id="att_abc123")
+attachment(action="get", attachment_id="att_abc123", view=True)
+attachment(action="get", attachment_id="att_abc123", mindroom_output_path="incoming/plan.pdf")
 view_file(path="plots/result.png")
-register_attachment("exports/report.csv")
+attachment(action="register", path="exports/report.csv")
+attachment(action="inline_image", path="plots/result.png", alt="Result")
 matrix_message(message="Here is the report.", attachments=["att_abc123", "exports/report.csv"])
 ```
 
@@ -6620,24 +6622,24 @@ To post files into Matrix, pass attachment IDs or file paths to `matrix_message`
 
 ### Viewing Content
 
-`get_attachment(attachment_id, view=True)` sends an image, audio, video, or document (including PDF and plain text) to the model, up to 20 MiB.
+`attachment(action="get", attachment_id=..., view=True)` sends an image, audio, video, or document (including PDF and plain text) to the model, up to 20 MiB.
 The model and its provider must support that media type and may have stricter limits.
 `view=True` cannot be combined with `mindroom_output_path`.
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
-`view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
+`view_file` shows one image to the calling model in one call; to view an attachment, use `attachment(action="get", attachment_id=..., view=True)`, and use `read_file` for ordinary text and code.
 Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace, or in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, inside that directory.
 Turns without a Matrix room, in [headless runs](https://docs.mindroom.chat/headless/) and through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), offer `view_file` alone of the `attachments` functions.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
-Image viewing through `get_attachment(view=True)` follows the same limits.
+Image viewing through `attachment(action="get", attachment_id=..., view=True)` follows the same limits.
 Viewing does not post anything to Matrix; to share the image, pass the returned attachment ID to `matrix_message`.
 That ID works within the same tool run; in later turns, view the original path again.
 Conversation history keeps up to four recently viewed images within 10 MiB in total, and older ones are replaced by a notice.
 
 ### Saving Files to the Workspace
 
-`get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
+`attachment(action="get", attachment_id=..., mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
 Save attachments this way before processing them with `filesystem` or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
@@ -6645,8 +6647,8 @@ See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for ho
 
 ### Inline Images
 
-`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
-using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment(action="inline_image", attachment_id=...|path=..., alt=None)` accepts either a context attachment ID (`attachment_id`) or a local file path (`path`),
+using the same path rules as registering attachments. It uploads the image to Matrix and returns
 `attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
 Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
 The alt text defaults to the filename.
@@ -6655,11 +6657,11 @@ Only images with an `image/*` MIME type and a recognized image byte signature ar
 up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
 In encrypted rooms, MindRoom encrypts the upload (or reuses turn-scoped encrypted image media)
 and attaches decryption keys under `io.mindroom.inline_media` for each embedded image.
-When `inline_image` refuses, send the image through `matrix_message(attachments=[reference])` instead.
+When `attachment(action="inline_image", ...)` refuses, send the image through `matrix_message(attachments=[...])` instead.
 
 ### Registering Local Files
 
-`register_attachment(file_path)` copies a local file into attachment storage and returns a new attachment ID for the current room and thread, usable by later calls in the same run.
+`attachment(action="register", path=...)` copies a local file into attachment storage and returns a new attachment ID for the current room and thread, usable by later calls in the same run.
 Later changes to the source file do not change the attachment.
 Registered files are limited to 64 MiB.
 Paths, including the targets of symbolic links, follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting:
@@ -6679,7 +6681,7 @@ Pruning never deletes workspace files, the source files of registered attachment
 - **Incoming media size**: received files must be at most 64 MiB (67,108,864 bytes), including after decryption; send a smaller file if one is rejected.
   Homeservers and model providers may set lower limits.
 - **Auto-inlined files per turn**: incoming text files are included inline automatically up to 50 KiB (51,200 bytes) per turn (matching the inline tool-output threshold), and all incoming files (text, PDFs, and other documents) share a cap of half the remaining context headroom when a context or replay window applies; PDFs are sized by page count rather than byte size.
-  Larger files are omitted from the inline prompt with a note telling the agent to save or inspect them with `get_attachment` instead.
+  Larger files are omitted from the inline prompt with a note telling the agent to save or inspect them with `attachment(action="get", ...)` instead.
 - **Earlier media per turn**: a turn fetches at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
   An earlier file that fails to download is not tried again for an hour.
 
@@ -9643,7 +9645,7 @@ These configurations fail validation:
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
 - Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
-- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
+- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, and `self_config` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
@@ -9773,7 +9775,7 @@ mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
-A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.list_attachments`.
+A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.attachment` (`{"action": "list"}`).
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
 
@@ -14599,7 +14601,7 @@ Each agent, room, and requester may make 12 calls per 30 seconds, and each attac
 ## Attachments
 
 Each `attachments` entry is an [attachment ID](https://docs.mindroom.chat/attachments/#attachment-ids) (`att_*`) or a local file path, and files are sent in the listed order.
-Local paths are registered as new attachments and follow the same [path rules and limits as `register_attachment`](https://docs.mindroom.chat/attachments/#registering-local-files).
+Local paths are registered as new attachments and follow the same [path rules and limits as `attachment(action="register", ...)`](https://docs.mindroom.chat/attachments/#registering-local-files).
 Use `./att_filename` for a local file whose name starts with `att_`.
 Every reference is checked before anything is sent.
 
@@ -15686,7 +15688,7 @@ To give an agent read access only, set [`write: false`](#limit-what-an-agent-can
 `confluence_list_attachments` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
 
 `confluence_download_attachment` stores the file in MindRoom's [attachment storage](https://docs.mindroom.chat/attachments/) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
-The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
+The ID is usable in the same turn, for example with `attachment(action="get", attachment_id=...)` to inspect the file, `attachment(action="get", attachment_id=..., mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
 Downloads are limited to 64 MiB, the limit for [registered files](https://docs.mindroom.chat/attachments/), which cannot be raised.
@@ -15762,7 +15764,6 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 | `slack_edit` | Replaces a message's text | the person's own messages | the app's own messages, in the agent's channels |
 | `slack_delete` | Deletes a message | messages the person may delete in Slack | the app's own messages, in the agent's channels |
 | `slack_react` | Adds an emoji reaction to a message | as the person | as the app, in the agent's channels |
-| `slack_watch` | Starts, stops, or checks a [watch](#watches) | in a Matrix conversation | not offered |
 
 Functions take a conversation ID such as `C0123ABCD`, `<conversation>:<ts>` such as `C0123ABCD:1714000000.000100`, or a message link, never a channel name.
 `slack_upload` takes a path in the agent's workspace and follows the agent's [`file_access`](https://docs.mindroom.chat/configuration/agents/) setting.
@@ -15959,49 +15960,48 @@ A channel has one answering agent, so two agents cannot both set `room` with the
 
 ## Watches
 
-A watch forwards a person's own Slack mentions and direct messages into the Matrix room where they start it.
+A Slack watch forwards a person's own Slack mentions, bound thread replies, and direct messages into a private Matrix room through the unified `triggers` toolkit (`source_id="slack"`).
 It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
+Existing `<control_state>/slack/watches.json` watches and live thread bindings are migrated automatically on startup and archived as `watches.json.migrated`.
 
-In the room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `slack_watch`:
+In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers(action="subscribe_event", source_id="slack", ...)`:
 
-- `action="start"` creates the watch, or replaces the one the person has with this agent in this room.
-- `action="stop"` ends it, and `action="status"` shows its filters and, when it is not delivering, why.
-- `mentions` (default `true`) delivers messages that mention the person, including in group direct messages.
-- `direct_messages` (default `true`) delivers every message others send in the person's direct messages and group direct messages.
-- `channels` (optional) limits channel messages to those channel IDs; direct messages are not limited by it.
-  Replies in a thread where the person was mentioned also arrive, within those channels.
+- `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
+- `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
+- Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives, and `max_fires_per_hour=60` (capped by `external_trigger_policy.max_fires_per_hour`).
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
-Each delivery opens a thread in the room, such as "Slack direct message for you from Dana", with the Slack text, its author, its channel unless it is a direct message, and a link.
-Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, until 7 days pass without a message.
-The agent can then summarize it or draft a reply; its turn runs as the watch's owner.
-A watch lasts until it is stopped.
+Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
+Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.
+The agent's turn runs as the watch's owner.
 
-A watch delivers only while all of these hold, so someone else never reads a private message:
+A Slack watch delivers only while all of these hold, so someone else never reads a private message:
 
 - Only the owner and MindRoom's own accounts are in the room, and nobody is invited; a bridge or other bot counts as a person.
 - The room hides earlier messages from people who join later.
   A [personal room](https://docs.mindroom.chat/personal-rooms/) MindRoom created already does.
-- The owner's Slack connection works and is still the Slack account the watch started with.
+- The target agent still has personal Slack configured, the Slack app has an `app_token`, and the owner's Slack connection is still the Slack account bound at subscribe time.
 
-`slack_watch(action="status")` reports a paused watch with one of these texts:
+`triggers(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
 
-| Status | Fix |
+| `paused_reason` | Fix |
 | --- | --- |
-| `paused: Slack is not connected` | Connect Slack again from the link the agent gives. |
-| `paused: Slack account changed; start the watch again` | Start the watch again. |
-| `paused: you are not in this room` | Rejoin the room. |
-| `paused: another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
-| `paused: people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
-| `paused: room members could not be checked` | Try again when the homeserver answers. |
+| `Slack is not connected` | Connect Slack again from the link the agent gives. |
+| `Slack account changed; recreate this subscription` | Delete and recreate the Slack trigger subscription. |
+| `The MindRoom Slack app needs an app-level token for watches` | Add `app_token` to `slack_app`. |
+| `the watch's agent no longer has personal Slack` | Re-enable personal `slack` on the target agent or recreate the subscription with another agent. |
+| `you are not in this room` | Rejoin the room. |
+| `another person is in this room` | Remove the other person or invitation, or watch from a room only you are in. |
+| `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
+| `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn that a watch started, `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and `slack_watch` start and stop refuse with `Ask me in a new message to change your Slack watch`.
-A new message from the owner in the same thread can post.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_post`, `slack_edit`, `slack_delete`, `slack_react`, and `slack_upload` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
 ## MCP
 
 `slack` works through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/): select the agent and the `slack` tool on the Connections portal, and calls use the signed-in person's own Slack account, as in Matrix.
-`slack_watch` does not work there.
 A project agent's channels are readable over MCP by everyone allowed to use that agent, and writable unless `write` is `false`, because its calls use the app's token.
 Which agents the gateway offers is described in [Agent eligibility](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility).
 
@@ -18158,7 +18158,7 @@ Have the agent retry with a smaller payload, such as saving large content to a w
 ## Tools That Cannot Pause for Approval
 
 The [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) has no approval cards, so it hides every tool function that matches a required-approval rule, including script rules.
-Skill and knowledge-search functions such as `get_skill_script` and `search_knowledge_base` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
+Skill and knowledge-search functions (`skill` and `search_knowledge_base`) cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
 ## Who Posts the Card
@@ -19257,7 +19257,7 @@ Do not report or "fix" these; they are deliberate.
 - Hosted tenants may set `file_access: unrestricted`; it exposes only their own instance.
 - With `file_access: workspace`, the browser, attachments, `matrix_message`, `chat_ui` canvases, Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack uploads may still use every file in the agent workspace.
 - A `chat_ui` canvas can leak what the user types into it through WebRTC, which browsers do not let a page block, or, with libraries or remote assets on, through the addresses it requests, so agents should only show pages they wrote; remote assets also show every host a page names the viewer's IP address; see [Privacy and safety](https://docs.mindroom.chat/canvases/#privacy-and-safety).
-- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `get_attachment(mindroom_output_path=...)` and then passes that workspace path.
+- The browser and `matrix_message` also accept `att_*` IDs of attachments available in the conversation, and `agent_manager`'s `set_avatar` accepts only those IDs; Gmail, Google Drive, Microsoft Files, Outlook mail, and Slack take file paths only, so an agent first saves a received attachment into the workspace with `attachment(action="get", attachment_id=..., mindroom_output_path=...)` and then passes that workspace path.
 - `mindroom_output_path`, attachment saves, Google Drive and Microsoft Files downloads, Outlook mail attachment downloads, Slack downloads, `file_generation` saves, `visualization` charts, and report publishing always write inside the workspace regardless of `file_access`, because they produce MindRoom-owned output.
 - Writes into `.git` directories stay blocked for `filesystem` in both modes, because MindRoom runs Git in checkouts that may sit inside agent workspaces.
 - Live reply frames in an encrypted room use the room's current Megolm session without counting toward its 100-message rotation, so one session covers more ciphertexts, including live-only text, reasoning, and running tools' output that need not equal any stored event; age and membership rotation still apply.
@@ -21111,6 +21111,7 @@ async def lifespan(lifecycle: PluginLifecycle):
 | `context()` | The plugin's [context](#plugin-context) under the config MindRoom serves now; it raises once that config no longer loads the plugin |
 | `process_state` | A dict that every start of this plugin shares for as long as the MindRoom process runs; a reload cancels no task kept in it |
 | `stop_reason` | Set before the stop code runs: `"reload"` when the plugin's new lifespan already started and can take over `process_state`, `"disabled"` when no new lifespan did because a config change removed or disabled the plugin or its new code failed to load or start, and `"shutdown"` when MindRoom stops, after its agents have stopped |
+| `register_event_source(source)` | Registers an [`EventSource`](#event-sources) on the primary runtime's reactive trigger service, returns its `EventSourceEmitter`, and auto-unregisters it when the lifespan stops |
 
 MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
 `mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
@@ -21125,6 +21126,71 @@ A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespa
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
+
+## Event sources
+
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
+
+Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
+Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
+
+```python
+# lifecycle.py
+from contextlib import asynccontextmanager
+
+from mindroom.plugin_api import EventSource, EventSourceDescriptor, PluginLifecycle
+
+
+class AlertsEventSource(EventSource):
+    source_id = "my-plugin-alerts"
+    description = "Incoming operational alerts from my-plugin."
+    allowed_kinds = ("fired", "resolved")
+    match_fields = ("severity",)
+    default_once = False
+    default_new_thread = True
+    default_thread_key_from_event = True
+
+
+@asynccontextmanager
+async def lifespan(lifecycle: PluginLifecycle):
+    emitter = lifecycle.register_event_source(AlertsEventSource())
+    lifecycle.process_state["alerts_emitter"] = emitter
+    yield
+```
+
+HTTP routes in `routes_module` can look up the active emitter for one of the plugin's own registered sources with `event_source_emitter(request, source_id)` from `mindroom.plugin_http`:
+
+```python
+# routes.py
+from fastapi import APIRouter, Request
+
+from mindroom.plugin_http import event_source_emitter
+
+router = APIRouter()
+
+
+@router.post("/webhook")
+async def receive_alert(request: Request) -> dict[str, int]:
+    # Verify the incoming provider signature or shared secret before emitting.
+    verify_provider_signature(request)
+    payload = await request.json()
+    emitter = event_source_emitter(request, "my-plugin-alerts")
+    enqueued = await emitter.emit(
+        kind=payload["kind"],
+        event_id=payload["id"],
+        title=payload.get("title"),
+        text=payload.get("body"),
+        thread_key=payload.get("incident_id"),
+        data={"severity": payload.get("severity", "info")},
+    )
+    return {"enqueued": enqueued}
+```
+
+Key contracts:
+
+- **Namespace:** A plugin's `source_id` must match `^[A-Za-z0-9_-]{1,64}$` and equal the plugin's `name` or start with `<name>_` or `<name>-`. Collisions with built-in sources, YAML `external_trigger_policy.event_sources`, or other plugins raise `ValueError`.
+- **Reload safety:** Registrations are token-fenced. During hot reload, the new lifespan atomically replaces the plugin's registration; when the old lifespan exits, its teardown leaves the replacement intact, and any call to the old `EventSourceEmitter.emit(...)` fails closed with `EventSourceInactiveError`.
+- **Access control & hooks on `EventSource`:** Override `describe_for_user(ctx) -> EventSourceDescriptor | None` to restrict which users can discover or subscribe to your source (returning `None` hides the source; otherwise any user with the `triggers` tool can subscribe). Always authenticate incoming webhook requests in your route before calling `event_source_emitter(...).emit(...)`. You can also override `validate_subscription(ctx, *, kind, match, existing_binding=None) -> ValidatedSubscription`, `matches_rule(rule, event, *, audience=None, has_thread_binding=False) -> bool`, `dry_run_audience(rule)`, `check_delivery_access(ctx, *, rule, event=None) -> EventSourceAccessDenial | None`, and `check_history_access(ctx, *, rule, event=None)` for per-user discovery, OAuth or room-privacy checks, ephemeral audience filtering, and private history gating. `EventSourceDescriptor.private_room_only` controls core listing visibility for non-owners, while plugins must enforce room and user access inside `validate_subscription`, `check_delivery_access` (returning `EventSourceAccessDenial`), and `check_history_access`. Returning `EventSourceAccessDenial(reason=..., retry=True)` retries the firing later, whereas `retry=False` (the default) skips it permanently.
 
 ## Worker services
 
@@ -25063,7 +25129,7 @@ For worker-routed `shell` calls with a resolved workspace, MindRoom sets `HOME`,
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
 As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
-For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
+For example, after `attachment(action="get", attachment_id="att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
 
@@ -25182,7 +25248,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
-| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |

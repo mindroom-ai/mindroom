@@ -646,7 +646,7 @@ def _request_config_and_event_source(
     except HTTPException as exc:
         raise HTTPException(status_code=503, detail="External event source configuration is not available") from exc
     policy = config.external_trigger_policy
-    if not policy.enabled or not policy.reactive_enabled:
+    if not policy.is_reactive_active:
         raise HTTPException(status_code=404, detail="External event source not found")
     source = policy.event_sources.get(source_id)
     if source is None:

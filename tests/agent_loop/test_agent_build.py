@@ -235,32 +235,18 @@ def test_a_rule_on_the_function_an_alias_names_gates_the_aliased_function(
     assert gated == {"add": ToolGate.POLICY}
 
 
-def test_a_rule_hiding_one_skill_function_names_it_in_the_prompt(tmp_path: Path) -> None:
-    """When approval hides some skill functions, the rest are offered and the prompt names the hidden ones."""
+def test_a_rule_hiding_skill_omits_skill_tool_and_catalog(tmp_path: Path) -> None:
+    """Gating `skill` hides the skill function, the skills catalog, and skill usage guidance."""
     config, runtime_paths = _config(tmp_path)
     config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="get_skill_script", action="require_approval")],
+        rules=[ApprovalRuleConfig(match="skill", action="require_approval")],
     )
 
     build = _build(config, runtime_paths, supports_native_tool_approval=True)
 
-    assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"get_skill_instructions", "get_skill_reference"}
-    assert build.prompt.skills_block is not None
-    assert "These skill functions are not available to you: get_skill_script." in build.prompt.instructions
-
-
-def test_a_rule_hiding_get_skill_instructions_keeps_prompt_non_contradictory(tmp_path: Path) -> None:
-    """Gating get_skill_instructions alone leaves the remaining skill tools and qualifies the prompt hint."""
-    config, runtime_paths = _config(tmp_path)
-    config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="get_skill_instructions", action="require_approval")],
-    )
-
-    build = _build(config, runtime_paths, supports_native_tool_approval=True)
-
-    assert set(_offered(build)) == _CALCULATOR_FUNCTIONS | {"get_skill_reference", "get_skill_script"}
-    assert "These skill functions are not available to you: get_skill_instructions." in build.prompt.instructions
-    assert any("if available" in line for line in build.prompt.instructions)
+    assert set(_offered(build)) == _CALCULATOR_FUNCTIONS
+    assert build.prompt.skills_block is None
+    assert not any("skill(" in line for line in build.prompt.instructions)
 
 
 def _write_plugin_skill(plugin_root: Path, name: str) -> None:

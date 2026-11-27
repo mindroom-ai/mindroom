@@ -532,7 +532,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
 @pytest.mark.parametrize(
     ("authored", "function_name"),
     [
-        ("matrix_message", "list_attachments"),
+        ("matrix_message", "attachment"),
         ("openclaw_compat", "run_shell_command"),
         ("compact_context", "compact_context"),
     ],
