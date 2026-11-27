@@ -16,7 +16,7 @@ import httpx2
 import pytest
 
 from mindroom.llm.media import File, Image
-from mindroom.llm.messages import Message, model_provenance, stable_serialize
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance, stable_serialize
 from mindroom.llm.provider import DeferredTools, ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
@@ -247,7 +247,8 @@ def _claude_answer(route: ModelProvider, *blocks: dict[str, Any], **fields: Any)
     return Message(
         role="assistant",
         content="Pack a light rain jacket.",
-        provider_data={**model_provenance(route.identity.id, route.identity.provider), CLAUDE_BLOCKS_KEY: list(blocks)},
+        provider_data={CLAUDE_BLOCKS_KEY: list(blocks)},
+        meta=MessageMeta(model=ModelProvenance(route.identity.id, route.identity.provider)),
         from_history=True,
         **fields,
     )
@@ -298,10 +299,10 @@ def test_claude_counts_earlier_thinking_where_it_replays_it(family: str, replays
 def test_gemini_counts_a_signed_function_call_as_its_call_and_reported_reasoning(tmp_path: Path) -> None:
     """A function call Gemini signed replays its signature too, which costs the reasoning, not the ciphertext's length."""
     route = _route("gemini", tmp_path)
-    provenance = model_provenance(route.identity.id, route.identity.provider)
+    meta = MessageMeta(model=ModelProvenance(route.identity.id, route.identity.provider))
     metrics = MessageMetrics(tokens=TokenCounts(output_tokens=320, reasoning_tokens=300))
     call = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": '{"city": "Paris"}'}}
-    plain = Message(role="assistant", tool_calls=[call], provider_data=provenance, metrics=metrics)
+    plain = Message(role="assistant", tool_calls=[call], meta=meta, metrics=metrics)
     signed = replace(plain, tool_calls=[{**call, "thought_signature": "c2lnbmF0dXJl" * 400}])
 
     assert _difference(route, signed, plain) == 300
@@ -525,7 +526,7 @@ def test_what_request_params_authors_counts_once_per_reported_request(
     answer = Message(
         role="assistant",
         content="Pack a light rain jacket.",
-        provider_data=model_provenance(plain.identity.id, plain.identity.provider),
+        meta=MessageMeta(model=ModelProvenance(plain.identity.id, plain.identity.provider)),
     )
     request = _conversation(answer)
 

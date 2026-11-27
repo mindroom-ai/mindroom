@@ -78,7 +78,7 @@ class _CsvTools(Toolkit):
         if self._inspect_actions:
             tools.append(self.csv_inspect)
         if enable_all or resolve_bool_toggle(enable_query_csv_file, default=True):
-            tools.append(self.query_csv_file)
+            tools.append(self.csv_query)
 
         super().__init__(name="csv_tools", tools=tools)
 
@@ -138,7 +138,7 @@ class _CsvTools(Toolkit):
             logger.exception("Error inspecting CSV", csv_name=csv_name, action=action)
             return f"Error reading csv: {exc}"
 
-    def query_csv_file(self, csv_name: str, sql_query: str) -> str:
+    def csv_query(self, csv_name: str, sql_query: str) -> str:
         """Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`)."""
         file_path = self._resolve_csv(csv_name)
         if file_path is None:
@@ -217,7 +217,7 @@ class _CsvTools(Toolkit):
     ],
     dependencies=["duckdb"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#csv",
-    function_names=("csv_inspect", "query_csv_file"),
+    function_names=("csv_inspect", "csv_query"),
     action_scoped_grants=("csv_inspect",),
 )
 def csv_tools() -> type[Toolkit]:

@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["google-search-results"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#serpapi",
-    function_names=("search_google", "search_youtube"),
+    function_names=("serpapi_search_google", "serpapi_search_youtube"),
 )
 def serpapi_tools() -> type[SerpApiTools]:
     """Return SerpApi tools for Google and YouTube search."""

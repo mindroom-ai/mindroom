@@ -18,7 +18,7 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
-from mindroom.llm.messages import FALLBACK_MODEL_KEY, PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
+from mindroom.llm.messages import tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     ReasoningDelta,
@@ -243,7 +243,7 @@ def _chat_message(
     wrap_gemini_tool_results: bool = False,
     fallback_model: str | None = None,
 ) -> dict[str, Any]:
-    if PROMPT_UPDATE_KEY in (message.provider_data or {}):
+    if message.meta.prompt_update:
         # Only a request to a route that takes one where it stands holds one (``pipeline.prompt_hold``).
         return {"role": "system", "content": message.content}
     values: dict[str, Any] = {
@@ -278,7 +278,7 @@ def _chat_message(
         # encrypted details pass unchanged.
         # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole
         joined = _joined_reasoning_details(reasoning_details)
-        if (message.provider_data or {}).get(FALLBACK_MODEL_KEY) != fallback_model:
+        if message.meta.fallback_model != fallback_model:
             joined = [
                 detail
                 for detail in joined

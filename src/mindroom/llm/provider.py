@@ -311,8 +311,8 @@ class ModelSelected:
 class TurnCompleted:
     """The last stream event: the finished assistant message with its metrics and provider data.
 
-    The adapter that finished the turn records the model that answered it in the message's provider data
-    (``llm/messages.py`` ``model_provenance``), which usage attribution and a run's own model messages
+    The adapter that finished the turn records the model that answered it in ``message.meta.model``
+    (``ModelProvenance``), which usage attribution and a run's own model messages
     (``is_own_model_message``) read; a stage that wraps another provider passes that record on unchanged.
     """
 
@@ -523,9 +523,9 @@ async def complete(provider: ModelProvider, request: ModelRequest) -> ModelTurn:
 
 def answering_identity(message: Message, default: ModelIdentity) -> ModelIdentity:
     """Return the model the provider stamped on ``message`` as having answered it, else ``default``."""
-    from mindroom.llm.messages import read_model_provenance  # noqa: PLC0415 - keep llm.provider slim at import time
+    from mindroom.llm.messages import ModelProvenance  # noqa: PLC0415 - keep llm.provider slim at import time
 
-    if (answered := read_model_provenance(message.provider_data)) is None:
+    if not isinstance(answered := message.meta.model, ModelProvenance):
         return default
     return replace(default, id=answered.model_id, provider=answered.provider)
 

@@ -11,8 +11,6 @@ import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -33,8 +31,7 @@ def turn_message(message: Message) -> dict[str, Any]:
     the request an answer answered is storage-only too: it digests that whole request, so it would change with any
     edit to it.
     """
-    provider_data = {key: value for key, value in (message.provider_data or {}).items() if key != REQUEST_IDENTITY_KEY}
-    stored = replace(message, provider_data=provider_data).to_dict()
+    stored = replace(message, meta=replace(message.meta, request_identity=None)).to_dict()
     return {key: stored[key] for key in sorted(stored) if key not in STORAGE_ONLY_MESSAGE_KEYS}
 
 

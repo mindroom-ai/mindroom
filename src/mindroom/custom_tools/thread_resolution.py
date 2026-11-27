@@ -112,6 +112,7 @@ class ThreadResolutionTools(Toolkit):
                 )
             except ThreadTagsError as exc:
                 return self._payload("error", action="resolve", thread_id=thread_id, message=str(exc))
+            context.resolved_thread_ids.add(thread_id)
             if state is not None and SNOOZED_THREAD_TAG in state.tags:
                 await self._end_snooze(context, thread_id)
             return self._payload(
@@ -131,10 +132,13 @@ class ThreadResolutionTools(Toolkit):
             )
         except ThreadTagsError as exc:
             return self._payload("error", action="reopen", thread_id=thread_id, message=str(exc))
+        is_resolved = RESOLVED_THREAD_TAG in state.tags
+        if not is_resolved:
+            context.resolved_thread_ids.discard(thread_id)
         return self._payload(
             "ok",
             action="reopen",
             room_id=context.room_id,
             thread_id=thread_id,
-            resolved=RESOLVED_THREAD_TAG in state.tags,
+            resolved=is_resolved,
         )

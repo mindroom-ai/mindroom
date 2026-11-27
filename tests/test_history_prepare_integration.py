@@ -366,7 +366,7 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
     ]
     messages = prepared_run.turn.in_request_order()
     assert _contents(messages) == expected
-    assert [message.add_to_agent_memory for message in messages] == [True, True, True, False]
+    assert [message.is_turn_context for message in messages] == [False, False, False, True]
     assert prepared_run.prompt_text == "\n\n".join(expected)
 
 
@@ -1469,7 +1469,7 @@ async def _three_turns(
                     {
                         "role": message.role,
                         "content": str(message.content),
-                        "add_to_agent_memory": message.add_to_agent_memory,
+                        "is_turn_context": message.is_turn_context,
                     }
                     for message in _after_prompt(request.messages)
                 ],
@@ -1498,7 +1498,7 @@ async def test_each_turn_replays_its_previous_request_whole_and_keeps_turn_conte
         "Third prompt",
         render_transient_context(("turn context three",)),
     ]
-    assert [message["add_to_agent_memory"] for message in third_request[-2:]] == [True, False]
+    assert [message["is_turn_context"] for message in third_request[-2:]] == [False, True]
 
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     persisted = storage.load_session("session-1")
@@ -1553,11 +1553,11 @@ async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplicat
     assert third_request[-1] == {
         "role": "user",
         "content": render_transient_context(("turn context three",)),
-        "add_to_agent_memory": False,
+        "is_turn_context": True,
     }
     assert third_request[-2]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
         "Third prompt\n\n"
         "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
-    assert third_request[-2]["add_to_agent_memory"] is True
+    assert third_request[-2]["is_turn_context"] is False

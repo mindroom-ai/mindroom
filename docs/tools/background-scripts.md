@@ -114,7 +114,7 @@ Create one `MindRoomTools` instance and call tools by toolkit name, function nam
 from mindroom.script_sdk import MindRoomTools
 
 tools = MindRoomTools()
-result = tools.call("website", "read_url", url="https://example.org/status.txt")
+result = tools.call("website", "website_read_url", url="https://example.org/status.txt")
 print(result, flush=True)
 ```
 
@@ -134,7 +134,7 @@ An `indeterminate` call means MindRoom accepted the call but cannot prove whethe
 A script, or a program it starts, can also call tools with the [agent CLI](agent-cli.md) through the same access:
 
 ```bash
-mindroom-agent tools call website read_url '{"url": "https://example.org/status.txt"}'
+mindroom-agent tools call website website_read_url '{"url": "https://example.org/status.txt"}'
 ```
 
 Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
@@ -165,11 +165,11 @@ POLL_SECONDS = 15
 
 def main() -> None:
     tools = MindRoomTools()
-    previous = tools.call("website", "read_url", url=STATUS_URL)
+    previous = tools.call("website", "website_read_url", url=STATUS_URL)
 
     while True:
         time.sleep(POLL_SECONDS)
-        current = tools.call("website", "read_url", url=STATUS_URL)
+        current = tools.call("website", "website_read_url", url=STATUS_URL)
         if current == previous:
             continue
 

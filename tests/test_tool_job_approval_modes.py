@@ -46,7 +46,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime, register_background_runtime
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE, AdaptedToolkit, ToolFunction, ToolGate
 from tests.conftest import FakeApprovalTransport
@@ -88,7 +88,7 @@ class _NativeTools(Toolkit):
     def __init__(self, observed: list[int]) -> None:
         self.observed = observed
         super().__init__(name="native", tools=[self.native_step])
-        bind_toolkit_construction(self, ToolConstruction("native_plugin", None))
+        self.tool_construction = ToolConstruction("native_plugin", None)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         if function.name == "native_step":
@@ -201,7 +201,7 @@ class _GatedTools(Toolkit):
         self.effects = effects
         self.gate = gate
         super().__init__(name="reports", tools=[self.write_report])
-        bind_toolkit_construction(self, ToolConstruction("reports", None))
+        self.tool_construction = ToolConstruction("reports", None)
 
     async def write_report(self, title: str) -> str:
         """Write one report."""

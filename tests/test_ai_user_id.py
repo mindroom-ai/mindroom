@@ -62,7 +62,7 @@ from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.media import File
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
@@ -244,7 +244,7 @@ def _answered(model_id: str, provider: str, **counters: int) -> RunRecord:
         role="assistant",
         content="ok",
         metrics=MessageMetrics(tokens=TokenCounts(**counters)),
-        provider_data=model_provenance(model_id, provider),
+        meta=MessageMeta(model=ModelProvenance(model_id, provider)),
     )
     return RunRecord(run_id="run-1", agent_id="general", status=RunStatus.completed, messages=[message])
 
@@ -1130,7 +1130,7 @@ class TestUserIdPassthrough:
         [transient] = turn.transient
         assert transient.role == "user"
         assert transient.content == render_transient_context(("turn context",))
-        assert transient.add_to_agent_memory is False
+        assert transient.is_turn_context is True
         build_context = prepared_run.build.prompt.turn_context
         assert build_context is not None
         stable, turn_part = prepared_run.spec.system_messages

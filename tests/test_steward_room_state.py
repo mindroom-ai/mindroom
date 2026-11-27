@@ -37,7 +37,12 @@ from mindroom.room_settings import (
     resolve_room_setting,
 )
 from mindroom.runtime_shutdown import ShutdownBudget
-from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
+from mindroom.steward_duties import (
+    _ROOM_STATE_CONCURRENCY,
+    StewardDuties,
+    StewardDutiesDeps,
+    reconcile_held_room_states,
+)
 from tests.access_schema_support import member_event
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -2926,3 +2931,67 @@ async def test_router_stop_cancels_its_room_state_tasks_without_waiting(room_sta
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
     assert publish.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["publish_rooms", "reconcile_held"])
+async def test_room_state_reconciliation_caps_concurrency(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Overlapping bulk publishes and retries share the _ROOM_STATE_CONCURRENCY permit cap."""
+    _, _, _, _, client = room_state
+    duties = _owner_bot(room_state).steward_duties
+    room_ids = {f"!room-{index}:localhost" for index in range(_ROOM_STATE_CONCURRENCY * 2)}
+    base_room = client.rooms[ROOM_ID]
+    for room_id in room_ids:
+        client.rooms[room_id] = base_room
+    retry_room = "!retry:localhost"
+    duties._room_state_reruns[retry_room] = {"state"}
+
+    in_flight = peak = publish_in_flight = publish_peak_with_retry = 0
+    seen: set[str] = set()
+    retry_entered, saturated, release_retry, release_publish = (asyncio.Event() for _ in range(4))
+
+    async def slow_reconcile(room_id: str, needed: set[str] | None = None, _delay: int = 0) -> set[str]:
+        nonlocal in_flight, peak, publish_in_flight, publish_peak_with_retry
+        in_flight += 1
+        peak = max(peak, in_flight)
+        seen.add(room_id)
+        if needed is not None:
+            retry_entered.set()
+            await release_retry.wait()
+        else:
+            publish_in_flight += 1
+            if not release_retry.is_set():
+                publish_peak_with_retry = max(publish_peak_with_retry, publish_in_flight)
+            if in_flight == _ROOM_STATE_CONCURRENCY:
+                saturated.set()
+            await release_publish.wait()
+            publish_in_flight -= 1
+        in_flight -= 1
+        return set()
+
+    monkeypatch.setattr(duties, "_reconcile_room_state", slow_reconcile)
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda _a, _b: 0.0)
+    try:
+        retry_task = asyncio.create_task(duties._retry_room_state(retry_room))
+        await asyncio.wait_for(retry_entered.wait(), timeout=1.0)
+        work = asyncio.create_task(
+            duties._publish_rooms(room_ids)
+            if mode == "publish_rooms"
+            else reconcile_held_room_states(duties.deps.runtime.orchestrator),
+        )
+        await asyncio.wait_for(saturated.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert (peak, publish_peak_with_retry) == (_ROOM_STATE_CONCURRENCY, _ROOM_STATE_CONCURRENCY - 1)
+        release_retry.set()
+        release_publish.set()
+        await asyncio.gather(retry_task, work)
+        assert peak == _ROOM_STATE_CONCURRENCY
+        assert (room_ids | {retry_room}) <= seen
+    finally:
+        release_retry.set()
+        release_publish.set()
+        duties.stopping()

@@ -88,7 +88,7 @@ def test_generate_media_uses_configured_key_and_returns_images(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = FalTools(api_key="configured-key", model="fal-ai/flux-2")
 
-    result = toolkit.generate_media(prompt="A geometric Matrix room")
+    result = toolkit.fal_generate_media(prompt="A geometric Matrix room")
 
     assert isinstance(result, ToolValue)
     sync_client.assert_called_once_with(key="configured-key")
@@ -159,7 +159,7 @@ def test_generate_media_uses_default_model_and_returns_videos(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = FalTools(api_key="configured-key", model=FAL_VIDEO)
 
-    result = toolkit.generate_media(prompt="A camera circles a forest")
+    result = toolkit.fal_generate_media(prompt="A camera circles a forest")
 
     sync_client.assert_called_once_with(key="configured-key")
     subscribe.assert_called_once_with(
@@ -180,7 +180,7 @@ def test_image_to_image_registration_exposes_edit_arguments() -> None:
         enable_image_to_image=True,
     )
 
-    function = toolkit_offers(toolkit, "image_to_image")
+    function = toolkit_offers(toolkit, "fal_image_to_image")
 
     assert set(function.parameters["properties"]) == {"prompt", "image_url"}
     assert function.parameters["required"] == ["prompt"]
@@ -219,7 +219,7 @@ def test_image_to_image_uses_flux_2_edit_and_returns_attachment(
         enable_image_to_image=True,
     )
 
-    result = toolkit.image_to_image(
+    result = toolkit.fal_image_to_image(
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )
@@ -245,7 +245,7 @@ def test_image_to_image_rejects_missing_image_url(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = FalTools(api_key="configured-key", enable_generate_media=False)
 
-    result = toolkit.image_to_image(prompt="Add a blue sky")
+    result = toolkit.fal_image_to_image(prompt="Add a blue sky")
 
     sync_client.assert_not_called()
     assert result.content == "Error: image_url is required for image editing."
@@ -262,7 +262,7 @@ def test_image_to_image_returns_provider_error(monkeypatch: pytest.MonkeyPatch) 
     )
     toolkit = FalTools(api_key="configured-key", enable_generate_media=False)
 
-    result = toolkit.image_to_image(
+    result = toolkit.fal_image_to_image(
         prompt="Add a blue sky",
         image_url="https://cdn.example.test/source.png",
     )
@@ -282,8 +282,8 @@ def test_fal_missing_or_blank_api_key_fails_closed_without_sdk_fallback(
     monkeypatch.setattr(fal_client, "SyncClient", sync_client)
     toolkit = FalTools(api_key=api_key, enable_image_to_image=True)
 
-    media_result = toolkit.generate_media("A sunset")
-    edit_result = toolkit.image_to_image("Add clouds", image_url="https://cdn.example.test/source.png")
+    media_result = toolkit.fal_generate_media("A sunset")
+    edit_result = toolkit.fal_image_to_image("Add clouds", image_url="https://cdn.example.test/source.png")
 
     sync_client.assert_not_called()
     assert media_result.content == "Error: FAL_API_KEY not set."
@@ -361,7 +361,7 @@ def test_fal_env_fallback_priority_and_scoped_isolation(
     )
     assert isinstance(scoped_denied, FalTools)
     assert scoped_denied.api_key is None
-    denied_result = scoped_denied.generate_media("A sunset")
+    denied_result = scoped_denied.fal_generate_media("A sunset")
     assert denied_result.content == "Error: FAL_API_KEY not set."
     sync_client.assert_not_called()
 

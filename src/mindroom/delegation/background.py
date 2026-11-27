@@ -6,13 +6,20 @@ from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
+from mindroom.delegation.cost import carried_receipts, merged_stored_receipts
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, interrupted_by_restart
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
-from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
+from mindroom.tool_jobs.runtime import (
+    BackgroundJob,
+    BackgroundOutcome,
+    JobRecoveryBlockedError,
+    JobSpec,
+    job_delegation_id_from_payload,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
@@ -33,17 +40,28 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild.from_dict(job.adapter["child"])
 
 
-def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
+def _job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
     """Return the run that acknowledged each subagent job, by the delegation id its saved child names.
 
     Its adapter keeps the parent run whose saved result first acknowledged it (``ACKNOWLEDGED_BY``); None stands for a
     job none acknowledged yet, or one a release that kept no such record acknowledged. Nothing else of a child is read,
     so one no reader decodes stops no replay; a job whose adapter or child is no mapping, or names no id, is no receipt's.
     """
-    owned = (job for job in jobs if job.kind == "delegation" and isinstance(job.adapter, dict))
-    read = ((job.adapter.get("child"), job.adapter.get(ACKNOWLEDGED_BY) if job.consumed else None) for job in owned)
-    named = ((child.get("delegation_id"), by) for child, by in read if isinstance(child, dict))
-    return {key: by if isinstance(by, str) else None for key, by in named if isinstance(key, str)}
+    return {
+        did: by if isinstance(by := (job.adapter.get(ACKNOWLEDGED_BY) if job.consumed else None), str) else None
+        for job in jobs
+        if (did := job_delegation_id_from_payload(job.kind, job.adapter)) is not None
+    }
+
+
+async def carried_job_receipts(
+    ran: Mapping[str, Mapping[str, Any] | None],
+    load_jobs: Callable[[Sequence[str]], Awaitable[Iterable[BackgroundJob]]],
+) -> dict[str, float]:
+    """Return what *ran*'s cut-short runs received, loading only the delegation jobs their receipts name."""
+    if not (received := merged_stored_receipts(ran)):
+        return {}
+    return carried_receipts(ran, _job_acknowledgers(await load_jobs(tuple(received))), received=received)
 
 
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:

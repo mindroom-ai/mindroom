@@ -61,17 +61,17 @@ class _FirecrawlTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_scrape:
-            tools.append(self.scrape_website)
+            tools.append(self.firecrawl_scrape_website)
         if all or enable_crawl:
-            tools.append(self.crawl_website)
+            tools.append(self.firecrawl_crawl_website)
         if all or enable_mapping:
-            tools.append(self.map_website)
+            tools.append(self.firecrawl_map_website)
         if all or enable_search:
-            tools.append(self.search_web)
+            tools.append(self.firecrawl_search_web)
 
         super().__init__(name="firecrawl_tools", tools=tools)
 
-    def scrape_website(self, url: str) -> str:
+    def firecrawl_scrape_website(self, url: str) -> str:
         """Use this function to scrape a website using Firecrawl.
 
         Args:
@@ -84,7 +84,7 @@ class _FirecrawlTools(Toolkit):
         scrape_result = self.app.scrape(url, **params)
         return _serialize(scrape_result)
 
-    def crawl_website(self, url: str, limit: int | None = None) -> str:
+    def firecrawl_crawl_website(self, url: str, limit: int | None = None) -> str:
         """Use this function to crawl a website using Firecrawl.
 
         Args:
@@ -110,7 +110,7 @@ class _FirecrawlTools(Toolkit):
         crawl_result = self.app.crawl(url, **params)
         return _serialize(crawl_result)
 
-    def map_website(self, url: str) -> str:
+    def firecrawl_map_website(self, url: str) -> str:
         """Use this function to map a website using Firecrawl.
 
         Args:
@@ -120,7 +120,7 @@ class _FirecrawlTools(Toolkit):
         map_result = self.app.map(url)
         return _serialize(map_result)
 
-    def search_web(self, query: str, limit: int | None = None) -> str:
+    def firecrawl_search_web(self, query: str, limit: int | None = None) -> str:
         """Use this function to search the web using Firecrawl.
 
         Args:
@@ -205,7 +205,12 @@ class _FirecrawlTools(Toolkit):
     ],
     dependencies=["firecrawl-py"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#firecrawl",
-    function_names=("crawl_website", "map_website", "scrape_website", "search_web"),
+    function_names=(
+        "firecrawl_crawl_website",
+        "firecrawl_map_website",
+        "firecrawl_scrape_website",
+        "firecrawl_search_web",
+    ),
 )
 def firecrawl_tools() -> type[Toolkit]:
     """Return Firecrawl tools for web scraping and crawling."""

@@ -18,7 +18,7 @@ from mindroom.agent_loop.tools import tool_result_message
 from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, LEGACY_COST_ID, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
-from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.llm.usage import team_run_usage
 from mindroom.logging_config import get_logger
@@ -136,7 +136,7 @@ def recover_interrupted_run(
     checkpoint never is.
 
     ``stopped`` says the run's user stopped it, so no replay continues it: its turn then ends with one more assistant
-    message, the text of the response the stop cut off (``CUT_OFF_TEXT_KEY``), which the reply showed, and
+    message, the text of the response the stop cut off (``meta.cut_off_text``), which the reply showed, and
     ``STOPPED_BY_USER_NOTE``. A stopped run that called no tool is kept too, once a response of it had begun.
     """
     if run.status is not RunStatus.cancelled or run.parent_run_id is not None:
@@ -185,7 +185,7 @@ def recover_interrupted_run(
         results.append(tool_result_message(execution))
     ending = []
     if stopped:
-        shown = "".join((message.provider_data or {}).get(CUT_OFF_TEXT_KEY, "") for message in reversed(cut_off))
+        shown = "".join(message.meta.cut_off_text or "" for message in reversed(cut_off))
         ending = [Message(role="assistant", content=f"{shown.strip()}\n\n{STOPPED_BY_USER_NOTE}".lstrip())]
     recovered = replace(
         run,

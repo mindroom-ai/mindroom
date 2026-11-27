@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import jsonschema
 import requests
 
-from mindroom.tool_system.authoring import authored_description, passthrough_parameters
+from mindroom.tool_system.authoring import tool_mark
 from mindroom.tools import apify as apify_module
 
 if TYPE_CHECKING:
@@ -245,7 +245,8 @@ def test_apify_fetches_private_actor_build_through_authenticated_client(monkeypa
     assert build_client.get_calls == 1
 
     fn = toolkit.functions["apify_actor_private_scraper"]
-    params = passthrough_parameters(fn)
+    mark = tool_mark(fn)
+    params = None if mark is None else mark.parameters
     assert params is not None
     assert params["properties"]["startUrls"]["items"]["properties"]["url"]["type"] == "string"
 
@@ -344,8 +345,9 @@ def test_apify_tool_description_does_not_duplicate_parameter_descriptions(monkey
 
     toolkit = apify_module.apify_tools()(actors="apify/rag-web-browser", apify_api_token=apify_key)
     fn = toolkit.functions["apify_actor_apify_rag-web-browser"]
-    description = authored_description(fn)
-    params = passthrough_parameters(fn)
+    mark = tool_mark(fn)
+    description = None if mark is None else mark.description
+    params = None if mark is None else mark.parameters
 
     assert description == "Concise Actor summary."
     assert param_description not in description

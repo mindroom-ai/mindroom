@@ -74,14 +74,14 @@ class OpenAITools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_transcription:
-            tools.append(self.transcribe_audio)
+            tools.append(self.openai_transcribe_audio)
         if all or enable_image_generation:
-            tools.append(self.generate_image)
+            tools.append(self.openai_generate_image)
         if all or enable_speech_generation:
-            tools.append(self.generate_speech)
+            tools.append(self.openai_generate_speech)
         super().__init__(name="openai", tools=tools)
 
-    def transcribe_audio(self, audio_path: str) -> str:
+    def openai_transcribe_audio(self, audio_path: str) -> str:
         """Transcribe an audio file using OpenAI speech-to-text.
 
         Args:
@@ -106,7 +106,7 @@ class OpenAITools(Toolkit):
             return f"Failed to transcribe audio: {exc}"
         return str(transcript)
 
-    def generate_image(self, prompt: str) -> ToolValue:
+    def openai_generate_image(self, prompt: str) -> ToolValue:
         """Generate an image from a text prompt using OpenAI.
 
         Args:
@@ -147,7 +147,7 @@ class OpenAITools(Toolkit):
             logger.exception("Failed to generate image", model=self.image_model)
             return ToolValue(content=f"Failed to generate image: {exc}")
 
-    async def generate_speech(self, text_input: str) -> ToolValue:
+    async def openai_generate_speech(self, text_input: str) -> ToolValue:
         """Synthesize speech audio from text using OpenAI.
 
         Args:

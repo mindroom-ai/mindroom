@@ -28,7 +28,7 @@ _TOOL_MARK = "__mindroom_tool__"
 
 
 @dataclass(frozen=True, slots=True)
-class _ToolMark:
+class ToolMark:
     """What ``@tool`` or ``passthrough_tool`` declares about one function."""
 
     name: str | None
@@ -37,6 +37,14 @@ class _ToolMark:
     parameters: Mapping[str, Any] | None = None
     offer_background_after: bool | None = None
     offer_output_path: bool | None = None
+
+
+def _marking[F](mark: ToolMark) -> Callable[[F], F]:
+    def apply(marked: F) -> F:
+        setattr(_function_of(marked), _TOOL_MARK, mark)
+        return marked
+
+    return apply
 
 
 @overload
@@ -68,20 +76,14 @@ def tool[F](
     ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
     parameters in the schema. A static or class method may be marked before or after it becomes one.
     """
-
-    def mark(marked: F) -> F:
-        setattr(
-            _function_of(marked),
-            _TOOL_MARK,
-            _ToolMark(
-                name=name,
-                description=description,
-                offer_background_after=offer_background_after,
-                offer_output_path=offer_output_path,
-            ),
-        )
-        return marked
-
+    mark: Callable[[F], F] = _marking(
+        ToolMark(
+            name=name,
+            description=description,
+            offer_background_after=offer_background_after,
+            offer_output_path=offer_output_path,
+        ),
+    )
     return mark if function is None else mark(function)
 
 
@@ -100,27 +102,20 @@ def passthrough_tool[F](
     ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
     parameters in the schema.
     """
-
-    def mark(marked: F) -> F:
-        setattr(
-            _function_of(marked),
-            _TOOL_MARK,
-            _ToolMark(
-                name=name,
-                description=description,
-                parameters=parameters,
-                offer_background_after=offer_background_after,
-                offer_output_path=offer_output_path,
-            ),
-        )
-        return marked
-
-    return mark
+    return _marking(
+        ToolMark(
+            name=name,
+            description=description,
+            parameters=parameters,
+            offer_background_after=offer_background_after,
+            offer_output_path=offer_output_path,
+        ),
+    )
 
 
 def _tool_name(function: Callable[..., Any]) -> str:
     """Return the name the model calls ``function`` by: the one ``@tool`` gave it, else its own."""
-    mark = _mark(function)
+    mark = tool_mark(function)
     if mark is not None and mark.name is not None:
         return mark.name
     # A tool is a function or a method (``_require_tool_shape``), so it has a name of its own.
@@ -145,33 +140,10 @@ def _require_tool_shape(toolkit: str, function: object) -> None:
         raise ValueError(msg)
 
 
-def authored_description(function: Callable[..., Any]) -> str | None:
-    """Return the description ``@tool`` gave ``function``; None leaves its docstring to describe it."""
-    mark = _mark(function)
-    return None if mark is None else mark.description
-
-
-def passthrough_parameters(function: Callable[..., Any]) -> Mapping[str, Any] | None:
-    """Return the schema ``passthrough_tool`` gave ``function``; None for a function whose signature derives one."""
-    mark = _mark(function)
-    return None if mark is None else mark.parameters
-
-
-def authored_offer_background_after(function: Callable[..., Any]) -> bool | None:
-    """Return whether ``@tool`` chose to offer ``background_after`` on ``function``; None inherits its toolkit's default."""
-    mark = _mark(function)
-    return None if mark is None else mark.offer_background_after
-
-
-def authored_offer_output_path(function: Callable[..., Any]) -> bool | None:
-    """Return whether ``@tool`` chose to offer ``mindroom_output_path`` on ``function``; None inherits its toolkit's default."""
-    mark = _mark(function)
-    return None if mark is None else mark.offer_output_path
-
-
-def _mark(function: object) -> _ToolMark | None:
+def tool_mark(function: object) -> ToolMark | None:
+    """Return the ``@tool`` or ``passthrough_tool`` mark on ``function``, or None if unmarked."""
     mark = getattr(function, _TOOL_MARK, None)
-    return mark if isinstance(mark, _ToolMark) else None
+    return mark if isinstance(mark, ToolMark) else None
 
 
 def _function_of(member: object) -> object:
@@ -244,7 +216,9 @@ def tool_attributes(cls: type[Toolkit]) -> tuple[str, ...]:
     """Return the attributes of ``cls`` that ``@tool`` marks as its functions, in the order the class defines them."""
     attributes = dict.fromkeys(attribute for base in reversed(cls.__mro__) for attribute in vars(base))
     return tuple(
-        attribute for attribute in attributes if _mark(_function_of(inspect.getattr_static(cls, attribute))) is not None
+        attribute
+        for attribute in attributes
+        if tool_mark(_function_of(inspect.getattr_static(cls, attribute))) is not None
     )
 
 
@@ -304,14 +278,12 @@ def toolkit_functions(toolkit: Toolkit) -> dict[str, Callable[..., Any]]:
 
 __all__ = [
     "CurrentCall",
+    "ToolMark",
     "Toolkit",
-    "authored_description",
-    "authored_offer_background_after",
-    "authored_offer_output_path",
     "current_call",
-    "passthrough_parameters",
     "passthrough_tool",
     "tool",
     "tool_attributes",
+    "tool_mark",
     "toolkit_functions",
 ]

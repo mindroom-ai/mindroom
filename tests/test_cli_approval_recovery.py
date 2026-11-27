@@ -870,7 +870,7 @@ async def test_a_recovered_approval_keeps_the_thread_messages_its_paused_turn_re
             messages=[
                 earlier,
                 Message(role="user", content="Current message:\nHello"),
-                Message(role="user", content="Jobs: none.", add_to_agent_memory=False),
+                Message(role="user", content="Jobs: none.", is_turn_context=True),
                 Message(role="assistant", tool_calls=[bash_call]),
             ],
         ),

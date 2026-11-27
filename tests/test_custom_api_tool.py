@@ -44,9 +44,9 @@ def test_custom_api_toolkit_is_native_and_respects_enable_switches() -> None:
 
     assert isinstance(tool_class(), Toolkit)
     assert tool_class().name == "api_tools"
-    assert list(tool_class().functions) == ["make_request"]
+    assert list(tool_class().functions) == ["custom_api_request"]
     assert list(tool_class(enable_make_request=False).functions) == []
-    assert list(tool_class(enable_make_request=False, all=True).functions) == ["make_request"]
+    assert list(tool_class(enable_make_request=False, all=True).functions) == ["custom_api_request"]
 
 
 def test_custom_api_handles_json_text_non_2xx_and_transport_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,7 +72,7 @@ def test_custom_api_handles_json_text_non_2xx_and_transport_errors(monkeypatch: 
     )
 
     created = json.loads(
-        toolkit.make_request(
+        toolkit.custom_api_request(
             "items",
             method="POST",
             params={"page": "2"},
@@ -89,12 +89,12 @@ def test_custom_api_handles_json_text_non_2xx_and_transport_errors(monkeypatch: 
     assert sent[0].headers["X-Trace"] == "t-1"
     assert sent[0].headers["Accept-Encoding"] == "identity"
 
-    failed = json.loads(toolkit.make_request("/plain"))
+    failed = json.loads(toolkit.custom_api_request("/plain"))
     assert failed["status_code"] == 502
     assert failed["data"] == {"text": "upstream down"}
     assert failed["error"] == "Request failed"
 
-    errored = json.loads(toolkit.make_request("boom"))
+    errored = json.loads(toolkit.custom_api_request("boom"))
     assert errored == {"error": "Request failed: connection reset"}
 
 
@@ -111,9 +111,9 @@ def test_custom_api_enforces_defensive_destination_and_credential_policies(monke
 
     tool_class = custom_api_tools()
     with pytest.raises(ServerFetchUrlError):
-        tool_class().make_request("http://127.0.0.1:8080/private")
+        tool_class().custom_api_request("http://127.0.0.1:8080/private")
 
-    unanchored = json.loads(tool_class(api_key="sk-test").make_request("https://example.com/data"))
+    unanchored = json.loads(tool_class(api_key="sk-test").custom_api_request("https://example.com/data"))
     assert "base_url" in unanchored["error"]
     assert sent == []
 
@@ -122,7 +122,7 @@ def test_custom_api_enforces_defensive_destination_and_credential_policies(monke
             base_url="https://api.example.com",
             api_key="sk-test",
             headers={"X-Key": "secret"},
-        ).make_request(
+        ).custom_api_request(
             "start",
             headers={"Host": "other.example", "X-Trace": "keep"},
         ),

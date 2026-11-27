@@ -88,7 +88,7 @@ async def approval_receipt_hook(state: LoopState) -> RequestDecision:
     """
     calls = take_unsent_receipt(state.run.run_id, partial(_sent_call_id, state.messages))
     if calls is not None:
-        state.messages.append(Message(role="user", content=build_approval_receipt(calls), add_to_agent_memory=False))
+        state.messages.append(Message(role="user", content=build_approval_receipt(calls), is_turn_context=True))
     return SendRequest()
 
 

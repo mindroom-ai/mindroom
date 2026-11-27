@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
@@ -49,13 +49,17 @@ from mindroom.tool_system.runtime_context import (
     current_requester_id,
     get_tool_runtime_context,
     scope_hook_context_kwargs,
+    scope_workspace_root,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from pathlib import Path
 
+    from mindroom.history.conversation_text import Utterance
     from mindroom.history.summary_fork import SummaryFork
     from mindroom.history.types import CompactionMode
+    from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelIdentity, ModelProvider
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
@@ -82,21 +86,95 @@ def scope_usage_recorder(
     )
 
 
-def _transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
-    """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
-    return tuple(
-        TranscriptLine(
-            role="user" if said.kind == "said" else "assistant",
-            sender=said.sender,
-            display_name=said.display_name,
-            text=said.unredacted,
-        )
-        for run in runs
-        for said in utterances(run)
+type CompactionKind = Literal["pre_reply", "mid_turn", "run_local", "native"]
+
+
+class _UnsetWorkspaceRoot:
+    """Sentinel indicating ``emit_compaction_hook`` should resolve ``workspace_root`` lazily."""
+
+
+_UNSET_WORKSPACE_ROOT = _UnsetWorkspaceRoot()
+
+
+def _utterance_line(said: Utterance) -> TranscriptLine:
+    return TranscriptLine(
+        role="user" if said.kind == "said" else "assistant",
+        sender=said.sender,
+        display_name=said.display_name,
+        text=said.unredacted,
     )
 
 
-async def _emit_compaction_hook(
+def _compaction_transcript(runs: Sequence[AnyRunRecord]) -> tuple[TranscriptLine, ...]:
+    """Return what was said in ``runs``, oldest first, as compaction hooks read it."""
+    return tuple(_utterance_line(said) for run in runs for said in utterances(run))
+
+
+def _stored_lines_by_message_id(
+    selected_ids: set[str],
+    session_runs: Sequence[AnyRunRecord],
+) -> dict[str, list[TranscriptLine]]:
+    """Index stored-run transcript lines by message id, inspecting only runs matching ``selected_ids``."""
+    stored_lines: dict[str, list[TranscriptLine]] = {}
+    remaining_ids = set(selected_ids)
+    for run in session_runs:
+        if not remaining_ids:
+            break
+        matched_ids = {msg.id for msg in run.messages if msg.id and msg.id in remaining_ids}
+        if not matched_ids:
+            continue
+        remaining_ids -= matched_ids
+        run_lines: dict[str, list[TranscriptLine]] = {msg_id: [] for msg_id in matched_ids}
+        for said in utterances(run):
+            msg_id = said.message.id
+            if msg_id and msg_id in run_lines:
+                run_lines[msg_id].append(_utterance_line(said))
+        for msg_id, msg_lines in run_lines.items():
+            stored_lines.setdefault(msg_id, msg_lines)
+    return stored_lines
+
+
+def projected_messages_transcript(
+    history_messages: Sequence[Message],
+    current_messages: Sequence[Message],
+    *,
+    record: AnyRunRecord,
+    session_runs: Sequence[AnyRunRecord] = (),
+) -> tuple[TranscriptLine, ...]:
+    """Project replayed ``history_messages`` and ``current_messages`` into compaction transcript lines.
+
+    History messages matching a stored run in ``session_runs`` reuse that run's ``utterances`` projection so run-level
+    attribution and exclusions (automation turns, job follow-up prompts, stopped turns) are preserved.
+    """
+    lines: list[TranscriptLine] = []
+    if history_messages:
+        selected_ids = {msg.id for msg in history_messages if msg.id}
+        stored_lines_by_msg_id = _stored_lines_by_message_id(selected_ids, session_runs)
+        seen_stored_ids: set[str] = set()
+        for msg in history_messages:
+            if msg.id and msg.id in stored_lines_by_msg_id:
+                if msg.id not in seen_stored_ids:
+                    seen_stored_ids.add(msg.id)
+                    lines.extend(stored_lines_by_msg_id[msg.id])
+            else:
+                lines.extend(_compaction_transcript([RunRecord(run_id="", messages=[msg])]))
+    if current_messages:
+        lines.extend(
+            _compaction_transcript(
+                [
+                    RunRecord(
+                        run_id="",
+                        user_id=record.user_id,
+                        messages=list(current_messages),
+                        metadata=record.metadata,
+                    ),
+                ],
+            ),
+        )
+    return tuple(lines)
+
+
+async def emit_compaction_hook(
     *,
     event_name: str,
     scope: HistoryScope,
@@ -105,32 +183,57 @@ async def _emit_compaction_hook(
     token_count_before: int,
     token_count_after: int | None = None,
     compaction_summary: str | None = None,
-) -> None:
+    kind: CompactionKind | None = None,
+    mode: CompactionMode | None = None,
+    summary_model: str | None = None,
+    compacted_at: str | None = None,
+    compacted_run_count: int | None = None,
+    workspace_root: Path | None | _UnsetWorkspaceRoot = _UNSET_WORKSPACE_ROOT,
+) -> Path | None | _UnsetWorkspaceRoot:
+    """Emit a compaction observer hook when registered, resolving and returning ``workspace_root`` lazily."""
     runtime_context = get_tool_runtime_context()
     if runtime_context is None or not runtime_context.hooks.registry.has_hooks(event_name):
-        return
+        return workspace_root
+    effective_session_id = session_id or runtime_context.session_id
+    resolved_workspace = (
+        await asyncio.to_thread(scope_workspace_root, runtime_context, scope)
+        if isinstance(workspace_root, _UnsetWorkspaceRoot)
+        else workspace_root
+    )
+    hook_kwargs = scope_hook_context_kwargs(
+        runtime_context,
+        event_name=event_name,
+        correlation_id=runtime_context.correlation_id or f"{event_name}:{effective_session_id}:{uuid4().hex}",
+        scope=scope,
+        session_id=effective_session_id,
+    )
+    # Compaction hooks always attribute to the compacted scope's own id (e.g. a team member).
+    hook_kwargs["agent_name"] = scope.scope_id
     context = CompactionHookContext(
-        **scope_hook_context_kwargs(
-            runtime_context,
-            event_name=event_name,
-            correlation_id=runtime_context.correlation_id or f"{event_name}:{session_id}:{uuid4().hex}",
-            scope=scope,
-            session_id=session_id,
-        ),
+        **hook_kwargs,
         transcript=tuple(transcript),
         token_count_before=token_count_before,
         token_count_after=token_count_after,
         compaction_summary=compaction_summary,
+        workspace_root=resolved_workspace,
+        kind=kind,
+        mode=mode,
+        summary_model=summary_model,
+        compacted_at=compacted_at,
+        compacted_run_count=compacted_run_count,
+        requester_id=runtime_context.requester_id,
     )
     await emit(runtime_context.hooks.registry, event_name, context)
+    return resolved_workspace
 
 
-def _compaction_hooks_registered() -> bool:
+def compaction_hooks_registered(*event_names: str) -> bool:
+    """Return whether any compaction hook for ``event_names`` (default: before or after) is registered."""
     runtime_context = get_tool_runtime_context()
-    return runtime_context is not None and any(
-        runtime_context.hooks.registry.has_hooks(event_name)
-        for event_name in (EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER)
-    )
+    if runtime_context is None:
+        return False
+    events = event_names or (EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER)
+    return any(runtime_context.hooks.registry.has_hooks(event_name) for event_name in events)
 
 
 @timed("system_prompt_assembly.history_prepare.compaction")
@@ -162,17 +265,22 @@ async def compact_scope_history(
     if not visible_runs:
         return None
 
-    hooks_registered = _compaction_hooks_registered()
+    hooks_registered = compaction_hooks_registered()
     compacted_transcript: list[TranscriptLine] = []
+    resolved_workspace: Path | None | _UnsetWorkspaceRoot = _UNSET_WORKSPACE_ROOT
     estimate_tokens = partial(estimate_prompt_visible_history_tokens, history_settings=history_settings, model=model)
 
     async def before_persist(included_runs: Sequence[AnyRunRecord]) -> None:
-        await _emit_compaction_hook(
+        nonlocal resolved_workspace
+        resolved_workspace = await emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=scope,
-            transcript=_transcript(included_runs) if hooks_registered else (),
+            transcript=_compaction_transcript(included_runs) if hooks_registered else (),
             session_id=session.session_id,
             token_count_before=before_tokens,
+            kind="pre_reply",
+            mode=mode,
+            workspace_root=resolved_workspace,
         )
 
     async def after_persist(
@@ -181,7 +289,7 @@ async def compact_scope_history(
         remaining_runs: Sequence[AnyRunRecord],
     ) -> None:
         if hooks_registered:
-            compacted_transcript.extend(_transcript(chunk.included_runs))
+            compacted_transcript.extend(_compaction_transcript(chunk.included_runs))
         if progress is None or not remaining_runs:
             return
         snapshot = replace(
@@ -233,12 +341,14 @@ async def compact_scope_history(
                 runs_before=len(visible_runs),
                 runs_after=len(scope_visible_runs(session)),
                 compacted_run_count=compacted_run_count,
-                compacted_at=_iso_utc_now(),
+                compacted_at=iso_utc_now(),
                 history_budget_tokens=available_history_budget,
             ),
             scope=scope,
             transcript=compacted_transcript,
             complete=complete,
+            kind="pre_reply",
+            workspace_root=resolved_workspace,
         )
 
     try:
@@ -384,6 +494,7 @@ async def compact_running_turn(
     rewritten_request_tokens: Callable[[str], int],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
     fork: SummaryFork | None = None,
+    hook_mode: CompactionMode = "auto",
 ) -> CompactionOutcome:
     """Summarize ``basis.runs`` and ``snapshots``, validate and size pre-commit, then append one row storing ``fold``."""
     scope = owner_scope(session)
@@ -403,13 +514,15 @@ async def compact_running_turn(
         messages=list(fold.messages),
         metadata=fold.run.metadata,
     )
-    transcript = _transcript([*basis.runs, folded_run]) if _compaction_hooks_registered() else ()
-    await _emit_compaction_hook(
+    transcript = _compaction_transcript([*basis.runs, folded_run]) if compaction_hooks_registered() else ()
+    resolved_workspace = await emit_compaction_hook(
         event_name=EVENT_COMPACTION_BEFORE,
         scope=scope,
         transcript=transcript,
         session_id=session.session_id,
         token_count_before=before_tokens,
+        kind="mid_turn",
+        mode=hook_mode,
     )
 
     async def commit_and_report() -> CompactionOutcome:
@@ -433,10 +546,18 @@ async def compact_running_turn(
             runs_before=len(basis.runs) + 1,
             runs_after=1,
             compacted_run_count=len(basis.runs) + 1,
-            compacted_at=_iso_utc_now(),
+            compacted_at=iso_utc_now(),
             history_budget_tokens=available_history_budget,
         )
-        return await _report_committed(outcome, scope=scope, transcript=transcript, complete=complete)
+        return await _report_committed(
+            outcome,
+            scope=scope,
+            transcript=transcript,
+            complete=complete,
+            kind="mid_turn",
+            hook_mode=hook_mode,
+            workspace_root=resolved_workspace,
+        )
 
     return await run_coroutine_until_complete(commit_and_report())
 
@@ -447,8 +568,11 @@ async def _report_committed(
     scope: HistoryScope,
     transcript: Sequence[TranscriptLine],
     complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
+    kind: CompactionKind,
+    hook_mode: CompactionMode | None = None,
+    workspace_root: Path | None | _UnsetWorkspaceRoot = _UNSET_WORKSPACE_ROOT,
 ) -> CompactionOutcome:
-    await _emit_compaction_hook(
+    await emit_compaction_hook(
         event_name=EVENT_COMPACTION_AFTER,
         scope=scope,
         transcript=transcript,
@@ -456,17 +580,29 @@ async def _report_committed(
         token_count_before=outcome.before_tokens,
         token_count_after=outcome.after_tokens,
         compaction_summary=outcome.summary,
+        kind=kind,
+        mode=outcome.mode if hook_mode is None else hook_mode,
+        summary_model=outcome.summary_model,
+        compacted_at=outcome.compacted_at,
+        compacted_run_count=outcome.compacted_run_count,
+        workspace_root=workspace_root,
     )
     return await complete(outcome)
 
 
-def _iso_utc_now() -> str:
+def iso_utc_now() -> str:
+    """Return the current UTC timestamp as an ISO-8601 string with ``Z`` suffix."""
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 __all__ = [
+    "CompactionKind",
     "ConversationChangedError",
     "compact_running_turn",
     "compact_scope_history",
+    "compaction_hooks_registered",
+    "emit_compaction_hook",
+    "iso_utc_now",
+    "projected_messages_transcript",
     "scope_usage_recorder",
 ]

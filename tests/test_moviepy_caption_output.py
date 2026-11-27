@@ -88,7 +88,7 @@ def test_embed_captions_cleans_owned_audio_and_video_files(  # noqa: PLR0915
         monkeypatch.setattr(os, "replace", reject_publication)
 
     toolkit = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path)
-    result = toolkit.embed_captions(str(source), str(captions), str(output))
+    result = toolkit.moviepy_video_tools_embed_captions(str(source), str(captions), str(output))
 
     if failure is None:
         assert result == str(output)

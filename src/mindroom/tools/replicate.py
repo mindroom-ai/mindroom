@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["replicate"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#replicate",
-    function_names=("generate_media",),
+    function_names=("replicate_generate_media",),
 )
 def replicate_tools() -> type[ReplicateTools]:
     """Return Replicate tools for AI media generation."""

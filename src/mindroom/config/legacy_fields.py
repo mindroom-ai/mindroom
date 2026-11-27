@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_SPLIT_FUNCTIONS,
+    SINGLE_VERB_RENAMED_TARGETS,
+    STRICT_WILDCARD_SCRIPT_RENAMES,
     STRICT_WILDCARD_SCRIPT_TOOLKITS,
 )
 
@@ -469,6 +471,9 @@ def _is_broad_glob_for_old(rule: _ApprovalRule, *, old: str, broad_probe: str) -
     return any(fnmatchcase(old, pattern) and fnmatchcase(broad_probe, pattern) for pattern in rule.match_patterns())
 
 
+_RetiredApprovalFailureKind = Literal["script", "conflict", "rem_old", "rem_new"]
+
+
 def _split_approval_suffix(old: str) -> str:
     if old == "desktop":
         return " (and retain a desktop rule or add a run_desktop_shell rule if gating desktop shell commands)"
@@ -480,12 +485,13 @@ def _retired_script_approval_error(
     *,
     script_index: int,
     old: str,
-    new: str,
-    split_from_active: bool,
-    all_replacements: tuple[str, ...] | None,
+    news: Sequence[str],
+    split_from_active: bool = False,
+    all_replacements: tuple[str, ...] | None = None,
 ) -> str:
     prefix = f"tool_approval.rules[{script_index}].match {rule.match!r} runs approval script {rule.script!r}"
     if split_from_active:
+        new = news[0]
         return (
             f"{prefix} for {old}; read actions from {old} moved to {new}; "
             f"update the script for {new} and add an explicit match: {new} rule."
@@ -497,13 +503,133 @@ def _retired_script_approval_error(
             f"{prefix} for retired tool {old}; {old} was split into {joined}; "
             f"update the script and add explicit rules for {joined}{suffix}."
         )
+    joined = ", ".join(news)
+    target = news[0] if len(news) == 1 else f"[{joined}]"
     return (
-        f"{prefix} for retired tool {old}; {old} is now {new}; "
-        f"update the script for {new} and add an explicit match: {new} rule."
+        f"{prefix} for retired tool {old}; {old} is now {joined}; "
+        f"update the script for {joined} and add an explicit match: {target} rule."
     )
 
 
-def _retired_approval_pair_error_for_agent(
+def _retired_split_mismatch_error(
+    kind: Literal["rem_old", "rem_new"],
+    index: int,
+    *,
+    rules: Sequence[_ApprovalRule],
+    old: str,
+    new: str,
+    default: str,
+    split_from_active: bool,
+    all_replacements: tuple[str, ...] | None,
+) -> str:
+    if split_from_active:
+        fix = f"add explicit approval rules for {new}."
+        reason = f"read actions from {old} moved to {new}, which now gets a different approval decision"
+        previous = f"read actions from {old}"
+    else:
+        assert all_replacements is not None
+        joined = " and ".join(all_replacements)
+        fix = f"rewrite the rules for {joined}{_split_approval_suffix(old)}."
+        reason = f"{old} was split into {joined} ({new} now gets a different approval decision)"
+        previous = f"{old} (now split into {joined})"
+    if kind == "rem_old":
+        return f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; {reason}; {fix}"
+    return (
+        f"tool_approval.rules[{index}].match {rules[index].match!r} now decides {new}, "
+        f"changing tool_approval.default {default!r} that previously decided {previous}; {fix}"
+    )
+
+
+def _retired_approval_mismatch_error(
+    kind: Literal["rem_old", "rem_new"],
+    index: int,
+    *,
+    rules: Sequence[_ApprovalRule],
+    old: str,
+    news: Sequence[str],
+    default: str,
+    kept_news: Sequence[str] = (),
+    split_from_active: bool = False,
+    all_replacements: tuple[str, ...] | None = None,
+) -> str:
+    if split_from_active or (all_replacements and len(all_replacements) > 1):
+        return _retired_split_mismatch_error(
+            kind,
+            index,
+            rules=rules,
+            old=old,
+            new=news[0],
+            default=default,
+            split_from_active=split_from_active,
+            all_replacements=all_replacements,
+        )
+    joined = ", ".join(news)
+    target = news[0] if len(news) == 1 else f"[{joined}]"
+    if kind == "rem_old":
+        verb = "gets" if len(news) == 1 else "get"
+        if kept_news:
+            kept_joined = ", ".join(kept_news)
+            kept_patterns = [pattern for pattern in rules[index].match_patterns() if pattern != old]
+            combined_match = json.dumps([*kept_patterns, *news])
+            return (
+                f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; "
+                f"{old} is now {joined} (while still matching {kept_joined}), which now {verb} a different "
+                f"approval decision; keep the existing pattern and add {joined} "
+                f"(for example match: {combined_match}) so {kept_joined} stays covered."
+            )
+        return (
+            f"tool_approval.rules[{index}].match {rules[index].match!r} decided {old}; "
+            f"{old} is now {joined}, which now {verb} a different approval decision; "
+            f"rewrite the rules for {target}."
+        )
+    return (
+        f"tool_approval.rules[{index}].match {rules[index].match!r} now decides {joined}, "
+        f"changing tool_approval.default {default!r} that previously decided {old}; "
+        f"rewrite the rules for {target}."
+    )
+
+
+def _format_retired_approval_error(
+    kind: _RetiredApprovalFailureKind,
+    index: int,
+    *,
+    rules: Sequence[_ApprovalRule],
+    old: str,
+    news: Sequence[str],
+    default: str,
+    kept_news: Sequence[str] = (),
+    split_from_active: bool = False,
+    all_replacements: tuple[str, ...] | None = None,
+) -> str:
+    if kind == "script":
+        return _retired_script_approval_error(
+            rules[index],
+            script_index=index,
+            old=old,
+            news=news,
+            split_from_active=split_from_active,
+            all_replacements=all_replacements,
+        )
+    if kind == "conflict":
+        joined = ", ".join(news)
+        return (
+            f"tool_approval.rules[{index}].match {rules[index].match!r} targets retired {old}, "
+            f"which conflicts with {joined}; remove the retired {old} rule or reconcile it with {joined}."
+        )
+    return _retired_approval_mismatch_error(
+        kind,
+        index,
+        rules=rules,
+        old=old,
+        news=news,
+        default=default,
+        kept_news=kept_news,
+        split_from_active=split_from_active,
+        all_replacements=all_replacements,
+    )
+
+
+def _retired_approval_pair_failure_for_agent(
     rules: Sequence[_ApprovalRule],
     *,
     old: str,
@@ -513,9 +639,7 @@ def _retired_approval_pair_error_for_agent(
     default_timeout_days: float,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
-    split_from_active: bool = False,
-    all_replacements: tuple[str, ...] | None = None,
-) -> str | None:
+) -> tuple[_RetiredApprovalFailureKind, int] | None:
     old_indices = _agent_rule_indices(rules, old, agent)
     new_indices = _agent_rule_indices(rules, new, agent)
     shared_prefix_len = 0
@@ -546,14 +670,7 @@ def _retired_approval_pair_error_for_agent(
         )
         is not None
     ):
-        return _retired_script_approval_error(
-            rules[script_index],
-            script_index=script_index,
-            old=old,
-            new=new,
-            split_from_active=split_from_active,
-            all_replacements=all_replacements,
-        )
+        return ("script", script_index)
     old_chain = _effective_approval_chain(
         rules,
         old_indices,
@@ -587,64 +704,54 @@ def _retired_approval_pair_error_for_agent(
             if broad_probe is not None
             else None
         )
-        return (
-            f"tool_approval.rules[{conflict_index}].match {rules[conflict_index].match!r} targets retired {old}, "
-            f"which conflicts with {new}; remove the retired {old} rule or reconcile it with {new}."
-            if conflict_index is not None
-            else None
-        )
-    return _retired_approval_mismatch_error(
-        rules,
-        rem_old=rem_old,
-        rem_new=rem_new,
-        old=old,
-        new=new,
-        default=default,
-        split_from_active=split_from_active,
-        all_replacements=all_replacements,
-    )
-
-
-def _retired_approval_mismatch_error(
-    rules: Sequence[_ApprovalRule],
-    *,
-    rem_old: Sequence[int],
-    rem_new: Sequence[int],
-    old: str,
-    new: str,
-    default: str,
-    split_from_active: bool,
-    all_replacements: tuple[str, ...] | None = None,
-) -> str | None:
-    is_multi_split = not split_from_active and bool(all_replacements) and len(all_replacements) > 1
-    joined = " and ".join(all_replacements) if all_replacements and is_multi_split else new
-    suffix = _split_approval_suffix(old) if is_multi_split else ""
-    fix = f"add explicit approval rules for {new}." if split_from_active else f"rewrite the rules for {joined}{suffix}."
+        return ("conflict", conflict_index) if conflict_index is not None else None
     if rem_old:
         report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
-        if split_from_active:
-            reason = f"read actions from {old} moved to {new}, which now gets a different approval decision"
-        elif is_multi_split:
-            reason = f"{old} was split into {joined} ({new} now gets a different approval decision)"
-        else:
-            reason = f"{old} is now {new}, which now gets a different approval decision"
-        return f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; {reason}; {fix}"
+        return ("rem_old", report_index)
     if rem_new:
         report_index = next(
             (index for index in rem_new if new not in rules[index].match_patterns()),
             rem_new[0],
         )
-        if split_from_active:
-            previous = f"read actions from {old}"
-        elif is_multi_split:
-            previous = f"{old} (now split into {joined})"
-        else:
-            previous = old
-        return (
-            f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
-            f"changing tool_approval.default {default!r} that previously decided {previous}; {fix}"
-        )
+        return ("rem_new", report_index)
     return None
+
+
+def _retired_approval_pair_error_for_agent(
+    rules: Sequence[_ApprovalRule],
+    *,
+    old: str,
+    new: str,
+    agent: str,
+    default: str,
+    default_timeout_days: float,
+    reject_wildcard_scripts: bool = False,
+    broad_probe: str | None = None,
+    split_from_active: bool = False,
+    all_replacements: tuple[str, ...] | None = None,
+) -> str | None:
+    failure = _retired_approval_pair_failure_for_agent(
+        rules,
+        old=old,
+        new=new,
+        agent=agent,
+        default=default,
+        default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=reject_wildcard_scripts,
+        broad_probe=broad_probe,
+    )
+    if failure is None:
+        return None
+    return _format_retired_approval_error(
+        failure[0],
+        failure[1],
+        rules=rules,
+        old=old,
+        news=[new],
+        default=default,
+        split_from_active=split_from_active,
+        all_replacements=all_replacements,
+    )
 
 
 def _first_retired_approval_error(
@@ -753,8 +860,46 @@ def retired_action_argument_approval_error(
     return None
 
 
+def _collect_consolidated_approval_targets(
+    toolkit_checks: Sequence[tuple[str, Mapping[str, str], bool | None]],
+) -> tuple[dict[str, dict[str, bool]], list[tuple[Mapping[str, tuple[str, ...]], bool]]]:
+    targets_by_old: dict[str, dict[str, bool]] = {}
+    split_checks: list[tuple[Mapping[str, tuple[str, ...]], bool]] = []
+    for toolkit_name, renames, reject_wildcard_scripts in toolkit_checks:
+        toolkit_strict = (
+            toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
+            if reject_wildcard_scripts is None
+            else reject_wildcard_scripts
+        )
+        strict_old_names = (
+            STRICT_WILDCARD_SCRIPT_RENAMES.get(toolkit_name, frozenset())
+            if reject_wildcard_scripts is None
+            else frozenset()
+        )
+        for old, new in renames.items():
+            reject_wildcards = toolkit_strict or old in strict_old_names
+            targets = targets_by_old.setdefault(old, {})
+            targets[new] = targets.get(new, False) or reject_wildcards
+        if (split_renames := RETIRED_SPLIT_FUNCTIONS.get(toolkit_name)) is not None:
+            split_checks.append((split_renames, toolkit_strict))
+    return targets_by_old, split_checks
+
+
+def _normalize_consolidated_toolkit_checks(
+    toolkit_or_checks: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
+    renames: Mapping[str, str] | None,
+    reject_wildcard_scripts: bool | None,
+) -> Sequence[tuple[str, Mapping[str, str], bool | None]]:
+    if not isinstance(toolkit_or_checks, str):
+        return toolkit_or_checks
+    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_or_checks) if renames is None else renames
+    if not effective_renames and toolkit_or_checks not in RETIRED_SPLIT_FUNCTIONS:
+        return ()
+    return [(toolkit_or_checks, effective_renames or {}, reject_wildcard_scripts)]
+
+
 def retired_consolidated_approval_error(
-    toolkit_name: str,
+    toolkit_name: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
@@ -763,28 +908,67 @@ def retired_consolidated_approval_error(
     *,
     reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
-    """Return a migration error when approval rules decide a consolidated/split function differently from a retired name."""
-    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
-    split_renames = RETIRED_SPLIT_FUNCTIONS.get(toolkit_name)
-    pairs = [
-        *(effective_renames.items() if effective_renames else ()),
-        *((old, new) for old, replacements in (split_renames or {}).items() for new in replacements),
-    ]
-    if not pairs:
-        return None
-    return _first_retired_approval_error(
-        pairs,
-        rules=rules,
-        default=default,
-        default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=(
-            toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
-            if reject_wildcard_scripts is None
-            else reject_wildcard_scripts
-        ),
-        agent_names=agent_names,
-        split_replacements=split_renames,
-    )
+    """Return a migration error when approval rules decide consolidated/split functions differently from retired names.
+
+    Accepts either a single toolkit name (with optional ``renames``/``reject_wildcard_scripts`` for direct callers and
+    plugins) or a sequence of ``(toolkit_name, renames, reject_wildcard_scripts)`` checks grouped across enabled
+    toolkits so shared bare names (such as ``run_query`` across ``postgres`` and ``redshift``) name every failing
+    replacement at once, and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS``.
+    """
+    toolkit_checks = _normalize_consolidated_toolkit_checks(toolkit_name, renames, reject_wildcard_scripts)
+    targets_by_old, split_checks = _collect_consolidated_approval_targets(toolkit_checks)
+
+    probes = _probe_agents(rules, agent_names)
+    for old, targets in targets_by_old.items():
+        first_failure: tuple[_RetiredApprovalFailureKind, int] | None = None
+        failing_news: list[str] = []
+        for new, reject_wildcards in targets.items():
+            for agent in probes:
+                failure = _retired_approval_pair_failure_for_agent(
+                    rules,
+                    old=old,
+                    new=new,
+                    agent=agent,
+                    default=default,
+                    default_timeout_days=default_timeout_days,
+                    reject_wildcard_scripts=reject_wildcards,
+                )
+                if failure is not None:
+                    if first_failure is None:
+                        first_failure = failure
+                    failing_news.append(new)
+                    break
+        if first_failure is not None:
+            kind, index = first_failure
+            kept_news = (
+                [new for new in targets if new not in failing_news and rules[index].matches_tool(new)]
+                if kind == "rem_old"
+                else []
+            )
+            return _format_retired_approval_error(
+                kind,
+                index,
+                rules=rules,
+                old=old,
+                news=failing_news,
+                default=default,
+                kept_news=kept_news,
+            )
+
+    for split_renames, toolkit_strict in split_checks:
+        if (
+            split_error := _first_retired_approval_error(
+                ((old, new) for old, replacements in split_renames.items() for new in replacements),
+                rules=rules,
+                default=default,
+                default_timeout_days=default_timeout_days,
+                reject_wildcard_scripts=toolkit_strict,
+                agent_names=agent_names,
+                split_replacements=split_renames,
+            )
+        ) is not None:
+            return split_error
+    return None
 
 
 def retired_split_approval_only_error(
@@ -824,20 +1008,8 @@ def _retired_function_filter(
     return None
 
 
-_SINGLE_VERB_RENAMED_TARGETS = frozenset(
-    {
-        "contacts_read",
-        "email_invite_read",
-        "shared_directories_read",
-        "google_docs_read",
-        "claude_agent_read",
-        "twilio_send",
-    },
-)
-
-
 def _is_single_verb_renamed_target(new: str) -> bool:
-    return new in _SINGLE_VERB_RENAMED_TARGETS or new.endswith("_google_docs_read")
+    return new in SINGLE_VERB_RENAMED_TARGETS or new.endswith("_google_docs_read")
 
 
 def _single_verb_rename_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:
@@ -873,10 +1045,12 @@ def _stored_consolidated_filter_guidance(tool_name: str, key: str, old: str, new
 def _stored_toggle_filter_guidance(
     tool_name: str,
     toggle_hint: str,
-    _key: str,
-    _old: str,
+    key: str,
+    old: str,
     new: str,
 ) -> str:
+    if _is_single_verb_renamed_target(new):
+        return _single_verb_rename_filter_guidance(tool_name, key, old, new)
     return (
         f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
         f"disable unwanted actions via `{tool_name}`'s {toggle_hint} (or `tool_approval.rules` "

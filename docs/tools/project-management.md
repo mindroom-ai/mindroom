@@ -320,7 +320,7 @@ agents:
 
 ## [`zendesk`]
 
-`zendesk` searches Help Center articles with `search_zendesk()` and returns their body text without titles, URLs, or HTML.
+`zendesk` searches Help Center articles with `zendesk_search()` and returns their body text without titles, URLs, or HTML.
 It cannot read or update tickets.
 
 | Option | Type | Required | Default | Notes |
@@ -328,7 +328,7 @@ It cannot read or update tickets.
 | `username` | `text` | `no` | `null` | Zendesk username; required unless `ZENDESK_USERNAME` is set. |
 | `password` | `password` | `no` | `null` | Zendesk password; required unless `ZENDESK_PASSWORD` is set. |
 | `company_name` | `text` | `no` | `null` | Zendesk subdomain, as in `<company_name>.zendesk.com`, not the display name; required unless `ZENDESK_COMPANY_NAME` is set. |
-| `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `search_zendesk()`. |
+| `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `zendesk_search()`. |
 | `all` | `boolean` | `no` | `false` | Enable every function regardless of the flag above. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 

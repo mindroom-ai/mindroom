@@ -10,7 +10,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "agentql_scrape_website",
         "description": "Scrape all text content from a website using AgentQL.",
         "parameters": {
           "type": "object",
@@ -39,7 +39,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "custom_scrape_website",
+        "name": "agentql_custom_scrape_website",
         "description": "Scrape a website using a custom AgentQL query.",
         "parameters": {
           "type": "object",
@@ -79,7 +79,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "save_dag_file",
+        "name": "airflow_save_dag_file",
         "description": "Write Python DAG `contents` to `dag_file` under the DAG directory and return its path.",
         "parameters": {
           "type": "object",
@@ -111,7 +111,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_dag_file",
+        "name": "airflow_read_dag_file",
         "description": "Read and return the contents of `dag_file` under the DAG directory.",
         "parameters": {
           "type": "object",
@@ -150,7 +150,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_arxiv_and_return_articles",
+        "name": "arxiv_search",
         "description": "Use this function to search arXiv for a query and return the top articles.",
         "parameters": {
           "type": "object",
@@ -183,7 +183,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_arxiv_papers",
+        "name": "arxiv_read_papers",
         "description": "Use this function to read a list of arxiv papers and return the content.",
         "parameters": {
           "type": "object",
@@ -230,7 +230,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_functions",
+        "name": "aws_lambda_list_functions",
         "description": "List AWS Lambda function names in the configured region.",
         "parameters": {
           "type": "object",
@@ -253,7 +253,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "invoke_function",
+        "name": "aws_lambda_invoke_function",
         "description": "Invoke AWS Lambda `function_name` with a JSON `payload` string.",
         "parameters": {
           "type": "object",
@@ -294,7 +294,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "aws_ses_send_email",
         "description": "Send plain-text email via Amazon SES.",
         "parameters": {
           "type": "object",
@@ -555,7 +555,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "screenshot",
+        "name": "browserbase_screenshot",
         "description": "Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`).",
         "parameters": {
           "type": "object",
@@ -704,7 +704,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "localize_voice",
+        "name": "cartesia_localize_voice",
         "description": "Create a localized Cartesia voice in another language.",
         "parameters": {
           "type": "object",
@@ -761,7 +761,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "text_to_speech",
+        "name": "cartesia_text_to_speech",
         "description": "Synthesize MP3 speech audio from text using Cartesia.",
         "parameters": {
           "type": "object",
@@ -794,7 +794,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "list_voices",
+        "name": "cartesia_list_voices",
         "description": "List available Cartesia voices (first page) as JSON.",
         "parameters": {
           "type": "object",
@@ -824,12 +824,12 @@
       "enable_canvas_remote_assets": true,
       "enable_show_canvas": true
     },
-    "instructions": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load images, styles, fonts, media and scripts from any https: address, so a preview can use the real assets of the site it shows. Fetching data, workers and nested frames stay blocked.",
-    "guidance": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).\n- To show the user a real website, open it in your worker browser, whose first call in a conversation shows the Computer panel; a canvas cannot.\n- Canvas pages may load images, styles, fonts, media and scripts from any https: address, so a preview can use the real assets of the site it shows. Fetching data, workers and nested frames stay blocked.",
+    "instructions": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.\n- To show a real website, open it in your worker browser (first call shows the Computer panel); a canvas cannot.\n- Canvas pages may load images, styles, fonts, media, and scripts from any https: address (e.g. real site assets); data fetches, workers, and nested frames stay blocked.",
+    "guidance": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.\n- To show a real website, open it in your worker browser (first call shows the Computer panel); a canvas cannot.\n- Canvas pages may load images, styles, fonts, media, and scripts from any https: address (e.g. real site assets); data fetches, workers, and nested frames stay blocked.",
     "functions": [
       {
         "name": "open_settings",
-        "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
+        "description": "Open MindRoom Chat Settings at one section. Changes no setting (user decides). Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -854,7 +854,7 @@
       },
       {
         "name": "open_panel",
-        "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+        "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -864,7 +864,7 @@
                 "members",
                 "computer"
               ],
-              "description": "'computer' (worker browser) or 'members' (default; room members)."
+              "description": "computer (worker browser) or members (default)."
             }
           },
           "required": []
@@ -875,41 +875,41 @@
       },
       {
         "name": "show_canvas",
-        "description": "Show an interactive HTML canvas you wrote, inline in the conversation or in the side panel.\nWhen to use: use when seeing/clicking beats text. Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a quick choice, just ask in reply. Cannot load real websites. Pass `html` or workspace-relative `path` (e.g. `slides/deck.html`), up to 4 MB. Show only pages you wrote (appears as yours; typed data could leave the page).\n\nInline vs Panel & Raw: prefer `inline=True` (~700px desktop / 360px phone) for in-flow items: charts, diagrams, mockups, pickers, short forms, multi-step flows. Use panel for persistent views (dashboards, slides, long docs). New canvases post separately and appear below your reply text (refer to them as below, or by title on quiet turns). Inline themed rules: no background, card, title banner, or side padding on `html`/`body`; fixed pixel heights for charts; no `vh` or `height:100%` on `html`/`body`; restarts when scrolled away (give fields `id`/`name` or use `saveState`); use themed mode (not `raw`/`width`) for forms; show next step as new inline canvas or update. For realistic website/app previews, use `inline=True`, `raw=True` (no Chat styles/vars), and target `width` (e.g. 1440/390, scaled to fit)—overrides inline rules, rendered up to 16:10 tall (568-1080px) where `vh` and scrolling work (panel uses panel width).\n\nTheme & Sandbox: design like a responsive web app; prefer SVG/CSS over embedded images, summarize large data, skip unneeded interactivity. Fetch/XHR/WebSockets always blocked; external images/scripts/styles/fonts blocked unless instructions name an allowed source (embed images as `data:` URLs). For Chart.js/D3/Mermaid/KaTeX pass `libraries` (never a CDN). Cannot see user account/messages. Theme CSS vars: `--mr-bg`, `--mr-surface`, `--mr-surface-raised`, `--mr-border`, `--mr-text`, `--mr-text-muted`, `--mr-accent`, `--mr-accent-text`, `--mr-success`, `--mr-warning`, `--mr-danger`, `--mr-radius`, `--mr-font`; `window.mindroom.colorScheme` is `'light'` or `'dark'`.\n\nSubmitting & State: nothing reaches you until committed. Commit via `window.mindroom.submit(data, {label: \"short summary\"})` (< 512 KB JSON; decimals arrive as text) or `<form>` (`data-mindroom-label` sets label). Chat confirms with user, delivering `Canvas response (<canvas_event_id>, revision <event_id>): <label>` + JSON (older revision = earlier version). Runtime/blocked errors can be sent as `Canvas error (<canvas_event_id>, revision <event_id>):` + lines. Inputs/selects/textareas with stable `id`/`name` auto-persist across reloads/updates (except passwords, hidden, `autocomplete=\"off\"`; change id if meaning changes; redraw on restored `input` events). For other state, call `window.mindroom.saveState(value)` on change (<= 256K chars JSON; larger throws); reloads read `window.mindroom.state` (`undefined` if unset; read defensively across versions). Local to device (100 most recent canvases) unless `share_state=True` (set at creation; Chat notifies user, stores room-readable copy for `read_canvas_state`—never store secrets in `saveState`).\n\nUpdating: pass `canvas_event_id` to replace in place (omit for a separate canvas; users switch canvases from room header). `show_canvas` reads `path` immediately and parallel tool calls run concurrently—call it ONLY after file-writing calls/jobs finish, never alongside them, or the user sees stale HTML. Success means request sent, not opened/answered.",
+        "description": "Create/replace HTML canvas you wrote (charts, diagrams, mockups, pickers, forms, dashboards, slides) inline or panel.\nNew: title + html or path. Replace: original canvas_event_id + html or path. Reopen unchanged: no call; user picks in room header.\nUse when seeing/clicking beats text (quick choice: ask in reply). Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams.\n\nLayout: prefer inline=true (~700px desktop/360px phone) for in-flow/multi-step flows; panel (default) for persistent views/slides/long docs. New canvases appear below your reply text (refer as below/title).\nInline themed: html/body has no background/card/title banner/side padding/vh/height:100%; fixed px chart heights; keep forms themed (no raw/width); scroll-away restarts (use id/name or saveState); next step: update or new.\nSite/app preview: inline=true, raw=true (no Chat styles/vars), width (320-2560, e.g. 1440/390, scaled; overrides inline rules; <=16:10, 568-1080px, vh/scroll work; panel uses own width).\n\nSandbox & theme: responsive, SVG/CSS over images, summarize large data, skip needless interactivity, <=4 MB; only your HTML (appears as yours; typed data could leave; no real websites). Blocked: fetch/XHR/WebSockets, user data, external assets unless instructions allow (embed data: images; pass libraries for Chart.js/D3/Mermaid/KaTeX, never CDN).\nVars (--mr-*, e.g. var(--mr-bg)): bg, surface, surface-raised, border, text, text-muted, accent, accent-text, success, warning, danger, radius, font; window.mindroom.colorScheme (light|dark).\n\nSubmit & state: nothing reaches you until commit via window.mindroom.submit(data, {label: \"short summary\"}) (<512KB JSON; decimals as text) or <form data-mindroom-label=\"...\">. User confirms before Canvas response (<canvas_event_id>, revision <event_id>): <label> + JSON (older = earlier) or Canvas error (<canvas_event_id>, revision <event_id>): + lines.\nAuto-persist inputs/selects/textareas via stable id/name (not type=password/hidden/autocomplete=\"off\"; rename id if meaning changes; redraw on restored input). Other state: call window.mindroom.saveState(v) on change (<=256K chars JSON; larger throws); restore from window.mindroom.state on load (undefined if unset; read defensively). Device-local (100 recent) unless share_state=true (at creation; user notified; room-readable via read_canvas_state without submit; no secrets).\n\npath reads immediately: call ONLY after file writes finish, never in parallel. Success = request sent, not opened/answered.",
         "parameters": {
           "type": "object",
           "properties": {
             "title": {
               "type": "string",
-              "description": "Short single-line title (omit on update to keep original)."
+              "description": "Required on create (1 line <=120 chars); omit on update to keep original."
             },
             "html": {
               "type": "string",
-              "description": "Inline HTML/CSS/JS (pass `html` or `path`)."
+              "description": "Inline HTML; pass html or path, never both (one required on update)."
             },
             "path": {
               "type": "string",
-              "description": "Workspace-relative HTML file path (instead of `html`)."
+              "description": "Workspace HTML path instead of html; finish writes first (one required on update)."
             },
             "canvas_event_id": {
               "type": "string",
-              "description": "Existing canvas event ID in this conversation to update in place."
+              "description": "Original $ID in this conversation to replace in place; still needs html or path, cannot reopen unchanged."
             },
             "share_state": {
               "type": "boolean",
-              "description": "Expose state to `read_canvas_state` (set on creation; preserved on update)."
+              "description": "Expose state to read_canvas_state (on create; kept on update)."
             },
             "inline": {
               "type": "boolean",
-              "description": "Show inline instead of side panel (set on creation; preserved on update)."
+              "description": "Show inline vs side panel (on create; kept on update)."
             },
             "raw": {
               "type": "boolean",
-              "description": "Omit Chat styles/theme vars (per revision; re-pass on updates)."
+              "description": "Omit Chat styles/vars (per revision; re-pass on update)."
             },
             "width": {
               "type": "integer",
-              "description": "Target viewport width in CSS px (320-2560; per revision; panel uses its own width)."
+              "description": "Target width px, 320-2560 (per revision; panel uses own)."
             },
             "libraries": {
               "type": "array",
@@ -922,7 +922,7 @@
                   "katex"
                 ]
               },
-              "description": "Bundled libraries for this revision (re-pass on updates)."
+              "description": "Bundled libs (re-pass on update)."
             }
           },
           "required": []
@@ -933,13 +933,13 @@
       },
       {
         "name": "read_canvas_state",
-        "description": "Read the latest state from a `share_state=True` canvas: `window.mindroom.saveState` value, kept inputs (by `#id`/name), and timestamp. Empty until the user changes something; call anytime (e.g. from scheduled tasks) without needing a submit.",
+        "description": "Read latest state from a share_state=true canvas: saveState, kept inputs (#id/name), timestamp. Empty until user changes something; ok anytime (incl. scheduled tasks) without needing submit.",
         "parameters": {
           "type": "object",
           "properties": {
             "canvas_event_id": {
               "type": "string",
-              "description": "Event ID of a `share_state=True` canvas in this conversation."
+              "description": "Event ID ($...) of a share_state=true canvas in this conversation."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -971,7 +971,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "crawl",
+        "name": "crawl4ai_crawl",
         "description": "Crawl validated public HTTP(S) URLs.",
         "parameters": {
           "type": "object",
@@ -1064,7 +1064,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "query_csv_file",
+        "name": "csv_query",
         "description": "Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`).",
         "parameters": {
           "type": "object",
@@ -1106,7 +1106,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "make_request",
+        "name": "custom_api_request",
         "description": "Make an HTTP request to a validated public HTTP(S) URL.",
         "parameters": {
           "type": "object",
@@ -1355,7 +1355,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_voices",
+        "name": "eleven_labs_get_voices",
         "description": "List available ElevenLabs voices with ID, name, and description.",
         "parameters": {
           "type": "object",
@@ -1378,7 +1378,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_sound_effect",
+        "name": "eleven_labs_generate_sound_effect",
         "description": "Generate a sound effect from a text prompt.",
         "parameters": {
           "type": "object",
@@ -1411,7 +1411,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "text_to_speech",
+        "name": "eleven_labs_text_to_speech",
         "description": "Convert text to speech audio using ElevenLabs.",
         "parameters": {
           "type": "object",
@@ -1551,7 +1551,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "research",
+        "name": "exa_research",
         "description": "Perform deep research on `instructions` with optional `output_schema` JSON schema and return JSON data and citations.",
         "parameters": {
           "type": "object",
@@ -1597,7 +1597,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "fal_generate_media",
         "description": "Generate an image or video with the configured Fal model.",
         "parameters": {
           "type": "object",
@@ -1626,7 +1626,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "image_to_image",
+        "name": "fal_image_to_image",
         "description": "Edit an input image according to a text prompt using Fal Flux 2.",
         "parameters": {
           "type": "object",
@@ -2001,7 +2001,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "firecrawl_scrape_website",
         "description": "Use this function to scrape a website using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -2030,7 +2030,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "crawl_website",
+        "name": "firecrawl_crawl_website",
         "description": "Use this function to crawl a website using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -2063,7 +2063,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "map_website",
+        "name": "firecrawl_map_website",
         "description": "Use this function to map a website using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -2092,7 +2092,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_web",
+        "name": "firecrawl_search_web",
         "description": "Use this function to search the web using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -2136,7 +2136,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_image",
+        "name": "gemini_generate_image",
         "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
@@ -2165,7 +2165,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_video",
+        "name": "gemini_generate_video",
         "description": "Generate a video from a text prompt using Vertex AI Veo.",
         "parameters": {
           "type": "object",
@@ -2204,7 +2204,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_gifs",
+        "name": "giphy_search_gifs",
         "description": "Search Giphy for GIFs matching a query.",
         "parameters": {
           "type": "object",
@@ -2277,7 +2277,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "google_bigquery_run_sql_query",
         "description": "Run one read-only GoogleSQL SELECT query; unqualified tables resolve in the configured dataset.",
         "parameters": {
           "type": "object",
@@ -2367,7 +2367,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "groq_transcribe_audio",
         "description": "Transcribe audio from an http(s) URL or local file using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -2396,7 +2396,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "translate_audio",
+        "name": "groq_translate_audio",
         "description": "Translate audio from an http(s) URL or local file into English using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -2425,7 +2425,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "groq_generate_speech",
         "description": "Synthesize speech audio from text using Groq TTS.",
         "parameters": {
           "type": "object",
@@ -2514,7 +2514,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_url",
+        "name": "jina_read_url",
         "description": "Reads a URL and returns the truncated content using Jina Reader API.",
         "parameters": {
           "type": "object",
@@ -2542,7 +2542,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_query",
+        "name": "jina_search_query",
         "description": "Performs a web search using Jina Reader API and returns the truncated results.",
         "parameters": {
           "type": "object",
@@ -2580,7 +2580,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_with_linkup",
+        "name": "linkup_search",
         "description": "Use this function to search the web for a given query.\nThis function uses the Linkup API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -2628,7 +2628,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_video",
+        "name": "lumalabs_generate_video",
         "description": "Generate a video from a text prompt and optional keyframes.",
         "parameters": {
           "type": "object",
@@ -2690,7 +2690,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "image_to_video",
+        "name": "lumalabs_image_to_video",
         "description": "Generate a video from one or two images with a prompt.",
         "parameters": {
           "type": "object",
@@ -2869,7 +2869,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "extract_audio",
+        "name": "moviepy_video_tools_extract_audio",
         "description": "Extract the audio track from a video file.",
         "parameters": {
           "type": "object",
@@ -2903,7 +2903,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_srt",
+        "name": "moviepy_video_tools_create_srt",
         "description": "Write SRT-formatted subtitle text to a file.",
         "parameters": {
           "type": "object",
@@ -2937,7 +2937,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "embed_captions",
+        "name": "moviepy_video_tools_embed_captions",
         "description": "Burn word-highlighted SRT captions onto a video.",
         "parameters": {
           "type": "object",
@@ -3037,7 +3037,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_cypher_query",
+        "name": "neo4j_run_cypher_query",
         "description": "Execute a Cypher query against the Neo4j database and return JSON records.",
         "parameters": {
           "type": "object",
@@ -3075,7 +3075,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_article",
+        "name": "newspaper_read_article",
         "description": "Use this function to read an article from a URL.",
         "parameters": {
           "type": "object",
@@ -3200,7 +3200,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "openai_transcribe_audio",
         "description": "Transcribe an audio file using OpenAI speech-to-text.",
         "parameters": {
           "type": "object",
@@ -3229,7 +3229,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_image",
+        "name": "openai_generate_image",
         "description": "Generate an image from a text prompt using OpenAI.",
         "parameters": {
           "type": "object",
@@ -3258,7 +3258,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "openai_generate_speech",
         "description": "Synthesize speech audio from text using OpenAI.",
         "parameters": {
           "type": "object",
@@ -3413,7 +3413,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_pandas_dataframe",
+        "name": "pandas_create_dataframe",
         "description": "Create and store a DataFrame under `dataframe_name` via `pandas.<create_using_function>(**function_parameters)`.",
         "parameters": {
           "type": "object",
@@ -3452,7 +3452,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_dataframe_operation",
+        "name": "pandas_run_operation",
         "description": "Run `operation` on stored DataFrame `dataframe_name` with optional `operation_parameters`.",
         "parameters": {
           "type": "object",
@@ -3501,7 +3501,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_pubmed",
+        "name": "pubmed_search",
         "description": "Search PubMed, using the configured max_results when the call omits it.",
         "parameters": {
           "type": "object",
@@ -3642,7 +3642,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "replicate_generate_media",
         "description": "Generate an image or video using the configured Replicate model.",
         "parameters": {
           "type": "object",
@@ -3681,7 +3681,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "resend_send_email",
         "description": "Send an HTML email via Resend.",
         "parameters": {
           "type": "object",
@@ -3734,7 +3734,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "smartscraper",
+        "name": "scrapegraph_smartscraper",
         "description": "Extract structured data from a webpage using an AI prompt.",
         "parameters": {
           "type": "object",
@@ -3768,7 +3768,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "markdownify",
+        "name": "scrapegraph_markdownify",
         "description": "Convert a webpage to markdown.",
         "parameters": {
           "type": "object",
@@ -3797,7 +3797,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "searchscraper",
+        "name": "scrapegraph_searchscraper",
         "description": "Search the web and extract information from the top results.",
         "parameters": {
           "type": "object",
@@ -3826,7 +3826,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "crawl",
+        "name": "scrapegraph_crawl",
         "description": "Crawl a website and extract structured data across multiple pages.\nStarts a crawl job upstream and polls until it completes or ``crawl_max_wait`` elapses.",
         "parameters": {
           "type": "object",
@@ -3877,7 +3877,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "scrape",
+        "name": "scrapegraph_scrape",
         "description": "Get raw HTML content from a webpage.",
         "parameters": {
           "type": "object",
@@ -3917,7 +3917,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google",
+        "name": "serpapi_search_google",
         "description": "Search Google using the Serpapi API. Returns the search results.",
         "parameters": {
           "type": "object",
@@ -3950,7 +3950,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "search_youtube",
+        "name": "serpapi_search_youtube",
         "description": "Search Youtube using the Serpapi API. Returns the search results.",
         "parameters": {
           "type": "object",
@@ -4228,7 +4228,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "sql_run_query",
         "description": "Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty).",
         "parameters": {
           "type": "object",
@@ -4278,7 +4278,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_with_tavily",
+        "name": "tavily_search_context",
         "description": "Use this function to search the web for a given query.\nThis function uses the Tavily API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -4307,7 +4307,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "extract_url_content",
+        "name": "tavily_extract",
         "description": "Extract content from one or more URLs using Tavily's Extract API.\nThis function retrieves the main content from web pages in markdown or text format.",
         "parameters": {
           "type": "object",
@@ -4507,7 +4507,7 @@
     "functions": [
       {
         "name": "trafilatura_extract",
-        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `trafilatura_html_to_text`; to crawl a site use `trafilatura_crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -4554,7 +4554,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "html_to_text",
+        "name": "trafilatura_html_to_text",
         "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
@@ -4585,7 +4585,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "crawl_website",
+        "name": "trafilatura_crawl_website",
         "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
@@ -5279,7 +5279,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_wikipedia",
+        "name": "wikipedia_search",
         "description": "Searches Wikipedia for a query.",
         "parameters": {
           "type": "object",
@@ -5443,7 +5443,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_zendesk",
+        "name": "zendesk_search",
         "description": "Search Zendesk Help Center articles matching `search_string`.",
         "parameters": {
           "type": "object",

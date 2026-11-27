@@ -152,7 +152,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         if self._inspect_actions:
             tools.append(self.google_bigquery_inspect)
         if all or run_sql_query:
-            tools.append(self.run_sql_query)
+            tools.append(self.google_bigquery_run_sql_query)
         super().__init__(
             name="google_bigquery",
             tools=tools,
@@ -224,7 +224,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
         ]
         return json.dumps({"table_description": table.description or "", "columns": columns})
 
-    def run_sql_query(self, query: str) -> str:
+    def google_bigquery_run_sql_query(self, query: str) -> str:
         """Run one read-only GoogleSQL SELECT query; unqualified tables resolve in the configured dataset.
 
         Args:
@@ -253,7 +253,7 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             detail = _REST_REQUEST_PREFIX.sub("", str(exc.message), count=1)[:_MAX_ERROR_DETAIL]
             return json.dumps({"error": f"{_SERVICE_NAME} request failed (HTTP {exc.code}): {detail}"})
         except GoogleAPIError as exc:
-            return self._google_cloud_error_result(_SERVICE_NAME, "run_sql_query", exc)
+            return self._google_cloud_error_result(_SERVICE_NAME, "google_bigquery_run_sql_query", exc)
         truncated = len(records) > self.max_rows
         return json.dumps(
             {"columns": columns, "rows": records[: self.max_rows], "truncated": truncated},

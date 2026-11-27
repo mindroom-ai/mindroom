@@ -31,7 +31,7 @@ class TurnMessages:
     """A new turn's input around its prompt.
 
     ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
-    ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
+    ``transient`` holds turn context (``is_turn_context=True``), such as memory results, that follows the prompt
     and is stored with the run where it was sent, unless the run stopped after a call. Later turns replay it there
     outside a message limit, so each request extends the previous one whole: Codex's prompt cache reuses only a prompt
     an earlier request sent whole, so a turn context left out of later requests would cap their cache hits at the first
@@ -60,7 +60,7 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
     replay; a tool result whose call the message limit cut off is dropped, since it cannot replay without that call.
-    Turn context (``add_to_agent_memory=False``) replays where it was sent, except under a message limit, which counts
+    Turn context (``is_turn_context=True``) replays where it was sent, except under a message limit, which counts
     conversation only, so turn context neither takes a slot in its window nor opens it without its prompt.
     Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
     Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
@@ -73,7 +73,7 @@ def scope_history_messages(
         replayed = replayed[-num_history_runs:]
     selected = replayable_messages(replayed)
     if num_history_messages is not None:
-        conversation = [message for message in selected if message.add_to_agent_memory]
+        conversation = [message for message in selected if not message.is_turn_context]
         newest = conversation[-num_history_messages:] if num_history_messages > 0 else []
         selected = list(dropwhile(lambda message: message.role == "tool", newest))
     history = [_history_copy(message) for message in selected]
@@ -203,7 +203,7 @@ def build_resume_request(
     """Return the request that resumes a paused run: its stored system messages, the summary, history, then the rest.
 
     ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system messages
-    are reused, and the turn context the paused request sent (``add_to_agent_memory=False``), such as memory results,
+    are reused, and the turn context the paused request sent (``is_turn_context=True``), such as memory results,
     stays where it was. So when the summary and history replay as they did for the paused request, this request repeats
     that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged prefix, and
     the provider's prompt cache still matches. A queued-message notice the paused run holds is left out: it told the

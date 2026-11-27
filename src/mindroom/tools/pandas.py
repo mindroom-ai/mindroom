@@ -35,13 +35,13 @@ class _PandasTools(Toolkit):
         enable_all = resolve_bool_toggle(all, default=False)
         tools: list[Any] = []
         if enable_all or resolve_bool_toggle(enable_create_pandas_dataframe, default=True):
-            tools.append(self.create_pandas_dataframe)
+            tools.append(self.pandas_create_dataframe)
         if enable_all or resolve_bool_toggle(enable_run_dataframe_operation, default=True):
-            tools.append(self.run_dataframe_operation)
+            tools.append(self.pandas_run_operation)
 
         super().__init__(name="pandas_tools", tools=tools)
 
-    def create_pandas_dataframe(
+    def pandas_create_dataframe(
         self,
         dataframe_name: str,
         create_using_function: str,
@@ -74,7 +74,7 @@ class _PandasTools(Toolkit):
         self.dataframes[dataframe_name] = dataframe
         return dataframe_name
 
-    def run_dataframe_operation(
+    def pandas_run_operation(
         self,
         dataframe_name: str,
         operation: str,
@@ -122,7 +122,7 @@ class _PandasTools(Toolkit):
     ],
     dependencies=["pandas"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#pandas",
-    function_names=("create_pandas_dataframe", "run_dataframe_operation"),
+    function_names=("pandas_create_dataframe", "pandas_run_operation"),
 )
 def pandas_tools() -> type[Toolkit]:
     """Return Pandas tools for data manipulation and analysis."""

@@ -45,7 +45,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import ModelIdentity, TurnCompleted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import TokenCounts
@@ -131,7 +131,7 @@ def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool
     if sums_attempts:
         # The retrying stage marks a finished turn whose usage adds up failed attempts.
         [completed] = [step for step in turn if isinstance(step, TurnCompleted)]
-        completed.message.provider_data = {AGGREGATE_USAGE_KEY: True}
+        completed.message.meta = MessageMeta(aggregate_usage=True)
     install_model_providers(monkeypatch, {"default": ScriptedModel([turn], identity=_IDENTITY)})
 
 

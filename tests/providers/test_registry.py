@@ -29,7 +29,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.llm.errors import MALFORMED_TOOL_CALL, MISSING_API_KEY, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
 from mindroom.llm.request_context import bind_request_headers
 from mindroom.providers import names
@@ -1208,7 +1208,7 @@ async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn
     # Each attempt reports its usage as it arrives; the guidance retry settles the malformed attempt's report first.
     assert reports == [(30, 5, False), (30, 5, True), (40, 9, False), (40, 9, True)]
     assert (turn.message.metrics.tokens.input_tokens, turn.message.metrics.tokens.output_tokens) == (70, 14)
-    assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert turn.message.meta.aggregate_usage is True
     assert len(wire.requests) == 2
 
 

@@ -416,7 +416,7 @@ async def _store_interrupted[R: AnyRunRecord](
 def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, status: RunStatus) -> None:
     """Snapshot the live messages the run stores, stamp its status, and set its duration, counted from ``started``.
 
-    Replayed history never stores. The turn context the run's requests sent (``add_to_agent_memory=False``), such as
+    Replayed history never stores. The turn context the run's requests sent (``is_turn_context=True``), such as
     memory results and the approval receipt, stores in place: a resume then sends the paused request unchanged, and
     the next turn's request can extend this run's last one whole, which append-only prompt caches such as Codex's
     need. A run that stopped after a call, or whose team member run did (``run_tool_executions``), drops it instead:
@@ -425,7 +425,7 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
     """
     stopped = status is not RunStatus.paused and any(tool.stop_after_call for tool in run_tool_executions(record))
     record.messages = [
-        message for message in messages if not message.from_history and (message.add_to_agent_memory or not stopped)
+        message for message in messages if not message.from_history and (not message.is_turn_context or not stopped)
     ]
     record.status = status
     assert record.metrics is not None

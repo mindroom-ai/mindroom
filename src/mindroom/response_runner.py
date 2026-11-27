@@ -34,6 +34,7 @@ from mindroom.constants import (
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    RESOLVED_IN_TURN_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
@@ -41,8 +42,8 @@ from mindroom.constants import (
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.conversation_state_writer import ReplySession
-from mindroom.delegation.background import job_acknowledgers
-from mindroom.delegation.cost import carried_receipts, receipts_metadata
+from mindroom.delegation.background import carried_job_receipts
+from mindroom.delegation.cost import receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import log_reply_error, model_error_labels
@@ -193,6 +194,7 @@ if TYPE_CHECKING:
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
@@ -233,6 +235,12 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     """Return what the stopped attempt at the current span's reply showed, which this attempt continues below."""
     handle = current_span()
     return None if handle is None else handle.resumed
+
+
+def _thread_resolved_in_turn(tool_context: ToolRuntimeContext) -> bool:
+    """Return whether this turn resolved its target thread."""
+    thread_id = tool_context.target.resolved_thread_id
+    return thread_id is not None and thread_id in tool_context.resolved_thread_ids
 
 
 def _shows_placeholder(request: ResponseRequest) -> bool:
@@ -1342,11 +1350,15 @@ class ResponseRunner:
             )
             if turn.attempts:
                 runtime = get_background_runtime(self.deps.runtime_paths)
+                journal = self.deps.runtime.orchestrator.event_journal_store
                 # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
-                journal = self.deps.runtime.orchestrator.event_journal_store()
-                jobs = runtime.retained_jobs() if runtime is not None else await saved_jobs(journal)
+                load_jobs = (
+                    runtime.delegation_jobs
+                    if runtime is not None
+                    else lambda ids: saved_jobs(journal(), delegation_ids=ids)
+                )
                 # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
-                received = receipts_metadata(carried_receipts(turn.ran, job_acknowledgers(jobs)))
+                received = receipts_metadata(await carried_job_receipts(turn.ran, load_jobs))
                 carried = with_prior_usage({CONTINUED_RUNS_METADATA_KEY: turn.attempts, **received}, turn.usage) or {}
                 request = replace(request, matrix_run_metadata={**(request.matrix_run_metadata or {}), **carried})
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
@@ -2250,8 +2262,11 @@ class ResponseRunner:
                 published[AI_RUN_METADATA_KEY] = {**fallback[AI_RUN_METADATA_KEY], **ai_run}
             entries = compactions.content()
             compaction_content = {COMPACTIONS_CONTENT_KEY: entries} if entries is not None else {}
+            resolved_content = (
+                {RESOLVED_IN_TURN_KEY: True} if _thread_resolved_in_turn(turn.runtime.tool_context) else {}
+            )
             return merge_response_extra_content(
-                {**fallback, **published, **compaction_content} or None,
+                {**fallback, **published, **compaction_content, **resolved_content} or None,
                 request.attachment_ids,
             )
 
@@ -2344,6 +2359,7 @@ class ResponseRunner:
                         ),
                         allow_new_terminal_message=lambda: participation is None or participation.approved,
                         placeholder_ready=None if participation is None else participation.wait_for_approval,
+                        resolved_in_turn=lambda: _thread_resolved_in_turn(runtime.tool_context),
                     ),
                 )
             if request.pipeline_timing is not None:

@@ -37,15 +37,15 @@ Toolkits with an `all` option enable every function when `all: true`, regardless
 
 ## [`aws_lambda`]
 
-`aws_lambda` provides `list_functions()` and `invoke_function(function_name, payload="{}")` in one AWS region.
-`invoke_function()` sends `payload` as a JSON string and returns the Lambda status code and the decoded response payload.
-`list_functions()` returns only the first page of results that AWS sends, so it is meant for simple invocation workflows rather than administering large accounts.
+`aws_lambda` provides `aws_lambda_list_functions()` and `aws_lambda_invoke_function(function_name, payload="{}")` in one AWS region.
+`aws_lambda_invoke_function()` sends `payload` as a JSON string and returns the Lambda status code and the decoded response payload.
+`aws_lambda_list_functions()` returns only the first page of results that AWS sends, so it is meant for simple invocation workflows rather than administering large accounts.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `region_name` | `text` | `us-east-1` | AWS region. |
-| `enable_list_functions` | `boolean` | `true` | Enable `list_functions()`. |
-| `enable_invoke_function` | `boolean` | `true` | Enable `invoke_function()`. |
+| `enable_list_functions` | `boolean` | `true` | Enable `aws_lambda_list_functions()`. |
+| `enable_invoke_function` | `boolean` | `true` | Enable `aws_lambda_invoke_function()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
@@ -58,7 +58,7 @@ agents:
 
 ## [`aws_ses`]
 
-`aws_ses` provides `send_email(subject, body, receiver_email)`, which sends a plain-text email from `sender_name <sender_email>` to one recipient.
+`aws_ses` provides `aws_ses_send_email(subject, body, receiver_email)`, which sends a plain-text email from `sender_name <sender_email>` to one recipient.
 Empty subjects and bodies are refused.
 It does not support HTML, templates, or attachments.
 Verify the sender identity in SES before use, and set both `sender_email` and `sender_name`, because an unset name appears literally as `None` in the sender.
@@ -68,8 +68,8 @@ Verify the sender identity in SES before use, and set both `sender_email` and `s
 | `sender_email` | `text` | `null` | Sender address; required in practice. |
 | `sender_name` | `text` | `null` | Sender display name. |
 | `region_name` | `text` | `us-east-1` | AWS region of the SES identity. |
-| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
-| `all` | `boolean` | `false` | Enable `send_email()`. |
+| `enable_send_email` | `boolean` | `true` | Enable `aws_ses_send_email()`. |
+| `all` | `boolean` | `false` | Enable `aws_ses_send_email()`. |
 
 ```yaml
 agents:
@@ -83,18 +83,18 @@ agents:
 
 ## [`airflow`]
 
-`airflow` provides `read_dag_file(dag_file)` and `save_dag_file(contents, dag_file)` for editing DAG source files.
+`airflow` provides `airflow_read_dag_file(dag_file)` and `airflow_save_dag_file(contents, dag_file)` for editing DAG source files.
 It does not talk to the Airflow scheduler or REST API, so it cannot trigger runs or inspect task state.
 `dag_file` paths are relative to `dags_dir`, which defaults to the agent workspace and resolves relative to it.
-`save_dag_file()` creates missing parent directories, and `read_dag_file()` refuses files larger than 64 MiB.
+`airflow_save_dag_file()` creates missing parent directories, and `airflow_read_dag_file()` refuses files larger than 64 MiB.
 DAG paths follow the agent's [`file_access`](../architecture/security-posture.md#file-access): with the default `workspace`, files outside the agent workspace are refused, so a DAG folder elsewhere needs `file_access: unrestricted`.
 Point `dags_dir` at the folder your Airflow deployment actually watches.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `dags_dir` | `text` | `null` | DAG directory; relative values resolve from the agent workspace. |
-| `enable_save_dag_file` | `boolean` | `true` | Enable `save_dag_file()`. |
-| `enable_read_dag_file` | `boolean` | `true` | Enable `read_dag_file()`. |
+| `enable_save_dag_file` | `boolean` | `true` | Enable `airflow_save_dag_file()`. |
+| `enable_read_dag_file` | `boolean` | `true` | Enable `airflow_read_dag_file()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
@@ -213,7 +213,7 @@ agents:
 
 ## [`custom_api`]
 
-`custom_api` provides `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)` for public HTTP(S) APIs that have no dedicated MindRoom tool.
+`custom_api` provides `custom_api_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)` for public HTTP(S) APIs that have no dedicated MindRoom tool.
 `method` accepts `GET`, `POST`, `PUT`, `DELETE`, or `PATCH`.
 With `base_url` set, `endpoint` is a path joined to it; without `base_url`, `endpoint` must be a full URL.
 Localhost, loopback, private-network, cloud metadata, and non-HTTP(S) destinations are refused, including through redirects, and there is no setting to allow them.
@@ -241,8 +241,8 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
 | `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
-| `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
-| `all` | `boolean` | `false` | Enable `make_request()`. |
+| `enable_make_request` | `boolean` | `true` | Enable `custom_api_request()`. |
+| `all` | `boolean` | `false` | Enable `custom_api_request()`. |
 
 ```yaml
 agents:

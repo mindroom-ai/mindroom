@@ -153,7 +153,7 @@ def test_read_only_guard_rejects_everything_else(sql: str) -> None:
 def test_run_sql_query_refuses_writes_before_calling_bigquery(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path)
 
-    result = json.loads(tool.run_sql_query("DELETE FROM events WHERE true"))
+    result = json.loads(tool.google_bigquery_run_sql_query("DELETE FROM events WHERE true"))
 
     assert result == {"error": "Only a single read-only SELECT query is allowed"}
     assert client.queries == []
@@ -162,7 +162,7 @@ def test_run_sql_query_refuses_writes_before_calling_bigquery(tmp_path: Path) ->
 def test_run_sql_query_uses_default_dataset_location_and_row_cap(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path, max_rows=2)
 
-    result = json.loads(tool.run_sql_query("SELECT n FROM events"))
+    result = json.loads(tool.google_bigquery_run_sql_query("SELECT n FROM events"))
 
     assert result == {"columns": ["n"], "rows": [{"n": 1}, {"n": 2}], "truncated": True}
     call = client.queries[0]
@@ -175,7 +175,7 @@ def test_run_sql_query_uses_default_dataset_location_and_row_cap(tmp_path: Path)
 def test_run_sql_query_job_config_is_accepted_by_jobs_query(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path)
 
-    tool.run_sql_query("SELECT n FROM events")
+    tool.google_bigquery_run_sql_query("SELECT n FROM events")
 
     call = client.queries[0]
     request = _job_helpers._to_query_request(call["job_config"], query=call["sql"], location=call["location"])
@@ -187,7 +187,7 @@ def test_run_sql_query_reports_bad_request_message_truncated(tmp_path: Path) -> 
     tool, client = _tool(tmp_path)
     client.error = google_exceptions.BadRequest("Unrecognized name: missing at [1:8]" + "x" * 1000)
 
-    result = json.loads(tool.run_sql_query("SELECT missing FROM events"))
+    result = json.loads(tool.google_bigquery_run_sql_query("SELECT missing FROM events"))
 
     assert result["error"].startswith("Google BigQuery request failed (HTTP 400): Unrecognized name: missing")
     assert len(result["error"]) <= 600
@@ -198,7 +198,7 @@ def test_run_sql_query_strips_the_rest_request_prefix_from_bad_request_messages(
     request = "POST https://bigquery.googleapis.com/bigquery/v2/projects/example-project/queries?prettyPrint=false"
     client.error = google_exceptions.BadRequest(f"{request}: Unrecognized name: missing at [1:8]")
 
-    result = json.loads(tool.run_sql_query("SELECT missing FROM events"))
+    result = json.loads(tool.google_bigquery_run_sql_query("SELECT missing FROM events"))
 
     assert result == {"error": "Google BigQuery request failed (HTTP 400): Unrecognized name: missing at [1:8]"}
 
@@ -207,7 +207,7 @@ def test_run_sql_query_keeps_bad_request_messages_without_a_request_prefix(tmp_p
     tool, client = _tool(tmp_path)
     client.error = google_exceptions.BadRequest("Invalid ARRAY literal: expected INT64")
 
-    result = json.loads(tool.run_sql_query("SELECT [1, 'a']"))
+    result = json.loads(tool.google_bigquery_run_sql_query("SELECT [1, 'a']"))
 
     assert result == {"error": "Google BigQuery request failed (HTTP 400): Invalid ARRAY literal: expected INT64"}
 
@@ -216,7 +216,7 @@ def test_run_sql_query_hides_other_provider_text(tmp_path: Path) -> None:
     tool, client = _tool(tmp_path)
     client.error = google_exceptions.Forbidden("provider-controlled-secret")
 
-    result = tool.run_sql_query("SELECT 1")
+    result = tool.google_bigquery_run_sql_query("SELECT 1")
 
     assert json.loads(result) == {"error": "Google BigQuery request failed (HTTP 403)"}
 
@@ -228,7 +228,7 @@ def test_retry_error_reports_status_only_without_provider_text(tmp_path: Path, o
     calls = {
         "list_tables": lambda: tool.google_bigquery_inspect("list_tables"),
         "describe_table": lambda: tool.google_bigquery_inspect("describe_table", table_id="events"),
-        "run_sql_query": lambda: tool.run_sql_query("SELECT 1"),
+        "run_sql_query": lambda: tool.google_bigquery_run_sql_query("SELECT 1"),
     }
 
     result = calls[operation]()
@@ -282,7 +282,7 @@ def test_max_rows_rejects_values_outside_one_to_one_thousand(tmp_path: Path, raw
 
 def test_config_flags_control_registered_functions(tmp_path: Path) -> None:
     tool, _client = _tool(tmp_path, list_tables=False, describe_table=False)
-    assert set(tool.functions) == {"run_sql_query"}
+    assert set(tool.functions) == {"google_bigquery_run_sql_query"}
 
     only_list, _ = _tool(tmp_path, describe_table=False, run_sql_query=False)
     assert set(only_list.functions) == {"google_bigquery_inspect"}

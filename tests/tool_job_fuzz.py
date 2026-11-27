@@ -189,7 +189,7 @@ class JobFuzzRunner:
         if self._dead:
             await self._lose_process()
         elif self._faults > faults:
-            self._resync()
+            await self._resync()
         await self.check()
 
     async def finish(self) -> None:
@@ -286,9 +286,17 @@ class JobFuzzRunner:
     def _current(self, job_id: str) -> BackgroundJob:
         return self.runtime._entries[job_id].job
 
+    @staticmethod
+    def _is_cold(job: BackgroundJob) -> bool:
+        return job.status in TERMINAL_STATUSES and job.consumed
+
+    def _hot(self, job_id: str) -> BackgroundJob | None:
+        entry = self.runtime._entries.get(job_id)
+        return None if entry is None else entry.job
+
     def _cause(self, job_id: str, cause: _Cause) -> None:
         """Record why work stopped while it still ran."""
-        if self._current(job_id).status not in TERMINAL_STATUSES:
+        if (job := self._hot(job_id)) is not None and job.status not in TERMINAL_STATUSES:
             self.jobs[job_id].causes.append(cause)
 
     async def _start(self, action: Action, job_id: str) -> None:
@@ -414,18 +422,22 @@ class JobFuzzRunner:
         await self._end_tasks()
         self._crashing, self._dead, self._fault = False, False, None
         await self._reopen()
-        self._resync()
+        await self._resync()
 
     def _forget(self, job_id: str) -> None:
         del self.jobs[job_id]
         self.claims.pop(job_id, None)
         self.admissions.pop(job_id, None)
 
-    def _resync(self) -> None:
+    async def _resync(self) -> None:
         """After a failed save, keep what the runtime holds: a step it did not accept changed nothing."""
+        snapshots = await self._saved_jobs()
         for job_id in list(self.jobs):
             entry = self.runtime._entries.get(job_id)
             if entry is None:
+                if (cold := snapshots.get(job_id)) is not None and self._is_cold(cold):
+                    self.jobs[job_id].consumed = True
+                    continue
                 self._forget(job_id)
                 continue
             job, model = entry.job, self.jobs[job_id]
@@ -463,8 +475,11 @@ class JobFuzzRunner:
             self._recovering = False
         assert {key: admission.executions for key, admission in self.admissions.items()} == executions
         assert set(saved) == set(self.jobs)
+        restored_saved = await self._saved_jobs()
         for job_id, before in saved.items():
-            after = self._current(job_id)
+            if (after := self._hot(job_id)) is None:
+                assert self._is_cold(before), job_id
+                after = restored_saved[job_id]
             if before.status in TERMINAL_STATUSES:
                 assert after == before, job_id
             else:
@@ -490,10 +505,22 @@ class JobFuzzRunner:
             if entry.saved:
                 assert snapshots[job_id] == job, job_id
             self._observe(job)
+        for job_id, cold in snapshots.items():
+            if job_id not in entries:
+                assert self._is_cold(cold), job_id
+                self._observe(cold)
         # A payload is saved with its outcome, which a failed later save cannot take back.
         payloads = {job_id for job_id in snapshots if await self._saved.tool_jobs("reader").load_payload(job_id)}
-        saved_payloads = {job_id for job_id, entry in entries.items() if entry.saved and entry.job.has_result_payload}
-        known_payloads = {job_id for job_id, entry in entries.items() if entry.job.has_result_payload}
+        saved_payloads = {
+            job_id
+            for job_id, job in snapshots.items()
+            if (job_id not in entries or entries[job_id].saved) and job.has_result_payload
+        }
+        known_payloads = {
+            job_id
+            for job_id, job in {**snapshots, **{jid: entry.job for jid, entry in entries.items()}}.items()
+            if job.has_result_payload
+        }
         assert saved_payloads <= payloads <= known_payloads, payloads
         for admission in self.admissions.values():
             assert admission.executions <= 1
@@ -523,7 +550,10 @@ class JobFuzzRunner:
         assert set(self.runtime._follow_up_revisions) == set(expected_cands)
 
     def _pending(self, job_id: str) -> bool:
-        job, model, held = self._current(job_id), self.jobs[job_id], self.claims.get(job_id)
+        if (job := self._hot(job_id)) is None:
+            assert self.jobs[job_id].consumed
+            return False
+        model, held = self.jobs[job_id], self.claims.get(job_id)
         claimed = held is not None and held.epoch == self._epoch
         return job.status in TERMINAL_STATUSES and not model.consumed and not claimed
 

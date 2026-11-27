@@ -27,22 +27,22 @@ Generated media is attached to the agent's reply.
 
 ## `openai`
 
-`openai` provides `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` takes a local file path, not a URL.
+`openai` provides `openai_transcribe_audio(audio_path)`, `openai_generate_image(prompt)`, and `openai_generate_speech(text_input)`.
+`openai_transcribe_audio()` takes a local file path, not a URL.
 The path follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): with the default `workspace` it must be a regular file inside the agent workspace, and relative paths resolve from there.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `OPENAI_API_KEY`. |
-| `enable_transcription` | `boolean` | `true` | Enable `transcribe_audio()`. |
-| `enable_image_generation` | `boolean` | `true` | Enable `generate_image()`. |
-| `enable_speech_generation` | `boolean` | `true` | Enable `generate_speech()`. |
+| `enable_transcription` | `boolean` | `true` | Enable `openai_transcribe_audio()`. |
+| `enable_image_generation` | `boolean` | `true` | Enable `openai_generate_image()`. |
+| `enable_speech_generation` | `boolean` | `true` | Enable `openai_generate_speech()`. |
 | `all` | `boolean` | `false` | Enable all three functions. |
-| `transcription_model` | `text` | `gpt-transcribe` | Model for `transcribe_audio()`. |
-| `text_to_speech_voice` | `text` | `alloy` | Voice for `generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
-| `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
+| `transcription_model` | `text` | `gpt-transcribe` | Model for `openai_transcribe_audio()`. |
+| `text_to_speech_voice` | `text` | `alloy` | Voice for `openai_generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
+| `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `openai_generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
 | `text_to_speech_format` | `text` | `wav` | Speech format; `gpt-realtime` models return only `wav` or `pcm` (24 kHz mono), and speech-endpoint models also take `mp3`, `opus`, `aac`, or `flac`. |
-| `image_model` | `text` | `gpt-image-2.6-sunburst` | Model for `generate_image()`. |
+| `image_model` | `text` | `gpt-image-2.6-sunburst` | Model for `openai_generate_image()`. |
 | `image_quality` | `text` | `null` | Passed through to the image API. |
 | `image_size` | `text` | `null` | Passed through to the image API. |
 | `image_style` | `text` | `null` | Passed through to the image API. |
@@ -57,25 +57,25 @@ agents:
 ```
 
 The `dalle` toolkit no longer exists, and a config that lists it fails with `Unknown tool 'dalle'.`
-Replace the whole `dalle` block with the image-only `openai` block above, move supported overrides to the `image_*` options, and change instructions that call `create_image()` to `generate_image()`.
+Replace the whole `dalle` block with the image-only `openai` block above, move supported overrides to the `image_*` options, and change instructions that call `create_image()` to `openai_generate_image()`.
 The `desi_vocal` toolkit also no longer exists; use `openai` or `eleven_labs` for speech.
 
 ## `gemini`
 
-`gemini` provides `generate_image(prompt)` and `generate_video(prompt)`.
+`gemini` provides `gemini_generate_image(prompt)` and `gemini_generate_video(prompt)`.
 Generated images are square (1:1).
-`generate_video()` works only in Vertex AI mode and otherwise returns `Video generation requires Vertex AI mode.`
+`gemini_generate_video()` works only in Vertex AI mode and otherwise returns `Video generation requires Vertex AI mode.`
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `gemini_generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
-| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
-| `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `generate_video()` (Veo 3.1). |
-| `enable_generate_image` | `boolean` | `true` | Enable `generate_image()`. |
-| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
+| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `gemini_generate_image()` (Nano Banana 2.1). |
+| `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `gemini_generate_video()` (Veo 3.1). |
+| `enable_generate_image` | `boolean` | `true` | Enable `gemini_generate_image()`. |
+| `enable_generate_video` | `boolean` | `true` | Enable `gemini_generate_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 One `gemini` toolkit uses a single Vertex location for both functions.
@@ -103,89 +103,89 @@ agents:
 
 ## `groq`
 
-`groq` provides `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`.
-`transcribe_audio()` and `translate_audio()` accept a public `http` or `https` URL or a local file path.
+`groq` provides `groq_transcribe_audio(audio_source)`, `groq_translate_audio(audio_source)`, and `groq_generate_speech(text_input)`.
+`groq_transcribe_audio()` and `groq_translate_audio()` accept a public `http` or `https` URL or a local file path.
 A local path follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): with the default `workspace` it must be a regular file inside the agent workspace, and relative paths resolve from there.
-`translate_audio()` translates the audio to English.
-`generate_speech()` always returns WAV audio.
+`groq_translate_audio()` translates the audio to English.
+`groq_generate_speech()` always returns WAV audio.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `GROQ_API_KEY`. |
-| `transcription_model` | `text` | `whisper-large-v3` | Model for `transcribe_audio()`. |
-| `translation_model` | `text` | `whisper-large-v3` | Model for `translate_audio()`. |
-| `tts_model` | `text` | `canopylabs/orpheus-v1-english` | Model for `generate_speech()`. |
-| `tts_voice` | `text` | `troy` | Voice for `generate_speech()`. |
-| `enable_transcribe_audio` | `boolean` | `true` | Enable `transcribe_audio()`. |
-| `enable_translate_audio` | `boolean` | `true` | Enable `translate_audio()`. |
-| `enable_generate_speech` | `boolean` | `true` | Enable `generate_speech()`. |
+| `transcription_model` | `text` | `whisper-large-v3` | Model for `groq_transcribe_audio()`. |
+| `translation_model` | `text` | `whisper-large-v3` | Model for `groq_translate_audio()`. |
+| `tts_model` | `text` | `canopylabs/orpheus-v1-english` | Model for `groq_generate_speech()`. |
+| `tts_voice` | `text` | `troy` | Voice for `groq_generate_speech()`. |
+| `enable_transcribe_audio` | `boolean` | `true` | Enable `groq_transcribe_audio()`. |
+| `enable_translate_audio` | `boolean` | `true` | Enable `groq_translate_audio()`. |
+| `enable_generate_speech` | `boolean` | `true` | Enable `groq_generate_speech()`. |
 | `all` | `boolean` | `false` | Enable all three functions. |
 
 ## `replicate`
 
-`replicate` provides `generate_media(prompt)`, which runs the configured Replicate model with only a `prompt` input.
+`replicate` provides `replicate_generate_media(prompt)`, which runs the configured Replicate model with only a `prompt` input.
 It works only with models that accept a single `prompt` field and return files whose URLs end in an image or video extension.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `REPLICATE_API_KEY`. `REPLICATE_API_TOKEN` is not read. |
 | `model` | `text` | `minimax/h3` | Replicate model reference. |
-| `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
-| `all` | `boolean` | `false` | Enable `generate_media()`. |
+| `enable_generate_media` | `boolean` | `true` | Enable `replicate_generate_media()`. |
+| `all` | `boolean` | `false` | Enable `replicate_generate_media()`. |
 
 ## `fal`
 
-`fal` provides `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url)`.
-`generate_media()` runs the configured `model` with only a `prompt` input.
-`image_to_image()` edits the image at `image_url` with [Fal's FLUX.2 edit model](https://fal.ai/models/fal-ai/flux-2/edit/api), regardless of `model`.
+`fal` provides `fal_generate_media(prompt)` and, when enabled, `fal_image_to_image(prompt, image_url)`.
+`fal_generate_media()` runs the configured `model` with only a `prompt` input.
+`fal_image_to_image()` edits the image at `image_url` with [Fal's FLUX.2 edit model](https://fal.ai/models/fal-ai/flux-2/edit/api), regardless of `model`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `FAL_API_KEY` or `FAL_KEY`. |
-| `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `generate_media()`. |
-| `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
-| `enable_image_to_image` | `boolean` | `false` | Enable `image_to_image()`. |
+| `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `fal_generate_media()`. |
+| `enable_generate_media` | `boolean` | `true` | Enable `fal_generate_media()`. |
+| `enable_image_to_image` | `boolean` | `false` | Enable `fal_image_to_image()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ## `cartesia`
 
-`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
-`localize_voice()` creates a new voice in another language from an existing one.
-Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
-`text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
+`cartesia` provides `cartesia_list_voices()`, `cartesia_localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `cartesia_text_to_speech(transcript, voice_id=None)`.
+`cartesia_localize_voice()` creates a new voice in another language from an existing one.
+Both `cartesia_localize_voice()` and `cartesia_text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
+`cartesia_text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `CARTESIA_API_KEY`. |
-| `model_id` | `text` | `sonic-3.6` | Model for `text_to_speech()`. |
+| `model_id` | `text` | `sonic-3.6` | Model for `cartesia_text_to_speech()`. |
 | `default_voice_id` | `text` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Voice used when a call passes no `voice_id`. |
-| `enable_text_to_speech` | `boolean` | `true` | Enable `text_to_speech()`. |
-| `enable_list_voices` | `boolean` | `true` | Enable `list_voices()`. |
-| `enable_localize_voice` | `boolean` | `false` | Enable `localize_voice()`. |
+| `enable_text_to_speech` | `boolean` | `true` | Enable `cartesia_text_to_speech()`. |
+| `enable_list_voices` | `boolean` | `true` | Enable `cartesia_list_voices()`. |
+| `enable_localize_voice` | `boolean` | `false` | Enable `cartesia_localize_voice()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ## `eleven_labs`
 
-`eleven_labs` provides `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`.
+`eleven_labs` provides `eleven_labs_get_voices()`, `eleven_labs_generate_sound_effect(prompt, duration_seconds=None)`, and `eleven_labs_text_to_speech(prompt)`.
 The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
-`text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `generate_sound_effect()` returns MP3 (`audio/mpeg`).
+`eleven_labs_text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `eleven_labs_generate_sound_effect()` returns MP3 (`audio/mpeg`).
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `ELEVEN_LABS_API_KEY`. |
-| `voice_id` | `text` | `JBFqnCBsd6RMkjVDRZzb` | Voice for `text_to_speech()`. |
-| `model_id` | `text` | `eleven_v4` | Model for `text_to_speech()`. |
+| `voice_id` | `text` | `JBFqnCBsd6RMkjVDRZzb` | Voice for `eleven_labs_text_to_speech()`. |
+| `model_id` | `text` | `eleven_v4` | Model for `eleven_labs_text_to_speech()`. |
 | `output_format` | `text` | `mp3_44100_64` | Codec and bitrate preset. |
 | `target_directory` | `text` | `null` | Also save generated audio files to this directory. |
-| `enable_get_voices` | `boolean` | `true` | Enable `get_voices()`. |
-| `enable_generate_sound_effect` | `boolean` | `true` | Enable `generate_sound_effect()`. |
-| `enable_text_to_speech` | `boolean` | `true` | Enable `text_to_speech()`. |
+| `enable_get_voices` | `boolean` | `true` | Enable `eleven_labs_get_voices()`. |
+| `enable_generate_sound_effect` | `boolean` | `true` | Enable `eleven_labs_generate_sound_effect()`. |
+| `enable_text_to_speech` | `boolean` | `true` | Enable `eleven_labs_text_to_speech()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ## `lumalabs`
 
-`lumalabs` provides `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-`image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
+`lumalabs` provides `lumalabs_generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `lumalabs_image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
+`lumalabs_image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
 Both functions wait for the video until it finishes or `max_wait_time` passes.
 Keep `wait_for_completion: true`, because `false` returns `Async generation unsupported` without a job handle.
 
@@ -196,13 +196,13 @@ Keep `wait_for_completion: true`, because `false` returns `Async generation unsu
 | `wait_for_completion` | `boolean` | `true` | Wait for the finished video. |
 | `poll_interval` | `number` | `3` | Seconds between status checks. |
 | `max_wait_time` | `number` | `300` | Seconds to wait before timing out. |
-| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
-| `enable_image_to_video` | `boolean` | `true` | Enable `image_to_video()`. |
+| `enable_generate_video` | `boolean` | `true` | Enable `lumalabs_generate_video()`. |
+| `enable_image_to_video` | `boolean` | `true` | Enable `lumalabs_image_to_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ## `modelslabs`
 
-`modelslabs` provides `generate_media(prompt)`, and `file_type` decides what it generates:
+`modelslabs` provides `modelslabs_generate_media(prompt)`, and `file_type` decides what it generates:
 
 | `file_type` | Output | Default model |
 | --- | --- | --- |

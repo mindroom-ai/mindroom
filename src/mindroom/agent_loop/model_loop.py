@@ -39,14 +39,7 @@ from mindroom.llm.errors import (
     incomplete_turn_error,
 )
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
-from mindroom.llm.messages import (
-    AGGREGATE_USAGE_KEY,
-    CUT_OFF_TEXT_KEY,
-    REWRITTEN_ATTEMPT_KEY,
-    Message,
-    model_provenance,
-    usage_sums_attempts,
-)
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
@@ -55,12 +48,7 @@ from mindroom.llm.provider import (
     TurnCompleted,
     answering_identity,
 )
-from mindroom.llm.request_identity import (
-    CACHE_ROUTING_KEY,
-    REQUEST_IDENTITY_KEY,
-    cache_routing_digest,
-    request_prefixes,
-)
+from mindroom.llm.request_identity import cache_routing_digest, request_prefixes
 from mindroom.llm.runs import RunRecord, RunRequirement, joined_texts
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import closing_async_stream
@@ -124,6 +112,7 @@ class EndRun:
 
 type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
+type AfterTurnHook = Callable[[LoopState, ModelRequest, Message], Awaitable[None]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
 type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
@@ -138,6 +127,9 @@ class LoopHooks:
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
+    - ``after_turn``: awaited in order with the loop state (whose messages end with the accepted assistant message),
+      the request that produced it, and that message, immediately after each completed model turn is accepted and
+      before tool calls or loop exit (native compaction observer hooks).
     - ``answer_tool_calls``: sees the live messages, which end with an assistant message that requests tools,
       together with the turn's stop reason; when it returns result messages, one per call in call order, they answer
       the batch in place of running it, and each call is recorded and announced as a failed call (the output-limit
@@ -161,6 +153,7 @@ class LoopHooks:
     """
 
     before_request: tuple[BeforeRequestHook, ...] = ()
+    after_turn: tuple[AfterTurnHook, ...] = ()
     answer_tool_calls: AnswerToolCalls | None = None
     rewrite_tool_calls: RewriteToolCalls | None = None
     before_dispatch: BeforeDispatchHook | None = None
@@ -256,6 +249,7 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, tracker)
+        await _after_turn(hooks, state, request, message)
         if not message.tool_calls:
             break
         batch_events = _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn)
@@ -303,6 +297,12 @@ async def _before_request(
         if isinstance(await hook(state), EndRun):
             return False
     return True
+
+
+async def _after_turn(hooks: LoopHooks, state: LoopState, request: ModelRequest, message: Message) -> None:
+    """Run the post-turn hooks in order after one completed model turn has been accepted."""
+    for hook in hooks.after_turn:
+        await hook(state, request, message)
 
 
 def _accept_turn(
@@ -520,19 +520,18 @@ def _stamp_answering_model(record: AnyRunRecord, identity: ModelIdentity, model_
 
 async def _stamp_request_identity(model: ModelProvider, request: ModelRequest, turn: TurnCompleted) -> None:
     """Attach the request identity and cache-routing digests unless a stage rewrote the request."""
-    answered = turn.message.provider_data or {}
-    if answered.get(REWRITTEN_ATTEMPT_KEY):
+    meta = turn.message.meta
+    if meta.attempt_rewritten:
         return
-    updated = answered
-    if REQUEST_IDENTITY_KEY not in updated:
+    request_identity = meta.request_identity
+    if request_identity is None:
         # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
         request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
-        if request_identity is not None:
-            updated = {**updated, REQUEST_IDENTITY_KEY: request_identity}
-    if CACHE_ROUTING_KEY not in updated and (routing := cache_routing_digest(model.model_params)) is not None:
-        updated = {**updated, CACHE_ROUTING_KEY: routing}
-    if updated is not answered:
-        turn.message.provider_data = updated
+    cache_routing = meta.cache_routing
+    if cache_routing is None:
+        cache_routing = cache_routing_digest(model.model_params)
+    if request_identity != meta.request_identity or cache_routing != meta.cache_routing:
+        turn.message.meta = replace(meta, request_identity=request_identity, cache_routing=cache_routing)
 
 
 async def _stream_turn(
@@ -545,7 +544,7 @@ async def _stream_turn(
     """Stream one request, yielding its deltas and then its finished turn.
 
     The finished turn records the identity of ``request`` (``llm.request_identity``), unless a pipeline stage answered
-    it with another request in its place (``REWRITTEN_ATTEMPT_KEY``) or recorded the identity as it sent the request.
+    it with another request in its place (``meta.attempt_rewritten``) or recorded the identity as it sent the request.
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the active attempt's
     reported usage is kept under its billing identity and the run record updates its answering model whenever the active
@@ -589,7 +588,7 @@ def _keep_unaccepted(
     for prior_identity, prior_metrics in tracker.prior_usage:
         _count_request(metrics, prior_metrics, prior_identity)
     if turn is not None:
-        sums_attempts = usage_sums_attempts(turn.message.provider_data)
+        sums_attempts = turn.message.meta.aggregate_usage
         answered = answering_identity(turn.message, tracker.identity)
         _stamp_answering_model(record, answered, tracker.model_name)
         _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
@@ -667,13 +666,14 @@ def _keep_cut_off(
         billed = None
     if billed is None and not shown:
         return
-    provider_data = model_provenance(identity.id, identity.provider)
-    if shown:
-        provider_data[CUT_OFF_TEXT_KEY] = shown
-    if sums_attempts:
-        # Usage that sums retried attempts must not read as one request's.
-        provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
-    message = Message(role="assistant", provider_data=provider_data)
+    message = Message(
+        role="assistant",
+        meta=MessageMeta(
+            model=ModelProvenance(identity.id, identity.provider),
+            cut_off_text=shown or None,
+            aggregate_usage=sums_attempts,
+        ),
+    )
     messages.append(message)
     if billed is not None:
         message.metrics = billed
@@ -702,6 +702,7 @@ __all__ = [
     "EMPTY_REQUEST",
     "NO_HOOKS",
     "AfterToolBatchHook",
+    "AfterTurnHook",
     "AnswerToolCalls",
     "BeforeDispatchHook",
     "BeforeRequestHook",

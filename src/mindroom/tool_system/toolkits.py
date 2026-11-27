@@ -121,11 +121,12 @@ def adapt_toolkit(
     does. ``registered`` is the registered tool they come from, which each one carries as its ``registered_toolkit``;
     it is ``key`` unless an implied or preset tool brings the toolkit in.
     """
-    functions = [_adapt_function(toolkit, name) for name in toolkit_function_names(toolkit)]
     instructions = toolkit.instructions or None
     return AdaptedToolkit(
         name=toolkit.name,
-        functions=tuple(replace(function, toolkit=key, registered_toolkit=registered or key) for function in functions),
+        functions=tuple(
+            _adapt_function(toolkit, name, key=key, registered=registered) for name in toolkit_function_names(toolkit)
+        ),
         instructions=instructions,
         guidance=instructions,
     )
@@ -143,11 +144,17 @@ def toolkit_function_names(toolkit: Toolkit) -> tuple[str, ...]:
     return tuple(name for name in toolkit.functions if offered is None or name in offered)
 
 
-def toolkit_function(toolkit: Toolkit, name: str) -> ToolFunction | None:
+def toolkit_function(
+    toolkit: Toolkit,
+    name: str,
+    *,
+    key: str | None = None,
+    registered: str | None = None,
+) -> ToolFunction | None:
     """Return the function ``toolkit`` offers under ``name``, adapted and finished alone; None when it offers none."""
     if name not in toolkit_function_names(toolkit):
         return None
-    return _adapt_function(toolkit, name)
+    return _adapt_function(toolkit, name, key=key, registered=registered)
 
 
 def with_offered_instructions(
@@ -166,7 +173,13 @@ def with_offered_instructions(
     return adapted
 
 
-def _adapt_function(toolkit: Toolkit, name: str) -> ToolFunction:
+def _adapt_function(
+    toolkit: Toolkit,
+    name: str,
+    *,
+    key: str | None = None,
+    registered: str | None = None,
+) -> ToolFunction:
     """Derive one function of a toolkit: its description, schema, and entrypoint.
 
     A function ``passthrough_tool`` marked keeps its schema and takes its arguments unvalidated; any other is derived
@@ -182,14 +195,16 @@ def _adapt_function(toolkit: Toolkit, name: str) -> ToolFunction:
             " read the call through current_call() instead"
         )
         raise ValueError(msg)
-    authored = authoring.passthrough_parameters(function)
+    mark = authoring.tool_mark(function)
+    authored = None if mark is None else mark.parameters
     derived = authored is None
-    offer_background_after = authoring.authored_offer_background_after(function)
-    offer_output_path = authoring.authored_offer_output_path(function)
+    description = None if mark is None else mark.description
+    offer_background_after = None if mark is None else mark.offer_background_after
+    offer_output_path = None if mark is None else mark.offer_output_path
     offered = toolkit.offered_function(
         ToolFunction(
             name=name,
-            description=authoring.authored_description(function) or (tool_description(function) if derived else None),
+            description=description or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
             nullable_optional_parameters=nullable_optional_parameters(function) if authored is None else frozenset(),
             offer_background_after=toolkit.offer_background_after
@@ -204,7 +219,7 @@ def _adapt_function(toolkit: Toolkit, name: str) -> ToolFunction:
             offered = with_output_files(offered, finishing.output_files)
         if finishing.to_worker is not None:
             offered = replace(offered, entrypoint=finishing.to_worker(offered.name, offered.entrypoint))
-    return offered
+    return replace(offered, toolkit=key, registered_toolkit=registered or key)
 
 
 def model_arguments(arguments: Mapping[str, Any], function: ToolFunction) -> dict[str, Any]:

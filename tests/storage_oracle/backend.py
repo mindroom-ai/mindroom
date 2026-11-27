@@ -28,7 +28,7 @@ from mindroom.history.run_visibility import replays_in_scope
 from mindroom.history.storage import new_scope_session, read_scope_state
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
@@ -56,8 +56,6 @@ _MEMBERS = ("alpha", "beta")
 # The model every compaction summary reports, and the counters it returns.
 SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle")
 SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
-# The response turn id a run's live queued-message notice names.
-NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
 # Events the legacy openings' summaries and archived runs hold, as ``Driver.seed_legacy`` documents them.
 LEGACY_EVENTS: dict[int, tuple[str, ...]] = {
     0: ("$legacy-1", "$legacy-2"),
@@ -437,7 +435,7 @@ class Driver(ABC):
                 "n",
                 "user",
                 f"newer message for {run_id}",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, NOTICE_TURN_KEY: response_turn_id},
+                meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_turn_id),
             ),
         )
         self.notice_turns.append(response_turn_id)

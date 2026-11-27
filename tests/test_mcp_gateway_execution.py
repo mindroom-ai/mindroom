@@ -580,7 +580,7 @@ async def test_cancelled_google_scholar_search_keeps_capacity_until_the_scrape_r
         return await gateway.invoke_tool(
             context,
             toolkit="calculator",
-            function="search_google_scholar",
+            function="google_scholar_search",
             arguments={"query": "attention"},
         )
 

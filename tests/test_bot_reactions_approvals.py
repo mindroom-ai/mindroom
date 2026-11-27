@@ -56,7 +56,7 @@ from mindroom.response_turn import PausedAttempt
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import (
@@ -1139,6 +1139,98 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
         assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
+        assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
+
+    @pytest.mark.asyncio
+    async def test_interactive_selection_recovery_proof_allows_orderly_shutdown(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """An active selection response proves recovery once its turn is durable, so orderly shutdown drains cleanly."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        preparation_started = asyncio.Event()
+
+        async def prepare_forever() -> None:
+            preparation_started.set()
+            await asyncio.Event().wait()
+
+        target = bot._conversation_resolver.build_message_target(
+            room_id="!test:localhost",
+            thread_id="$thread-a",
+            reply_to_event_id="$question",
+        )
+        journal = bot.journal_principal()
+        await journal.admit(
+            InboundEvent(
+                event_id="$reaction",
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                kind=EventKind.REACTION,
+                event_class=EventClass.ACTIONABLE,
+                sender="@user:localhost",
+                origin_server_ts=1_000,
+                source={"event_id": "$reaction", "content": {}},
+            ),
+        )
+        await _start_selection_response(bot, prepare_forever, target=target)
+        await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
+
+        [(task, ownership)] = list(bot._response_runner.inbox._inbox_response_tasks.items())
+        assert task.get_name() == "interactive_selection_response:$reaction"
+        proof = ownership.recovery_proof_ready
+
+        async def proof_ready() -> bool:
+            result = proof()
+            assert not isinstance(result, bool)
+            return await result
+
+        # Pending journal source is already recoverable before persistence.
+        assert await proof_ready() is True
+
+        selection, _ = _claimed_test_selection(bot, room_id=target.room_id)
+        selection_turn = bot._interactive_selections._selection_turn_record(
+            selection,
+            facts=make_ingress_facts(
+                "@user:localhost",
+                source_kind=INTERACTIVE_SELECTION_SOURCE_KIND,
+                requester_user_id="@user:localhost",
+            ),
+            source_event_id="$reaction",
+            response_target=target,
+        )
+        pending_turn = await bot._turn_store.record_pending_turn(selection_turn)
+        assert pending_turn is not None
+        assert pending_turn.record.turn_key is not None
+        assert (
+            await journal.enqueue_final_answer(
+                delivery_id="$reaction",
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id or "$reaction",
+                payload={"msgtype": "m.text", "body": "answer"},
+                turn_key=pending_turn.record.turn_key,
+            )
+            is not None
+        )
+        await journal.claim_matrix_delivery(delivery_id="$reaction", stage=DeliveryStage.FINAL)
+        await journal.acknowledge_matrix_delivery(
+            delivery_id="$reaction",
+            stage=DeliveryStage.FINAL,
+            event_id="$ack-response:localhost",
+            delivered_projections=(),
+        )
+        # Once settled and acknowledged without a completed turn record, proof stays False.
+        assert await proof_ready() is False
+
+        await bot._turn_store.record_responded_turn(
+            canonicalize_turn_record(pending_turn.record, response_event_id="$ack-response:localhost"),
+            room_id=target.room_id,
+        )
+        assert await proof_ready() is True
+
+        bot._response_runner.inbox.begin_process_shutdown()
+        assert await bot._response_runner.inbox.finish_process_shutdown_recovery(timeout_seconds=1.0) is True
         assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     @pytest.mark.asyncio

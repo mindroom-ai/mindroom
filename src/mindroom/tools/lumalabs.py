@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["lumaai"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#lumalabs",
-    function_names=("generate_video", "image_to_video"),
+    function_names=("lumalabs_generate_video", "lumalabs_image_to_video"),
 )
 def lumalabs_tools() -> type[LumaLabTools]:
     """Return Luma Labs tools for Dream Machine video generation."""

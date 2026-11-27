@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from mindroom.llm.messages import Message
+from dataclasses import replace
 
-_COMPACTION_SUMMARY_MARKER = "mindroom_compaction_summary"
-_SCOPE_SUMMARY = "scope"
-_RUN_LOCAL_SUMMARY = "run"
-_SUMMARY_FOLLOWS_KEY = "mindroom_compaction_summary_follows"
+from mindroom.llm.messages import Message, MessageMeta
 
 
 def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
@@ -24,7 +21,7 @@ def compaction_summary_message(summary: str, *, run_local: bool) -> Message:
             "The conversation continues after this summary. If it records progress on the current request, "
             "continue that work from its next steps instead of starting over."
         ),
-        provider_data={_COMPACTION_SUMMARY_MARKER: _RUN_LOCAL_SUMMARY if run_local else _SCOPE_SUMMARY},
+        meta=MessageMeta(compaction_summary="run" if run_local else "scope"),
         from_history=not run_local,
     )
 
@@ -38,23 +35,19 @@ def compaction_summary_text(message: Message) -> str:
 
 def is_compaction_summary(message: Message) -> bool:
     """Return whether one message is a rendered compaction summary."""
-    return _summary_kind(message) in {_SCOPE_SUMMARY, _RUN_LOCAL_SUMMARY}
+    return message.meta.compaction_summary is not None
 
 
 def is_scope_summary(message: Message) -> bool:
     """Return whether one message is the scope's summary, as opposed to one run's own."""
-    return _summary_kind(message) == _SCOPE_SUMMARY
+    return message.meta.compaction_summary == "scope"
 
 
 def mark_summary_follows(prompt: Message) -> None:
     """Record that the scope's summary replays right after this prompt, where a mid-turn compaction placed it."""
-    prompt.provider_data = {**(prompt.provider_data or {}), _SUMMARY_FOLLOWS_KEY: True}
+    prompt.meta = replace(prompt.meta, compaction_summary_follows=True)
 
 
 def summary_follows(message: Message) -> bool:
     """Return whether the scope's summary replays right after this message."""
-    return (message.provider_data or {}).get(_SUMMARY_FOLLOWS_KEY) is True
-
-
-def _summary_kind(message: Message) -> object:
-    return (message.provider_data or {}).get(_COMPACTION_SUMMARY_MARKER)
+    return message.meta.compaction_summary_follows

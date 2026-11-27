@@ -5,13 +5,7 @@ The actual toolkit searches the agent's deferred toolkits and is built in
 ``build_agent_toolkit()``, so its metadata has no generic factory.
 """
 
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -22,8 +16,6 @@ register_builtin_tool_metadata(
         description="Search deferred tools and call them",
         docs_url="https://docs.mindroom.chat/tools/dynamic-tools/#mindroom-tool-search",
         category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         icon="PackagePlus",
         icon_color="text-sky-500",
         config_fields=[],

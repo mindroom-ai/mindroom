@@ -76,12 +76,12 @@ class GeminiTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_generate_image:
-            tools.append(self.generate_image)
+            tools.append(self.gemini_generate_image)
         if all or enable_generate_video:
-            tools.append(self.generate_video)
+            tools.append(self.gemini_generate_video)
         super().__init__(name="gemini", tools=tools)
 
-    def generate_image(self, prompt: str) -> ToolValue:
+    def gemini_generate_image(self, prompt: str) -> ToolValue:
         """Generate an image through the Gemini content-generation API.
 
         Args:
@@ -115,7 +115,7 @@ class GeminiTools(Toolkit):
             logger.exception("Failed to generate image with Gemini")
             return ToolValue(content=f"Failed to generate image: {exc}")
 
-    def generate_video(self, prompt: str) -> ToolValue:
+    def gemini_generate_video(self, prompt: str) -> ToolValue:
         """Generate a video from a text prompt using Vertex AI Veo.
 
         Args:

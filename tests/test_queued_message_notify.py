@@ -63,7 +63,7 @@ from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message as OwnedMessage
-from mindroom.llm.messages import is_queued_notice_message
+from mindroom.llm.messages import MessageMeta, is_queued_notice_message
 from mindroom.llm.runs import AnyRunRecord, RunRecord
 from mindroom.llm.runs import RunStatus as OwnedRunStatus
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -355,19 +355,12 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target() ->
         )
 
 
-_QUEUED_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
-_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
-
-
 def _notice_messages(messages: list[OwnedMessage], *, response_turn_id: str | None = None) -> list[OwnedMessage]:
     return [
         message
         for message in messages
         if is_queued_notice_message(message)
-        and (
-            response_turn_id is None
-            or (message.provider_data or {}).get(_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY) == response_turn_id
-        )
+        and (response_turn_id is None or message.meta.queued_notice_turn_id == response_turn_id)
     ]
 
 
@@ -393,7 +386,7 @@ def _owned_notice(response_turn_id: str, *, from_history: bool = False) -> Owned
     return OwnedMessage(
         role="user",
         content=QUEUED_MESSAGE_NOTICE_TEXT,
-        provider_data={_QUEUED_NOTICE_MARKER_KEY: True, _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id},
+        meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_turn_id),
         from_history=from_history,
     )
 
@@ -2909,10 +2902,10 @@ async def test_notice_hook_keeps_single_notice_at_end() -> None:
 
     assert _notice_count(queued_messages) == 1
     assert queued_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
-    assert queued_messages[-1].provider_data == {
-        _QUEUED_NOTICE_MARKER_KEY: True,
-        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
-    }
+    assert queued_messages[-1].meta == MessageMeta(
+        queued_message_notice=True,
+        queued_notice_turn_id=notice_context.response_turn_id,
+    )
     assert _notice_count(next_turn_messages) == 1
     assert next_turn_messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
     assert next_notice_context.response_turn_id != notice_context.response_turn_id
@@ -2938,10 +2931,10 @@ async def test_notice_hook_uses_configured_notice_text() -> None:
         await _after_batch(messages, OwnedMessage(role="tool", content="result"), notice_text="Custom queued notice.")
 
     assert messages[-1].content == "Custom queued notice."
-    assert messages[-1].provider_data == {
-        _QUEUED_NOTICE_MARKER_KEY: True,
-        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
-    }
+    assert messages[-1].meta == MessageMeta(
+        queued_message_notice=True,
+        queued_notice_turn_id=notice_context.response_turn_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -3067,10 +3060,7 @@ def test_notice_provider_data_survives_mindroom_sqlite_round_trip(tmp_path: Path
     assert session is not None
     stored_notice = session.runs[0].messages[0]
     assert stored_notice.content == QUEUED_MESSAGE_NOTICE_TEXT
-    assert stored_notice.provider_data == {
-        _QUEUED_NOTICE_MARKER_KEY: True,
-        _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
-    }
+    assert stored_notice.meta == MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_turn_id)
     assert stored_notice.from_history is False
 
 
@@ -3086,9 +3076,7 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
         await _after_batch(messages, OwnedMessage(role="tool", content="First tool result"))
         notices = _notice_messages(messages)
         assert len(notices) == 1
-        provider_data = notices[0].provider_data
-        assert isinstance(provider_data, dict)
-        response_turn_id = provider_data[_QUEUED_NOTICE_RESPONSE_TURN_ID_KEY]
+        response_turn_id = notices[0].meta.queued_notice_turn_id
         assert isinstance(response_turn_id, str)
         response_1_ids.append(response_turn_id)
         messages.append(OwnedMessage(role="assistant", content="First response handoff"))
@@ -3144,10 +3132,7 @@ async def test_prior_notice_survives_actual_next_provider_request_and_tool_round
         seen = list(model.requests[0].messages)
         prior = next(message for message in seen if message.content == QUEUED_MESSAGE_NOTICE_TEXT)
         assert prior.from_history is True
-        assert prior.provider_data == {
-            _QUEUED_NOTICE_MARKER_KEY: True,
-            _QUEUED_NOTICE_RESPONSE_TURN_ID_KEY: response_1_id,
-        }
+        assert prior.meta == MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_1_id)
         assert [
             (message.role, message.content)
             for message in seen

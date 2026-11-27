@@ -220,7 +220,7 @@ def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
     """
     thread_tags = toolkit_offers(ThreadTagsTools(), "thread_tags")
     matrix_api = toolkit_offers(MatrixApiTools(), "matrix_api_write")
-    make_request = toolkit_offers(custom_api_tools()(), "make_request")
+    make_request = toolkit_offers(custom_api_tools()(), "custom_api_request")
     event = {"action": "send_event", "event_type": "m.room.message", "content": {"msgtype": "m.text", "body": "Hi"}}
     request = {
         "endpoint": "https://api.example.com/items",
@@ -245,7 +245,7 @@ def test_vendor_tools_taking_any_values_accept_real_arguments() -> None:
 
     A value that is not an object is still refused there, so a tool body never receives one.
     """
-    operation = toolkit_offers(pandas_tools()(), "run_dataframe_operation")
+    operation = toolkit_offers(pandas_tools()(), "pandas_run_operation")
     arguments = {"dataframe_name": "sales", "operation": "head", "operation_parameters": {"n": 5}}
 
     validate_tool_arguments(dict(operation.parameters), arguments)
@@ -716,7 +716,7 @@ def test_non_none_default_nullable_parameter_keeps_any_of_including_run_sql_quer
         },
     )
 
-    sql_function = toolkit_offers(sql_tools()(db_url="sqlite://"), "run_sql_query")
+    sql_function = toolkit_offers(sql_tools()(db_url="sqlite://"), "sql_run_query")
     assert sql_function.parameters["properties"]["limit"] == {"anyOf": [{"type": "integer"}, {"type": "null"}]}
     assert "limit" not in sql_function.parameters["required"]
     validate_tool_arguments(dict(sql_function.parameters), {"query": "SELECT 1", "limit": None})

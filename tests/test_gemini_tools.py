@@ -46,7 +46,7 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
         enable_generate_video=False,
     )
 
-    result = toolkit.generate_image("A geometric Matrix room")
+    result = toolkit.gemini_generate_image("A geometric Matrix room")
 
     assert isinstance(result, ToolValue)
     assert len(result.images) == 1
@@ -62,7 +62,7 @@ def test_generate_image_offers_the_model_its_prompt(monkeypatch) -> None:  # noq
     monkeypatch.setattr(gemini_media, "Client", lambda **_kwargs: SimpleNamespace())
     toolkit = GeminiTools(api_key="test-key", enable_generate_video=False)
 
-    function = toolkit_offers(toolkit, "generate_image")
+    function = toolkit_offers(toolkit, "gemini_generate_image")
 
     assert function.description == "Generate an image through the Gemini content-generation API."
     assert set(function.parameters["properties"]) == {"prompt"}
@@ -87,7 +87,7 @@ def test_generate_image_keeps_the_gemini_api_on_v1beta(monkeypatch) -> None:  # 
     )
     toolkit = GeminiTools(api_key="test-key", enable_generate_video=False)
 
-    result = toolkit.generate_image("A geometric Matrix room")
+    result = toolkit.gemini_generate_image("A geometric Matrix room")
 
     assert len(result.images) == 1
     assert result.images[0].content == b"image-bytes"
@@ -211,7 +211,7 @@ def test_gemini_explicit_vertexai_false_routes_to_gemini_api_despite_process_env
         assert isinstance(toolkit, GeminiTools)
         assert toolkit.vertexai is False
         assert toolkit.client._api_client.vertexai is False
-        result = toolkit.generate_image("A geometric Matrix room")
+        result = toolkit.gemini_generate_image("A geometric Matrix room")
 
     assert len(result.images) == 1
     assert result.images[0].content == b"image-bytes"

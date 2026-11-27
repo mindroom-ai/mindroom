@@ -56,7 +56,7 @@ from mindroom.history.types import (
     PreparedHistoryState,
     ResolvedReplayPlan,
 )
-from mindroom.llm.messages import MEDIA_MSGTYPE_KEY, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
@@ -610,7 +610,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
     transient_context = Message(
         role="user",
         content="Retrieved memory for this turn",
-        add_to_agent_memory=False,
+        is_turn_context=True,
     )
     prepared = await _prepare_common(
         prepare_scope_history,
@@ -642,7 +642,7 @@ async def test_scheduled_history_limit_shares_budget_between_inline_and_persiste
     assert prepared.turn.prompt.content is not None
     [transient] = prepared.turn.transient
     assert transient.content == "Retrieved memory for this turn"
-    assert transient.add_to_agent_memory is False
+    assert transient.is_turn_context is True
 
 
 @pytest.mark.asyncio
@@ -1377,7 +1377,7 @@ def test_transient_context_follows_current_prompt_after_the_thread_context() -> 
     transient_context = Message(
         role="user",
         content="Retrieved memory for this turn",
-        add_to_agent_memory=False,
+        is_turn_context=True,
     )
 
     turn = _messages_with_current_prompt(
@@ -1395,8 +1395,8 @@ def test_transient_context_follows_current_prompt_after_the_thread_context() -> 
         "Retrieved memory for this turn",
     ]
     assert messages[2] is not transient_context
-    assert messages[2].add_to_agent_memory is False
-    assert messages[1].add_to_agent_memory is True
+    assert messages[2].is_turn_context is True
+    assert messages[1].is_turn_context is False
 
     prepared = _PreparedExecutionContext(
         turn=turn,
@@ -1581,7 +1581,7 @@ def test_context_media_messages_name_their_msgtype() -> None:
 
     # A body beside a different file name is a caption (MSC2530), which readers may show; a user turn's time prefix
     # does not make a file name a caption.
-    assert [(message.provider_data or {}).get(MEDIA_MSGTYPE_KEY) for message in messages[:5]] == [
+    assert [message.meta.media_msgtype for message in messages[:5]] == [
         "m.file",
         "m.audio",
         "m.file",

@@ -37,21 +37,10 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
 from mindroom.llm.media import Image
-from mindroom.llm.messages import (
-    AGGREGATE_USAGE_KEY,
-    CUT_OFF_TEXT_KEY,
-    MEDIA_FOLLOW_UP_TEXT,
-    REWRITTEN_ATTEMPT_KEY,
-    Message,
-)
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
-from mindroom.llm.request_identity import (
-    CACHE_ROUTING_KEY,
-    REQUEST_IDENTITY_KEY,
-    cache_routing_digest,
-    request_prefixes,
-)
+from mindroom.llm.request_identity import cache_routing_digest, request_prefixes
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
@@ -131,10 +120,11 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     assert assistant.metrics == usage(12, 3, time_to_first_token=0.25)
     [request] = model.requests
     # The answer records the model that answered it and the identity of the request it answered.
-    assert assistant.provider_data == {
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-        REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1],
-    }
+    assert assistant.provider_data is None
+    assert assistant.meta == MessageMeta(
+        model=ModelProvenance("scripted-model", "Synthetic"),
+        request_identity=request_prefixes(model, request)[-1],
+    )
     assert request.messages == tuple(messages[:2])
     assert request.tools == ()
 
@@ -146,7 +136,7 @@ async def test_an_answer_to_another_request_than_the_loop_sent_records_no_reques
             role="assistant",
             content="done",
             metrics=usage(9, 1),
-            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+            meta=MessageMeta(attempt_rewritten=True),
         ),
         stop_reason="end",
     )
@@ -155,10 +145,10 @@ async def test_an_answer_to_another_request_than_the_loop_sent_records_no_reques
 
     await run_loop(spec(model), messages)
 
-    assert messages[-1].provider_data == {
-        REWRITTEN_ATTEMPT_KEY: True,
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-    }
+    assert messages[-1].meta == MessageMeta(
+        attempt_rewritten=True,
+        model=ModelProvenance("scripted-model", "Synthetic"),
+    )
 
 
 async def test_cache_routing_digest_stamping_in_model_loop() -> None:
@@ -171,30 +161,30 @@ async def test_cache_routing_digest_stamping_in_model_loop() -> None:
     normal_messages = _prompt()
     await run_loop(spec(normal_model), normal_messages)
     [normal_request] = normal_model.requests
-    assert normal_messages[-1].provider_data == {
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-        REQUEST_IDENTITY_KEY: request_prefixes(normal_model, normal_request)[-1],
-        CACHE_ROUTING_KEY: expected_digest,
-    }
+    assert normal_messages[-1].meta == MessageMeta(
+        model=ModelProvenance("scripted-model", "Synthetic"),
+        request_identity=request_prefixes(normal_model, normal_request)[-1],
+        cache_routing=expected_digest,
+    )
 
-    # A pipeline stage (e.g. prompt hold) may pre-stamp REQUEST_IDENTITY_KEY; routing digest is still stamped.
+    # A pipeline stage (e.g. prompt hold) may pre-stamp request_identity; routing digest is still stamped.
     prestamped_turn = TurnCompleted(
         message=Message(
             role="assistant",
             content="held",
             metrics=usage(10, 2),
-            provider_data={REQUEST_IDENTITY_KEY: "held-identity"},
+            meta=MessageMeta(request_identity="held-identity"),
         ),
         stop_reason="end",
     )
     held_model = ScriptedModel([[TextDelta("held"), prestamped_turn]], model_params=params)
     held_messages = _prompt()
     await run_loop(spec(held_model), held_messages)
-    assert held_messages[-1].provider_data == {
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-        REQUEST_IDENTITY_KEY: "held-identity",
-        CACHE_ROUTING_KEY: expected_digest,
-    }
+    assert held_messages[-1].meta == MessageMeta(
+        model=ModelProvenance("scripted-model", "Synthetic"),
+        request_identity="held-identity",
+        cache_routing=expected_digest,
+    )
 
     # A rewritten attempt records neither request identity nor cache routing digest.
     rewritten_turn = TurnCompleted(
@@ -202,17 +192,17 @@ async def test_cache_routing_digest_stamping_in_model_loop() -> None:
             role="assistant",
             content="rewritten",
             metrics=usage(10, 2),
-            provider_data={REWRITTEN_ATTEMPT_KEY: True},
+            meta=MessageMeta(attempt_rewritten=True),
         ),
         stop_reason="end",
     )
     rewritten_model = ScriptedModel([[TextDelta("rewritten"), rewritten_turn]], model_params=params)
     rewritten_messages = _prompt()
     await run_loop(spec(rewritten_model), rewritten_messages)
-    assert rewritten_messages[-1].provider_data == {
-        REWRITTEN_ATTEMPT_KEY: True,
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-    }
+    assert rewritten_messages[-1].meta == MessageMeta(
+        attempt_rewritten=True,
+        model=ModelProvenance("scripted-model", "Synthetic"),
+    )
 
 
 async def test_request_settings_come_from_the_template_and_tools_from_the_spec() -> None:
@@ -1243,10 +1233,10 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     assert [message.role for message in messages] == ["system", "user", "assistant"]
     assert (settled.content, settled.metrics) == (None, usage(50, 2))
     # The text the cut-off response streamed is kept beside the message, which stays without content.
-    assert settled.provider_data == {
-        CUT_OFF_TEXT_KEY: "Par",
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-    }
+    assert settled.meta == MessageMeta(
+        cut_off_text="Par",
+        model=ModelProvenance("scripted-model", "Synthetic"),
+    )
     assert record.metrics is not None
     assert (
         record.metrics.tokens.input_tokens,
@@ -1277,9 +1267,13 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
 
     # The finished turn alone carries the usage, as a provider that reports none along the way gives it; after a
     # retry it is the attempts' sum, which the pipeline marks.
-    marker = {AGGREGATE_USAGE_KEY: True} if retried else None
     finished = TurnCompleted(
-        message=Message(role="assistant", content="done", metrics=usage(50, 2), provider_data=marker),
+        message=Message(
+            role="assistant",
+            content="done",
+            metrics=usage(50, 2),
+            meta=MessageMeta(aggregate_usage=retried),
+        ),
         stop_reason="end",
     )
     model = ScriptedModel([[TextDelta("done"), finished, Await(finish_the_stream)]])
@@ -1309,16 +1303,12 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert messages[-1].metrics == usage(50, 2)
     # Kept or cut off, the usage reads as one request only when it was one; only a kept answer records its request.
     [request] = model.requests
-    identity = (
-        {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]}
-        if ending == "completes"
-        else {CUT_OFF_TEXT_KEY: "done"}
+    assert messages[-1].meta == MessageMeta(
+        aggregate_usage=retried,
+        model=ModelProvenance("scripted-model", "Synthetic"),
+        request_identity=request_prefixes(model, request)[-1] if ending == "completes" else None,
+        cut_off_text="done" if ending != "completes" else None,
     )
-    assert messages[-1].provider_data == {
-        **(marker or {}),
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-        **identity,
-    }
     assert record.metrics is not None
     assert (
         record.metrics.tokens.input_tokens,
@@ -1344,10 +1334,10 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
         await run_loop(spec(model), messages, record=record)
 
     assert messages[-1].metrics == usage(7, 0)
-    assert messages[-1].provider_data == {
-        **({AGGREGATE_USAGE_KEY: True} if retried else {}),
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-    }
+    assert messages[-1].meta == MessageMeta(
+        aggregate_usage=retried,
+        model=ModelProvenance("scripted-model", "Synthetic"),
+    )
     assert record.metrics is not None
     assert record.metrics.tokens.input_tokens == 7
 
@@ -1381,10 +1371,10 @@ async def test_a_cut_off_request_without_usage_keeps_the_text_it_streamed_and_co
     assert [message.role for message in messages] == ["system", "user", "assistant"]
     # No request sends the message, which has no content; a run its user stopped is recovered with the text.
     assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
-    assert messages[-1].provider_data == {
-        CUT_OFF_TEXT_KEY: "Partial",
-        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
-    }
+    assert messages[-1].meta == MessageMeta(
+        cut_off_text="Partial",
+        model=ModelProvenance("scripted-model", "Synthetic"),
+    )
     assert (record.metrics, record.content) == (RunMetrics(), None)
 
 
@@ -1412,7 +1402,7 @@ async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_co
     # Only the text the turn streamed is kept, on a message without content or usage.
     assert [message.role for message in messages] == ["system", "user", "assistant"]
     assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
-    assert (messages[-1].provider_data or {})[CUT_OFF_TEXT_KEY] == "done"
+    assert messages[-1].meta.cut_off_text == "done"
     assert record.metrics == RunMetrics()
 
 
@@ -1443,7 +1433,7 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
     assert record.metrics.details == {
         "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI")],
     }
-    assert messages[-1].provider_data["mindroom_model"] == {"id": "m", "provider": "OpenAI"}
+    assert messages[-1].meta.model == ModelProvenance("m", "OpenAI")
 
 
 async def test_reasoning_only_content_filter_after_tool_call_fails_and_keeps_history_clean() -> None:

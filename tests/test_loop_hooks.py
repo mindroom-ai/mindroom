@@ -16,11 +16,14 @@ from mindroom.config.main import Config
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest
+from mindroom.llm.runs import RunRecord
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks, leader_loop_hooks
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.participation import ParticipationGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _Conversation
+from mindroom.run_storage import RunStorage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.teams.members import BuiltTeam
 from mindroom.tool_jobs.execution import JobActor
@@ -127,6 +130,7 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
     assert _stages(agent.tool_middleware) == ["with_job_admission", "_middleware"]
     assert agent.tool_middleware[1:] == leader.tool_middleware == (_middleware,)
     for hooks in (agent, leader):
+        assert _stages(hooks.after_turn) == ["native_compaction_after_turn_hook"]
         assert _stages(hooks.after_tool_batch) == ["queued_notice_after_tool_batch", "job_notice_hook"]
         assert _stages(hooks.on_resume_entry) == ["queued_notice_on_resume_entry"]
     assert agent.on_loop_end is not None
@@ -142,30 +146,49 @@ def test_each_run_compacts_as_its_history_scope(tmp_path: Path, monkeypatch: pyt
     )
     model = ScriptedModel([])
     scopes: list[HistoryScope] = []
+    native_scopes: list[HistoryScope] = []
+    native_session_runs: list[list[Any]] = []
     real_compaction_hook = loop_hooks.mid_turn_compaction_hook
+    real_native_hook = loop_hooks.native_compaction_after_turn_hook
 
     def capture_compaction_hook(**kwargs: Any) -> BeforeRequestHook:  # noqa: ANN401
         scopes.append(kwargs["scope"])
         return real_compaction_hook(**kwargs)
 
+    def capture_native_hook(**kwargs: Any) -> Any:  # noqa: ANN401
+        native_scopes.append(kwargs["scope"])
+        runs = kwargs["session_runs"]
+        native_session_runs.append(list(runs() if callable(runs) else runs))
+        return real_native_hook(**kwargs)
+
     monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capture_compaction_hook)
+    monkeypatch.setattr(loop_hooks, "native_compaction_after_turn_hook", capture_native_hook)
+    stored_run = RunRecord(run_id="stored-1", messages=[Message(role="user", content="prior")])
+    storage = RunStorage(
+        store=None,
+        session=ConversationSession(session_id="s1", kind="agent", owner_id="general", runs=[stored_run]),
+        scope=HistoryScope(kind="agent", scope_id="general"),
+    )
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
         model_name="default",
-        storage=None,
+        storage=storage,
         replay_plan=None,
         prompt_id=None,
     )
     team = _built_team(model)
 
     agent_loop_hooks(_agent_build(model), turn)
-    leader_loop_hooks(team, turn)
+    leader_loop_hooks(team, replace(turn, storage=None))
 
-    assert scopes == [
+    expected = [
         HistoryScope(kind="agent", scope_id="general"),
         HistoryScope(kind="team", scope_id=team.spec.leader.id),
     ]
+    assert scopes == expected
+    assert native_scopes == expected
+    assert native_session_runs == [[stored_run], []]
 
 
 def _batch(call_id: str, *, answered: bool) -> list[Message]:

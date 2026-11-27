@@ -55,7 +55,7 @@ class _DuckDbTools(Toolkit):
 
         super().__init__(
             name="duckdb_tools",
-            tools=[self.duckdb_inspect, self.run_query, self.duckdb_manage],
+            tools=[self.duckdb_inspect, self.duckdb_run_query, self.duckdb_manage],
         )
 
     @property
@@ -115,7 +115,7 @@ class _DuckDbTools(Toolkit):
         except AttributeError:
             return str(query_result)
 
-    def run_query(self, query: str) -> str:
+    def duckdb_run_query(self, query: str) -> str:
         """Run a single DuckDB SQL query and return CSV-formatted output."""
         formatted_sql = first_sql_statement(query)
         if not formatted_sql:
@@ -305,7 +305,7 @@ class _DuckDbTools(Toolkit):
     ],
     dependencies=["duckdb"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#duckdb",
-    function_names=("duckdb_inspect", "duckdb_manage", "run_query"),
+    function_names=("duckdb_inspect", "duckdb_manage", "duckdb_run_query"),
     action_scoped_grants=("duckdb_inspect", "duckdb_manage"),
 )
 def duckdb_tools() -> type[Toolkit]:

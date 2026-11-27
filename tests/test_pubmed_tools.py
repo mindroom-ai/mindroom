@@ -40,7 +40,7 @@ def test_pubmed_retains_article_metadata(
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = pubmed_tools()(max_results=3, results_expanded=expanded)
-        results = json.loads(toolkit.functions["search_pubmed"]("synthetic query"))
+        results = json.loads(toolkit.functions["pubmed_search"]("synthetic query"))
 
     assert len(paths) == 2
     assert len(results) == 1
@@ -91,7 +91,7 @@ def test_pubmed_expanded_metadata_labeled_abstracts_and_urls(monkeypatch: pytest
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = pubmed_tools()(email="researcher@example.org", results_expanded=True)
-        (entry,) = json.loads(toolkit.search_pubmed("bacteria"))
+        (entry,) = json.loads(toolkit.pubmed_search("bacteria"))
 
     assert "Title: Study of E. coli" in entry
     assert "First Author: Pasteur, Louis" in entry
@@ -117,11 +117,11 @@ def test_pubmed_empty_results_errors_and_enable_flags(monkeypatch: pytest.Monkey
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = pubmed_tools()()
-        assert toolkit.search_pubmed("empty") == "[]"
+        assert toolkit.pubmed_search("empty") == "[]"
         assert len(paths) == 1
-        assert toolkit.search_pubmed("fail").startswith("Could not fetch articles. Error:")
+        assert toolkit.pubmed_search("fail").startswith("Could not fetch articles. Error:")
 
     disabled = pubmed_tools()(enable_search_pubmed=False)
     assert disabled.name == "pubmed"
     assert disabled.functions == {}
-    assert list(pubmed_tools()(enable_search_pubmed=False, all=True).functions) == ["search_pubmed"]
+    assert list(pubmed_tools()(enable_search_pubmed=False, all=True).functions) == ["pubmed_search"]

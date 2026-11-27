@@ -118,7 +118,7 @@ def test_message_defaults() -> None:
     assert first.id != second.id
     assert isinstance(first.created_at, int)
     assert first.metrics == MessageMetrics()
-    assert (first.from_history, first.add_to_agent_memory) == (False, True)
+    assert (first.from_history, first.is_turn_context) == (False, False)
 
 
 def test_message_is_mutable_and_copies_independently() -> None:

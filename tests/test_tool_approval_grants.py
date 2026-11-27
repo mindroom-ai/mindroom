@@ -1507,7 +1507,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     plugin_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="custom_plugin",
-        function_name="read_url",
+        function_name="website_read_url",
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1529,24 +1529,24 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     registry = refresh_plugins(config, runtime_paths).tools
     assert "website" in registry.entries
     assert "custom_plugin" in registry.entries
-    assert "read_url" not in registry.entries["website"].action_scoped_grants
-    assert "read_url" in registry.entries["custom_plugin"].action_scoped_grants
+    assert "website_read_url" not in registry.entries["website"].action_scoped_grants
+    assert "website_read_url" in registry.entries["custom_plugin"].action_scoped_grants
 
     # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
     website_op = grant_operation(
         config,
-        "read_url",
+        "website_read_url",
         {"url": "https://example.com"},
         tools=registry,
         toolkit_name="website",
     )
     assert website_op is not None
-    assert website_op.tool_name == "read_url"
+    assert website_op.tool_name == "website_read_url"
     assert website_op.mcp_server_id is None
     assert website_op.mcp_tool_name is None
     assert scheduled_call_offers_any_arguments(
         config,
-        "read_url",
+        "website_read_url",
         {"url": "https://example.com"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1558,19 +1558,19 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # The owning plugin gets per-action scoping and fails closed when action is missing.
     plugin_op = grant_operation(
         config,
-        "read_url",
+        "website_read_url",
         {"action": "read"},
         tools=registry,
         toolkit_name="custom_plugin",
     )
     assert plugin_op is not None
-    assert plugin_op.tool_name == "read_url"
+    assert plugin_op.tool_name == "website_read_url"
     assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
     assert (
         grant_operation(
             config,
-            "read_url",
+            "website_read_url",
             {"url": "https://example.com"},
             tools=registry,
             toolkit_name="custom_plugin",
@@ -1579,7 +1579,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     )
     assert not scheduled_call_offers_any_arguments(
         config,
-        "read_url",
+        "website_read_url",
         {"action": "read"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1591,14 +1591,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # timed_grant_operation threads call.toolkit_name into grant_operation.
     website_tool = ToolExecution(
         tool_call_id="call-website",
-        tool_name="read_url",
+        tool_name="website_read_url",
         tool_args={"url": "https://example.com"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     website_call = ApprovalCall(
         tool_call_id="call-website",
-        tool_name="read_url",
+        tool_name="website_read_url",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="website",
@@ -1607,14 +1607,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
 
     plugin_tool = ToolExecution(
         tool_call_id="call-plugin",
-        tool_name="read_url",
+        tool_name="website_read_url",
         tool_args={"action": "read"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     plugin_call = ApprovalCall(
         tool_call_id="call-plugin",
-        tool_name="read_url",
+        tool_name="website_read_url",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="custom_plugin",
@@ -3662,9 +3662,9 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
         (["hackernews"], ["skill", "*"], r"check\.py.*hackernews"),
         (["hackernews"], ["hackernews", "skill", "*"], None),
         (["google_bigquery"], ["skill", "*"], r"check\.py.*google_bigquery_inspect"),
-        (["google_bigquery"], ["google_bigquery_inspect", "skill", "*"], None),
+        (["google_bigquery"], ["google_bigquery_inspect", "google_bigquery_run_sql_query", "skill", "*"], None),
         (["browserbase"], ["skill", "*"], r"check\.py.*browserbase"),
-        (["browserbase"], ["browserbase", "skill", "*"], None),
+        (["browserbase"], ["browserbase", "browserbase_screenshot", "skill", "*"], None),
     ],
 )
 def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits(
@@ -5032,6 +5032,166 @@ def test_single_verb_renamed_filter_guidance_replaces_in_place(
     assert "remove" not in guidance
 
 
+def test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped(tmp_path: Path) -> None:
+    """Normalized integration names fail closed for enabled toolkits without firing across unrelated toolkits."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    def _validate(tools: list[object], rules: list[dict[str, object]]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+                "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+                "tool_approval": {"rules": rules},
+            },
+            runtime_paths,
+        )
+
+    # 1. Exact retired rule fails closed when its toolkit is enabled.
+    with pytest.raises(ConfigRuntimeValidationError, match=r"read_url.*website_read_url"):
+        _validate(["website"], [{"match": "read_url", "action": "require_approval"}])
+
+    # 2. Wildcard approval script fails closed until the replacement has an explicit rule ahead of it.
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*read_url.*website_read_url"):
+        _validate(["website"], [{"match": "skill", "script": "check.py"}, {"match": "*", "script": "check.py"}])
+
+    # 3. Overlapping retired names (`read_url` for website vs jina, `run_query` for postgres vs duckdb) stay scoped
+    #    to the enabled toolkit and never fire for disabled toolkits.
+    loaded_website = _validate(
+        ["website"],
+        [
+            {"match": "website_read_url", "action": "require_approval"},
+            {"match": "skill", "script": "check.py"},
+            {"match": "*", "script": "check.py"},
+        ],
+    )
+    assert loaded_website.tool_approval.rules[0].match == "website_read_url"
+
+    # Unchanged older consolidated renames on postgres (e.g. show_tables -> postgres_inspect) do NOT retroactively
+    # fail catch-all "*" approval scripts once the newly normalized functions have explicit rules.
+    loaded_postgres = _validate(
+        ["postgres"],
+        [
+            {"match": "postgres_run_query", "action": "require_approval"},
+            {"match": "postgres_export_table_to_path", "action": "require_approval"},
+            {"match": "skill", "script": "check.py"},
+            {"match": "*", "script": "check.py"},
+        ],
+    )
+    assert loaded_postgres.tool_approval.rules[0].match == "postgres_run_query"
+
+    # 4. Single-verb filter guidance replaces in place without claiming an action parameter.
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _validate([{"wikipedia": {"include_tools": ["search_wikipedia"]}}], [])
+    message = str(exc_info.value)
+    assert (
+        "replace `search_wikipedia` with `wikipedia_search` in `wikipedia.include_tools` "
+        "while preserving any other entries in the list"
+    ) in message
+    assert "action" not in message.split("was removed; ", 1)[1]
+
+    # 5. google_bigquery mixes consolidated google_bigquery_inspect with 1-to-1 renamed google_bigquery_run_sql_query;
+    #    a retired run_sql_query filter gets in-place replacement guidance rather than action/toggle guidance.
+    with pytest.raises(ConfigRuntimeValidationError) as bq_exc_info:
+        _validate([{"google_bigquery": {"include_tools": ["run_sql_query"]}}], [])
+    bq_message = str(bq_exc_info.value)
+    assert (
+        "replace `run_sql_query` with `google_bigquery_run_sql_query` in `google_bigquery.include_tools` "
+        "while preserving any other entries in the list"
+    ) in bq_message
+    assert "action" not in bq_message.split("was removed; ", 1)[1]
+
+
+def test_shared_retired_bare_name_reports_all_enabled_replacements(tmp_path: Path) -> None:
+    """When multiple enabled toolkits share a retired bare name, migration errors name every failing replacement."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    def _validate(agents: dict[str, dict[str, object]], rules: list[dict[str, object]]) -> Config:
+        return Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+                "agents": agents,
+                "tool_approval": {"rules": rules},
+            },
+            runtime_paths,
+        )
+
+    two_db_agents = {
+        "pg_agent": {"display_name": "PG", "tools": ["postgres"], "include_default_tools": False},
+        "rs_agent": {"display_name": "RS", "tools": ["redshift"], "include_default_tools": False},
+    }
+
+    # Exact retired rule matching shared `run_query` across separate agents names both replacements.
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        _validate(two_db_agents, [{"match": "run_query", "action": "require_approval"}])
+    message = str(exc_info.value)
+    assert "postgres_run_query" in message
+    assert "redshift_run_query" in message
+    assert "[postgres_run_query, redshift_run_query]" in message
+
+    # Adding only one explicit override while keeping `run_query` still fails on the uncovered sibling.
+    with pytest.raises(ConfigRuntimeValidationError) as partial_exc_info:
+        _validate(
+            two_db_agents,
+            [
+                {"match": "postgres_run_query", "action": "require_approval"},
+                {"match": "run_query", "action": "require_approval"},
+            ],
+        )
+    partial_message = str(partial_exc_info.value)
+    assert "redshift_run_query" in partial_message
+    assert "postgres_run_query" not in partial_message
+
+    # Rewriting the rule to cover both enabled replacements loads cleanly.
+    loaded = _validate(
+        two_db_agents,
+        [{"match": ["postgres_run_query", "redshift_run_query"], "action": "require_approval"}],
+    )
+    assert loaded.tool_approval.rules[0].match == ["postgres_run_query", "redshift_run_query"]
+
+    # Wildcard approval scripts also name all enabled replacements for a shared retired bare name.
+    two_web_agents = {
+        "web_agent": {"display_name": "Web", "tools": ["website"], "include_default_tools": False},
+        "jina_agent": {"display_name": "Jina", "tools": ["jina"], "include_default_tools": False},
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as wildcard_exc_info:
+        _validate(
+            two_web_agents,
+            [{"match": "skill", "script": "check.py"}, {"match": "*", "script": "check.py"}],
+        )
+    wildcard_message = str(wildcard_exc_info.value)
+    assert "jina_read_url" in wildcard_message
+    assert "website_read_url" in wildcard_message
+    assert "[jina_read_url, website_read_url]" in wildcard_message
+
+    # Glob rule matching one enabled replacement (google_bigquery_run_sql_query) while missing another (sql_run_query)
+    # instructs the operator to keep the existing glob and add the uncovered replacement instead of replacing it.
+    sql_and_bq_agents = {
+        "sql_agent": {"display_name": "SQL", "tools": ["sql"], "include_default_tools": False},
+        "bq_agent": {"display_name": "BQ", "tools": ["google_bigquery"], "include_default_tools": False},
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as glob_exc_info:
+        _validate(sql_and_bq_agents, [{"match": "*sql_query", "action": "require_approval"}])
+    glob_message = str(glob_exc_info.value)
+    assert "sql_run_query" in glob_message
+    assert "google_bigquery_run_sql_query" in glob_message
+    assert "keep the existing pattern" in glob_message
+    assert '["*sql_query", "sql_run_query"]' in glob_message
+
+    loaded_glob = _validate(
+        sql_and_bq_agents,
+        [{"match": ["*sql_query", "sql_run_query"], "action": "require_approval"}],
+    )
+    assert loaded_glob.tool_approval.rules[0].match == ["*sql_query", "sql_run_query"]
+
+
 def test_triggers_write_watch_script_cannot_receive_timed_grant() -> None:
     """watch_script creates executable scripts and must never receive a timed auto-approve grant."""
     config = Config()
@@ -5294,3 +5454,25 @@ def test_workflow_retired_filter_guidance_recommends_removal_and_approval_rules(
             worker_target=None,
         )
     assert "replace `workflow`" not in str(stored_exc.value)
+
+
+def test_retired_consolidated_approval_error_accepts_single_toolkit_and_renames() -> None:
+    """External plugins calling ``retired_consolidated_approval_error(toolkit_name, ..., renames=...)`` keep working."""
+    from mindroom.config.legacy_fields import retired_consolidated_approval_error  # noqa: PLC0415
+
+    approval = Config(
+        tool_approval={
+            "default": "auto_approve",
+            "rules": [{"match": "link_pull_request", "action": "require_approval"}],
+        },
+    ).tool_approval
+    error = retired_consolidated_approval_error(
+        toolkit_name="pull_requests",
+        rules=approval.rules,
+        default=approval.default,
+        default_timeout_days=approval.timeout_days,
+        renames={"link_pull_request": "pull_requests"},
+    )
+    assert error is not None
+    assert "link_pull_request" in error
+    assert "pull_requests" in error

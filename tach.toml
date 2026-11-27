@@ -580,6 +580,7 @@ visibility = [
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
+    "mindroom.thread_auto_reopen",
     "mindroom.tool_jobs.runtime",
     "mindroom.turn_store",
     "mindroom.turns.ingress",
@@ -889,11 +890,12 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.model_usage"
-depends_on = ["mindroom.llm"]
+depends_on = []
 visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
     "mindroom.skill_learning.reviewer",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.request_size",
     "mindroom.providers.pipeline",
     "mindroom.usage.provider_analytics",
@@ -1423,6 +1425,7 @@ depends_on = [
     "mindroom.approval.receipt",
     "mindroom.delegation.lifecycle",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.run_checkpoint",
     "mindroom.history.types",
     "mindroom.llm",
@@ -3469,6 +3472,7 @@ depends_on = [
 visibility = [
     "mindroom.execution_preparation",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.runtime",
 ]
 
@@ -3527,13 +3531,24 @@ depends_on = [
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
-    "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.request_size",
     "mindroom.history.summarizer",
     "mindroom.providers.openai",
 ]
+
+[[modules]]
+path = "mindroom.history.native_compaction_hook"
+depends_on = [
+    "mindroom.history.compaction",
+    "mindroom.history.request_size",
+    "mindroom.hooks",
+    "mindroom.model_usage",
+    "mindroom.native_compaction",
+]
+visibility = ["mindroom.loop_hooks"]
 
 [[modules]]
 path = "mindroom.providers.anthropic"
@@ -3555,7 +3570,6 @@ visibility = [
 [[modules]]
 path = "mindroom.providers.anthropic.legacy_stored_turns"
 depends_on = [
-    "mindroom.native_compaction",
     "mindroom.providers.anthropic.repairs",
     "mindroom.providers.claude_wire_blocks",
 ]
@@ -3909,6 +3923,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_auto_reopen_runtime"
+depends_on = [
+    "mindroom.room_steward",
+    "mindroom.thread_auto_reopen",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
     "mindroom.room_settings",
@@ -4018,6 +4040,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.storage_preparation",
+    "mindroom.orchestration.thread_auto_reopen_runtime",
     "mindroom.orchestration.thread_snooze_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
@@ -5568,6 +5591,14 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.scheduling.tasks",
     "mindroom.thread_tags",
+]
+
+[[modules]]
+path = "mindroom.thread_auto_reopen"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.thread_snooze",
 ]
 
 [[modules]]
@@ -8171,6 +8202,7 @@ expose = [
     "ToolMetadataValidationError",
     "ToolRegistry",
     "builtin_tool_registry",
+    "factory_origin",
     "plugin_load_active",
 ]
 from = ["mindroom.tool_system.registry"]
@@ -8183,6 +8215,7 @@ expose = [
     "ToolRegistry",
     "builtin_tool_registry",
     "compose_tool_registry",
+    "factory_origin",
     "plugin_load_active",
     "plugin_module_registrations",
     "record_plugin_root",
@@ -8271,6 +8304,7 @@ expose = [
     "member_tool_scope",
     "require_tool_runtime_context",
     "scope_hook_context_kwargs",
+    "scope_workspace_root",
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",
@@ -8651,7 +8685,6 @@ depends_on = [
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
     "mindroom.mcp_gateway.types",
-    "mindroom.runtime_resolution",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.agent_tools",
@@ -8976,6 +9009,8 @@ from = ["mindroom.config.retired_tool_renames"]
 expose = [
     "RETIRED_CONSOLIDATED_FUNCTIONS",
     "RETIRED_SPLIT_FUNCTIONS",
+    "SINGLE_VERB_RENAMED_TARGETS",
+    "STRICT_WILDCARD_SCRIPT_RENAMES",
     "STRICT_WILDCARD_SCRIPT_TOOLKITS",
 ]
 
@@ -10078,6 +10113,7 @@ expose = ["ReplicateTools"]
 [[modules]]
 path = "mindroom.delegation.background"
 depends_on = [
+    "mindroom.delegation.cost",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.tool_jobs.results",
@@ -10262,7 +10298,6 @@ depends_on = [
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.call_record",
-    "mindroom.tool_system.construction",
     "mindroom.tool_system.dedicated_threads",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
@@ -10655,7 +10690,6 @@ path = "mindroom.tool_system.construction"
 depends_on = []
 visibility = [
     "mindroom.tool_jobs.authorization",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.toolkit_builder",
 ]
@@ -11326,6 +11360,7 @@ depends_on = [
     "mindroom.history.summary_fork",
     "mindroom.history.summary_message",
     "mindroom.history.types",
+    "mindroom.hooks",
     "mindroom.llm",
     "mindroom.session_storage.summary_rows",
     "mindroom.usage.storage",

@@ -109,7 +109,7 @@ def test_queued_media_fetches_provider_job_id(
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 2
     assert provider.requests[1].url == fetch_url
@@ -144,7 +144,7 @@ def test_inline_success_uses_completed_urls(
     ]
     tool = modelslabs_tools()(api_key="test-api-key", file_type=file_type, wait_for_completion=True)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     media = {"images": result.images, "videos": result.videos, "audios": result.audios}[media_field]
     assert media is not None
@@ -169,7 +169,7 @@ def test_queued_media_wait_timeout_does_not_claim_generation_success(provider: _
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert "timed out" in result.content.lower()
     assert "success" not in result.content.lower()
@@ -206,7 +206,7 @@ def test_queued_media_reports_provider_failure(
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert "Generation rejected" in result.content
     assert "success" not in result.content.lower()
@@ -222,7 +222,7 @@ def test_media_without_wait_keeps_artifacts_and_skips_fetch(provider: _ModelsLab
     provider.payloads = [{"status": status, "id": 74123, "eta": 1, "future_links": [media_url]}]
     tool = modelslabs_tools()(api_key="test-api-key", file_type="gif", wait_for_completion=False)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 1
     assert result.images is not None
@@ -234,7 +234,7 @@ def test_initial_provider_error_remains_an_error(provider: _ModelsLabTransport) 
     provider.payloads = [{"status": "error", "message": "Invalid request"}]
     tool = modelslabs_tools()(api_key="test-api-key", file_type="gif", wait_for_completion=True)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 1
     assert "Invalid request" in result.content
@@ -258,7 +258,7 @@ def test_transport_timeout_returns_an_honest_outcome(provider: _ModelsLabTranspo
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert "success" not in result.content.lower()
     if stage == "generation":
@@ -308,7 +308,7 @@ def test_http_provider_rejection_preserves_explanation(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert result.content == f"Error: {explanation}"
     assert len(provider.requests) == (2 if stage == "fetch" else 1)
@@ -338,7 +338,7 @@ def test_unknown_http_failure_does_not_claim_success(
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert "success" not in result.content.lower()
     assert len(provider.requests) == (2 if stage == "fetch" else 1)
@@ -378,7 +378,7 @@ def test_failed_status_check_can_recover(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert "success" in result.content.lower()
     assert len(provider.requests) == 3
@@ -423,7 +423,7 @@ def test_fractional_polling_settings_from_runtime_config(
     )
     assert isinstance(tool, ModelsLabTools)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == attempt_count + 1
     assert all(request.url.endswith("/fetch/74123") for request in provider.requests[1:])
@@ -459,7 +459,7 @@ def test_zero_eta_checks_once(
         max_wait_time=max_wait_time,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 2
     assert provider.requests[1].url.endswith("/fetch/74123")
@@ -488,7 +488,7 @@ def test_zero_poll_cap_skips_fetch_and_retains_queued_links(provider: _ModelsLab
         max_wait_time=0,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 1
     assert provider.sleeps == []
@@ -523,7 +523,7 @@ def test_completed_fetch_urls_replace_queued_links(
         max_wait_time=1,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     media = {"images": result.images, "videos": result.videos, "audios": result.audios}[media_field]
     assert media is not None
@@ -550,7 +550,7 @@ def test_numeric_provider_eta_is_polled(provider: _ModelsLabTransport, eta: floa
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 3
     assert all(request.url == "https://modelslab.com/api/v6/images/fetch/74123" for request in provider.requests[1:])
@@ -567,7 +567,7 @@ def test_invalid_provider_eta_does_not_start_polling(provider: _ModelsLabTranspo
     provider.payloads = [{"status": "processing", "id": 74123, "eta": eta}]
     tool = modelslabs_tools()(api_key="test-api-key", file_type="png", wait_for_completion=True)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 1
     assert "success" not in result.content.lower()
@@ -582,7 +582,7 @@ def test_initial_service_error_preserves_explanation(provider: _ModelsLabTranspo
     ]
     tool = modelslabs_tools()(api_key="test-api-key", wait_for_completion=True)
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert result.content == "Error: Provider temporarily unavailable"
     assert len(provider.requests) == 1
@@ -630,7 +630,7 @@ def test_retryable_fetch_error_preserves_job(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 3
     assert provider.sleeps == [1]
@@ -686,7 +686,7 @@ def test_provider_retry_after_stops_wait(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 2
     assert provider.sleeps == []
@@ -727,7 +727,7 @@ def test_rate_limit_without_retry_after_can_recover(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 3
     assert provider.sleeps == [1]
@@ -752,7 +752,7 @@ def test_retry_after_without_retryable_failure_does_not_stop_polling(provider: _
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test pattern")
+    result = tool.modelslabs_generate_media("Make a test pattern")
 
     assert len(provider.requests) == 3
     assert provider.sleeps == [1]
@@ -809,7 +809,7 @@ def test_submission_read_timeout_depends_on_wait_for_completion(
         max_wait_time=2,
     )
 
-    result = tool.generate_media("Make a test video")
+    result = tool.modelslabs_generate_media("Make a test video")
 
     assert provider.timeouts == expected_timeouts
     assert result.videos

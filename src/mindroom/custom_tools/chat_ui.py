@@ -87,29 +87,24 @@ _CANVAS_STATE_EVENT_TYPE = "io.mindroom.canvas_state"
 _CANVAS_STATE_SCAN_LIMIT = 50
 # Cross-function Chat UI rules; per-function details live on the function docstrings.
 _CHAT_UI_INSTRUCTIONS = (
-    "chat_ui only affects MindRoom Chat (never the user's own computer or browser). "
-    "Side panels share one slot (opening one replaces the current panel)."
+    "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot."
 )
 
 
 # Added only when the agent has both show_canvas and open_panel.
 _REAL_WEBSITE_HINT = (
-    "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
-    "the Computer panel; a canvas cannot."
+    "To show a real website, open it in your worker browser (first call shows the Computer panel); a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
-    "For packages show_canvas's libraries do not cover, canvas pages may load scripts, styles, and fonts from "
-    "https://cdn.jsdelivr.net/npm/ at a pinned version, "
-    'such as <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>, '
-    "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
-    "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
+    "For libraries beyond show_canvas's bundled list, canvas pages may load pinned scripts/styles/fonts from "
+    "https://cdn.jsdelivr.net/npm/ (e.g. leaflet@1.9.4/dist/leaflet.js or /+esm); no other source works. "
+    "Data fetches (inline data instead), workers, and string-eval (e.g. Alpine/Vue templates) stay blocked."
 )
 
 _CANVAS_REMOTE_ASSETS_HINT = (
-    "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
-    "so a preview can use the real assets of the site it shows. "
-    "Fetching data, workers and nested frames stay blocked."
+    "Canvas pages may load images, styles, fonts, media, and scripts from any https: address (e.g. real site assets); "
+    "data fetches, workers, and nested frames stay blocked."
 )
 
 
@@ -397,12 +392,7 @@ class ChatUITools(Toolkit):
             return await _send_computer_notice(context, requester_id, notice)
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
-        """Open the user's MindRoom Chat Settings dialog at one section.
-
-        This works on the Chat app's own settings screen. It changes no setting; the
-        user decides what to do there. Success means the UI request was sent, not that
-        the client opened Settings.
-        """
+        """Open MindRoom Chat Settings at one section. Changes no setting (user decides). Success = request sent, not opened."""
         return await self._send_action(
             "open_settings",
             f"Open Settings ({section}) in MindRoom Chat.",
@@ -410,12 +400,12 @@ class ChatUITools(Toolkit):
         )
 
     async def open_panel(self, panel: _SidePanel = "members") -> str:
-        """Show a MindRoom Chat side panel: 'computer' or 'members'.
+        """Show a MindRoom Chat side panel: computer or members.
 
-        'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.
+        computer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.
 
         Args:
-            panel: 'computer' (worker browser) or 'members' (default; room members).
+            panel: computer (worker browser) or members (default).
 
         """
         if panel == "computer":
@@ -439,28 +429,33 @@ class ChatUITools(Toolkit):
         width: int | None = None,
         libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show an interactive HTML canvas you wrote, inline in the conversation or in the side panel.
+        """Create/replace HTML canvas you wrote (charts, diagrams, mockups, pickers, forms, dashboards, slides) inline or panel.
 
-        When to use: use when seeing/clicking beats text. Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams. For a quick choice, just ask in reply. Cannot load real websites. Pass `html` or workspace-relative `path` (e.g. `slides/deck.html`), up to 4 MB. Show only pages you wrote (appears as yours; typed data could leave the page).
+        New: title + html or path. Replace: original canvas_event_id + html or path. Reopen unchanged: no call; user picks in room header.
+        Use when seeing/clicking beats text (quick choice: ask in reply). Prefer show_canvas over ASCII art; use ```mermaid fences for simple inline diagrams.
 
-        Inline vs Panel & Raw: prefer `inline=True` (~700px desktop / 360px phone) for in-flow items: charts, diagrams, mockups, pickers, short forms, multi-step flows. Use panel for persistent views (dashboards, slides, long docs). New canvases post separately and appear below your reply text (refer to them as below, or by title on quiet turns). Inline themed rules: no background, card, title banner, or side padding on `html`/`body`; fixed pixel heights for charts; no `vh` or `height:100%` on `html`/`body`; restarts when scrolled away (give fields `id`/`name` or use `saveState`); use themed mode (not `raw`/`width`) for forms; show next step as new inline canvas or update. For realistic website/app previews, use `inline=True`, `raw=True` (no Chat styles/vars), and target `width` (e.g. 1440/390, scaled to fit)—overrides inline rules, rendered up to 16:10 tall (568-1080px) where `vh` and scrolling work (panel uses panel width).
+        Layout: prefer inline=true (~700px desktop/360px phone) for in-flow/multi-step flows; panel (default) for persistent views/slides/long docs. New canvases appear below your reply text (refer as below/title).
+        Inline themed: html/body has no background/card/title banner/side padding/vh/height:100%; fixed px chart heights; keep forms themed (no raw/width); scroll-away restarts (use id/name or saveState); next step: update or new.
+        Site/app preview: inline=true, raw=true (no Chat styles/vars), width (320-2560, e.g. 1440/390, scaled; overrides inline rules; <=16:10, 568-1080px, vh/scroll work; panel uses own width).
 
-        Theme & Sandbox: design like a responsive web app; prefer SVG/CSS over embedded images, summarize large data, skip unneeded interactivity. Fetch/XHR/WebSockets always blocked; external images/scripts/styles/fonts blocked unless instructions name an allowed source (embed images as `data:` URLs). For Chart.js/D3/Mermaid/KaTeX pass `libraries` (never a CDN). Cannot see user account/messages. Theme CSS vars: `--mr-bg`, `--mr-surface`, `--mr-surface-raised`, `--mr-border`, `--mr-text`, `--mr-text-muted`, `--mr-accent`, `--mr-accent-text`, `--mr-success`, `--mr-warning`, `--mr-danger`, `--mr-radius`, `--mr-font`; `window.mindroom.colorScheme` is `'light'` or `'dark'`.
+        Sandbox & theme: responsive, SVG/CSS over images, summarize large data, skip needless interactivity, <=4 MB; only your HTML (appears as yours; typed data could leave; no real websites). Blocked: fetch/XHR/WebSockets, user data, external assets unless instructions allow (embed data: images; pass libraries for Chart.js/D3/Mermaid/KaTeX, never CDN).
+        Vars (--mr-*, e.g. var(--mr-bg)): bg, surface, surface-raised, border, text, text-muted, accent, accent-text, success, warning, danger, radius, font; window.mindroom.colorScheme (light|dark).
 
-        Submitting & State: nothing reaches you until committed. Commit via `window.mindroom.submit(data, {label: "short summary"})` (< 512 KB JSON; decimals arrive as text) or `<form>` (`data-mindroom-label` sets label). Chat confirms with user, delivering `Canvas response (<canvas_event_id>, revision <event_id>): <label>` + JSON (older revision = earlier version). Runtime/blocked errors can be sent as `Canvas error (<canvas_event_id>, revision <event_id>):` + lines. Inputs/selects/textareas with stable `id`/`name` auto-persist across reloads/updates (except passwords, hidden, `autocomplete="off"`; change id if meaning changes; redraw on restored `input` events). For other state, call `window.mindroom.saveState(value)` on change (<= 256K chars JSON; larger throws); reloads read `window.mindroom.state` (`undefined` if unset; read defensively across versions). Local to device (100 most recent canvases) unless `share_state=True` (set at creation; Chat notifies user, stores room-readable copy for `read_canvas_state`—never store secrets in `saveState`).
+        Submit & state: nothing reaches you until commit via window.mindroom.submit(data, {label: "short summary"}) (<512KB JSON; decimals as text) or <form data-mindroom-label="...">. User confirms before Canvas response (<canvas_event_id>, revision <event_id>): <label> + JSON (older = earlier) or Canvas error (<canvas_event_id>, revision <event_id>): + lines.
+        Auto-persist inputs/selects/textareas via stable id/name (not type=password/hidden/autocomplete="off"; rename id if meaning changes; redraw on restored input). Other state: call window.mindroom.saveState(v) on change (<=256K chars JSON; larger throws); restore from window.mindroom.state on load (undefined if unset; read defensively). Device-local (100 recent) unless share_state=true (at creation; user notified; room-readable via read_canvas_state without submit; no secrets).
 
-        Updating: pass `canvas_event_id` to replace in place (omit for a separate canvas; users switch canvases from room header). `show_canvas` reads `path` immediately and parallel tool calls run concurrently—call it ONLY after file-writing calls/jobs finish, never alongside them, or the user sees stale HTML. Success means request sent, not opened/answered.
+        path reads immediately: call ONLY after file writes finish, never in parallel. Success = request sent, not opened/answered.
 
         Args:
-            title: Short single-line title (omit on update to keep original).
-            html: Inline HTML/CSS/JS (pass `html` or `path`).
-            path: Workspace-relative HTML file path (instead of `html`).
-            canvas_event_id: Existing canvas event ID in this conversation to update in place.
-            share_state: Expose state to `read_canvas_state` (set on creation; preserved on update).
-            inline: Show inline instead of side panel (set on creation; preserved on update).
-            raw: Omit Chat styles/theme vars (per revision; re-pass on updates).
-            width: Target viewport width in CSS px (320-2560; per revision; panel uses its own width).
-            libraries: Bundled libraries for this revision (re-pass on updates).
+            title: Required on create (1 line <=120 chars); omit on update to keep original.
+            html: Inline HTML; pass html or path, never both (one required on update).
+            path: Workspace HTML path instead of html; finish writes first (one required on update).
+            canvas_event_id: Original $ID in this conversation to replace in place; still needs html or path, cannot reopen unchanged.
+            share_state: Expose state to read_canvas_state (on create; kept on update).
+            inline: Show inline vs side panel (on create; kept on update).
+            raw: Omit Chat styles/vars (per revision; re-pass on update).
+            width: Target width px, 320-2560 (per revision; panel uses own).
+            libraries: Bundled libs (re-pass on update).
 
         """
         validated = self._validated_context("show_canvas")
@@ -508,10 +503,10 @@ class ChatUITools(Toolkit):
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
 
     async def read_canvas_state(self, canvas_event_id: str) -> str:
-        """Read the latest state from a `share_state=True` canvas: `window.mindroom.saveState` value, kept inputs (by `#id`/name), and timestamp. Empty until the user changes something; call anytime (e.g. from scheduled tasks) without needing a submit.
+        """Read latest state from a share_state=true canvas: saveState, kept inputs (#id/name), timestamp. Empty until user changes something; ok anytime (incl. scheduled tasks) without needing submit.
 
         Args:
-            canvas_event_id: Event ID of a `share_state=True` canvas in this conversation.
+            canvas_event_id: Event ID ($...) of a share_state=true canvas in this conversation.
 
         """
         action = "read_canvas_state"
@@ -608,7 +603,13 @@ class ChatUITools(Toolkit):
         if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
             return cls._canvas_error(_CANVAS_TITLE_ERROR)
         if bool(html) == bool(path):
-            return cls._canvas_error("Give exactly one of html or path.")
+            message = (
+                "Give exactly one of html or path. canvas_event_id replaces content in place and cannot reopen an "
+                "unchanged canvas; pass html or path to update it, or tell the user to select it in the room header."
+                if canvas_event_id is not None and not html and not path
+                else "Give exactly one of html or path."
+            )
+            return cls._canvas_error(message)
         if html and not html.strip():
             return cls._canvas_error("Canvas HTML must not be empty.")
         return None

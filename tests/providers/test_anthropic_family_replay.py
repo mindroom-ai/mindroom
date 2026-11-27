@@ -982,15 +982,19 @@ async def test_a_checkpoint_stored_with_its_response_blocks_replays_as_a_new_one
     provider = route_provider("anthropic", tmp_path, wire)
     stored_now = await _recorded_reply(provider, wire, [_CHECKPOINT, cited])
     provider_data = {key: value for key, value in (stored_now.provider_data or {}).items() if key != "claude_blocks"}
-    checkpoint = provider_data["mindroom_native_compaction"]
+    checkpoint = stored_now.meta.native_compaction
+    assert isinstance(checkpoint, dict)
     stored_earlier = replace(
         stored_now,
         provider_data={
             **provider_data,
             "content_blocks": [dict(_CHECKPOINT), copy.deepcopy(cited)],
             "server_tool_blocks": [dict(_CHECKPOINT)],
-            "mindroom_native_compaction": {**checkpoint, "items": [dict(_CHECKPOINT), copy.deepcopy(cited)]},
         },
+        meta=replace(
+            stored_now.meta,
+            native_compaction={**checkpoint, "items": [dict(_CHECKPOINT), copy.deepcopy(cited)]},
+        ),
     )
 
     bodies = []
@@ -1251,8 +1255,8 @@ def test_an_authored_approval_restore_requires_a_compatible_saved_policy(tmp_pat
     latest = Message(role="assistant", content="Waiting for approval")
     record_native_checkpoint(latest, [], saved)
     if change == "missing_threshold":
-        assert latest.provider_data is not None
-        latest.provider_data["mindroom_native_compaction"].pop("threshold")
+        assert isinstance(latest.meta.native_compaction, dict)
+        latest.meta.native_compaction.pop("threshold")
     run = _completed_run("paused", messages=[checkpoint, _user("Continue"), latest])
     session = _session("session", runs=[run])
     if change == "summary":

@@ -27,6 +27,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
+from mindroom.tool_system.tool_schema import tool_parameters
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -265,6 +266,32 @@ def _prepare_run(  # noqa: PLR0911 - one refusal per broken condition
     return resolved.function, arguments_text, approver_id
 
 
+def _hidden_entrypoint_arguments_valid(
+    function: ToolFunction,
+    arguments: dict[str, object],
+    hidden_names: set[str],
+) -> bool:
+    """Return whether declared compat keys omitted from an open offered schema fit the entrypoint's parameters."""
+    if not callable(function.entrypoint):
+        return False
+    try:
+        derived = tool_parameters(function.entrypoint)
+    except (NameError, TypeError, ValueError):
+        return False
+    derived_properties = derived.get("properties", {})
+    if not hidden_names <= set(derived_properties):
+        return False
+    try:
+        validate_tool_arguments(
+            {"type": "object", "properties": {name: derived_properties[name] for name in hidden_names}},
+            {name: arguments[name] for name in hidden_names},
+            nullable_optional_parameters=function.nullable_optional_parameters,
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> str | None:
     """Return why arguments do not fit the function's current schema, or None."""
     schema = dict(function.parameters)
@@ -274,7 +301,15 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
     except ValueError:
         return "the arguments do not match the tool's current parameters"
     # Tool entrypoints reject arguments they do not take, which would fail only after the approval is spent.
-    if unknown and schema.get("additionalProperties") is not True:
+    # Open schemas that hide legacy or capability-gated kwargs opt them in via ``compat_parameters`` so stored
+    # calls validate against the entrypoint without reopening parameters hidden because an action was disabled.
+    if (
+        unknown
+        and schema.get("additionalProperties") is not True
+        and not (
+            unknown <= function.compat_parameters and _hidden_entrypoint_arguments_valid(function, arguments, unknown)
+        )
+    ):
         return "the arguments do not match the tool's current parameters"
     return None
 

@@ -49,7 +49,7 @@ _RECEIPT_HEADER = RECEIPT_TEXT.splitlines()[0]
 def receipts(request: ModelRequest) -> list[str]:
     """Return each approval receipt ``request`` carries, in order, checking each is a user message of turn context."""
     found = [message for message in request.messages if str(message.content).startswith(_RECEIPT_HEADER)]
-    assert all(message.role == "user" and not message.add_to_agent_memory for message in found)
+    assert all(message.role == "user" and message.is_turn_context for message in found)
     assert all(_RECEIPT_HEADER not in str(message.content) for message in request.messages if message not in found)
     return [str(message.content) for message in found]
 

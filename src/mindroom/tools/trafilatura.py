@@ -282,12 +282,12 @@ class _TrafilaturaTools(Toolkit):
         if self._extract_actions:
             tools.append(self.trafilatura_extract)
         if all or enable_html_to_text:
-            tools.append(self.html_to_text)
+            tools.append(self.trafilatura_html_to_text)
         if all or enable_crawl_website:
             if _load_spider() is None:
                 logger.warning("trafilatura_crawler_disabled")
             else:
-                tools.append(self.crawl_website)
+                tools.append(self.trafilatura_crawl_website)
 
         super().__init__(name="trafilatura_tools", tools=tools)
 
@@ -331,7 +331,7 @@ class _TrafilaturaTools(Toolkit):
         output_format: str | None = None,
         as_json: bool | None = None,
     ) -> str:
-        """Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).
+        """Extract from URL(s) with Trafilatura (for raw HTML strings use `trafilatura_html_to_text`; to crawl a site use `trafilatura_crawl_website`).
 
         - `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).
         - `metadata`: Extract metadata only from `url` (optional `as_json`, default True).
@@ -438,7 +438,7 @@ class _TrafilaturaTools(Toolkit):
                 logger.warning("trafilatura_extract_batch_failed", error=str(exc))
                 return f"Error in batch extraction: {exc}"
 
-    def html_to_text(self, html_content: str, clean: bool = True) -> str:
+    def trafilatura_html_to_text(self, html_content: str, clean: bool = True) -> str:
         """Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True)."""
         trafilatura = _require_trafilatura()
         try:
@@ -451,7 +451,7 @@ class _TrafilaturaTools(Toolkit):
         else:
             return result or "Error: Could not extract text from HTML content"
 
-    def crawl_website(self, homepage_url: str, extract_content: bool = False) -> str:
+    def trafilatura_crawl_website(self, homepage_url: str, extract_content: bool = False) -> str:
         """Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`)."""
         trafilatura_spider = _load_spider()
         if trafilatura_spider is None:
@@ -563,7 +563,7 @@ class _TrafilaturaTools(Toolkit):
     ],
     dependencies=["trafilatura"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#trafilatura",
-    function_names=("crawl_website", "html_to_text", "trafilatura_extract"),
+    function_names=("trafilatura_crawl_website", "trafilatura_extract", "trafilatura_html_to_text"),
     action_scoped_grants=("trafilatura_extract",),
 )
 def trafilatura_tools() -> type[Toolkit]:

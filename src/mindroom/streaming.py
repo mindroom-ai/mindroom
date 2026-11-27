@@ -18,6 +18,7 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     COMPACTIONS_CONTENT_KEY,
     REASONING_CONTENT_KEY,
+    RESOLVED_IN_TURN_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
     STREAM_STATUS_KEY,
@@ -672,6 +673,8 @@ class StreamingResponse:
     active_model: Callable[[], Mapping[str, str] | None] | None = None
     # Returns whether the finalized reply should suppress push while background work continues.
     suppress_final_push: Callable[[], Awaitable[bool]] | None = None
+    # Returns whether the current turn resolved its target thread, so creates/edits never auto-reopen it.
+    resolved_in_turn: Callable[[], bool] | None = None
     _warmup_state: WorkerWarmupState = field(default_factory=WorkerWarmupState, init=False, repr=False)
     # Reuse only the last Markdown render; mentions and delivery metadata stay fresh.
     _render_markdown: Callable[[str], str] = field(
@@ -1449,6 +1452,8 @@ class StreamingResponse:
         compactions = self.compactions.content() if self.compactions is not None else None
         if compactions is not None:
             extra_content[COMPACTIONS_CONTENT_KEY] = compactions
+        if self.resolved_in_turn is not None and self.resolved_in_turn():
+            extra_content[RESOLVED_IN_TURN_KEY] = True
         durable_reasoning = is_final or (self.event_id is not None and not self.live_active)
         if durable_reasoning and self.reasoning_text.strip():
             reasoning_seconds = self._reasoning_seconds
@@ -2504,6 +2509,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     resumed: UnfinishedStreamedReply | None = None,
     placeholder_ready: Callable[[], Awaitable[bool]] | None = None,
     suppress_final_push: Callable[[], Awaitable[bool]] | None = None,
+    resolved_in_turn: Callable[[], bool] | None = None,
 ) -> StreamTransportOutcome:
     """Stream chunks to a Matrix room and return the canonical transport outcome.
 
@@ -2539,6 +2545,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         compactions=compactions,
         active_model=active_model,
         suppress_final_push=suppress_final_push,
+        resolved_in_turn=resolved_in_turn,
         initial_send=initial_send,
         progress_write_ahead=progress_write_ahead,
         progress_delivered=progress_delivered,

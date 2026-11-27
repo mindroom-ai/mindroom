@@ -292,10 +292,10 @@ async def test_turn_context_takes_no_marker_and_replays_unchanged_on_the_next_tu
     wire = Wire(sse_reply([{"type": "text", "text": "A1"}]))
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"extended_cache_time": False})
     system = Message(role="system", content="Stable system")
-    first = [Message(role="user", content="Q1"), Message(role="user", content=transient, add_to_agent_memory=False)]
+    first = [Message(role="user", content="Q1"), Message(role="user", content=transient, is_turn_context=True)]
     second_turn = [
         Message(role="user", content="Q2"),
-        Message(role="user", content=transient, add_to_agent_memory=False),
+        Message(role="user", content=transient, is_turn_context=True),
     ]
     for messages in (first, [*first, Message(role="assistant", content="A1"), *second_turn]):
         await claude_turn(provider, ModelRequest(messages=[system, *messages]))

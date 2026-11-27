@@ -396,5 +396,5 @@ async def test_the_note_follows_the_prompt_and_every_request_extends_the_previou
     assert last[-2].content == "Third prompt"
     assert is_transient_context(last[-1].content)
     assert "note three" in str(last[-1].content)
-    assert last[-1].add_to_agent_memory is False
+    assert last[-1].is_turn_context is True
     assert sum("note one" in str(message.content) for message in last) == 1

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+    from mindroom.orchestration.thread_auto_reopen_runtime import ThreadAutoReopenCoordinator
     from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
     from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.response_admission import ResponseAdmissionGate
@@ -84,6 +85,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
 
     @property
     def thread_snooze(self) -> ThreadSnoozeRuntimeCoordinator: ...  # noqa: D102
+
+    @property
+    def thread_auto_reopen(self) -> ThreadAutoReopenCoordinator: ...  # noqa: D102
 
     @property
     def reactive_triggers(self) -> ReactiveTriggerService: ...  # noqa: D102

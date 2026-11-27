@@ -19,7 +19,7 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools import baidusearch as baidusearch_module
 from mindroom.custom_tools import ddgs_search as ddgs_search_module
 from mindroom.tool_approval_grants import grant_operation
-from mindroom.tool_system.authoring import Toolkit, authored_description
+from mindroom.tool_system.authoring import Toolkit, tool_mark
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters
@@ -65,7 +65,7 @@ def _build_env_configured_tool(
         (googlesearch_tools, "websearch", ["google_search"]),
         (baidusearch_tools, "baidusearch", ["baidu_search"]),
         (serper_tools, "serper_tools", ["serper"]),
-        (serpapi_tools, "serpapi_tools", ["search_google"]),
+        (serpapi_tools, "serpapi_tools", ["serpapi_search_google"]),
     ],
 )
 def test_wave2_search_toolkits_are_native_with_preserved_names_and_order(
@@ -96,7 +96,10 @@ def test_duckduckgo_and_googlesearch_share_one_ddgs_implementation() -> None:
 def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
     """Native search tool methods preserve their descriptions and non-null optional schemas."""
     baidu_fn = baidusearch_tools()().functions["baidu_search"]
-    assert (authored_description(baidu_fn) or tool_description(baidu_fn)) == "Execute Baidu search and return results"
+    baidu_mark = tool_mark(baidu_fn)
+    assert ((baidu_mark.description if baidu_mark is not None else None) or tool_description(baidu_fn)) == (
+        "Execute Baidu search and return results"
+    )
     baidu_schema = tool_parameters(baidu_fn)
     assert baidu_schema["required"] == ["query"]
     assert set(baidu_schema["properties"]) == {"query", "max_results", "language"}
@@ -109,8 +112,8 @@ def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
     assert schema["properties"]["markdown"]["type"] == "boolean"
 
     serpapi_toolkit = serpapi_tools()(all=True)
-    assert tool_parameters(serpapi_toolkit.functions["search_google"])["required"] == ["query"]
-    assert tool_parameters(serpapi_toolkit.functions["search_youtube"])["required"] == ["query"]
+    assert tool_parameters(serpapi_toolkit.functions["serpapi_search_google"])["required"] == ["query"]
+    assert tool_parameters(serpapi_toolkit.functions["serpapi_search_youtube"])["required"] == ["query"]
 
 
 def test_ddgs_search_tools_backends_options_and_modifier(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -490,8 +493,8 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
 
     no_key = serpapi_tools()()
     assert no_key.api_key is None
-    assert no_key.search_google("mindroom") == "Please provide an API key"
-    assert no_key.search_youtube("mindroom") == "Please provide an API key"
+    assert no_key.serpapi_search_google("mindroom") == "Please provide an API key"
+    assert no_key.serpapi_search_youtube("mindroom") == "Please provide an API key"
 
     test_key = "serp key+1/2"
     toolkit = _build_env_configured_tool(
@@ -501,10 +504,10 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
         overrides={"enable_search_youtube": True},
     )
 
-    assert toolkit.search_google("") == "Please provide a query to search for"
-    assert toolkit.search_youtube("") == "Please provide a query to search for"
+    assert toolkit.serpapi_search_google("") == "Please provide a query to search for"
+    assert toolkit.serpapi_search_youtube("") == "Please provide a query to search for"
 
-    google_result = json.loads(toolkit.search_google("mindroom", num_results=5))
+    google_result = json.loads(toolkit.serpapi_search_google("mindroom", num_results=5))
     assert google_result == {
         "search_results": [{"title": "MindRoom"}],
         "recipes_results": "",
@@ -512,14 +515,14 @@ def test_serpapi_google_youtube_env_fallback_and_key_redaction(
         "knowledge_graph": {"title": "MindRoom"},
         "related_questions": "",
     }
-    youtube_result = json.loads(toolkit.search_youtube("matrix"))
+    youtube_result = json.loads(toolkit.serpapi_search_youtube("matrix"))
     assert youtube_result == {
         "video_results": [{"title": "Demo"}],
         "movie_results": "",
         "channel_results": [{"title": "Official"}],
     }
 
-    error_text = toolkit.search_google("boom")
+    error_text = toolkit.serpapi_search_google("boom")
     assert error_text.startswith("Error searching for the query boom:")
     assert test_key not in error_text
     assert quote(test_key, safe="") not in error_text
@@ -534,12 +537,12 @@ def test_serpapi_enable_flags_and_all() -> None:
     """SerpApiTools defaults to Google only and honors YouTube and all switches."""
     tool_class = serpapi_tools()
 
-    assert list(tool_class().functions) == ["search_google"]
-    assert list(tool_class(enable_search_youtube=True).functions) == ["search_google", "search_youtube"]
+    assert list(tool_class().functions) == ["serpapi_search_google"]
+    assert list(tool_class(enable_search_youtube=True).functions) == ["serpapi_search_google", "serpapi_search_youtube"]
     assert list(tool_class(enable_search_google=False).functions) == []
     assert list(tool_class(enable_search_google=False, enable_search_youtube=False, all=True).functions) == [
-        "search_google",
-        "search_youtube",
+        "serpapi_search_google",
+        "serpapi_search_youtube",
     ]
 
 

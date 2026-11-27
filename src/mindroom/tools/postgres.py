@@ -43,7 +43,7 @@ class _PostgresTools(SqlCursorToolkit):
         self.port = port
         super().__init__(
             name="postgres_tools",
-            tools=[self.postgres_inspect, self.run_query, self.export_table_to_path],
+            tools=[self.postgres_inspect, self.postgres_run_query, self.postgres_export_table_to_path],
             table_schema=table_schema,
             connection=connection,
         )
@@ -116,11 +116,11 @@ class _PostgresTools(SqlCursorToolkit):
         """
         return self._inspect_db(action, table=table, query=query)
 
-    def run_query(self, query: str) -> str:
+    def postgres_run_query(self, query: str) -> str:
         """Run a read-only SQL query against PostgreSQL and return CSV-formatted rows."""
         return self._run_db_query(query)
 
-    def export_table_to_path(self, table: str, path: str) -> str:
+    def postgres_export_table_to_path(self, table: str, path: str) -> str:
         """Export a PostgreSQL table as a local CSV file at `path`."""
         return self._export_table(table, path)
 
@@ -181,7 +181,7 @@ class _PostgresTools(SqlCursorToolkit):
     ],
     dependencies=["psycopg"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#postgres",
-    function_names=("export_table_to_path", "postgres_inspect", "run_query"),
+    function_names=("postgres_export_table_to_path", "postgres_inspect", "postgres_run_query"),
     action_scoped_grants=("postgres_inspect",),
 )
 def postgres_tools() -> type[Toolkit]:

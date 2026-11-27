@@ -307,7 +307,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     hook = AsyncMock()
     monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
     monkeypatch.setattr("mindroom.history.summarizer.generate_compaction_summary", generate)
-    monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
+    monkeypatch.setattr("mindroom.history.compaction.emit_compaction_hook", hook)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     task = asyncio.create_task(
         _compact_stored_scope(

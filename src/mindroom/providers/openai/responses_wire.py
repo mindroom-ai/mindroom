@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.llm.messages import FALLBACK_MODEL_KEY, media_items, tool_result_view
+from mindroom.llm.messages import EMPTY_META, MessageMeta, media_items, tool_result_view
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -30,12 +30,7 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import (
-    ENCRYPTED_REPLAY_RESET_KEY,
-    NATIVE_CHECKPOINT_KEY,
-    native_checkpoint_state,
-    native_replay,
-)
+from mindroom.native_compaction import native_checkpoint_state, native_replay
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
@@ -82,7 +77,6 @@ _TERMINAL_EVENT_TYPES = _ENDED_EVENT_TYPES | {"response.failed"}
 # The output items the model writes itself; every other item is a hosted tool's call or output.
 _MODEL_ITEM_TYPES = frozenset({"message", "reasoning", "function_call"})
 _STORED_KEY = "mindroom_response_stored"
-_PORTABLE_KEY = "mindroom_portable_replay"
 _CONVERSATION_DIGEST_KEY = "mindroom_conversation_sha256"
 
 
@@ -124,19 +118,24 @@ class ResponsesReplay:
     encrypted_from: int = 0
 
 
-def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] | None:
-    """Return the index and provider data of the latest assistant message that records a response id."""
+def _latest_response(messages: Sequence[Message]) -> tuple[int, Message, str] | None:
+    """Return the index, message, and response id of the latest assistant message that records one."""
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
-        if message.role == "assistant" and message.provider_data and message.provider_data.get("response_id"):
-            return index, message.provider_data
+        if (
+            message.role == "assistant"
+            and message.provider_data
+            and isinstance(response_id := message.provider_data.get("response_id"), str)
+            and response_id
+        ):
+            return index, message, response_id
     return None
 
 
 def conversation_digest(messages: Sequence[Message]) -> str:
     """Return the digest of the conversation ``messages`` hold, which each stored response records for its request.
 
-    It covers what a request sends of each message, the system text and the turn context (``add_to_agent_memory=False``)
+    It covers what a request sends of each message, the system text and the turn context (``is_turn_context=True``)
     included, and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning,
     and inline media bytes, which a media item's id and source stand for. Each message is encoded alone, which gives
     the digest of the list encoded in one call, so a worker thread computing it lets the event loop take the GIL
@@ -158,8 +157,8 @@ def conversation_digest(messages: Sequence[Message]) -> str:
     return digest.hexdigest()
 
 
-def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bool:
-    """Return whether a request can continue the response that recorded ``provider_data``, after the messages ``before``.
+def _continuable(message: Message, before: Sequence[Message]) -> bool:
+    """Return whether a request can continue the response ``message`` recorded, after the messages ``before``.
 
     The provider keeps a stored response's context, the conversation its request sent or continued, and a continuing
     request never resends it, so the response continues only when that conversation is what the request replays
@@ -181,9 +180,9 @@ def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bo
     # Handling: the missing digest never equals the request's, so the next request replays the history explicitly
     # once and continues the response it stores from then on; ``mindroom_system_sha256`` is ignored.
     # Coverage: tests/providers/test_openai_family_requests.py::test_a_reply_stored_without_a_conversation_digest_replays_once
-    if FALLBACK_MODEL_KEY in provider_data:
+    if message.meta.fallback_model is not None:
         return False
-    return provider_data.get(_CONVERSATION_DIGEST_KEY) == conversation_digest(before)
+    return (message.provider_data or {}).get(_CONVERSATION_DIGEST_KEY) == conversation_digest(before)
 
 
 def responses_replay(
@@ -216,7 +215,7 @@ def responses_replay(
     return ResponsesReplay(
         history=history,
         sent_from=0 if chained is None else chained[0] + 1,
-        previous_response_id=None if chained is None else chained[1]["response_id"],
+        previous_response_id=None if chained is None else chained[2],
         native_route=route,
         encrypted_from=encrypted_from,
     )
@@ -517,6 +516,7 @@ class ResponsesTurnParts:
     reasoning: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     provider_data: dict[str, Any] = field(default_factory=dict)
+    meta: MessageMeta = EMPTY_META
     usage: MessageMetrics | None = None
     status: str | None = None
     incomplete_reason: str | None = None
@@ -646,7 +646,7 @@ class ResponsesStream:
         if self.store is not False:
             parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
         if self.encrypted_replay_reset is not None:
-            parts.provider_data[ENCRYPTED_REPLAY_RESET_KEY] = self.encrypted_replay_reset
+            parts.meta = replace(parts.meta, encrypted_replay_reset=self.encrypted_replay_reset)
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]
@@ -657,8 +657,11 @@ class ResponsesStream:
             # from its text and calls, after the searches it ran.
             parts.provider_data[RESPONSE_OUTPUT_KEY] = [item for item in output if item.get("type") != "reasoning"]
             return
-        parts.provider_data[_PORTABLE_KEY] = self.portable_replay
-        parts.provider_data[NATIVE_CHECKPOINT_KEY] = native_checkpoint_state(items, self.native_compaction)
+        parts.meta = replace(
+            parts.meta,
+            portable_replay=self.portable_replay,
+            native_compaction=native_checkpoint_state(items, self.native_compaction),
+        )
         parts.provider_data[RESPONSE_OUTPUT_KEY] = output
 
     def finish(self) -> ResponsesTurnParts:

@@ -193,7 +193,7 @@ Send to room IDs, not room titles.
 
 ## [`resend`]
 
-`resend` sends transactional email through Resend with `send_email()`, using the message body as HTML.
+`resend` sends transactional email through Resend with `resend_send_email()`, using the message body as HTML.
 Every message comes from `from_email`, which usually must be a sender verified in Resend.
 Use `gmail` instead when the agent needs to read or reply within a mailbox.
 
@@ -201,7 +201,7 @@ Use `gmail` instead when the agent needs to read or reply within a mailbox.
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Resend API key, or `RESEND_API_KEY`; required. |
 | `from_email` | `text` | `null` | Sender address for every message. |
-| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
+| `enable_send_email` | `boolean` | `true` | Enable `resend_send_email()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`email`]

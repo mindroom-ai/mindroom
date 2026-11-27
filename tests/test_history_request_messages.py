@@ -31,7 +31,7 @@ from mindroom.history.storage import new_scope_session
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
@@ -56,7 +56,7 @@ _SUMMARY = ScopeSummary(
     text="Goal: ship the release.\nProgress: tests pass.",
     updated_at=datetime(2027, 1, 15, tzinfo=UTC),
 )
-_SUMMARY_FOLLOWS = {"mindroom_compaction_summary_follows": True}
+_SUMMARY_FOLLOWS = MessageMeta(compaction_summary_follows=True)
 
 
 def _golden(name: str) -> dict[str, Any]:
@@ -325,7 +325,7 @@ def test_turn_context_replays_where_it_was_sent_but_takes_no_slot_in_a_message_w
             run_id,
             messages=[
                 Message(role="user", content=f"{run_id} question"),
-                Message(role="user", content=f"{run_id} memories", add_to_agent_memory=False),
+                Message(role="user", content=f"{run_id} memories", is_turn_context=True),
                 Message(role="assistant", content=f"{run_id} answer"),
             ],
         )
@@ -476,7 +476,7 @@ def test_new_request_orders_system_summary_history_context_prompt_then_transient
     turn = TurnMessages(
         context=(Message(role="user", content="unseen thread message"),),
         prompt=Message(role="user", content="current request"),
-        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+        transient=(Message(role="user", content="memories", is_turn_context=True),),
     )
 
     request = _request(summary=_SUMMARY, history=history, turn=turn)
@@ -487,7 +487,7 @@ def test_new_request_orders_system_summary_history_context_prompt_then_transient
             Message(
                 role="user",
                 content=_rendered_summary(_SUMMARY.text),
-                provider_data={"mindroom_compaction_summary": "scope"},
+                meta=MessageMeta(compaction_summary="scope"),
                 from_history=True,
             ),
             *history,
@@ -530,13 +530,13 @@ def test_next_request_repeats_the_previous_one_whole() -> None:
     first_turn = TurnMessages(
         context=(Message(role="user", content="thread message"),),
         prompt=Message(role="user", content="question one"),
-        transient=(Message(role="user", content="context one", add_to_agent_memory=False),),
+        transient=(Message(role="user", content="context one", is_turn_context=True),),
     )
     first = _request(summary=None, history=[], turn=first_turn)
     stored = [*first[1:], Message(role="assistant", content="answer one")]
     second_turn = TurnMessages(
         prompt=Message(role="user", content="question two"),
-        transient=(Message(role="user", content="context two", add_to_agent_memory=False),),
+        transient=(Message(role="user", content="context two", is_turn_context=True),),
     )
 
     second = _request(
@@ -568,7 +568,7 @@ def test_summary_replays_without_runs_and_with_its_text_trimmed() -> None:
 
 
 def test_summary_follows_the_prompt_a_mid_turn_compaction_placed_it_after() -> None:
-    folded_prompt = Message(role="user", content="long task", provider_data=_SUMMARY_FOLLOWS)
+    folded_prompt = Message(role="user", content="long task", meta=_SUMMARY_FOLLOWS)
     runs: list[AnyRunRecord] = [
         _agent_run("folded", messages=[folded_prompt, Message(role="assistant", content="done")]),
     ]
@@ -589,7 +589,7 @@ def test_a_replayed_run_local_summary_does_not_replace_the_scope_summary() -> No
     run_local = Message(
         role="user",
         content=_rendered_summary("local work"),
-        provider_data={"mindroom_compaction_summary": "run"},
+        meta=MessageMeta(compaction_summary="run"),
     )
     runs: list[AnyRunRecord] = [_agent_run("run", messages=[Message(role="user", content="task"), run_local])]
     turn = TurnMessages(prompt=Message(role="user", content="next request"))
@@ -675,7 +675,7 @@ def test_resumed_request_repeats_the_request_that_paused() -> None:
     runs: list[AnyRunRecord] = [_agent_run("earlier")]
     turn = TurnMessages(
         prompt=Message(role="user", content="multiply"),
-        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+        transient=(Message(role="user", content="memories", is_turn_context=True),),
     )
     paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
     call = _tool_call("call-multiply")
@@ -693,18 +693,18 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
     runs: list[AnyRunRecord] = [_agent_run("earlier")]
     turn = TurnMessages(
         prompt=Message(role="user", content="multiply"),
-        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+        transient=(Message(role="user", content="memories", is_turn_context=True),),
     )
     paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
     call = _tool_call("call-multiply")
     old_row = _paused_row(
-        [message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory],
+        [message for message in [*paused_request, call] if not message.from_history and not message.is_turn_context],
     )
     assert all("add_to_agent_memory" not in message for message in old_row.to_dict()["messages"])
 
     resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
 
-    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if not message.is_turn_context])
 
 
 @pytest.mark.parametrize("transient", [True, False], ids=["with-transient-context", "without-transient-context"])
@@ -717,10 +717,10 @@ def test_a_paused_run_s_turn_input_is_the_context_its_request_sent_before_the_pr
     turn = TurnMessages(
         prompt=Message(role="user", content="multiply"),
         context=context,
-        transient=(Message(role="user", content="memories", add_to_agent_memory=False),) if transient else (),
+        transient=(Message(role="user", content="memories", is_turn_context=True),) if transient else (),
     )
     paused_request = _request(summary=_SUMMARY, history=_replay([_agent_run("earlier")]), turn=turn)
-    answer = replace(_tool_call("call-multiply"), provider_data=model_provenance("m", "Synthetic"))
+    answer = replace(_tool_call("call-multiply"), meta=MessageMeta(model=ModelProvenance("m", "Synthetic")))
     stored = _paused_row([message for message in [*paused_request, answer] if not message.from_history]).messages
 
     turn_input = stored_turn_input(stored)
@@ -747,7 +747,7 @@ def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_ca
 def test_a_row_without_turn_context_ends_its_input_at_its_model_s_first_answer() -> None:
     """A row without turn context ends its input at its model's first answer, even one without a call."""
     context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
-    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    answer = Message(role="assistant", content="Partial", meta=MessageMeta(model=ModelProvenance("m", "Synthetic")))
     stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
 
     assert [message.id for message in stored_turn_input(stored).context] == [context.id]
@@ -759,7 +759,7 @@ def test_a_stopped_row_replays_the_scope_summary_where_its_run_placed_it(folded:
     stored_prompt = Message(role="user", content="multiply")
     if folded:
         mark_summary_follows(stored_prompt)
-    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    answer = Message(role="assistant", content="Partial", meta=MessageMeta(model=ModelProvenance("m", "Synthetic")))
     snapshot = build_interrupted_replay_snapshot(
         user_message="multiply",
         user_message_is_structured=False,
@@ -788,7 +788,7 @@ def test_a_run_s_turn_input_holds_its_own_fold_summary_in_place_of_the_context_t
     notice = Message(
         role="user",
         content="A newer message arrived.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+        meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id="a"),
     )
     stored = _paused_row(
         [_system(), Message(role="user", content="multiply"), summary, notice, _tool_call("call-multiply")],
@@ -804,7 +804,7 @@ def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> Non
     notice = Message(
         role="user",
         content="A newer message is waiting.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+        meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id="a"),
     )
     result = Message(role="tool", tool_call_id="call-1", content="6")
     paused = _paused_row([_system(), Message(role="user", content="multiply"), _tool_call("call-1"), result, notice])
@@ -843,7 +843,7 @@ def test_resuming_messages_that_carry_the_scope_summary_keeps_that_one() -> None
     carried = Message(
         role="user",
         content=_rendered_summary("carried"),
-        provider_data={"mindroom_compaction_summary": "scope"},
+        meta=MessageMeta(compaction_summary="scope"),
         from_history=True,
     )
     paused = [_system(), carried, Message(role="user", content="multiply"), _tool_call("call")]
@@ -854,7 +854,7 @@ def test_resuming_messages_that_carry_the_scope_summary_keeps_that_one() -> None
 
 
 def test_resume_places_the_summary_after_a_paused_prompt_marked_for_it() -> None:
-    prompt = Message(role="user", content="long task", provider_data=_SUMMARY_FOLLOWS)
+    prompt = Message(role="user", content="long task", meta=_SUMMARY_FOLLOWS)
     paused = [_system(), prompt, _tool_call("call")]
 
     resumed = build_resume_request(paused=paused, summary=_SUMMARY, history=[])

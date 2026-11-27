@@ -1,12 +1,6 @@
 """Report Publishing tool metadata registration."""
 
-from mindroom.tool_system.declarations import (
-    SetupType,
-    ToolCategory,
-    ToolFileAccess,
-    ToolMetadata,
-    ToolStatus,
-)
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata
 
 register_builtin_tool_metadata(
@@ -17,8 +11,6 @@ register_builtin_tool_metadata(
         description="Share reports through public links that you can revoke",
         docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing",
         category=ToolCategory.PRODUCTIVITY,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
         requires_room_context=True,
         consumes_workspace_paths=True,
         icon="Share2",

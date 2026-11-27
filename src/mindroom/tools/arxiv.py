@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["arxiv", "pypdf"],
     docs_url="https://docs.mindroom.chat/tools/research-sources/#arxiv",
-    function_names=("read_arxiv_papers", "search_arxiv_and_return_articles"),
+    function_names=("arxiv_read_papers", "arxiv_search"),
 )
 def arxiv_tools() -> type[ArxivTools]:
     """Return ArXiv tools for academic paper research."""

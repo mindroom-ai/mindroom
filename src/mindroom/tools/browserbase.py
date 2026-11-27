@@ -89,7 +89,7 @@ class _BrowserbaseTools(Toolkit):
         if self._enabled_actions:
             tools.append(self.browserbase)
         if all or enable_screenshot:
-            tools.append(self.screenshot)
+            tools.append(self.browserbase_screenshot)
         super().__init__(name="browserbase_tools", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
@@ -203,7 +203,7 @@ class _BrowserbaseTools(Toolkit):
         content = self._extract_text_content(raw_content) if self.parse_html else raw_content
         return self._truncate_content(content)
 
-    async def screenshot(self, path: str, full_page: bool = True, connect_url: str | None = None) -> str:
+    async def browserbase_screenshot(self, path: str, full_page: bool = True, connect_url: str | None = None) -> str:
         """Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`)."""
         if not path.strip():
             return error_json("path is required for screenshot.")
@@ -283,7 +283,7 @@ class _BrowserbaseTools(Toolkit):
     ],
     dependencies=["browserbase", "playwright"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browserbase",
-    function_names=("browserbase", "screenshot"),
+    function_names=("browserbase", "browserbase_screenshot"),
     action_scoped_grants=("browserbase",),
 )
 def browserbase_tools() -> type[Toolkit]:

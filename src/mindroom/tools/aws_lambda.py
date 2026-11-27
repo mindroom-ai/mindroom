@@ -64,12 +64,12 @@ class _AWSLambdaTools(Toolkit):
         enable_all = resolve_toggle(all, default=False)
         tools: list[Any] = []
         if resolve_toggle(enable_list_functions, default=True, enable_all=enable_all):
-            tools.append(self.list_functions)
+            tools.append(self.aws_lambda_list_functions)
         if resolve_toggle(enable_invoke_function, default=True, enable_all=enable_all):
-            tools.append(self.invoke_function)
+            tools.append(self.aws_lambda_invoke_function)
         super().__init__(name="aws_lambda", tools=tools)
 
-    def list_functions(self) -> str:
+    def aws_lambda_list_functions(self) -> str:
         """List AWS Lambda function names in the configured region."""
         try:
             response = self.client.list_functions()
@@ -78,7 +78,7 @@ class _AWSLambdaTools(Toolkit):
         except Exception as exc:
             return f"Error listing functions: {exc}"
 
-    def invoke_function(self, function_name: str, payload: str = "{}") -> str:
+    def aws_lambda_invoke_function(self, function_name: str, payload: str = "{}") -> str:
         """Invoke AWS Lambda `function_name` with a JSON `payload` string."""
         try:
             clean_name = require_non_empty(function_name, "function_name")
@@ -116,7 +116,7 @@ class _AWSLambdaTools(Toolkit):
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["boto3"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#aws_lambda",
-    function_names=("invoke_function", "list_functions"),
+    function_names=("aws_lambda_invoke_function", "aws_lambda_list_functions"),
 )
 def aws_lambda_tools() -> type[Toolkit]:
     """Return AWS Lambda tools for serverless function management."""

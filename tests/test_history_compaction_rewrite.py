@@ -12,15 +12,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_EVENT_ID_METADATA_KEY,
 )
 from mindroom.history.compaction import (
-    _emit_compaction_hook,
     _rewrite_working_session_for_compaction,
     compact_scope_history,
+    emit_compaction_hook,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_text_tokens
 from mindroom.history.storage import (
@@ -52,7 +53,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ModelSafeguardRefusal, ProviderError, RateLimited
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics
@@ -1131,7 +1132,7 @@ async def test_compaction_hooks_see_who_said_each_line_without_what_mindroom_add
             Message(
                 role="user",
                 content="A newer message is waiting.",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+                meta=MessageMeta(queued_message_notice=True),
             ),
             Message(role="assistant", content="Noted: next Friday."),
         ],
@@ -1656,7 +1657,7 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
     )
 
     with tool_runtime_context(runtime_context):
-        await _emit_compaction_hook(
+        await emit_compaction_hook(
             event_name=EVENT_COMPACTION_BEFORE,
             scope=HistoryScope(kind="team", scope_id="team_general"),
             transcript=(),
@@ -1668,6 +1669,168 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
 
     assert observed == ["team:team_general:team_general:!room:localhost:$thread"]
     assert saw_matrix_admin == [True]
+
+
+@pytest.mark.asyncio
+async def test_compaction_hook_metadata_workspaces_and_team_member_attribution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-reply hooks carry metadata and resolve shared, private, team, and team-member workspaces lazily."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        compaction=CompactionOverrideConfig(enabled=True, threshold_tokens=50),
+        context_window=64_000,
+    )
+    config.agents["private_agent"] = AgentConfig(
+        display_name="Private",
+        private=AgentPrivateConfig(per="user"),
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session(
+        "session-1",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="u " * 60), Message(role="assistant", content="a " * 60)],
+            ),
+        ],
+    )
+    seed_session(storage, session)
+
+    contexts: list[CompactionHookContext] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def on_before(ctx: CompactionHookContext) -> None:
+        contexts.append(ctx)
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def on_after(ctx: CompactionHookContext) -> None:
+        contexts.append(ctx)
+
+    registry = HookRegistry.from_plugins([_plugin("meta-hooks", [on_before, on_after])])
+    runtime_context = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=registry,
+        session_id="session-1",
+    )
+
+    install_model_providers(monkeypatch, {"default": summary_model()})
+    with (
+        tool_runtime_context(runtime_context),
+        patch(
+            "mindroom.history.summarizer.generate_compaction_summary",
+            new=AsyncMock(return_value="compact summary"),
+        ),
+    ):
+        prepared = await prepare_history_for_run_for_test(
+            agent_name="test_agent",
+            full_prompt="Current prompt",
+            session_id="session-1",
+            runtime_paths=runtime_paths,
+            config=config,
+            execution_identity=None,
+            storage=storage,
+            session=session,
+        )
+
+    assert prepared.compaction_reply_outcome == "success"
+    before_ctx, after_ctx = contexts
+    expected_workspace = runtime_context.agent_workspace_root(create=False)
+    assert before_ctx.kind == after_ctx.kind == "pre_reply"
+    assert before_ctx.mode == after_ctx.mode == "auto"
+    assert before_ctx.requester_id == after_ctx.requester_id == "@user:localhost"
+    assert before_ctx.workspace_root == after_ctx.workspace_root == expected_workspace
+    assert expected_workspace.is_dir()
+    assert (before_ctx.summary_model, before_ctx.compacted_at, before_ctx.compacted_run_count) == (None, None, None)
+    assert after_ctx.summary_model == "default"
+    assert after_ctx.compacted_at is not None
+    assert after_ctx.compacted_at.endswith("Z")
+    assert after_ctx.compacted_run_count == 1
+
+    # Team scope gets workspace_root=None; team member under ambient team/transport context gets member name + workspace.
+    contexts.clear()
+    team_ambient = replace(runtime_context, agent_name="team_general", transport_agent_name="router")
+    with tool_runtime_context(team_ambient):
+        await emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=HistoryScope(kind="team", scope_id="team_general"),
+            transcript=(),
+            session_id="",
+            token_count_before=100,
+            token_count_after=20,
+            compaction_summary="team summary",
+        )
+        await emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            transcript=(),
+            session_id="",
+            token_count_before=100,
+            token_count_after=20,
+            compaction_summary="member summary",
+        )
+        await emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=HistoryScope(kind="agent", scope_id="private_agent"),
+            transcript=(),
+            session_id="",
+            token_count_before=100,
+            token_count_after=20,
+            compaction_summary="private summary",
+        )
+
+    team_ctx, member_ctx, private_ctx = contexts
+    assert (team_ctx.agent_name, team_ctx.workspace_root, team_ctx.session_id) == ("team_general", None, "session-1")
+    assert (member_ctx.agent_name, member_ctx.workspace_root, member_ctx.session_id) == (
+        "test_agent",
+        expected_workspace,
+        "session-1",
+    )
+    assert private_ctx.agent_name == "private_agent"
+    assert private_ctx.workspace_root is not None
+    assert private_ctx.workspace_root.is_dir()
+    assert private_ctx.workspace_root != expected_workspace
+
+    # Unregistered hooks perform zero workspace resolution I/O.
+    empty_ctx = _hook_runtime_context(
+        config=config,
+        runtime_paths=runtime_paths,
+        registry=HookRegistry.empty(),
+        session_id="session-1",
+    )
+    with (
+        tool_runtime_context(empty_ctx),
+        patch("mindroom.history.compaction.scope_workspace_root", side_effect=AssertionError("must not resolve")),
+    ):
+        await emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            transcript=(),
+            session_id="session-1",
+            token_count_before=10,
+        )
+
+    # Workspace resolution errors degrade to None without breaking hook emission.
+    contexts.clear()
+    with (
+        tool_runtime_context(runtime_context),
+        patch.object(
+            type(runtime_context),
+            "agent_workspace_root",
+            side_effect=OSError("disk unavailable"),
+        ),
+    ):
+        await emit_compaction_hook(
+            event_name=EVENT_COMPACTION_AFTER,
+            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+            transcript=(),
+            session_id="session-1",
+            token_count_before=10,
+        )
+    assert len(contexts) == 1
+    assert contexts[0].workspace_root is None
 
 
 @pytest.mark.asyncio

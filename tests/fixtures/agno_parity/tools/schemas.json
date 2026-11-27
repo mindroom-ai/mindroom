@@ -62,7 +62,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "agentql_scrape_website",
         "description": "Scrape all text content from a website using AgentQL.",
         "parameters": {
           "type": "object",
@@ -97,7 +97,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "save_dag_file",
+        "name": "airflow_save_dag_file",
         "description": "Write Python DAG `contents` to `dag_file` under the DAG directory and return its path.",
         "parameters": {
           "type": "object",
@@ -129,7 +129,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_dag_file",
+        "name": "airflow_read_dag_file",
         "description": "Read and return the contents of `dag_file` under the DAG directory.",
         "parameters": {
           "type": "object",
@@ -208,7 +208,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_arxiv_and_return_articles",
+        "name": "arxiv_search",
         "description": "Use this function to search arXiv for a query and return the top articles.",
         "parameters": {
           "type": "object",
@@ -241,7 +241,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "read_arxiv_papers",
+        "name": "arxiv_read_papers",
         "description": "Use this function to read a list of arxiv papers and return the content.",
         "parameters": {
           "type": "object",
@@ -584,7 +584,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_functions",
+        "name": "aws_lambda_list_functions",
         "description": "List AWS Lambda function names in the configured region.",
         "parameters": {
           "type": "object",
@@ -607,7 +607,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "invoke_function",
+        "name": "aws_lambda_invoke_function",
         "description": "Invoke AWS Lambda `function_name` with a JSON `payload` string.",
         "parameters": {
           "type": "object",
@@ -644,7 +644,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "aws_ses_send_email",
         "description": "Send plain-text email via Amazon SES.",
         "parameters": {
           "type": "object",
@@ -947,7 +947,7 @@
     "functions": [
       {
         "name": "browser_read",
-        "description": "Inspect a Chromium browser without mutating pages: check status/profiles/tabs, capture element snapshots (returns refs for `browser_control`), take screenshots, read console logs, or fetch action `help`/`actions`.\n`target='host'` uses MindRoom's worker browser (`tabs` returns empty when stopped without launching Chromium). `target='desktop'` (when configured) observes the user's local browser.",
+        "description": "Inspect Chromium without mutating pages: check status/profiles/tabs, snapshot element refs (for browser_control), take a screenshot, read console logs, or fetch help/actions.\nExamples: {\"action\":\"snapshot\"} | {\"action\":\"screenshot\",\"fullPage\":true}.\ntarget=host uses MindRoom's worker browser (tabs returns empty when stopped without launching Chromium). target=desktop observes the user's browser.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -963,7 +963,7 @@
                 "help",
                 "actions"
               ],
-              "description": "Read action (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions`)."
+              "description": "Read action (help for full table)."
             },
             "target": {
               "type": "string",
@@ -971,19 +971,15 @@
                 "host",
                 "desktop"
               ],
-              "description": "`host` (worker browser) or `desktop` (user's local browser)."
-            },
-            "node": {
-              "type": "string",
-              "description": "Unsupported compatibility field."
+              "description": "host (worker browser) or desktop (user's browser)."
             },
             "profile": {
               "type": "string",
-              "description": "Host-target profile name (default `mindroom`)."
+              "description": "Host-target profile (default mindroom)."
             },
             "targetId": {
               "type": "string",
-              "description": "Opaque host tab ID (rejected by desktop; desktop observes its active tab)."
+              "description": "Host tab ID (rejected by desktop; desktop observes active tab only; on host, omit for active tab or all-tab console)."
             },
             "limit": {
               "type": "integer",
@@ -991,19 +987,11 @@
             },
             "maxChars": {
               "type": "integer",
-              "description": "Snapshot text limit."
-            },
-            "mode": {
-              "type": "string",
-              "description": "Host-target snapshot mode (`efficient`)."
+              "description": "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."
             },
             "snapshotFormat": {
               "type": "string",
-              "description": "Host-target snapshot format (`ai`/`aria`)."
-            },
-            "refs": {
-              "type": "string",
-              "description": "Host-target snapshot refs mode (compat)."
+              "description": "Host-target snapshot format (ai/aria)."
             },
             "interactive": {
               "type": "boolean",
@@ -1011,31 +999,23 @@
             },
             "compact": {
               "type": "boolean",
-              "description": "Host-target compact snapshot hint."
+              "description": "Host-target compact snapshot output."
             },
             "depth": {
               "type": "integer",
-              "description": "Snapshot traversal depth."
+              "description": "Snapshot depth."
             },
             "selector": {
               "type": "string",
               "description": "Snapshot root CSS selector."
             },
-            "frame": {
-              "type": "string",
-              "description": "Host-target frame selector (compat; ignored)."
-            },
-            "labels": {
-              "type": "boolean",
-              "description": "Host-target snapshot label hint (compat; ignored)."
-            },
             "fullPage": {
               "type": "boolean",
-              "description": "Capture full page screenshot."
+              "description": "Full-page screenshot."
             },
             "ref": {
               "type": "string",
-              "description": "Snapshot ref or CSS selector."
+              "description": "Element ref or CSS selector (for element screenshot)."
             },
             "element": {
               "type": "string",
@@ -1043,15 +1023,15 @@
             },
             "type": {
               "type": "string",
-              "description": "Screenshot format (`png`/`jpeg`)."
+              "description": "Screenshot format (png/jpeg)."
             },
             "saveOnly": {
               "type": "boolean",
-              "description": "Host screenshot: return artifact metadata only (omit image bytes)."
+              "description": "Host screenshot: metadata only (omit image bytes)."
             },
             "returnAttachment": {
               "type": "boolean",
-              "description": "Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving plaintext to disk."
+              "description": "Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk."
             },
             "level": {
               "type": "string",
@@ -1078,7 +1058,7 @@
       },
       {
         "name": "browser_control",
-        "description": "Drive a live Chromium browser: start/stop profiles, open URLs (or local HTML via `paths`), focus/close tabs, navigate, interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), save PDFs, upload files, and arm dialogs. Use `browser_read` for `status`, `tabs`, `snapshot`, `screenshot`, `console`, and `help`.\n`target='host'` uses MindRoom's worker browser (first call auto-shows the Computer panel if `chat_ui` is present; call `chat_ui.open_panel(panel='computer')` only to reopen it—never navigates or takes control). `target='desktop'` (when configured) supports `start`, `stop`, and `open` only.",
+        "description": "Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.\nExamples: {\"action\":\"open\",\"targetUrl\":\"https://example.org\"} | {\"action\":\"open\",\"target\":\"host\",\"paths\":[\"page.html\"]} (omit targetUrl, incl. about:blank) | {\"action\":\"act\",\"target\":\"host\",\"request\":{\"kind\":\"click\",\"ref\":\"e1\"}}.\nopen takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1096,7 +1076,7 @@
                 "dialog",
                 "act"
               ],
-              "description": "Control action (`start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act`)."
+              "description": "Control action; page interactions use action='act' with request.kind."
             },
             "target": {
               "type": "string",
@@ -1104,42 +1084,30 @@
                 "host",
                 "desktop"
               ],
-              "description": "`host` (worker browser) or `desktop` (user's local browser: start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it)."
-            },
-            "node": {
-              "type": "string",
-              "description": "Unsupported compatibility field."
+              "description": "host (worker browser) or desktop (user's browser: start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it)."
             },
             "profile": {
               "type": "string",
-              "description": "Host-target profile name (default `mindroom`)."
+              "description": "Host-target profile (default mindroom)."
             },
             "targetUrl": {
               "type": "string",
-              "description": "URL for `open`/`navigate`."
+              "description": "URL for open/navigate (omit when using paths)."
             },
             "targetId": {
               "type": "string",
-              "description": "Opaque host tab ID (rejected by desktop)."
+              "description": "Host tab ID (rejected by desktop; required for focus)."
             },
             "paths": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "Upload files (artifact/workspace paths or att_* IDs; use `./att_*` for workspace files named att_*). For `open`, one local HTML file instead of targetUrl (cannot load other local files; relative links don't resolve)."
+              "description": "upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local files; relative links don't resolve)."
             },
             "ref": {
               "type": "string",
-              "description": "Snapshot ref or CSS selector (for `upload`)."
-            },
-            "inputRef": {
-              "type": "string",
-              "description": "Host-target upload input selector/ref."
-            },
-            "element": {
-              "type": "string",
-              "description": "CSS selector for element upload."
+              "description": "Element ref or CSS selector (required for upload)."
             },
             "timeoutMs": {
               "type": "integer",
@@ -1147,7 +1115,7 @@
             },
             "accept": {
               "type": "boolean",
-              "description": "Accept browser dialog."
+              "description": "Accept next dialog."
             },
             "promptText": {
               "type": "string",
@@ -1155,11 +1123,7 @@
             },
             "request": {
               "type": "object",
-              "propertyNames": {
-                "type": "string"
-              },
-              "additionalProperties": {},
-              "description": "For action='act'; set request.kind to: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from browser_read(action='snapshot')."
+              "description": "For action=act only: {\"kind\":\"click\",\"ref\":\"e1\"}. Kinds: click{ref,doubleClick?,button?,modifiers?}; type{ref,text,submit?,slowly?}; press{key}; hover{ref}; drag{startRef,endRef}; select{ref,values}; fill{fields:[{ref|selector,value}]}; resize{width,height}; wait{timeMs?|text?|textGone?}; evaluate{fn:\"JS expr or arrow (()=>... or el=>...), no bare return\",ref?}; close{}. Refs from browser_read(action='snapshot')."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -2465,7 +2429,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "screenshot",
+        "name": "browserbase_screenshot",
         "description": "Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`).",
         "parameters": {
           "type": "object",
@@ -2676,7 +2640,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "text_to_speech",
+        "name": "cartesia_text_to_speech",
         "description": "Synthesize MP3 speech audio from text using Cartesia.",
         "parameters": {
           "type": "object",
@@ -2709,7 +2673,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "list_voices",
+        "name": "cartesia_list_voices",
         "description": "List available Cartesia voices (first page) as JSON.",
         "parameters": {
           "type": "object",
@@ -2734,12 +2698,12 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).",
-    "guidance": "chat_ui only affects MindRoom Chat (never the user's own computer or browser). Side panels share one slot (opening one replaces the current panel).",
+    "instructions": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.",
+    "guidance": "chat_ui only affects MindRoom Chat (never the user's computer/browser). Side panels share one slot.",
     "functions": [
       {
         "name": "open_settings",
-        "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",
+        "description": "Open MindRoom Chat Settings at one section. Changes no setting (user decides). Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -2764,7 +2728,7 @@
       },
       {
         "name": "open_panel",
-        "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+        "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -2774,7 +2738,7 @@
                 "members",
                 "computer"
               ],
-              "description": "'computer' (worker browser) or 'members' (default; room members)."
+              "description": "computer (worker browser) or members (default)."
             }
           },
           "required": []
@@ -3331,7 +3295,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "crawl",
+        "name": "crawl4ai_crawl",
         "description": "Crawl validated public HTTP(S) URLs.",
         "parameters": {
           "type": "object",
@@ -3417,7 +3381,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "query_csv_file",
+        "name": "csv_query",
         "description": "Run a single DuckDB SQL query against configured CSV `csv_name` (table name equals `csv_name`).",
         "parameters": {
           "type": "object",
@@ -3455,7 +3419,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "make_request",
+        "name": "custom_api_request",
         "description": "Make an HTTP request to a validated public HTTP(S) URL.",
         "parameters": {
           "type": "object",
@@ -4431,7 +4395,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "duckdb_run_query",
         "description": "Run a single DuckDB SQL query and return CSV-formatted output.",
         "parameters": {
           "type": "object",
@@ -4870,7 +4834,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_voices",
+        "name": "eleven_labs_get_voices",
         "description": "List available ElevenLabs voices with ID, name, and description.",
         "parameters": {
           "type": "object",
@@ -4893,7 +4857,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_sound_effect",
+        "name": "eleven_labs_generate_sound_effect",
         "description": "Generate a sound effect from a text prompt.",
         "parameters": {
           "type": "object",
@@ -4926,7 +4890,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "text_to_speech",
+        "name": "eleven_labs_text_to_speech",
         "description": "Convert text to speech audio using ElevenLabs.",
         "parameters": {
           "type": "object",
@@ -5127,7 +5091,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "fal_generate_media",
         "description": "Generate an image or video with the configured Fal model.",
         "parameters": {
           "type": "object",
@@ -5572,7 +5536,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_website",
+        "name": "firecrawl_scrape_website",
         "description": "Use this function to scrape a website using Firecrawl.",
         "parameters": {
           "type": "object",
@@ -5607,7 +5571,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_image",
+        "name": "gemini_generate_image",
         "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
@@ -5636,7 +5600,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_video",
+        "name": "gemini_generate_video",
         "description": "Generate a video from a text prompt using Vertex AI Veo.",
         "parameters": {
           "type": "object",
@@ -5671,7 +5635,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_gifs",
+        "name": "giphy_search_gifs",
         "description": "Search Giphy for GIFs matching a query.",
         "parameters": {
           "type": "object",
@@ -6426,7 +6390,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "google_bigquery_run_sql_query",
         "description": "Run one read-only GoogleSQL SELECT query; unqualified tables resolve in the configured dataset.",
         "parameters": {
           "type": "object",
@@ -6992,7 +6956,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google_scholar",
+        "name": "google_scholar_search",
         "description": "Search Google Scholar for academic publications.",
         "parameters": {
           "type": "object",
@@ -7274,7 +7238,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "groq_transcribe_audio",
         "description": "Transcribe audio from an http(s) URL or local file using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -7303,7 +7267,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "translate_audio",
+        "name": "groq_translate_audio",
         "description": "Translate audio from an http(s) URL or local file into English using Groq Whisper.",
         "parameters": {
           "type": "object",
@@ -7332,7 +7296,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "groq_generate_speech",
         "description": "Synthesize speech audio from text using Groq TTS.",
         "parameters": {
           "type": "object",
@@ -7561,7 +7525,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_url",
+        "name": "jina_read_url",
         "description": "Reads a URL and returns the truncated content using Jina Reader API.",
         "parameters": {
           "type": "object",
@@ -7759,7 +7723,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_with_linkup",
+        "name": "linkup_search",
         "description": "Use this function to search the web for a given query.\nThis function uses the Linkup API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -7802,7 +7766,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_video",
+        "name": "lumalabs_generate_video",
         "description": "Generate a video from a text prompt and optional keyframes.",
         "parameters": {
           "type": "object",
@@ -7864,7 +7828,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "image_to_video",
+        "name": "lumalabs_image_to_video",
         "description": "Generate a video from one or two images with a prompt.",
         "parameters": {
           "type": "object",
@@ -9270,7 +9234,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "modelslabs_generate_media",
         "description": "Generate an image, video, audio clip, or GIF from a text prompt using ModelsLab.",
         "parameters": {
           "type": "object",
@@ -9305,7 +9269,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "extract_audio",
+        "name": "moviepy_video_tools_extract_audio",
         "description": "Extract the audio track from a video file.",
         "parameters": {
           "type": "object",
@@ -9339,7 +9303,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "create_srt",
+        "name": "moviepy_video_tools_create_srt",
         "description": "Write SRT-formatted subtitle text to a file.",
         "parameters": {
           "type": "object",
@@ -9373,7 +9337,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "embed_captions",
+        "name": "moviepy_video_tools_embed_captions",
         "description": "Burn word-highlighted SRT captions onto a video.",
         "parameters": {
           "type": "object",
@@ -9466,7 +9430,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_cypher_query",
+        "name": "neo4j_run_cypher_query",
         "description": "Execute a Cypher query against the Neo4j database and return JSON records.",
         "parameters": {
           "type": "object",
@@ -9500,7 +9464,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_article",
+        "name": "newspaper_read_article",
         "description": "Use this function to read an article from a URL.",
         "parameters": {
           "type": "object",
@@ -9638,7 +9602,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "transcribe_audio",
+        "name": "openai_transcribe_audio",
         "description": "Transcribe an audio file using OpenAI speech-to-text.",
         "parameters": {
           "type": "object",
@@ -9667,7 +9631,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_image",
+        "name": "openai_generate_image",
         "description": "Generate an image from a text prompt using OpenAI.",
         "parameters": {
           "type": "object",
@@ -9696,7 +9660,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "generate_speech",
+        "name": "openai_generate_speech",
         "description": "Synthesize speech audio from text using OpenAI.",
         "parameters": {
           "type": "object",
@@ -10306,7 +10270,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "create_pandas_dataframe",
+        "name": "pandas_create_dataframe",
         "description": "Create and store a DataFrame under `dataframe_name` via `pandas.<create_using_function>(**function_parameters)`.",
         "parameters": {
           "type": "object",
@@ -10345,7 +10309,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_dataframe_operation",
+        "name": "pandas_run_operation",
         "description": "Run `operation` on stored DataFrame `dataframe_name` with optional `operation_parameters`.",
         "parameters": {
           "type": "object",
@@ -10430,7 +10394,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "postgres_run_query",
         "description": "Run a read-only SQL query against PostgreSQL and return CSV-formatted rows.",
         "parameters": {
           "type": "object",
@@ -10458,7 +10422,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "export_table_to_path",
+        "name": "postgres_export_table_to_path",
         "description": "Export a PostgreSQL table as a local CSV file at `path`.",
         "parameters": {
           "type": "object",
@@ -10496,7 +10460,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_pubmed",
+        "name": "pubmed_search",
         "description": "Search PubMed, using the configured max_results when the call omits it.",
         "parameters": {
           "type": "object",
@@ -10813,7 +10777,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_query",
+        "name": "redshift_run_query",
         "description": "Run a SQL query against Amazon Redshift and return CSV-formatted rows.",
         "parameters": {
           "type": "object",
@@ -10841,7 +10805,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "export_table_to_path",
+        "name": "redshift_export_table_to_path",
         "description": "Export a Redshift table as a local CSV file at `path`.",
         "parameters": {
           "type": "object",
@@ -10879,7 +10843,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "generate_media",
+        "name": "replicate_generate_media",
         "description": "Generate an image or video using the configured Replicate model.",
         "parameters": {
           "type": "object",
@@ -10971,7 +10935,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_email",
+        "name": "resend_send_email",
         "description": "Send an HTML email via Resend.",
         "parameters": {
           "type": "object",
@@ -11182,7 +11146,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "smartscraper",
+        "name": "scrapegraph_smartscraper",
         "description": "Extract structured data from a webpage using an AI prompt.",
         "parameters": {
           "type": "object",
@@ -11502,7 +11466,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google",
+        "name": "serpapi_search_google",
         "description": "Search Google using the Serpapi API. Returns the search results.",
         "parameters": {
           "type": "object",
@@ -12398,7 +12362,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "run_sql_query",
+        "name": "sql_run_query",
         "description": "Run a SQL query and return JSON rows (up to `limit`, or all rows when `limit` is null; non-positive returns empty).",
         "parameters": {
           "type": "object",
@@ -12467,7 +12431,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search_using_tavily",
+        "name": "tavily_search",
         "description": "Use this function to search the web for a given query.\nThis function uses the Tavily API to provide realtime online information about the query.",
         "parameters": {
           "type": "object",
@@ -13045,7 +13009,7 @@
     "functions": [
       {
         "name": "trafilatura_extract",
-        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `trafilatura_html_to_text`; to crawl a site use `trafilatura_crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -13092,7 +13056,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "html_to_text",
+        "name": "trafilatura_html_to_text",
         "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
@@ -13123,7 +13087,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "crawl_website",
+        "name": "trafilatura_crawl_website",
         "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
@@ -13980,7 +13944,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "read_url",
+        "name": "website_read_url",
         "description": "Read a URL and return relevant documents from the website.",
         "parameters": {
           "type": "object",
@@ -14077,7 +14041,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_wikipedia",
+        "name": "wikipedia_search",
         "description": "Searches Wikipedia for a query.",
         "parameters": {
           "type": "object",
@@ -14418,7 +14382,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_zendesk",
+        "name": "zendesk_search",
         "description": "Search Zendesk Help Center articles matching `search_string`.",
         "parameters": {
           "type": "object",

@@ -164,7 +164,7 @@ def test_replicate_request_uses_resolved_api_key(
         monkeypatch.setenv("REPLICATE_API_TOKEN", sdk_token)
     tool = _tool(tmp_path, stored_key)
 
-    result = tool.generate_media(prompt="A red fox")
+    result = tool.replicate_generate_media(prompt="A red fox")
 
     assert [image.url for image in result.images] == [_IMAGE]
     assert len(replicate_transport.requests) == 1
@@ -182,7 +182,7 @@ def test_missing_replicate_key_does_not_make_a_request(
     if sdk_token is not None:
         monkeypatch.setenv("REPLICATE_API_TOKEN", sdk_token)
 
-    result = _tool(tmp_path).generate_media(prompt="A red fox")
+    result = _tool(tmp_path).replicate_generate_media(prompt="A red fox")
 
     assert result.content == "API key is not set."
     assert not result.images
@@ -226,7 +226,7 @@ def test_replicate_retains_media_output_contract(
     """Credential routing must retain the established FileOutput and error result shapes."""
     replicate_transport.output = output
 
-    result = _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
+    result = _tool(tmp_path, "stored-key").replicate_generate_media(prompt="A red fox")
 
     assert result.content == expected_content
     assert [image.url for image in result.images] == image_urls
@@ -246,7 +246,7 @@ def test_replicate_provider_failures_remain_tool_values(
         replicate_transport.prediction_status = "failed"
         replicate_transport.prediction_error = "Synthetic provider refusal"
 
-    result = _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
+    result = _tool(tmp_path, "stored-key").replicate_generate_media(prompt="A red fox")
 
     assert isinstance(result, ToolValue)
     assert result.content.startswith("Error:")
@@ -267,7 +267,7 @@ def test_replicate_closes_owned_request_client(
     elif outcome == "parse-error":
         replicate_transport.output = "https://media.example.org/result.bin"
 
-    _tool(tmp_path, "stored-key").generate_media(prompt="A red fox")
+    _tool(tmp_path, "stored-key").replicate_generate_media(prompt="A red fox")
 
     assert len(replicate_transport.clients) == 1
     assert replicate_transport.clients[0].is_closed
@@ -284,7 +284,7 @@ def test_separate_replicate_toolkits_keep_their_own_credentials(
     second = _tool(tmp_path / "second", "second-key")
 
     for tool in (first, second, first):
-        tool.generate_media(prompt="A red fox")
+        tool.replicate_generate_media(prompt="A red fox")
 
     assert [request.headers.get("Authorization") for request in replicate_transport.requests] == [
         "Bearer first-key",
@@ -300,7 +300,7 @@ def test_replicate_materializes_sdk_iterator_outputs(
     """SDK iterator outputs remain usable until all image and video artifacts are parsed."""
     replicate_transport.output = [_IMAGE, _VIDEO]
 
-    result = _tool(tmp_path, "stored-key", model=f"{_MODEL}:test-version").generate_media(prompt="A red fox")
+    result = _tool(tmp_path, "stored-key", model=f"{_MODEL}:test-version").replicate_generate_media(prompt="A red fox")
 
     assert [image.url for image in result.images] == [_IMAGE]
     assert [video.url for video in result.videos] == [_VIDEO]
@@ -312,7 +312,7 @@ def test_registered_replicate_function_exposes_prompt_only(
     replicate_transport: _ReplicateTransport,
 ) -> None:
     """The native function exposes only prompt with no injected framework parameter."""
-    function = toolkit_offers(_tool(tmp_path, "stored-key"), "generate_media")
+    function = toolkit_offers(_tool(tmp_path, "stored-key"), "replicate_generate_media")
     assert set(function.parameters["properties"]) == {"prompt"}
 
     result = function.entrypoint(prompt="A red fox")

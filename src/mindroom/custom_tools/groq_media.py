@@ -62,11 +62,11 @@ class GroqTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_transcribe_audio:
-            tools.append(self.transcribe_audio)
+            tools.append(self.groq_transcribe_audio)
         if all or enable_translate_audio:
-            tools.append(self.translate_audio)
+            tools.append(self.groq_translate_audio)
         if all or enable_generate_speech:
-            tools.append(self.generate_speech)
+            tools.append(self.groq_generate_speech)
         super().__init__(name="groq", tools=tools)
 
     def _request_audio(self, create: Callable[..., object], model: str, audio_source: str) -> str:
@@ -82,7 +82,7 @@ class GroqTools(Toolkit):
         with authorized.open() as audio_file:
             return str(create(file=(authorized.name, audio_file), model=model, response_format="text"))
 
-    def transcribe_audio(self, audio_source: str) -> str:
+    def groq_transcribe_audio(self, audio_source: str) -> str:
         """Transcribe audio from an http(s) URL or local file using Groq Whisper.
 
         Args:
@@ -95,7 +95,7 @@ class GroqTools(Toolkit):
             logger.exception("Failed to transcribe audio with Groq", audio_source=audio_source)
             return f"Failed to transcribe audio source '{audio_source}' with Groq: {exc}"
 
-    def translate_audio(self, audio_source: str) -> str:
+    def groq_translate_audio(self, audio_source: str) -> str:
         """Translate audio from an http(s) URL or local file into English using Groq Whisper.
 
         Args:
@@ -108,7 +108,7 @@ class GroqTools(Toolkit):
             logger.exception("Failed to translate audio with Groq", audio_source=audio_source)
             return f"Failed to translate audio source '{audio_source}' with Groq: {exc}"
 
-    def generate_speech(self, text_input: str) -> ToolValue:
+    def groq_generate_speech(self, text_input: str) -> ToolValue:
         """Synthesize speech audio from text using Groq TTS.
 
         Args:

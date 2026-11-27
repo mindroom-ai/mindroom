@@ -7,15 +7,27 @@ decode, are ``tests/llm/test_codecs.py``'s.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 
 import pytest
 
 from mindroom.llm import usage as llm_usage
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import (
+    EMPTY_META,
+    UNSET,
+    InvalidStamp,
+    Message,
+    MessageMeta,
+    ModelProvenance,
+    is_queued_notice_message,
+    stable_serialize,
+)
+from mindroom.llm.request_identity import message_digest
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.native_compaction import native_replay_route_matches, recorded_native_settings
 
 # --- media -----------------------------------------------------------------------------------------------------
 
@@ -326,12 +338,372 @@ def test_a_message_stores_its_flags_only_when_they_differ_from_their_defaults() 
 
 def test_only_turn_context_stores_its_flag_and_reads_back_as_it() -> None:
     """Turn context stores ``add_to_agent_memory: false``; every other message stores no such key."""
-    context = Message(role="user", content="<memory>likes tea</memory>", add_to_agent_memory=False)
+    context = Message(role="user", content="<memory>likes tea</memory>", is_turn_context=True)
     prompt = Message(role="user", content="Hi")
 
     assert context.to_dict()["add_to_agent_memory"] is False
     assert "add_to_agent_memory" not in prompt.to_dict()
     assert [Message.from_dict(message.to_dict()) for message in (context, prompt)] == [context, prompt]
+
+
+def test_legacy_provider_data_round_trips_all_18_internal_keys_and_opaque_wire_keys() -> None:
+    """All 18 internal keys split into ``meta``, opaque provider keys stay in ``provider_data``, input is not mutated."""
+    opaque_wire_data = {
+        "claude_blocks": [{"type": "text", "text": "hi"}],
+        "response_id": "resp_123",
+        "mindroom_response_output": [{"type": "message", "content": []}],
+        "mindroom_response_stored": True,
+        "mindroom_conversation_sha256": "deadbeef",
+    }
+    internal_keys = {
+        "mindroom_model": {"id": "claude-4", "provider": "Anthropic"},
+        "mindroom_aggregate_usage": True,
+        "mindroom_attempt_rewritten": True,
+        "mindroom_fallback_model": "backup",
+        "mindroom_cut_off_text": "partial",
+        "mindroom_media_msgtype": "m.image",
+        "mindroom_queued_message_notice": True,
+        "mindroom_queued_message_notice_response_turn_id": "turn-1",
+        "mindroom_prompt_update": True,
+        "mindroom_native_compaction": {"route": "r1", "threshold": 4096},
+        "mindroom_encrypted_replay_reset": "scope-1",
+        "mindroom_compaction_summary": "scope",
+        "mindroom_compaction_summary_follows": True,
+        "mindroom_thread_context_note": True,
+        "mindroom_own_thread_message": True,
+        "mindroom_request": "req-hash",
+        "mindroom_cache_routing": "route-hash",
+        "mindroom_portable_replay": False,
+    }
+    raw_provider_data = {**opaque_wire_data, **internal_keys}
+    snapshot = dict(raw_provider_data)
+    stored = {
+        "id": "m-all",
+        "role": "assistant",
+        "content": "hi",
+        "provider_data": raw_provider_data,
+        "add_to_agent_memory": False,
+        "created_at": 42,
+    }
+
+    decoded = Message.from_dict(stored)
+
+    assert raw_provider_data == snapshot
+    assert decoded.provider_data == opaque_wire_data
+    assert decoded.is_turn_context is True
+    assert decoded.meta == MessageMeta(
+        model=ModelProvenance(model_id="claude-4", provider="Anthropic"),
+        aggregate_usage=True,
+        attempt_rewritten=True,
+        fallback_model="backup",
+        cut_off_text="partial",
+        media_msgtype="m.image",
+        queued_message_notice=True,
+        queued_notice_turn_id="turn-1",
+        prompt_update=True,
+        native_compaction={"route": "r1", "threshold": 4096},
+        encrypted_replay_reset="scope-1",
+        compaction_summary="scope",
+        compaction_summary_follows=True,
+        thread_context_note=True,
+        own_thread_message=True,
+        request_identity="req-hash",
+        cache_routing="route-hash",
+        portable_replay=False,
+    )
+    assert decoded.to_dict() == stored
+
+
+def test_message_meta_tri_state_malformed_and_legacy_values_round_trip() -> None:
+    """Tri-state ``native_compaction`` / ``portable_replay``, ``InvalidStamp``, and legacy persisted notices."""
+    # 3-state native_compaction
+    absent = Message.from_dict({"id": "a", "role": "assistant", "created_at": 1})
+    assert absent.meta.native_compaction is UNSET
+    assert "provider_data" not in absent.to_dict()
+
+    explicit_none = Message.from_dict(
+        {"id": "n", "role": "assistant", "provider_data": {"mindroom_native_compaction": None}, "created_at": 1},
+    )
+    assert explicit_none.meta.native_compaction is None
+    assert explicit_none.provider_data is None
+    assert explicit_none.to_dict()["provider_data"] == {"mindroom_native_compaction": None}
+
+    malformed_nc = Message.from_dict(
+        {"id": "b", "role": "assistant", "provider_data": {"mindroom_native_compaction": "bad"}, "created_at": 1},
+    )
+    assert malformed_nc.meta.native_compaction == InvalidStamp("bad")
+    assert malformed_nc.provider_data is None
+    assert malformed_nc.to_dict()["provider_data"] == {"mindroom_native_compaction": "bad"}
+    assert native_replay_route_matches(malformed_nc, "route-1") is False
+    assert recorded_native_settings(malformed_nc) is None
+
+    # 3-state portable_replay
+    portable_false = Message.from_dict(
+        {"id": "pf", "role": "assistant", "provider_data": {"mindroom_portable_replay": False}, "created_at": 1},
+    )
+    assert portable_false.meta.portable_replay is False
+    assert portable_false.to_dict()["provider_data"] == {"mindroom_portable_replay": False}
+
+    portable_true = Message.from_dict(
+        {"id": "pt", "role": "assistant", "provider_data": {"mindroom_portable_replay": True}, "created_at": 1},
+    )
+    assert portable_true.meta.portable_replay is True
+    assert portable_true.to_dict()["provider_data"] == {"mindroom_portable_replay": True}
+
+    portable_bad = Message.from_dict(
+        {"id": "pb", "role": "assistant", "provider_data": {"mindroom_portable_replay": 1}, "created_at": 1},
+    )
+    assert portable_bad.meta.portable_replay is None
+    assert portable_bad.provider_data == {"mindroom_portable_replay": 1}
+    assert portable_bad.to_dict()["provider_data"] == {"mindroom_portable_replay": 1}
+
+    # InvalidStamp lossless round-trip on mindroom_model
+    bad_stamp = {"id": "only-id"}
+    invalid_model = Message.from_dict(
+        {"id": "im", "role": "assistant", "provider_data": {"mindroom_model": bad_stamp}, "created_at": 1},
+    )
+    assert invalid_model.meta.model == InvalidStamp(bad_stamp)
+    assert invalid_model.to_dict()["provider_data"] == {"mindroom_model": bad_stamp}
+
+    # Legacy queued notice "persisted"
+    legacy_notice = Message.from_dict(
+        {
+            "id": "ln",
+            "role": "user",
+            "content": "Wait.",
+            "provider_data": {
+                "mindroom_queued_message_notice": "persisted",
+                "mindroom_queued_message_notice_response_turn_id": "turn-old",
+            },
+            "created_at": 1,
+        },
+    )
+    assert legacy_notice.meta.queued_message_notice == "persisted"
+    assert legacy_notice.meta.queued_notice_turn_id == "turn-old"
+    assert legacy_notice.to_dict()["provider_data"] == {
+        "mindroom_queued_message_notice": "persisted",
+        "mindroom_queued_message_notice_response_turn_id": "turn-old",
+    }
+
+
+@pytest.mark.parametrize("raw_summary", [{}, []], ids=["dict", "list"])
+def test_unhashable_compaction_summary_decodes_and_round_trips_losslessly(raw_summary: object) -> None:
+    """Unhashable ``mindroom_compaction_summary`` values never raise ``TypeError`` and preserve wire bytes and digest."""
+    stored = {
+        "id": "u-summary",
+        "role": "user",
+        "content": "hello",
+        "provider_data": {"mindroom_compaction_summary": raw_summary},
+        "created_at": 1,
+    }
+
+    decoded = Message.from_dict(stored)
+
+    assert decoded.meta == EMPTY_META
+    assert decoded.meta.compaction_summary is None
+    assert decoded.provider_data == {"mindroom_compaction_summary": raw_summary}
+    assert decoded.to_dict() == stored
+    expected_digest = hashlib.sha256(
+        stable_serialize([{"role": "user", "content": "hello", "provider_data": stored["provider_data"]}, []]).encode(
+            "utf-8",
+            "surrogatepass",
+        ),
+    ).digest()
+    assert message_digest(decoded) == expected_digest
+
+
+@pytest.mark.parametrize(
+    ("wire_provider_data", "expected_meta", "expected_remaining"),
+    [
+        pytest.param(
+            {"mindroom_aggregate_usage": False},
+            EMPTY_META,
+            {"mindroom_aggregate_usage": False},
+            id="aggregate_usage_false",
+        ),
+        pytest.param(
+            {"mindroom_portable_replay": None},
+            EMPTY_META,
+            {"mindroom_portable_replay": None},
+            id="portable_replay_none",
+        ),
+        pytest.param(
+            {"mindroom_portable_replay": 1},
+            EMPTY_META,
+            {"mindroom_portable_replay": 1},
+            id="portable_replay_int",
+        ),
+        pytest.param(
+            {"mindroom_fallback_model": None},
+            EMPTY_META,
+            {"mindroom_fallback_model": None},
+            id="fallback_model_none",
+        ),
+        pytest.param(
+            {"mindroom_queued_message_notice": False},
+            EMPTY_META,
+            {"mindroom_queued_message_notice": False},
+            id="queued_notice_false",
+        ),
+        pytest.param(
+            {"mindroom_native_compaction": "bad"},
+            MessageMeta(native_compaction=InvalidStamp("bad")),
+            None,
+            id="native_compaction_bad",
+        ),
+    ],
+)
+def test_non_canonical_wire_provider_data_round_trips_losslessly_with_digest_parity(
+    wire_provider_data: dict[str, object],
+    expected_meta: MessageMeta,
+    expected_remaining: dict[str, object] | None,
+) -> None:
+    """Explicit falsy or non-canonical wire values decode to default/invalid ``meta`` and preserve exact wire bytes and digest."""
+    stored = {
+        "id": "m-nc",
+        "role": "assistant",
+        "content": "ok",
+        "provider_data": dict(wire_provider_data),
+        "created_at": 1,
+    }
+
+    decoded = Message.from_dict(stored)
+
+    assert decoded.meta == expected_meta
+    assert decoded.provider_data == expected_remaining
+    assert is_queued_notice_message(decoded) is False
+    assert decoded.to_dict() == stored
+    expected_digest = hashlib.sha256(
+        stable_serialize([{"role": "assistant", "content": "ok", "provider_data": wire_provider_data}, []]).encode(
+            "utf-8",
+            "surrogatepass",
+        ),
+    ).digest()
+    assert message_digest(decoded) == expected_digest
+
+
+def test_message_meta_does_not_alias_across_shallow_replace() -> None:
+    original = Message(role="assistant", content="hi", meta=MessageMeta(request_identity="req-1"))
+    copied = replace(original, from_history=True)
+    copied.meta = replace(copied.meta, request_identity="req-2", cache_routing="route-2")
+
+    assert original.meta == MessageMeta(request_identity="req-1")
+    assert copied.meta == MessageMeta(request_identity="req-2", cache_routing="route-2")
+    assert Message(role="user").meta is EMPTY_META
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_without_notices", "expected_with_notices"),
+    [
+        pytest.param(
+            Message(role="user", content="hello", id="u1", created_at=1),
+            "00432f10d09fa56ba871ec0d2d614ca55ca44d472565a8da81b9f1d213d832fb",
+            "00432f10d09fa56ba871ec0d2d614ca55ca44d472565a8da81b9f1d213d832fb",
+            id="plain_user",
+        ),
+        pytest.param(
+            Message(role="user", content="<memory>tea</memory>", id="u2", created_at=1, is_turn_context=True),
+            "53fb5c9d8003b723a0ffdd1305a0bb63d5515b1d296187998e2cef98d1f7e743",
+            "53fb5c9d8003b723a0ffdd1305a0bb63d5515b1d296187998e2cef98d1f7e743",
+            id="turn_context",
+        ),
+        pytest.param(
+            Message(
+                role="assistant",
+                content="hi",
+                id="a1",
+                created_at=1,
+                provider_data={"claude_blocks": [{"type": "text", "text": "hi"}]},
+                meta=MessageMeta(model=ModelProvenance("claude-4", "anthropic"), native_compaction=None),
+            ),
+            "a942be71a56c1c090fa84ec4f58499b2c61f7ad0eead311d2dd9d078a30bc5ed",
+            "a942be71a56c1c090fa84ec4f58499b2c61f7ad0eead311d2dd9d078a30bc5ed",
+            id="assistant_model_and_claude",
+        ),
+        pytest.param(
+            Message(
+                role="assistant",
+                content="yo",
+                id="a2",
+                created_at=1,
+                provider_data={"response_id": "r1"},
+                meta=MessageMeta(
+                    portable_replay=False,
+                    fallback_model="backup",
+                    attempt_rewritten=True,
+                    aggregate_usage=True,
+                ),
+            ),
+            "3449710b2999e1adb9c8850a888d5ea3f401fef114d1840d94b1b141bfe8b366",
+            "3449710b2999e1adb9c8850a888d5ea3f401fef114d1840d94b1b141bfe8b366",
+            id="assistant_portable_false_fallback",
+        ),
+        pytest.param(
+            Message(
+                role="user",
+                content="Newer message waiting.",
+                id="n1",
+                created_at=1,
+                meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id="turn-1"),
+            ),
+            b"",
+            "3d80f0d94493f5f404f59abb88b94e57518924dcfd5a9960213b44aa1be7e785",
+            id="queued_notice",
+        ),
+        pytest.param(
+            Message(
+                role="user",
+                content="Newer message waiting.",
+                id="n2",
+                created_at=1,
+                meta=MessageMeta(queued_message_notice="persisted", queued_notice_turn_id="turn-2"),
+            ),
+            b"",
+            "3d80f0d94493f5f404f59abb88b94e57518924dcfd5a9960213b44aa1be7e785",
+            id="queued_notice_persisted",
+        ),
+        pytest.param(
+            Message(
+                role="user",
+                content="summary",
+                id="s1",
+                created_at=1,
+                from_history=True,
+                meta=MessageMeta(compaction_summary="scope"),
+            ),
+            "934c35ebe479b654f5c76a61c20a4a5e11c715f183c24aa337cdefa606eb6e46",
+            "934c35ebe479b654f5c76a61c20a4a5e11c715f183c24aa337cdefa606eb6e46",
+            id="compaction_summary",
+        ),
+        pytest.param(
+            Message(
+                role="user",
+                content="updated prompt",
+                id="p1",
+                created_at=1,
+                is_turn_context=True,
+                meta=MessageMeta(prompt_update=True),
+            ),
+            "9303dfc46287fc7847c443c3bfa58d6ba1cd12e52ddec2ddd6328ad5efe6a9d1",
+            "9303dfc46287fc7847c443c3bfa58d6ba1cd12e52ddec2ddd6328ad5efe6a9d1",
+            id="prompt_update",
+        ),
+    ],
+)
+def test_message_digest_matches_pinned_pre_refactor_sha256_vectors(
+    message: Message,
+    expected_without_notices: bytes | str,
+    expected_with_notices: str,
+) -> None:
+    """Prompt-cache request-identity digests stay bit-for-bit identical after moving internal keys into ``meta``."""
+    without_notices = message_digest(message, count_queued_notices=False)
+    with_notices = message_digest(message, count_queued_notices=True)
+
+    assert without_notices is not None
+    assert with_notices is not None
+    actual_without = without_notices if isinstance(expected_without_notices, bytes) else without_notices.hex()
+    assert actual_without == expected_without_notices
+    assert with_notices.hex() == expected_with_notices
 
 
 # --- tool executions and the requirements read from them ------------------------------------------------------

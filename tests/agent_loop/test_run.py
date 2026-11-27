@@ -216,7 +216,7 @@ async def test_the_calls_of_a_run_no_store_keeps_share_its_session_s_state() -> 
 async def test_stored_messages_leave_out_history_copies_and_keep_transient_context_in_place() -> None:
     model = ScriptedModel([answer("ok")])
     history = Message(role="user", content="earlier", from_history=True)
-    transient = Message(role="user", content="context", add_to_agent_memory=False)
+    transient = Message(role="user", content="context", is_turn_context=True)
 
     _, record = await collect(
         run_agent(
@@ -1382,7 +1382,7 @@ async def test_a_run_that_stopped_after_a_call_stores_no_turn_context() -> None:
     _, record = await collect(
         run_agent(
             spec(model, switch),
-            [*_prompt(), Message(role="user", content="context", add_to_agent_memory=False)],
+            [*_prompt(), Message(role="user", content="context", is_turn_context=True)],
             ctx=context(),
             persist=None,
             request_template=EMPTY_REQUEST,
@@ -1391,7 +1391,7 @@ async def test_a_run_that_stopped_after_a_call_stores_no_turn_context() -> None:
 
     assert record.status is RunStatus.completed
     assert [message.role for message in record.messages] == ["system", "user", "assistant", "tool"]
-    assert all(message.add_to_agent_memory for message in record.messages)
+    assert all(not message.is_turn_context for message in record.messages)
 
 
 @pytest.mark.parametrize("stopping", ["approved", "before-pause"])
