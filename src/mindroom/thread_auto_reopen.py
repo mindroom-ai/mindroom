@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from mindroom.constants import NONTERMINAL_STREAM_STATUSES, RESOLVED_IN_TURN_KEY, STREAM_STATUS_KEY
+from mindroom.constants import (
+    NONTERMINAL_STREAM_STATUSES,
+    RESOLVED_IN_TURN_KEY,
+    STREAM_STATUS_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.event_journal import replacement_target, thread_root
 from mindroom.thread_snooze import THREAD_SNOOZE_CONTENT_KEY
 
@@ -67,7 +72,11 @@ def extract_auto_reopen_reply(
             managed = sender_is_managed(sender)
         return managed
 
-    if (THREAD_SNOOZE_CONTENT_KEY in content or content.get(RESOLVED_IN_TURN_KEY) is True) and is_managed():
+    if (
+        THREAD_SNOOZE_CONTENT_KEY in content
+        or content.get(RESOLVED_IN_TURN_KEY) is True
+        or content.get(VISIBLE_ROUTER_VOICE_ECHO_KEY) is True
+    ) and is_managed():
         return None
     if not _qualifies_event_kind(source.get("type"), content, is_managed):
         return None

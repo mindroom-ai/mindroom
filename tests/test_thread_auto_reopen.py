@@ -10,6 +10,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
 )
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content
 from mindroom.matrix.segmented_messages import segment_matrix_content
@@ -67,6 +68,7 @@ _QUALIFYING = [
     ("approval", _reply(event_type="io.mindroom.tool_approval", sender=BOT, content={"m.relates_to": THREAD_REL})),
     ("human-spoof-resolved", _reply(sender=HUMAN, content=_msg(**{RESOLVED_IN_TURN_KEY: True}))),
     ("human-spoof-snooze", _reply(sender=HUMAN, content=_msg(**{THREAD_SNOOZE_CONTENT_KEY: {"event": "ended"}}))),
+    ("human-spoof-voice-echo", _reply(sender=HUMAN, content=_msg(**{VISIBLE_ROUTER_VOICE_ECHO_KEY: True}))),
 ]
 
 _IGNORED = [
@@ -79,6 +81,7 @@ _IGNORED = [
     ("approval-edit", _reply(event_type="io.mindroom.tool_approval", sender=BOT, content={"m.relates_to": EDIT_REL})),
     ("managed-snooze", _reply(sender=BOT, content=_msg(**{THREAD_SNOOZE_CONTENT_KEY: {"event": "ended"}}))),
     ("managed-resolved-in-turn", _reply(sender=BOT, content=_msg(**{RESOLVED_IN_TURN_KEY: True}))),
+    ("managed-voice-echo", _reply(sender=BOT, content=_msg(**{VISIBLE_ROUTER_VOICE_ECHO_KEY: True}))),
     ("managed-plain-notice", _reply(sender=BOT, content=_msg("m.notice"))),
     ("completed-notice", _reply(sender=BOT, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}))),
     ("human-streaming", _reply(sender=HUMAN, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}))),
