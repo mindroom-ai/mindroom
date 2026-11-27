@@ -111,10 +111,15 @@ _WorkerProxyClientFactory = Callable[..., AbstractContextManager[_WorkerProxyCli
 _REAL_HTTPX_CLIENT = httpx.Client
 
 
-@functools.lru_cache(maxsize=4)
-def _cached_default_ssl_context(ssl_cert_file: str | None, ssl_cert_dir: str | None) -> ssl.SSLContext:
-    del ssl_cert_file, ssl_cert_dir
+@functools.lru_cache(maxsize=1)
+def _cached_default_ssl_context() -> ssl.SSLContext:
     return httpx.create_ssl_context(verify=True)
+
+
+def _default_ssl_context() -> ssl.SSLContext:
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return httpx.create_ssl_context(verify=True)
+    return _cached_default_ssl_context()
 
 
 def _open_worker_http_client(
@@ -123,8 +128,7 @@ def _open_worker_http_client(
     timeout: float,
 ) -> AbstractContextManager[_WorkerProxyClient]:
     if client_factory is _REAL_HTTPX_CLIENT:
-        verify = _cached_default_ssl_context(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
-        return client_factory(timeout=timeout, verify=verify)
+        return client_factory(timeout=timeout, verify=_default_ssl_context())
     return client_factory(timeout=timeout)
 
 

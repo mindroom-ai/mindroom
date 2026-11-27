@@ -184,17 +184,21 @@ _CONTAINER_LOG_EXCERPT_MAX_CHARS = 4096
 _REAL_HTTPX_CLIENT = httpx.Client
 
 
-@functools.lru_cache(maxsize=4)
-def _cached_default_ssl_context(ssl_cert_file: str | None, ssl_cert_dir: str | None) -> ssl.SSLContext:
-    del ssl_cert_file, ssl_cert_dir
+@functools.lru_cache(maxsize=1)
+def _cached_default_ssl_context() -> ssl.SSLContext:
     return httpx.create_ssl_context(verify=True)
+
+
+def _default_ssl_context() -> ssl.SSLContext:
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return httpx.create_ssl_context(verify=True)
+    return _cached_default_ssl_context()
 
 
 def _open_health_http_client(*, timeout: float) -> httpx.Client:
     client_factory = httpx.Client
     if client_factory is _REAL_HTTPX_CLIENT:
-        verify = _cached_default_ssl_context(os.environ.get("SSL_CERT_FILE"), os.environ.get("SSL_CERT_DIR"))
-        return client_factory(timeout=timeout, verify=verify)
+        return client_factory(timeout=timeout, verify=_default_ssl_context())
     return client_factory(timeout=timeout)
 
 
@@ -1438,9 +1442,7 @@ class DockerWorkerBackend(WorkerBackendDefaults):
         try:
             state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
             recheck_workspace_mounts = (
-                not entry.workspace_mounts
-                or resolved_worker_key_scope(state_scope_worker_key) == "user"
-                or (spec.sandbox is not None and spec.sandbox.mount_dir is not None)
+                not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
             )
             if recheck_workspace_mounts and entry.workspace_mounts != self._plan_workspace_mounts(
                 spec,
@@ -1451,6 +1453,10 @@ class DockerWorkerBackend(WorkerBackendDefaults):
                 return None
             shared_directory_mounts = self._plan_shared_directory_mounts(spec, launch)
             if entry.shared_directory_mounts != shared_directory_mounts or entry.ssh != self._ssh_marked(spec, launch):
+                self._invalidate_ready_worker(spec.worker_key)
+                return None
+            container = self._read_container(entry.container_name)
+            if container is None or container.id != entry.container_id or not self._container_is_running(container):
                 self._invalidate_ready_worker(spec.worker_key)
                 return None
         except Exception:
@@ -1536,7 +1542,14 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             self._invalidate_ready_worker(entry.spec.worker_key)
             raise
         self._store_ready_worker(replace(entry, lifecycle=lifecycle))
-        return self._handle_from_ready_cache(entry, lifecycle=lifecycle, paths=paths)
+        return self._handle_from_parts(
+            metadata,
+            container_id=entry.container_id,
+            host_port=entry.host_port,
+            ssh_port=entry.ssh_port,
+            status="ready",
+            paths=paths,
+        )
 
     def _container_image_id(self, container: _DockerContainer) -> str | None:
         image_id = container.attrs.get("Image")
@@ -1649,23 +1662,6 @@ class DockerWorkerBackend(WorkerBackendDefaults):
             ssh_endpoint=None
             if ssh_port is None
             else WorkerSshEndpoint(ssh_host, ssh_port, paths.state.root / ".runtime" / "ssh"),
-        )
-
-    def _handle_from_ready_cache(
-        self,
-        entry: _ReadyWorkerCacheEntry,
-        *,
-        lifecycle: WorkerLifecycleState,
-        paths: _DockerWorkerPaths,
-    ) -> WorkerHandle:
-        metadata = _DockerWorkerMetadata(entry.worker_id, entry.spec.worker_key, entry.container_name, lifecycle)
-        return self._handle_from_parts(
-            metadata,
-            container_id=entry.container_id,
-            host_port=entry.host_port,
-            ssh_port=entry.ssh_port,
-            status="ready",
-            paths=paths,
         )
 
     def _to_handle(

@@ -8397,7 +8397,7 @@ def test_open_worker_http_client_caches_default_ssl_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Real httpx.Client reuses one SSLContext per TLS env config, while custom factories only receive timeout."""
+    """Real httpx.Client caches default SSLContext, bypasses cache under SSL_CERT_*, and custom factories only get timeout."""
     worker_proxy_client_module._cached_default_ssl_context.cache_clear()
     created_contexts: list[object] = []
     real_create_ssl_context = httpx.create_ssl_context
@@ -8421,7 +8421,7 @@ def test_open_worker_http_client_caches_default_ssl_context(
         assert first._transport._pool._ssl_context is second._transport._pool._ssl_context
     assert len(created_contexts) == 1
 
-    # Changing SSL_CERT_DIR creates a distinct cached SSLContext without reparsing on repeat calls.
+    # Setting SSL_CERT_DIR bypasses the cache so each call loads a fresh SSLContext.
     monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
     with (
         worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as third,
@@ -8429,18 +8429,23 @@ def test_open_worker_http_client_caches_default_ssl_context(
     ):
         assert isinstance(third, httpx.Client)
         assert isinstance(fourth, httpx.Client)
-        assert third._transport._pool._ssl_context is fourth._transport._pool._ssl_context
+        assert third._transport._pool._ssl_context is not fourth._transport._pool._ssl_context
         assert third._transport._pool._ssl_context is not created_contexts[0]
-    assert len(created_contexts) == 2
+    assert len(created_contexts) == 3
 
-    # Changing SSL_CERT_FILE creates another distinct cached SSLContext.
+    # Setting SSL_CERT_FILE also bypasses the cache so rotated CA files at the same path are never stale.
     import certifi  # noqa: PLC0415
 
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
-    with worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as fifth:
+    with (
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as fifth,
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as sixth,
+    ):
         assert isinstance(fifth, httpx.Client)
-        assert fifth._transport._pool._ssl_context is not created_contexts[1]
-    assert len(created_contexts) == 3
+        assert isinstance(sixth, httpx.Client)
+        assert fifth._transport._pool._ssl_context is not sixth._transport._pool._ssl_context
+    assert len(created_contexts) == 5
 
     # Custom / monkeypatched client factories only receive timeout=... (no verify kwarg).
     custom_kwargs: list[dict[str, object]] = []
