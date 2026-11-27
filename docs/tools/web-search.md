@@ -42,13 +42,13 @@ Every toolkit that has an `all` option enables all of its functions when `all: t
 ## [`duckduckgo`]
 
 `duckduckgo` searches the web and news through DuckDuckGo with no API key.
-It provides `web_search(query, max_results=5)` and `search_news(query, max_results=5)`, both returning DDGS results as JSON.
+It provides `duckduckgo_search(query, action="web", max_results=None)` with actions `web` and `news`, returning DDGS results as JSON.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_search` | `boolean` | `true` | Enable `web_search()`. |
-| `enable_news` | `boolean` | `true` | Enable `search_news()`. |
-| `modifier` | `text` | `null` | Text prepended to every `web_search()` and `search_news()` query, for example `site:docs.example.com`. |
+| `enable_search` | `boolean` | `true` | Enable `action="web"`. |
+| `enable_news` | `boolean` | `true` | Enable `action="news"`. |
+| `modifier` | `text` | `null` | Text prepended to every `duckduckgo_search()` query, for example `site:docs.example.com`. |
 | `fixed_max_results` | `number` | `null` | Result count for every call, replacing the per-call `max_results`. |
 | `timelimit` | `text` | `null` | Age filter: `d`, `w`, `m`, or `y`. |
 | `region` | `text` | `null` | DDGS region code, such as `us-en`. |
@@ -68,7 +68,7 @@ agents:
 
 ## [`googlesearch`]
 
-`googlesearch` provides the same `web_search()` and `search_news()` functions, options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
+`googlesearch` provides `google_search(query, action="web", max_results=None)` with the same `web` and `news` actions, options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
 It is not an official Google API.
 DDGS currently falls back to automatic engine selection for Google requests, so results and ranking are not guaranteed to come from Google.
 Use [`serper`] or [`serpapi`] when you need real Google results.
@@ -158,16 +158,16 @@ agents:
 ## [`exa`]
 
 `exa` is the research-oriented search toolkit.
-It provides `search_exa(query, num_results=5, category=None)`, `get_contents(urls)`, `find_similar(url, num_results=5)`, `exa_answer(query, text=False)`, and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
+It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=False)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
 Search results include title, author, published date, URL, and page text truncated to `text_length_limit`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Exa API key; required unless `EXA_API_KEY` is set. |
-| `enable_search` | `boolean` | `true` | Enable `search_exa()`. |
-| `enable_get_contents` | `boolean` | `true` | Enable `get_contents()`. |
-| `enable_find_similar` | `boolean` | `true` | Enable `find_similar()`. |
-| `enable_answer` | `boolean` | `true` | Enable `exa_answer()`. |
+| `enable_search` | `boolean` | `true` | Enable `exa_lookup(action="search")`. |
+| `enable_get_contents` | `boolean` | `true` | Enable `exa_lookup(action="contents")`. |
+| `enable_find_similar` | `boolean` | `true` | Enable `exa_lookup(action="similar")`. |
+| `enable_answer` | `boolean` | `true` | Enable `exa_lookup(action="answer")`. |
 | `enable_research` | `boolean` | `false` | Enable `research()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `text` | `boolean` | `true` | Include page text in results. |
@@ -180,15 +180,15 @@ Search results include title, author, published date, URL, and page text truncat
 | `exclude_domains` | `string[]` | `null` | Domain denylist. |
 | `include_text` | `string[]` | `null` | Text every result must contain; Exa takes a list of one string of at most five words. |
 | `exclude_text` | `string[]` | `null` | Text no result may contain; Exa takes a list of one string of at most five words. |
-| `user_location` | `text` | `null` | Two-letter country code that localizes `search_exa()` results. |
-| `moderation` | `boolean` | `null` | Filter unsafe content from `search_exa()` results. |
+| `user_location` | `text` | `null` | Two-letter country code that localizes `exa_lookup(action="search")` results. |
+| `moderation` | `boolean` | `null` | Filter unsafe content from `exa_lookup(action="search")` results. |
 | `highlights` | `boolean` | `false` | Add the most relevant snippets of each page to results. |
 | `start_published_date` | `text` | `null` | Earliest publication date, ISO 8601. |
 | `end_published_date` | `text` | `null` | Latest publication date, ISO 8601. |
 | `start_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
-| `model` | `text` | `null` | Model for `exa_answer()` only: `exa` or `exa-pro`. |
+| `model` | `text` | `null` | Model for `exa_lookup(action="answer")` only: `exa` or `exa-pro`. |
 | `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
 | `show_results` | `boolean` | `false` | Log raw parsed results. |
@@ -231,7 +231,7 @@ agents:
 
 ## [`serper`]
 
-`serper` provides `search_web(query, num_results=None)`, `search_news(query, num_results=None)`, `search_scholar(query, num_results=None)`, and `scrape_webpage(url, markdown=False)` through the Serper API.
+`serper` provides `serper_search(query, action="web", num_results=None)` (`web`, `news`, `scholar`) and `scrape_webpage(url, markdown=False)` through the Serper API.
 All functions return Serper's raw JSON, and `scrape_webpage(markdown=True)` also requests the page as Markdown.
 
 | Option | Type | Default | Notes |
@@ -241,9 +241,9 @@ All functions return Serper's raw JSON, and `scrape_webpage(markdown=True)` also
 | `language` | `text` | `en` | Google language code (`hl`) for all searches. |
 | `num_results` | `number` | `10` | Default result count when a call does not pass one. |
 | `date_range` | `text` | `null` | Google date filter (`tbs`) for all searches, such as `qdr:w`. |
-| `enable_search` | `boolean` | `true` | Enable `search_web()`. |
-| `enable_search_news` | `boolean` | `true` | Enable `search_news()`. |
-| `enable_search_scholar` | `boolean` | `true` | Enable `search_scholar()`. |
+| `enable_search` | `boolean` | `true` | Enable `serper_search(action="web")`. |
+| `enable_search_news` | `boolean` | `true` | Enable `serper_search(action="news")`. |
+| `enable_search_scholar` | `boolean` | `true` | Enable `serper_search(action="scholar")`. |
 | `enable_scrape_webpage` | `boolean` | `true` | Enable `scrape_webpage()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |

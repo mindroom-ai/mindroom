@@ -22,6 +22,7 @@ from mindroom import execution_preparation
 from mindroom.ai import ai_response
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.history.types import CompactionDecision, PreparedHistoryState, ResolvedReplayPlan
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
@@ -273,14 +274,13 @@ async def _team_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[
 
     The leader and the checker answer their resumed requests as their stored runs' last assistant messages did.
     """
-    from mindroom.custom_tools.calculator import CalculatorTools  # noqa: PLC0415
     from mindroom.tool_system.authoring import tool  # noqa: PLC0415
 
-    def _capture_multiply(self: CalculatorTools, a: float, b: float) -> str:
+    def multiply(self: CalculatorTools, a: float, b: float) -> str:
         """Multiply two numbers (frozen Agno 3.0.9 capture shim)."""
         return self.calculate("multiply", a, b)
 
-    monkeypatch.setattr(CalculatorTools, "multiply", tool(_capture_multiply), raising=False)
+    monkeypatch.setattr(CalculatorTools, "multiply", tool(multiply), raising=False)
     team = build_team_turn(tmp_path, monkeypatch, _AUTHORED, members=("writer", "checker"), team_name="squad")
     [checker] = _member_runs("team-approved")
     team.models["leader"] = _resumed_model(_RUNS["team-approved"])

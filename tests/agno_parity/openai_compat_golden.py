@@ -79,7 +79,7 @@ _REQUESTS: dict[str, dict[str, list[list[ScriptStep]]]] = {
     "agent_blocking": {"writer-model": [answer("Hello from the writer.", usage(70, 5))]},
     "agent_stream_with_tool": {
         "writer-model": [
-            calls(tool_call("add", "call-api-add", a=2, b=3), metrics=usage(72, 3)),
+            calls(tool_call("calculate", "call-api-add", action="add", a=2, b=3), metrics=usage(72, 3)),
             _streamed(usage(78, 4), "The sum ", "is 5."),
         ],
     },
@@ -92,7 +92,7 @@ _REQUESTS: dict[str, dict[str, list[list[ScriptStep]]]] = {
             answer("The writer found 5.", usage(450, 9)),
         ],
         "writer-model": [
-            calls(tool_call("add", "call-api-writer-add", a=2, b=3), metrics=usage(80, 4)),
+            calls(tool_call("calculate", "call-api-writer-add", action="add", a=2, b=3), metrics=usage(80, 4)),
             answer("5", usage(95, 1)),
         ],
     },
