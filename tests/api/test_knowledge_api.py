@@ -358,7 +358,7 @@ def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypat
         msg = "status should not probe collection availability"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(knowledge_registry, "published_collection_exists", _offloaded_collection_probe)
+    monkeypatch.setattr(knowledge_registry, "_published_collection_exists", _offloaded_collection_probe)
 
     response = client.get("/api/knowledge/bases/research/status")
 
@@ -514,7 +514,7 @@ def test_status_rejects_query_incompatible_published_index(tmp_path: Path) -> No
     publish_api_config(client.app, config)
 
     with patch(
-        "mindroom.knowledge.registry.published_collection_exists",
+        "mindroom.knowledge.registry._published_collection_exists",
         side_effect=AssertionError("query-incompatible indexes should not probe collection availability"),
     ):
         response = client.get("/api/knowledge/bases/research/status")
