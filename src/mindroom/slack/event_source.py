@@ -443,9 +443,9 @@ async def emit_slack_watch_event(attempt: SlackAttempt) -> DeliveryResult:
         or event_source is None
         or emitter is None
         or not attempt.config.external_trigger_policy.is_reactive_active
-        or not await event_source.ensure_migrated()
     ):
         return "ignored"
+    await event_source.ensure_migrated()
 
     event = attempt.event
     is_dm, mentioned = is_direct_message(event), mentioned_user_ids(event.text)

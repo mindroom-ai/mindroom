@@ -1612,8 +1612,8 @@ from mindroom.plugin_api import EventSource, EventSourceDescriptor, PluginLifecy
 
 
 class AlertsEventSource(EventSource):
-    source_id = "my_plugin_alerts"
-    description = "Incoming operational alerts from my_plugin."
+    source_id = "my-plugin-alerts"
+    description = "Incoming operational alerts from my-plugin."
     allowed_kinds = ("fired", "resolved")
     match_fields = ("severity",)
     default_once = False
@@ -1644,7 +1644,7 @@ async def receive_alert(request: Request) -> dict[str, int]:
     # Verify the incoming provider signature or shared secret before emitting.
     verify_provider_signature(request)
     payload = await request.json()
-    emitter = event_source_emitter(request, "my_plugin_alerts")
+    emitter = event_source_emitter(request, "my-plugin-alerts")
     enqueued = await emitter.emit(
         kind=payload["kind"],
         event_id=payload["id"],

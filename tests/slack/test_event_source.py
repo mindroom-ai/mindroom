@@ -1085,6 +1085,20 @@ async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(
     assert registered.retry_migration is not None
     assert h.slack.calls("apps.event.authorizations.list") == []
 
+    # A valid SQLite-backed Slack subscription still fires even while legacy watches.json is broken.
+    alice_slack_trigger(h.paths, trigger_id="sqlite_slack_watch", kind="direct_message")
+    dm_for_sqlite = event_payload(
+        "message",
+        author="dana",
+        text="sqlite watch still works",
+        ts="1700000001.500000",
+        channel=DM,
+        channel_type="im",
+    )
+    assert await h.deliver(dm_for_sqlite, now=NOW + 0.5) == "delivered"
+    assert registered.retry_migration is not None
+    assert len(h.trigger_store.list_firings(trigger_id="sqlite_slack_watch")) == 1
+
     # Once watches.json is fixed, the next event lazily completes migration and delivers.
     _write_watches(h.paths, _legacy_watch())
     recovered_dm = event_payload(
