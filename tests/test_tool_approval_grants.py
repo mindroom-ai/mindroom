@@ -3312,6 +3312,60 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
 
 
 @pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        (["workflow"], ["*_workflow*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["*workflow*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["*workflow*", "workflow"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["skill", "*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["workflow", "*_workflow*"], None),
+        (["workflow"], ["workflow", "*workflow*"], None),
+        (["workflow"], ["workflow", "skill", "*"], None),
+        (["thread_tags"], ["*thread_tags*"], r"now decides thread_tags"),
+        (["thread_tags"], ["*tag*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread*", "thread_tags"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread_tags*", "thread_tags"], r"now decides thread_tags"),
+        (["thread_tags"], ["skill", "*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["thread_tags", "*thread_tags*"], None),
+        (["thread_tags"], ["thread_tags", "*tag*"], None),
+        (["thread_tags"], ["thread_tags", "skill", "*"], None),
+        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*", "workflow"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["workflow", "*_workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "*workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "skill", "*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired workflow/thread_tags/dynamic_workflow names until preceded by exact rules."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"exclude_tools": ["register_attachment"]},

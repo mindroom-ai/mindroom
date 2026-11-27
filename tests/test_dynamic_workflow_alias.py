@@ -367,6 +367,37 @@ def test_retired_dynamic_workflow_approval_rules_allowed(
     assert len(config.tool_approval.rules) == len(rules)
 
 
+@pytest.mark.parametrize(
+    ("agent_tools", "matches", "error_pattern"),
+    [
+        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*", "workflow"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["workflow", "*_workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "*workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "skill", "*"], None),
+        (["calculator"], ["*_workflow*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names(
+    tmp_path: Path,
+    agent_tools: list[object],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts matching retired `dynamic_workflow` names fail closed unless `workflow` precedes them."""
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    approval = {"rules": [{"match": match, "script": "check.py"} for match in matches]}
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(_cfg(agent_tools=agent_tools, tool_approval=approval), _paths(tmp_path))
+        return
+    config = Config.validate_with_runtime(_cfg(agent_tools=agent_tools, tool_approval=approval), _paths(tmp_path))
+    assert [rule.match for rule in config.tool_approval.rules] == matches
+
+
 @pytest.mark.parametrize("pattern", ["run_*", "create_*"])
 @pytest.mark.parametrize(
     ("default_action", "rule_action"),

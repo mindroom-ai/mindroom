@@ -360,21 +360,23 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
 #   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
-#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   mem0, zep), skills, attachments, workflow, and thread_tags previously exposed individual per-operation function
+#   names that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657;
+#   workflow/thread_tags: v2026.11.658); replacement: unreleased; consolidated into action-dispatched and risk-scoped
+#   functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
-#   retired function's effective decision differs from the replacement's effective decision (regardless of other
-#   toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments entry,
-#   directing operators to `attachment` / `view_file` and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired skills/attachments/workflow/thread_tags function is decided by an approval
+#   script or any retired function's effective decision differs from the replacement's effective decision (regardless of
+#   other toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments
+#   entry, directing operators to `attachment` / `view_file` and `tool_approval.rules`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
@@ -907,7 +909,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "inline_image": "attachment",
     },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments", "workflow", "thread_tags"})
 
 
 def _effective_approval_decision(
@@ -1207,10 +1209,11 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
 #   unified function is `workflow`.
 # Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
-#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
-#   differs from `workflow`'s effective decision.
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function is decided by an approval script or
+#   its effective approval decision differs from `workflow`'s effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "run_workflow": ("workflow",),
@@ -1232,4 +1235,5 @@ def retired_dynamic_workflow_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=True,
     )
