@@ -72,7 +72,7 @@ The approved call runs only with the exact arguments shown on the card.
 ### Auto-Approval for a Few Minutes
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
-It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments (for non-action-scoped tools such as `matrix_message` or `desktop`, a timed grant covers the whole function just as it does with `script` rules).
+It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments (for non-action-scoped tools such as `matrix_message` or `run_shell_command`, a timed grant covers the whole function just as it does with `script` rules).
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 

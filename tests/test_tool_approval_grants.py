@@ -985,7 +985,14 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
 @pytest.mark.parametrize(
     ("toolkit_name", "tool_name", "actions"),
     [
-        (None, "triggers", ("list", "delete", "rotate_key")),
+        ("triggers", "triggers_read", ("list", "history", "test")),
+        ("triggers", "triggers_write", ("delete", "rotate_key", "set_enabled")),
+        ("desktop", "desktop_read", ("status", "list_apps", "read_file")),
+        ("desktop", "desktop_control", ("launch_app", "click", "type_text")),
+        ("browser", "browser_read", ("status", "tabs", "snapshot")),
+        ("browser", "browser_control", ("start", "open", "act")),
+        ("matrix_api", "matrix_api_read", ("get_event", "get_state", "search")),
+        ("matrix_api", "matrix_api_write", ("send_event", "put_state", "redact")),
         (None, "memory", ("list", "search", "delete")),
         (None, "todo", ("list", "add", "update")),
         (None, "scheduler", ("list", "create", "cancel")),
@@ -1037,7 +1044,14 @@ def test_action_dispatched_grant_operation_binds_to_action(
 @pytest.mark.parametrize(
     ("toolkit_name", "tool_name", "action"),
     [
-        (None, "triggers", "list"),
+        ("triggers", "triggers_read", "list"),
+        ("triggers", "triggers_write", "delete"),
+        ("desktop", "desktop_read", "status"),
+        ("desktop", "desktop_control", "click"),
+        ("browser", "browser_read", "tabs"),
+        ("browser", "browser_control", "open"),
+        ("matrix_api", "matrix_api_read", "search"),
+        ("matrix_api", "matrix_api_write", "send_event"),
         (None, "memory", "list"),
         (None, "todo", "list"),
         (None, "scheduler", "list"),
@@ -1155,12 +1169,12 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("memory", "delete_memory", "memory"),
         ("memory", "add_memory", "memory"),
         ("todo", "update_todo", "todo"),
-        ("workflow", "start_workflow", "workflow"),
-        ("workflow", "get_workflow", "workflow"),
-        ("workflow", "cancel_workflow", "workflow"),
-        ("workflow", "resume_workflow", "workflow"),
-        ("workflow", "list_workflow_runs", "workflow"),
-        ("workflow", "save_workflow", "workflow"),
+        ("workflow", "start_workflow", "workflow_write"),
+        ("workflow", "get_workflow", "workflow_read"),
+        ("workflow", "cancel_workflow", "workflow_write"),
+        ("workflow", "resume_workflow", "workflow_write"),
+        ("workflow", "list_workflow_runs", "workflow_read"),
+        ("workflow", "save_workflow", "workflow_write"),
         ("thread_tags", "tag_thread", "thread_tags"),
         ("thread_tags", "untag_thread", "thread_tags"),
         ("thread_tags", "list_thread_tags", "thread_tags"),
@@ -3184,7 +3198,8 @@ async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
         ("google_tasks", "google_tasks_write", ("create", "update", "delete")),
         ("homeassistant", "homeassistant_read", ("list_entities", "get_state")),
         ("homeassistant", "homeassistant_control", ("turn_on", "call_service")),
-        ("workflow", "workflow", ("start", "get", "cancel", "resume", "list", "save")),
+        ("workflow", "workflow_read", ("list", "get")),
+        ("workflow", "workflow_write", ("start", "cancel", "resume", "save")),
         ("thread_tags", "thread_tags", ("tag", "untag", "list")),
     ],
 )
@@ -3516,7 +3531,7 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
     }
@@ -3536,7 +3551,7 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
     (tmp_path / "review.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     base: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
     }
 
@@ -3665,7 +3680,7 @@ def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
     }
@@ -3680,13 +3695,13 @@ def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits
 @pytest.mark.parametrize(
     ("tools", "matches", "error_pattern"),
     [
-        (["workflow"], ["*_workflow*"], r"check\.py.*start_workflow.*workflow"),
-        (["workflow"], ["*workflow*"], r"check\.py.*start_workflow.*workflow"),
-        (["workflow"], ["*workflow*", "workflow"], r"check\.py.*start_workflow.*workflow"),
-        (["workflow"], ["skill", "*"], r"check\.py.*start_workflow.*workflow"),
-        (["workflow"], ["workflow", "*_workflow*"], None),
-        (["workflow"], ["workflow", "*workflow*"], None),
-        (["workflow"], ["workflow", "skill", "*"], None),
+        (["workflow"], ["*_workflow*"], r"check\.py.*start_workflow.*workflow_write"),
+        (["workflow"], ["*workflow*"], r"check\.py.*start_workflow.*workflow_write"),
+        (["workflow"], ["*workflow*", "workflow_write"], r"check\.py.*start_workflow.*workflow_write"),
+        (["workflow"], ["skill", "*"], r"check\.py.*start_workflow.*workflow_write"),
+        (["workflow"], ["workflow_read", "workflow_write", "*_workflow*"], None),
+        (["workflow"], ["workflow_read", "workflow_write", "*workflow*"], None),
+        (["workflow"], ["workflow_read", "workflow_write", "skill", "*"], None),
         (["thread_tags"], ["*thread_tags*"], r"now decides thread_tags"),
         (["thread_tags"], ["*tag*"], r"check\.py.*tag_thread.*thread_tags"),
         (["thread_tags"], ["*thread*"], r"check\.py.*tag_thread.*thread_tags"),
@@ -3696,14 +3711,14 @@ def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits
         (["thread_tags"], ["thread_tags", "*thread_tags*"], None),
         (["thread_tags"], ["thread_tags", "*tag*"], None),
         (["thread_tags"], ["thread_tags", "skill", "*"], None),
-        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["*workflow*", "workflow"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["workflow", "*_workflow*"], None),
-        (["dynamic_workflow"], ["workflow", "*workflow*"], None),
-        (["dynamic_workflow"], ["workflow", "skill", "*"], None),
+        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["*workflow*", "workflow_write"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "*_workflow*"], None),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "*workflow*"], None),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "skill", "*"], None),
     ],
 )
 def test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names(
@@ -3719,7 +3734,7 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thr
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
     }
@@ -3858,7 +3873,7 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
     for toolkit_name, explicit_matches in wildcard_cases:
         stale = {
             "models": {"default": {"provider": "openai", "id": "x"}},
-            "defaults": {"tools": []},
+            "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
             "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
             "tool_approval": {
                 "rules": [
@@ -4072,7 +4087,7 @@ def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tm
     for extra, exact_old, glob_old, replacements in cases:
         base: dict[str, object] = {
             "models": {"default": {"provider": "openai", "id": "x"}},
-            "defaults": {"tools": []},
+            "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
             **extra,
         }
         expected_target = replacements[-1]
@@ -4175,7 +4190,7 @@ def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "knowledge_graph": {"model": "default"},
-        "defaults": {"tools": [], **defaults_extra},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only", **defaults_extra},
         "personal_agents": {"mind": template},
         "tool_approval": {"rules": [{"match": retired_match, "action": "require_approval"}]},
     }
@@ -4252,7 +4267,7 @@ def test_malformed_personal_agent_user_override_keeps_template_error_path_with_a
     runtime_paths = test_runtime_paths(tmp_path)
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "personal_agents": {
             "mind": {
                 "agent": {
@@ -4410,7 +4425,7 @@ def test_atlassian_and_slack_retired_approval_rules_fail_closed(
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         "tool_approval": {"default": default, "rules": rules},
     }
@@ -4584,7 +4599,7 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_na
     )
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": match, "script": "check_m365.py"} for match in matches]},
     }
@@ -4655,7 +4670,7 @@ def test_prefixed_atlassian_connection_grants_and_fail_closed_migrations(tmp_pat
     ) -> dict[str, object]:
         payload: dict[str, object] = {
             "models": {"default": {"provider": "openai", "id": "x"}},
-            "defaults": {"tools": []},
+            "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
             "plugins": [str(plugin_root)],
             "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
         }
@@ -4764,7 +4779,7 @@ def test_plugin_declared_retired_functions_fail_closed_on_wildcard_scripts(tmp_p
     (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
     base_data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "plugins": [{"path": str(plugin_root)}],
         "agents": {"a": {"display_name": "A", "tools": ["demo_consolidated"], "include_default_tools": False}},
     }
@@ -4812,7 +4827,7 @@ def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(
     runtime_paths = test_runtime_paths(tmp_path)
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
     }
     if error_pattern is not None:
@@ -4852,7 +4867,7 @@ def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_
     runtime_paths = test_runtime_paths(tmp_path)
     data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "defaults": {"tools": []},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
         "agents": {"a": {"display_name": "A", "tools": [{"slack": overrides}], "include_default_tools": False}},
     }
     with pytest.raises(ConfigRuntimeValidationError) as exc_info:
@@ -5028,7 +5043,7 @@ def test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped(t
         return Config.validate_with_runtime(
             {
                 "models": {"default": {"provider": "openai", "id": "x"}},
-                "defaults": {"tools": []},
+                "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
                 "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
                 "tool_approval": {"rules": rules},
             },
@@ -5101,7 +5116,7 @@ def test_shared_retired_bare_name_reports_all_enabled_replacements(tmp_path: Pat
         return Config.validate_with_runtime(
             {
                 "models": {"default": {"provider": "openai", "id": "x"}},
-                "defaults": {"tools": []},
+                "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
                 "agents": agents,
                 "tool_approval": {"rules": rules},
             },
@@ -5175,3 +5190,267 @@ def test_shared_retired_bare_name_reports_all_enabled_replacements(tmp_path: Pat
         [{"match": ["*sql_query", "sql_run_query"], "action": "require_approval"}],
     )
     assert loaded_glob.tool_approval.rules[0].match == ["*sql_query", "sql_run_query"]
+
+
+def test_triggers_write_watch_script_cannot_receive_timed_grant() -> None:
+    """watch_script creates executable scripts and must never receive a timed auto-approve grant."""
+    config = Config()
+    registry = builtin_tool_registry()
+
+    assert (
+        grant_operation(
+            config,
+            "triggers_write",
+            {"action": "watch_script"},
+            tools=registry,
+            toolkit_name="triggers",
+        )
+        is None
+    )
+    assert (
+        grant_operation(
+            config,
+            "triggers_write",
+            {"action": " watch_script "},
+            tools=registry,
+            toolkit_name="triggers",
+        )
+        is None
+    )
+    delete_op = grant_operation(
+        config,
+        "triggers_write",
+        {"action": "delete"},
+        tools=registry,
+        toolkit_name="triggers",
+    )
+    assert delete_op is not None
+    assert delete_op.mcp_tool_name == "delete"
+
+
+@pytest.mark.parametrize(
+    ("tools", "old_match", "expected_pattern", "desktop_pairing"),
+    [
+        (
+            ["triggers"],
+            "triggers",
+            r"triggers was split into triggers_read and triggers_write.*rewrite the rules for triggers_read and triggers_write\.",
+            "explicit_only",
+        ),
+        (
+            ["desktop"],
+            "desktop",
+            r"desktop was split into desktop_read and desktop_control.*rewrite the rules for desktop_read and desktop_control.*run_desktop_shell",
+            "explicit_only",
+        ),
+        (
+            [],
+            "desktop",
+            r"desktop was split into desktop_read and desktop_control.*rewrite the rules for desktop_read and desktop_control.*run_desktop_shell",
+            "self_service",
+        ),
+        (["browser"], "browser_control", r"read actions from browser_control moved to browser_read", "explicit_only"),
+        (
+            ["workflow"],
+            "workflow",
+            r"workflow was split into workflow_read and workflow_write.*rewrite the rules for workflow_read and workflow_write\.",
+            "explicit_only",
+        ),
+        (
+            ["matrix_api"],
+            "matrix_api",
+            r"matrix_api was split into matrix_api_read and matrix_api_write.*rewrite the rules for matrix_api_read and matrix_api_write\.",
+            "explicit_only",
+        ),
+    ],
+)
+def test_mega_tool_split_approval_rules_fail_closed(
+    tmp_path: Path,
+    tools: list[str],
+    old_match: str,
+    expected_pattern: str,
+    desktop_pairing: str,
+) -> None:
+    """Rules matching pre-split mega-tool function names fail closed and name all split replacements."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [], "desktop_pairing": desktop_pairing},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [{"match": old_match, "action": "require_approval"}],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
+        Config.validate_with_runtime(data, runtime_paths)
+
+
+def test_desktop_partial_and_script_split_approval_errors_name_all_replacements(tmp_path: Path) -> None:
+    """Partial desktop migration and approval scripts still name both split functions and run_desktop_shell."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    script_path = tmp_path / "gate.py"
+    script_path.write_text("def check(tool_name, arguments, agent_name):\n    return True\n", encoding="utf-8")
+
+    # Covering desktop_read alone still rejects desktop_control and names all replacements.
+    partial_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+        "agents": {"a": {"display_name": "A", "tools": ["desktop"], "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "desktop", "action": "require_approval"},
+                {"match": "desktop_read", "action": "require_approval"},
+            ],
+        },
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"desktop was split into desktop_read and desktop_control \(desktop_control now gets a different approval decision\).*run_desktop_shell",
+    ):
+        Config.validate_with_runtime(partial_data, runtime_paths)
+
+    # Wildcard/exact approval script on retired `desktop` also names both replacements and run_desktop_shell.
+    script_data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": [], "desktop_pairing": "explicit_only"},
+        "agents": {"a": {"display_name": "A", "tools": ["desktop"], "include_default_tools": False}},
+        "tool_approval": {
+            "default": "auto_approve",
+            "rules": [{"match": "desktop*", "script": str(script_path)}],
+        },
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"desktop was split into desktop_read and desktop_control; update the script and add explicit rules for desktop_read and desktop_control.*run_desktop_shell",
+    ):
+        Config.validate_with_runtime(script_data, runtime_paths)
+
+
+def test_preset_and_alias_toolkits_preserve_action_scoped_grant_operations() -> None:
+    """Tools resolved via presets like openclaw_compat or toolkit aliases keep distinct action-scoped grant keys."""
+    config = Config()
+    registry = builtin_tool_registry()
+
+    open_preset = grant_operation(
+        config,
+        "browser_control",
+        {"action": "open"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    close_preset = grant_operation(
+        config,
+        "browser_control",
+        {"action": "close"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    open_direct = grant_operation(
+        config,
+        "browser_control",
+        {"action": "open"},
+        tools=registry,
+        toolkit_name="browser",
+    )
+    assert open_preset is not None
+    assert close_preset is not None
+    assert open_direct is not None
+    assert open_preset == open_direct
+    assert open_preset.mcp_server_id == "browser"
+    assert open_preset.mcp_tool_name == "open"
+    assert close_preset.mcp_server_id == "browser"
+    assert close_preset.mcp_tool_name == "close"
+    assert open_preset.key != close_preset.key
+
+    tabs_preset = grant_operation(
+        config,
+        "browser_read",
+        {"action": "tabs"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    shot_preset = grant_operation(
+        config,
+        "browser_read",
+        {"action": "screenshot"},
+        tools=registry,
+        toolkit_name="openclaw_compat",
+    )
+    assert tabs_preset is not None
+    assert shot_preset is not None
+    assert tabs_preset.mcp_server_id == "browser"
+    assert tabs_preset.mcp_tool_name == "tabs"
+    assert shot_preset.mcp_tool_name == "screenshot"
+    assert tabs_preset.key != shot_preset.key
+
+    # Toolkit aliases also keep their canonical action-scoped grant owner and watch_script block.
+    delete_alias = grant_operation(
+        config,
+        "triggers_write",
+        {"action": "delete"},
+        tools=registry,
+        toolkit_name="external_trigger_manager",
+    )
+    assert delete_alias is not None
+    assert delete_alias.mcp_server_id == "triggers"
+    assert delete_alias.mcp_tool_name == "delete"
+    assert (
+        grant_operation(
+            config,
+            "triggers_write",
+            {"action": "watch_script"},
+            tools=registry,
+            toolkit_name="external_trigger_manager",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("filter_key", ["include_tools", "exclude_tools"])
+def test_workflow_retired_filter_guidance_recommends_removal_and_approval_rules(
+    tmp_path: Path,
+    filter_key: str,
+) -> None:
+    """Workflow has supports_toolkit_filters=False, so retired filter errors never suggest keeping the filter."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{"workflow": {filter_key: ["workflow"]}}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    expected = (
+        rf"`workflow` was split into `workflow_read`, `workflow_write` and `workflow` does not support "
+        rf"`{filter_key}`; remove `workflow\.{filter_key}` and use explicit `tool_approval\.rules` "
+        r"matching `workflow_read`, `workflow_write` instead"
+    )
+    with pytest.raises(ConfigRuntimeValidationError, match=expected) as exc_info:
+        Config.validate_with_runtime(data, runtime_paths)
+    assert "replace `workflow`" not in str(exc_info.value)
+
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("workflow", {"_source": "ui", filter_key: ["workflow"]})
+    with pytest.raises(ToolConfigOverrideError, match=expected) as stored_exc:
+        get_tool_by_name(
+            "workflow",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=None,
+        )
+    assert "replace `workflow`" not in str(stored_exc.value)

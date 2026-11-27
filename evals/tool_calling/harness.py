@@ -75,7 +75,7 @@ _EVAL_TOOLS: list[Any] = [
 ]
 _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 _BASE_ENV = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PYTHONDONTWRITEBYTECODE": "1", **dict.fromkeys(_PROXY_KEYS, "")}
-_REQ_A = frozenset({"browser_control", "show_canvas", "workflow", "thread_tags"})
+_REQ_A = frozenset({"browser_read", "browser_control", "show_canvas", "workflow_read", "workflow_write", "thread_tags"})
 _REQ_B = frozenset({"scheduler", "memory", "skill", "run_shell_command", "view_file", "attachment"})
 _REQUIRED_SURFACE = _REQ_A | _REQ_B | {"matrix_message", "tool_search", "call_tool"}
 
@@ -146,8 +146,8 @@ def _check_workflow_or_tags(name: str, action: str, kw: Mapping[str, Any]) -> No
     if name == "thread_tags":
         _need(not (err := _validate_thread_tags_params(action, args)), err or "")
         return
-    _validate_workflow_params(action, args)
-    if action == "start":
+    _validate_workflow_params(name, action, args)
+    if name == "workflow_write" and action == "start":
         sources = sum(_str(args.get(k)) for k in ("source", "path", "name"))
         _need(sources >= 1, "Missing required parameter: give one of source, path, or name.")
         _need(sources == 1, "Invalid value for parameter: give only one of source, path, or name.")
@@ -180,7 +180,7 @@ def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) ->
         _need(has_target, f"Missing required parameter 'targetUrl' for action={action!r}.")
     elif name == "attachment":
         _check_attachment(action, kw, ws)
-    elif name in {"workflow", "thread_tags"}:
+    elif name in {"workflow_read", "workflow_write", "thread_tags"}:
         _check_workflow_or_tags(name, action, kw)
     elif name == "matrix_message" and action == "send":
         has_body = _str(kw.get("message")) or bool(kw.get("attachments"))
@@ -233,11 +233,14 @@ def _stateful_stub(name: str, action: str, kw: Mapping[str, Any], state: dict[st
         extra: dict[str, Any] = {"tags": dict(tags)} if action == "list" else {"tag": kw["tag"]}
         return {"status": "ok", "tool": "thread_tags", "action": action, **extra}
     wf_run = {"run_id": "wf_01", "title": "nightly-smoke", "status": "completed"}
-    if name == "workflow":
+    if name == "workflow_read":
         return {"runs": [wf_run], "saved": []} if action == "list" else {"status": "ok", "action": action, **wf_run}
+    if name == "workflow_write":
+        return {"status": "ok", "action": action, **wf_run}
     stubs: dict[str, dict[str, Any]] = {
         "show_canvas": {"status": "ok", "tool": "chat_ui", "action": "show_canvas", "event_id": "$canvas_eval_1"},
         "scheduler": {"status": "ok", "tool": "scheduler", "action": action, "task_id": "task_eval_1"},
+        "browser_read": {"status": "ok", "action": action, "tabs": []},
         "browser_control": {"status": "ok", "action": action, "targetId": "tab_1", "url": kw.get("targetUrl") or ""},
         "matrix_message": {"status": "ok", "tool": "matrix_message", "action": action, "event_id": "$msg_eval_1"},
         "matrix_room": {"status": "ok", "room_id": "!room:localhost", "thread_id": "$thread", "name": "Eval Room"},
@@ -378,7 +381,11 @@ def _build_eval_agent(root: Path, case: EvalCase, provider: ModelProvider) -> tu
     wp = _PortableProvider(provider, portable_tool_search_stream, _PORTABLE_PROJ)
     build = create_agent("eval_agent", config, rp, identity, knowledge=None, model=tm, plugins=plugins, provider=wp)
     if missing := sorted(_REQUIRED_SURFACE - build.spec.functions.keys()):
-        hint = " (install browser extra: uv run --extra browser ...)" if "browser_control" in missing else ""
+        hint = (
+            " (install browser extra: uv run --extra browser ...)"
+            if {"browser_read", "browser_control"} & set(missing)
+            else ""
+        )
         msg = f"Eval agent missing required tool surface: {', '.join(missing)}{hint}"
         raise RuntimeError(msg)
     return build, ws

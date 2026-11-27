@@ -8,7 +8,6 @@ first error, and failure streak start fresh with it.
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -30,19 +29,10 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
 )
 from mindroom.knowledge.chunk_context import chunk_contexts
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
-from mindroom.knowledge.collections import KnowledgeChunk, write_file_rows
+from mindroom.knowledge.collections import write_file_rows
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
-from mindroom.knowledge.memory_entries import split_memory_entries
-from mindroom.knowledge.readers import (
-    Document,
-    JSONReader,
-    MarkdownReader,
-    Reader,
-    ReaderFactory,
-    TextReader,
-)
+from mindroom.knowledge.readers import ensure_reader_available, read_knowledge_file
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -51,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.embeddings.batching import RefreshEmbedder
+    from mindroom.knowledge.chunking import KnowledgeChunk
     from mindroom.knowledge.corpus_signature import FileSignature
     from mindroom.knowledge.vector_store import KnowledgeCollection
 
@@ -97,60 +88,6 @@ def max_concurrent_file_indexes(runtime_paths: RuntimePaths) -> int:
     return value
 
 
-class _MalformedJSONSourceError(Exception):
-    """A JSON parser failure carrying the already-read source text."""
-
-    def __init__(self, source_text: str, *, line: int, column: int) -> None:
-        super().__init__("Malformed JSON knowledge source")
-        self.source_text = source_text
-        self.line = line
-        self.column = column
-
-
-class _FallbackAwareJSONReader(JSONReader):
-    """Tag only JSON decoding failures raised inside the source reader."""
-
-    def read(self, file: Path, name: str | None = None) -> list[Document]:
-        try:
-            return super().read(file, name=name)
-        except json.JSONDecodeError as error:
-            raise _MalformedJSONSourceError(error.doc, line=error.lineno, column=error.colno) from error
-
-
-class _InMemoryTextReader(TextReader):
-    """Chunk the malformed JSON text already retained by its parse error, with the base's text chunking."""
-
-    def __init__(self, source_text: str) -> None:
-        super().__init__()
-        self._source_text = source_text
-
-    def read(self, file: Path, name: str | None = None) -> list[Document]:
-        return self.chunk_document(Document(name=name or str(file), content=self._source_text))
-
-
-class _MemoryEntryChunking(SafeFixedSizeChunking):
-    """Make each memory entry its own chunk, with its whitespace collapsed as in fixed-size chunks.
-
-    An entry over the chunk size is split into balanced pieces along natural boundaries of at most that size. A file
-    without entries, such as a lone heading, is chunked at the fixed size instead, so it still indexes.
-    """
-
-    def chunk(self, document: Document) -> list[Document]:
-        """Split one memory file into one document per entry."""
-        chunks: list[Document] = []
-        for entry in split_memory_entries(document.content, self.chunk_size):
-            number = len(chunks) + 1
-            content = self.clean_text(entry)
-            chunks.append(
-                Document(
-                    name=document.name,
-                    meta_data={**document.meta_data, "chunk": number, "chunk_size": len(content)},
-                    content=content,
-                ),
-            )
-        return chunks or super().chunk(document)
-
-
 class _PermanentEmbeddingError(Exception):
     """Internal signal that no further file in this refresh can be embedded.
 
@@ -176,14 +113,6 @@ def _knowledge_source_snapshot(file_path: Path) -> Iterator[tuple[Path, FileSign
     with tempfile.TemporaryDirectory(prefix="mindroom-knowledge-") as snapshot_dir:
         snapshot = Path(snapshot_dir) / file_path.name
         yield snapshot, file_signature(file_path, snapshot)
-
-
-def _knowledge_chunks(documents: Sequence[Document]) -> list[KnowledgeChunk]:
-    """Turn the documents a reader produced into owned chunks; reader output crosses into MindRoom only here."""
-    return [
-        KnowledgeChunk(text=document.content, name=document.name, metadata=dict(document.meta_data))
-        for document in documents
-    ]
 
 
 @dataclass(frozen=True)
@@ -280,31 +209,6 @@ class FileIndexer:
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self.knowledge_root).as_posix()
 
-    def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
-        """Apply this base's text chunking policy to ``reader`` in place."""
-        base_config = self.config.get_knowledge_base_config(self.base_id)
-        strategy = _MemoryEntryChunking if base_config.chunk_strategy == "memory_entries" else SafeFixedSizeChunking
-        chunking_strategy = strategy(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
-        reader.chunk_size = chunking_strategy.chunk_size
-        reader.chunking_strategy = chunking_strategy
-        return reader
-
-    def _build_reader(self, file_path: Path) -> Reader:
-        """Build a per-file reader with conservative chunking for text-like content."""
-        # ReaderFactory builds a new reader for each call, so configuring it changes no other caller's reader.
-        reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
-
-        if isinstance(reader, JSONReader):
-            # Carry the factory reader's configuration (encoding, chunking) onto
-            # the subclass that tags its own decode failures for the text fallback.
-            return _FallbackAwareJSONReader(**vars(reader))
-
-        # Large markdown/plain-text files are the common source of oversized embed requests.
-        if not isinstance(reader, (TextReader, MarkdownReader)):
-            return reader
-
-        return self._configure_text_reader(reader)
-
     def _read_file(self, file_path: Path) -> _PreparedFile | None:
         """Read and chunk one listed file through a private snapshot; None when its reader dependency is missing.
 
@@ -314,7 +218,7 @@ class FileIndexer:
         """
         relative_path = self._relative_path(file_path)
         try:
-            reader = self._build_reader(file_path)
+            ensure_reader_available(file_path.suffix)
         except ImportError as exc:
             logger.warning(
                 "Skipping knowledge file because its reader dependency is not installed",
@@ -324,32 +228,31 @@ class FileIndexer:
                 error=str(exc),
             )
             return None
+        base_config = self.config.get_knowledge_base_config(self.base_id)
         with _knowledge_source_snapshot(file_path) as (snapshot, signature):
             try:
-                documents = self._read_documents(reader, snapshot, relative_path)
+                chunks = read_knowledge_file(
+                    snapshot,
+                    name=snapshot.name,
+                    chunk_size=base_config.chunk_size,
+                    chunk_overlap=base_config.chunk_overlap,
+                    chunk_strategy=base_config.chunk_strategy,
+                    on_malformed_json=lambda line, column: logger.warning(
+                        "Malformed JSON knowledge file; indexing as text",
+                        base_id=self.base_id,
+                        path=relative_path,
+                        line=line,
+                        column=column,
+                    ),
+                )
             except Exception as exc:
                 raise _SourceReadError(exc) from exc
         return _PreparedFile(
             path=file_path,
             relative_path=relative_path,
             signature=signature,
-            chunks=tuple(_knowledge_chunks(documents)),
+            chunks=tuple(chunks),
         )
-
-    def _read_documents(self, reader: Reader, snapshot: Path, relative_path: str) -> list[Document]:
-        """Read one snapshot with its reader, rereading the retained text only for malformed source JSON."""
-        try:
-            return reader.read(snapshot, name=snapshot.name)
-        except _MalformedJSONSourceError as error:
-            logger.warning(
-                "Malformed JSON knowledge file; indexing as text",
-                base_id=self.base_id,
-                path=relative_path,
-                line=error.line,
-                column=error.column,
-            )
-            fallback_reader = self._configure_text_reader(_InMemoryTextReader(error.source_text))
-            return fallback_reader.read(snapshot, name=snapshot.name)
 
     async def _prepare_file(self, file_path: Path, *, vanished: set[str]) -> _PreparedFile | None:
         """Read and chunk one file on a worker thread; None when it vanished, failed to read, or lacks its reader."""

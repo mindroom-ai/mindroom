@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from pydantic import ValidationError
 
-from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import create_agent
@@ -32,10 +31,11 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
-from mindroom.tool_system.invocation import parse_tool_arguments
+from mindroom.tool_system.invocation import ToolCallContext, parse_tool_arguments, run_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -547,9 +547,9 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
     )
 
     assert "calculator" in _toolkit_names(alice_agent)
-    assert "desktop" in _portable_deferred_names(alice_agent)
-    alice_desktop = cast("Any", source_toolkit(offered_function(alice_agent, "desktop")))
-    result = await alice_desktop.desktop("status")
+    assert {"desktop_read", "desktop_control"} <= _portable_deferred_names(alice_agent)
+    alice_desktop = cast("Any", source_toolkit(offered_function(alice_agent, "desktop_read")))
+    result = await alice_desktop.desktop_read("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
 
     save_desktop_credentials(
@@ -614,10 +614,10 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
     )
-    unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop")))
-    result = await unpaired_desktop.desktop("status")
+    unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop_read")))
+    result = await unpaired_desktop.desktop_read("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
-    assert "desktop" in _native_deferred_names(unpaired)
+    assert {"desktop_read", "desktop_control"} <= _native_deferred_names(unpaired)
 
     save_desktop_credentials(
         get_runtime_credentials_manager(runtime_paths),
@@ -638,11 +638,11 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
     )
-    paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop")))
+    paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop_read")))
     paired_configuration = paired_desktop._current_configuration()
     assert paired_configuration.target is not None
     assert paired_configuration.target.user_id == "@alice-desktop:example.org"
-    assert "desktop" in _native_deferred_names(paired)
+    assert {"desktop_read", "desktop_control"} <= _native_deferred_names(paired)
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
@@ -949,7 +949,7 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
             local.functions[function_name] = lambda: "local"
         return local
 
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", fake_build_agent_toolkit)
 
     agent = create_agent(
         "code",
@@ -993,7 +993,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
     built: dict[str, Toolkit] = {}
-    build_agent_toolkit = agents_module.build_agent_toolkit
+    build_agent_toolkit = toolkit_builder.build_agent_toolkit
 
     def fake_build_agent_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "mcp_demo":
@@ -1012,7 +1012,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
             return local
         return build_agent_toolkit(tool_name, **kwargs)
 
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", fake_build_agent_toolkit)
 
     agent = create_agent(
         "code",
@@ -1412,9 +1412,10 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
     agent = _code_agent(config, tmp_path)
 
     function_names = _function_names(agent)
+    assert "browser_read" in function_names
     assert "browser_control" in function_names
     assert "browser" not in function_names
-    assert _native_deferred_names(agent) == frozenset({"browser_control"})
+    assert _native_deferred_names(agent) == frozenset({"browser_read", "browser_control"})
 
 
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:
@@ -1922,6 +1923,246 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
     payload = _tool_payload(toolkit.tool_search("shared"))
 
     assert payload["instructions"] == {"shared": "Use alpha.\n\nUse beta."}
+
+
+def test_tool_search_verbose_docstring_does_not_hijack_queries() -> None:
+    """BM25 length normalization and multi-term noise pruning stop verbose tools from hijacking searches."""
+    verbose_body = (
+        "Render interactive charts, dashboards, and widgets in the side panel for web previews and share flows. "
+        + " ".join(f"canvas layout detail {index}" for index in range(130))
+        + " Supports web embeds, web theming, and team share views inside the panel."
+    )
+
+    @tool(name="show_canvas", description=verbose_body)
+    def show_canvas(html: str) -> str:
+        return html
+
+    @tool(name="serper_search", description="Search the web using Serper.")
+    def serper_search(query: str) -> str:
+        return query
+
+    @tool(name="serper_scrape", description="Scrape a web page.")
+    def serper_scrape(url: str) -> str:
+        return url
+
+    @tool(name="publish_report", description="Publish a report and get a public share link.")
+    def publish_report(markdown: str) -> str:
+        return markdown
+
+    deferred = (
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas]), "Interactive chat side panels"),
+        _deferred(Toolkit(name="serper", tools=[serper_search, serper_scrape]), "Web search and scraping"),
+        _deferred(Toolkit(name="report_publishing", tools=[publish_report]), "Publish reports to public links"),
+    )
+
+    serper_matches = _tool_payload(_search_toolkit(*deferred).tool_search("serper search web scrape"))["matches"]
+    assert {match["name"] for match in serper_matches} == {"serper_search", "serper_scrape"}
+
+    report_matches = _tool_payload(_search_toolkit(*deferred).tool_search("report publishing public link share"))[
+        "matches"
+    ]
+    assert [match["name"] for match in report_matches] == ["publish_report"]
+
+    web_matches = _tool_payload(_search_toolkit(*deferred).tool_search("web"))["matches"]
+    assert {match["name"] for match in web_matches[:2]} == {"serper_search", "serper_scrape"}
+    assert web_matches[-1]["name"] == "show_canvas"
+
+
+def test_tool_search_stemming_camelcase_aliases_and_stop_words() -> None:
+    """Search stems plurals, splits camelCase, expands toolkit aliases, and handles stop-word-only queries."""
+
+    @tool(name="show_canvas", description="Render a panel.")
+    def show_canvas() -> str:
+        return "ok"
+
+    @tool(name="html_parser", description="Parse markup.")
+    def html_parser() -> str:
+        return "ok"
+
+    @tool(name="run_query", description="Execute a database query.")
+    def run_query() -> str:
+        return "ok"
+
+    @tool(name="web_search", description="Search pages.")
+    def web_search() -> str:
+        return "ok"
+
+    @tool(name="check_access", description="Inspect access class.")
+    def check_access() -> str:
+        return "ok"
+
+    @tool(name="read_file", description="Read contents from disk.")
+    def read_file() -> str:
+        return "ok"
+
+    deferred = (
+        _deferred(_JiraTools(), "Jira"),
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas]), "Chat panels"),
+        _deferred(
+            Toolkit(name="web_tools", tools=[html_parser, run_query, web_search, check_access]),
+            "Web helpers",
+        ),
+        _deferred(Toolkit(name="filesystem", tools=[read_file]), "Workspace files"),
+    )
+
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("issues"))["matches"][0]["name"] == "create_issue"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("queries"))["matches"][0]["name"] == "run_query"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("searches"))["matches"][0]["name"] == "web_search"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("classes"))["matches"][0]["name"] == "check_access"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("access"))["matches"][0]["name"] == "check_access"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("showCanvas"))["matches"][0]["name"] == "show_canvas"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("HTMLParser"))["matches"][0]["name"] == "html_parser"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("coding read"))["matches"][0]["name"] == "read_file"
+
+    stop_only = _tool_payload(_search_toolkit(*deferred).tool_search("the and of"))
+    assert stop_only["matches"] == []
+    assert "functions" not in stop_only
+
+
+def test_tool_search_within_turn_dedup_stubs_repeats_and_omits_repeated_instructions() -> None:
+    """Exploratory repeat searches stub already-returned schemas and omit already-sent domain instructions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    first = _tool_payload(toolkit.tool_search("crm", max_results=1))
+    assert first["matches"][0]["name"] == "crm_lookup"
+    assert "description" in first["matches"][0]
+    assert "parameters" in first["matches"][0]
+    assert "already_returned" not in first["matches"][0]
+    assert first["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+    second = _tool_payload(toolkit.tool_search("crm", max_results=2))
+    assert second["matches"][0] == {"name": "crm_lookup", "toolkit": "crm", "already_returned": True}
+    assert second["matches"][1]["name"] == "crm_notes"
+    assert "description" in second["matches"][1]
+    assert "parameters" in second["matches"][1]
+    assert "already_returned" not in second["matches"][1]
+    assert "instructions" not in second
+    assert "call_tool(name, arguments)" in second["usage"]
+    assert "exact name" in second["usage"]
+
+    third = _tool_payload(toolkit.tool_search("customer lookup"))
+    assert third["matches"] == [
+        {"name": "crm_lookup", "toolkit": "crm", "already_returned": True},
+        {"name": "crm_notes", "toolkit": "crm", "already_returned": True},
+    ]
+    assert "instructions" not in third
+
+
+def test_tool_search_exact_name_query_bypasses_dedup_and_returns_instructions() -> None:
+    """Exact bare or dotted function-name queries always re-emit the full schema and domain instructions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+    _tool_payload(toolkit.tool_search("crm"))
+
+    for exact_query in ("crm_lookup", "crm.crm_lookup"):
+        payload = _tool_payload(toolkit.tool_search(exact_query))
+        exact_match = payload["matches"][0]
+        assert exact_match["name"] == "crm_lookup"
+        assert exact_match["description"] == "Look up one customer record by ID."
+        assert set(exact_match["parameters"]["properties"]) == {"customer_id"}
+        assert "already_returned" not in exact_match
+        assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+        if len(payload["matches"]) > 1:
+            assert payload["matches"][1] == {"name": "crm_notes", "toolkit": "crm", "already_returned": True}
+
+
+def test_tool_search_fresh_toolkit_instance_has_no_cross_turn_dedup() -> None:
+    """Each turn gets a fresh DynamicToolsToolkit, so dedup state never leaks across turns."""
+    deferred = (_deferred(_CrmTools(), "Customer records"),)
+
+    turn_one = _search_toolkit(*deferred)
+    _tool_payload(turn_one.tool_search("crm"))
+
+    turn_two = _search_toolkit(*deferred)
+    payload = _tool_payload(turn_two.tool_search("crm"))
+    assert [match["name"] for match in payload["matches"]] == ["crm_lookup", "crm_notes"]
+    assert all("parameters" in match and "already_returned" not in match for match in payload["matches"])
+    assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+
+@pytest.mark.asyncio
+async def test_tool_search_dedup_is_scoped_per_run_id_on_reused_toolkit() -> None:
+    """A reused DynamicToolsToolkit deduplicates within one run_id without leaking state into a later run_id."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+    search_fn = toolkit_offers(toolkit, "tool_search")
+
+    async def search(run_id: str, query: str) -> dict[str, Any]:
+        result = await run_tool_call(
+            search_fn,
+            {"query": query},
+            ToolCallContext(run_id=run_id, session_id="team-session", user_id="@alice:localhost"),
+            middleware=(),
+        )
+        assert result.succeeded
+        return _tool_payload(cast("str", result.value))
+
+    run_one_first = await search("run-1", "crm")
+    assert all("parameters" in match and "already_returned" not in match for match in run_one_first["matches"])
+    assert run_one_first["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+    run_one_repeat = await search("run-1", "customer lookup")
+    assert run_one_repeat["matches"] == [
+        {"name": "crm_lookup", "toolkit": "crm", "already_returned": True},
+        {"name": "crm_notes", "toolkit": "crm", "already_returned": True},
+    ]
+    assert "instructions" not in run_one_repeat
+
+    run_two = await search("run-2", "crm")
+    assert [match["name"] for match in run_two["matches"]] == ["crm_lookup", "crm_notes"]
+    assert all("parameters" in match and "already_returned" not in match for match in run_two["matches"])
+    assert run_two["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+
+def test_tool_search_preserves_unsplit_camelcase_spelling_for_branded_toolkits() -> None:
+    """CamelCase terms match both compound toolkit names (Crawl4AI, GitHub) and split snake_case names."""
+
+    @tool(name="crawl_url", description="Fetch markdown from a webpage.")
+    def crawl_url(url: str) -> str:
+        return url
+
+    @tool(name="ai_summarize", description="Summarize text with AI.")
+    def ai_summarize(text: str) -> str:
+        return text
+
+    @tool(name="fetch_page", description="Extract page content using Crawl4AI.")
+    def fetch_page(url: str) -> str:
+        return url
+
+    @tool(name="git_status", description="Show working tree status.")
+    def git_status() -> str:
+        return "clean"
+
+    @tool(name="show_canvas", description="Render a canvas panel.")
+    def show_canvas() -> str:
+        return "ok"
+
+    @tool(name="canvas_only", description="Inspect a canvas.")
+    def canvas_only() -> str:
+        return "ok"
+
+    deferred = (
+        _deferred(Toolkit(name="crawl4ai", tools=[crawl_url]), "Web crawling"),
+        _deferred(Toolkit(name="ai_helper", tools=[ai_summarize]), "AI text helper"),
+        _deferred(Toolkit(name="scraper", tools=[fetch_page]), "Page extraction"),
+        _deferred(_GithubTools(), "GitHub"),
+        _deferred(Toolkit(name="git", tools=[git_status]), "Local git"),
+        _deferred(_JiraTools(), "Jira"),
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas, canvas_only]), "Chat panels"),
+    )
+
+    crawl_matches = _tool_payload(_search_toolkit(*deferred).tool_search("Crawl4AI"))["matches"]
+    assert crawl_matches[0]["name"] == "crawl_url"
+
+    lower_crawl_matches = _tool_payload(_search_toolkit(*deferred).tool_search("crawl4ai"))["matches"]
+    assert {"crawl_url", "fetch_page"} <= {match["name"] for match in lower_crawl_matches}
+
+    github_matches = _tool_payload(_search_toolkit(*deferred).tool_search("GitHub"))["matches"]
+    assert [match["toolkit"] for match in github_matches[:2]] == ["github", "github"]
+
+    github_issue_matches = _tool_payload(_search_toolkit(*deferred).tool_search("GitHub issue"))["matches"]
+    assert github_issue_matches[0]["toolkit"] == "github"
+
+    canvas_matches = _tool_payload(_search_toolkit(*deferred).tool_search("showCanvas"))["matches"]
+    assert canvas_matches[0]["name"] == "show_canvas"
 
 
 def test_call_tool_fallback_accepts_non_object_arguments() -> None:

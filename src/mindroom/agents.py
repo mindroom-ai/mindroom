@@ -33,7 +33,6 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import memory_backend
-from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
@@ -70,26 +69,20 @@ from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
 from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_keeps_room_tools
-from mindroom.tool_system.catalog import get_tool_by_name
-from mindroom.tool_system.construction import (
-    ToolConstruction,
-    bind_toolkit_construction,
-    tool_config_signature,
-)
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
-from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_sync_tool_entrypoint
 from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.toolkits import (
     adapt_toolkit,
-    configure_toolkit_functions,
     with_offered_instructions,
 )
 from mindroom.tool_system.worker_routing import (
@@ -481,15 +474,6 @@ def _file_mode_knowledge_instruction_block(
     return "\n".join([*lines, *source_lines])
 
 
-def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_path: Path) -> dict[str, object] | None:
-    """Point a registered tool that exposes a ``base_dir`` config field at the bound workdir or the agent's workspace."""
-    metadata = tools.get(tool_name)
-    config_fields = (metadata.config_fields if metadata is not None else None) or ()
-    if not any(field.name == "base_dir" for field in config_fields):
-        return None
-    return {"base_dir": str(current_tool_workdir() or workspace_path)}
-
-
 def _offered_entries(
     entries: Sequence[_ToolkitEntry],
     *,
@@ -567,178 +551,6 @@ def _build_agent_model_provider(
         runtime_paths,
         model_name,
         execution_identity=execution_identity,
-    )
-
-
-@timed("system_prompt_assembly.agent_create.toolkit_build")
-def build_agent_toolkit(  # noqa: C901, PLR0911
-    tool_name: str,
-    *,
-    agent_tools: AgentTools,
-    placement: ToolPlacement,
-    runtime_paths: constants.RuntimePaths,
-    agent_runtime: ResolvedAgentRuntime | None = None,
-    tool_config_overrides: dict[str, object] | None = None,
-    execution_identity: ToolExecutionIdentity | None,
-    workspace_in_worker: bool = False,
-    delegation_depth: int = 0,
-    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    persona: SubagentPersona | None = None,
-    deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
-    calls_as_jobs: bool = False,
-) -> Toolkit | None:
-    """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
-
-    ``persona`` is an authored subagent's persona; its ``delegate`` toolkit keeps
-    the copies it authors within the persona's tools, skills, and knowledge bases.
-    ``calls_as_jobs`` says whether the agent's build lets this toolkit's calls become background jobs.
-    ``workspace_in_worker`` says whether the build's workspace-path toolkits run in a worker, where attachments save.
-
-    ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
-    them; without it ``dynamic_tools`` is skipped and None is returned.
-    """
-    config = agent_tools.config
-    agent_name = agent_tools.agent_name
-    agent_config = config.get_agent(agent_name)
-    if agent_runtime is None:
-        agent_runtime = resolve_agent_runtime(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-            create=True,
-        )
-    credentials_manager = get_runtime_credentials_manager(runtime_paths)
-
-    def constructed[T: Toolkit](toolkit: T) -> T:
-        return bind_toolkit_construction(
-            toolkit,
-            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
-        )
-
-    def wrap_direct[T: Toolkit](toolkit: T) -> T:
-        policy = ToolOutputFilePolicy.for_current_tools(
-            agent_runtime.workspace.root,
-            runtime_paths,
-            auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-        )
-        return constructed(configure_toolkit_functions(toolkit, output_files=policy))
-
-    if tool_name == "memory":
-        from mindroom.custom_tools.memory import MemoryTools  # noqa: PLC0415
-
-        return wrap_direct(
-            MemoryTools(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            ),
-        )
-
-    if tool_name == "knowledge_graph":
-        from mindroom.custom_tools.knowledge_graph import KnowledgeGraphTools  # noqa: PLC0415
-
-        return wrap_direct(KnowledgeGraphTools(agent_name, config, runtime_paths, execution_identity))
-
-    if tool_name == "delegate":
-        # Imported lazily to avoid a circular import through DelegateTools -> create_agent.
-        from mindroom.custom_tools import delegate  # noqa: PLC0415
-
-        return wrap_direct(
-            delegate.DelegateTools(
-                agent_name=agent_name,
-                runtime_paths=runtime_paths,
-                config=config,
-                execution_identity=execution_identity,
-                delegation_depth=delegation_depth,
-                refresh_scheduler=refresh_scheduler,
-                workspace_root=agent_runtime.workspace.root,
-                persona=persona,
-                calls_as_jobs=calls_as_jobs,
-            ),
-        )
-
-    if tool_name == "self_config":
-        from mindroom.custom_tools.self_config import SelfConfigTools  # noqa: PLC0415
-
-        return wrap_direct(
-            SelfConfigTools(agent_name=agent_name, runtime_paths=runtime_paths),
-        )
-
-    if tool_name == "agent_manager":
-        from mindroom.custom_tools.agent_manager import AgentManagerTools  # noqa: PLC0415
-
-        can_create = agent_config.created_agents_per_owner > 0
-        info = config.generated_agent(agent_name)
-        generated, created = info is not None, info is not None and info.created
-        return wrap_direct(AgentManagerTools(agent_name, can_create=can_create, generated=generated, created=created))
-
-    if tool_name == "contacts":
-        from mindroom.custom_tools.contacts import ContactsTools  # noqa: PLC0415
-
-        return wrap_direct(ContactsTools(agent_name))
-
-    if tool_name == "skill_manage":
-        from mindroom.custom_tools.skill_manage import SkillManageTools  # noqa: PLC0415
-
-        # It keeps its own output handling, but background tool jobs still need its construction identity.
-        return constructed(
-            SkillManageTools(
-                agent_name,
-                config,
-                runtime_paths,
-                agent_workspace_skills_root(agent_runtime.workspace.root),
-            ),
-        )
-
-    if tool_name == "compact_context":
-        from mindroom.custom_tools.compact_context import CompactContextTools  # noqa: PLC0415
-
-        return wrap_direct(
-            CompactContextTools(
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            ),
-        )
-
-    if tool_name == "report_publishing":
-        from mindroom.custom_tools.report_publishing import ReportPublishingTools  # noqa: PLC0415
-
-        return wrap_direct(
-            ReportPublishingTools(),
-        )
-
-    if tool_name == "dynamic_tools":
-        from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit  # noqa: PLC0415
-
-        if deferred_toolkits is None:
-            return None
-        # Search results must reach the model inline, so they skip output-file redirection.
-        return constructed(DynamicToolsToolkit(deferred_toolkits=deferred_toolkits))
-
-    worker_scope = agent_runtime.execution.execution_scope
-    return get_tool_by_name(
-        tool_name,
-        runtime_paths,
-        tools=agent_tools.tools,
-        credentials_manager=credentials_manager,
-        runtime_config=config,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=_tool_base_dir_override(
-            tool_name,
-            tools=agent_tools.tools,
-            workspace_path=agent_runtime.workspace.root,
-        ),
-        runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
-        allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
-        tool_output_workspace_root=agent_runtime.workspace.root,
-        agent_state_root=agent_runtime.state_root,
-        tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
-        workspace_in_worker=workspace_in_worker,
-        worker_target=agent_runtime.execution.worker_target,
     )
 
 
@@ -1432,7 +1244,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         authored_name = tool_entry.authored_name or tool_name
         toolkit_calls_as_jobs = calls_as_jobs and not toolkit_is_background_excluded(tool_name, config, runtime_paths)
         with _agent_create_timing("toolkit_build.one", tool_name=tool_name):
-            toolkit = build_agent_toolkit(
+            toolkit = toolkit_builder.build_agent_toolkit(
                 tool_name,
                 agent_tools=agent_tools,
                 placement=placement,
@@ -2369,7 +2181,6 @@ __all__ = [
     "LeaderJobs",
     "agent_build_can_overlap_file_memory",
     "apply_tool_approval_capability",
-    "build_agent_toolkit",
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",

@@ -42,24 +42,24 @@ background_tool_jobs:
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
 | `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large, `0` for never by cost; see [Cost Limit](#cost-limit) |
 
-A run is a background job, so `workflow(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
+A run is a background job, so `workflow_write(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
-An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `workflow` asks before anything starts, as for any other call (timed grants are scoped per `action`).
-A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
+An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `workflow_write` asks before anything starts, as for any other call (timed grants are scoped per `action`).
+A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow_write` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
 A restart of MindRoom while the run is unfinished is the exception: the continued job delivers the report to the conversation, and the `tool:after_call` hooks of the call that started it do not run.
 Do not rely on an after-call hook running exactly once for a workflow call.
 
 ## Functions
 
-All workflow operations use a single unified function `workflow(action=...)`:
+Workflow operations are split into read-only `workflow_read(action=...)` and mutating `workflow_write(action=...)`:
 
 ```text
-workflow(action="start", source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
-workflow(action="get", run_id=..., nodes="active", messages=False)
-workflow(action="cancel", run_id=...)
-workflow(action="resume", run_id=..., source=None, path=None, rerun=None, max_cost_usd=None)
-workflow(action="list")
-workflow(action="save", run_id=..., name=..., description=None)
+workflow_read(action="list")
+workflow_read(action="get", run_id=..., nodes="active", messages=False)
+workflow_write(action="start", source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
+workflow_write(action="cancel", run_id=...)
+workflow_write(action="resume", run_id=..., source=None, path=None, rerun=None, max_cost_usd=None)
+workflow_write(action="save", run_id=..., name=..., description=None)
 ```
 
 - `action="start"` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
@@ -75,12 +75,12 @@ workflow(action="save", run_id=..., name=..., description=None)
   The plain `script` tool's `script_read` and `script_write(action="cancel")` neither list nor stop a run's script.
 - `action="resume"` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
 - `action="list"` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
-- `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
+- `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow_write(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
 
 A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
 
-Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `workflow(action="start", ...)` and `workflow(action="resume", ...)` wait for the run and return the report themselves.
+Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `workflow_write(action="start", ...)` and `workflow_write(action="resume", ...)` wait for the run and return the report themselves.
 Cancelling that call cancels its run, unless another call still waits for the same run.
 The same call delivered again finds its own run: it waits for it, or returns the report the run ended with, and runs nothing a second time.
 A run that another call resumed since belongs to that call: the earlier one neither cancels it nor returns its report, and ends with `Run <id> was resumed by another call.`
@@ -124,7 +124,7 @@ def main(args):
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
   Name the toolkit as it is registered: another name of it, such as `file` for `filesystem`, is refused as a tool the run does not have.
-  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "workflow", action="start", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
+  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "workflow_write", action="start", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 - `run(name, args=None)` executes the saved workflow `workflows/<name>.py` inline inside the current run and returns what its `main(args)` returns; see [Saved Workflows](#saved-workflows).
@@ -168,7 +168,7 @@ The options are those of `run_subagent` under shorter names.
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
 So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
-The description of `workflow` lists the `delegate_to` agents and the agents configured for the room.
+The description of `workflow_write` lists the `delegate_to` agents and the agents configured for the room.
 That list is read from the configuration alone; whether a listed agent's bot is in the room and may reply to the requester is checked when the call starts.
 While the bot of a room's agent has not finished starting, for example right after a restart, or the requester's access to that agent is still loading, the call is not refused: it waits and starts once both are known.
 An agent whose bot failed to start for good is waited for in the same way, until the run is stopped or its working time ends.
@@ -196,7 +196,7 @@ A `tool()` or `shell()` call of the script that needs an approval shows `waiting
 An agent of a run acts in the room and the thread the run was started in, for the run's requester.
 A message it sends with `matrix_message` and no other target lands in that thread.
 
-The agents of a run are not listed among the conversation's background jobs: the run reports them, and `workflow(action="get", ...)` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `workflow_read(action="get", ...)` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 
@@ -348,11 +348,11 @@ def main(args):
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
   Graph frames and the finished run card carry message-count `edges` (`{"from", "to", "kind": "message", "count"}`) and bounded, redacted peer message previews (`messages`), plus bounded, redacted result `preview` text on completed `agent`, `turn` and `tool` nodes; `shared_state` never enters the workflow graph or run card.
-  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `workflow(action="get", run_id=..., messages=True)` returns the full uncapped message history and shared state to the run's owner.
+  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `workflow_read(action="get", run_id=..., messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
 
-An agent of a run has the `workflow` tool of its agent, so it can call `workflow(action="start", ...)` itself.
+An agent of a run has the `workflow` tool of its agent, so it can call `workflow_write(action="start", ...)` itself.
 That call waits for the new run and returns its report to the agent.
 
 - The new run is a run inside the agent's run: it names that run and the agent's call, and the outer run shows it as a group under that call.
@@ -369,15 +369,15 @@ That call waits for the new run and returns its report to the agent.
 A script can start agents and runs through `tool()` as well.
 
 - `tool("delegate", "run_subagent", task=..., agent_name=..., system_prompt=...)` is the same as `agent()`: the run shows an agent call, with a job of its own, and the call returns the agent's answer.
-- `tool("workflow", "workflow", action="start", source=...)` starts a run inside the script's run and returns its report.
+- `tool("workflow", "workflow_write", action="start", source=...)` starts a run inside the script's run and returns its report.
   Its agents are as deep as the script's own.
-- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `workflow` applies.
+- Both first pass what every `tool()` call passes: the tool must still be the agent's, the hooks run, and the operator's approval rule for `run_subagent` or `workflow_write` applies.
   While the call waits for an approval it shows `waiting`, nothing is started before the decision, and a denial raises `ToolError` with kind `denied`.
 - `tool("delegate", "continue_subagent", ...)` is refused with `A workflow script cannot call delegate.continue_subagent yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).`
 
 ## Cost
 
-`workflow(action="get", ...)` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
+`workflow_read(action="get", ...)` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
 
 - `cost_usd` is what the run cost so far, over every attempt, and `attempt_cost_usd` is what the current attempt cost.
   After a resume the second number shows what the resume itself spent.
@@ -395,16 +395,16 @@ A script can start agents and runs through `tool()` as well.
 
 ### Cost Limit
 
-Nothing caps what a run costs unless its start names a limit: `workflow(action="start", ..., max_cost_usd=5)`.
+Nothing caps what a run costs unless its start names a limit: `workflow_write(action="start", ..., max_cost_usd=5)`.
 
 - When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further call starts.
   Calls that already run finish, and once nothing of the run is working any more, the run ends `interrupted` with `Stopped at the cost limit ($X of $Y).` on its card and in its delivered report.
   An amount under a cent is written with up to six decimal places.
 - A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
   Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
-- To continue a run stopped at its cost limit, call `workflow(action="resume", run_id=..., max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
+- To continue a run stopped at its cost limit, call `workflow_write(action="resume", run_id=..., max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
   Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`, and an interrupted nested child continues under the parent's raised limit.
-  Calling `workflow(action="resume", ...)` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+  Calling `workflow_write(action="resume", ...)` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
   A card Resume control (`io.mindroom.workflow_control`) without `max_cost_usd` on a run stopped at its limit raises `max_cost_usd` to `spent + max_cost_usd` (one more allowance of the same size).
 - A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
 - The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
@@ -444,7 +444,7 @@ A graph too large for one event keeps the calls that wait for a person first, th
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
 
 MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
-It resumes the run as `workflow(action="resume", run_id=..., max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
+It resumes the run as `workflow_write(action="resume", run_id=..., max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
 For a run stopped at its cost limit, a Resume control without `max_cost_usd` raises the limit to `spent + current max_cost_usd` (one more allowance of the same size); an explicit `max_cost_usd` that is not above what the run spent changes nothing.
 The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
 The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
@@ -474,7 +474,7 @@ def main(args):
   `parallel([agent(a), agent(b)])` is refused with `parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn).`
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
-  The run's `max_concurrent`, 16 unless `workflow(action="start", ...)` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
+  The run's `max_concurrent`, 16 unless `workflow_write(action="start", ...)` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
   A call that waits for an approval keeps its concurrency place until it finishes, so queued calls wait for a free place.
   A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
   An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
@@ -485,7 +485,7 @@ def main(args):
   Its message names the failures, for example `2 of 5 calls failed: [1] AgentError(failed): ...; [3] KeyError: 'x'`.
   A `PartialFailure` that the script does not catch fails the run.
 - An exception of the script's own code inside a function, such as a `KeyError`, fails only that item, and the run shows it as a failed call of kind `error` where it happened.
-- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); workflow(action="get", run_id=..., nodes="failed") shows them.`
+- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); workflow_read(action="get", run_id=..., nodes="failed") shows them.`
 
 On a resume each item is matched by its value, not by its position, so adding, removing, or reordering items reuses the saved calls of the items that stayed.
 Of two equal items the first and the second are told apart by their order.
@@ -515,7 +515,7 @@ def main(args):
 
 ## Resume A Run
 
-`workflow(action="resume", run_id=...)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
+`workflow_write(action="resume", run_id=...)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
 A run that has not ended is refused with `Run <id> is still running. Cancel it first.`
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
 Resume retries only calls proven not to have started.
@@ -529,12 +529,12 @@ A call that may have written (a tool that raised, an agent that made tool calls)
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
   That also holds when the call's arguments were edited, as long as no call before it ran again and `rerun` does not name it.
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.
-  Check its effect, then name it in `rerun`, for example `workflow(action="resume", run_id=..., rerun=["n4"])`, to run it again; `workflow(action="get", run_id=..., nodes="failed")` lists the IDs.
+  Check its effect, then name it in `rerun`, for example `workflow_write(action="resume", run_id=..., rerun=["n4"])`, to run it again; `workflow_read(action="get", run_id=..., nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
 - `max_cost_usd` sets the run's cost limit for the next attempt; when the run stopped at its cost limit, it must exceed what the run has spent.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
-- Every attempt runs in the room and thread the run was started in, also when `workflow(action="resume", ...)` is called from another one by the same requester; the report goes to where it was called.
+- Every attempt runs in the room and thread the run was started in, also when `workflow_write(action="resume", ...)` is called from another one by the same requester; the report goes to where it was called.
 
 One resume takes a run, and it takes it in one step: the run, its new script and the calls named in `rerun` change together or not at all.
 Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing, also when the first one took the run and its attempt could not start.
@@ -559,7 +559,7 @@ A write that finished before the interruption is not made again, and neither is 
 A run whose script had already returned its report ends with that report and gets no new attempt.
 
 - The next attempt starts once the requester's access to the agent in the run's room is confirmed; while MindRoom cannot check it yet, for example because the agent's bot has not synced or room membership is still loading after a start, the run waits `starting`.
-  Every attempt is checked in this way when it starts, the first one of a run and one that `workflow(action="resume", ...)` asked for included.
+  Every attempt is checked in this way when it starts, the first one of a run and one that `workflow_write(action="resume", ...)` asked for included.
   When the access is gone, or the bot is no longer in the run's room, the run ends `interrupted` with `The requester no longer has access.`
 - While the run's job is unfinished, only that job starts the run's attempts, so a Stop or a cancel of the job always reaches whatever could start one.
   After a restart of MindRoom, the job is first checked again as every background job that a restart stopped is, and only then does the next attempt start.
@@ -582,19 +582,19 @@ A run whose script had already returned its report ends with that report and get
 - When that paused turn cannot be resumed, for example because its saved paused run or approval metadata cannot be loaded, no follow-up turn is synthesized for it.
   Instead, the call ends as that of an agent that cannot be continued does: `indeterminate` if its record is unreadable or it had started another tool call, or `failed` with kind `interrupted` if its record proves no tool call started (a call still waiting for its decision counts as not started), in which case the next attempt runs it again.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
-- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow(action="resume", run_id=...).`
-- A run with no job, which is one that `workflow(action="start", ...)` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
-  When the call that waited for it is gone, nothing delivers the report; `workflow(action="get", run_id=...)` returns it in `result`.
+- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow_write(action="resume", run_id=...).`
+- A run with no job, which is one that `workflow_write(action="start", ...)` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
+  When the call that waited for it is gone, nothing delivers the report; `workflow_read(action="get", run_id=...)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `workflow(action="start", ...)` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `workflow` was cut short).
-  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `workflow(action="start", ...)` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
+  The agent that was inside its `workflow_write(action="start", ...)` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `workflow_write` was cut short).
+  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `workflow_write(action="start", ...)` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
   Stopping the agent while it waits, or cancelling the outer run, cancels the nested run.
-- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `workflow(action="get", ...)` of that run, and cancelling the outer run cancels it.
-  A script's own `tool("workflow", "workflow", action="start", ...)` call that a restart cut short ends `indeterminate` too.
+- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `workflow_read(action="get", ...)` of that run, and cancelling the outer run cancels it.
+  A script's own `tool("workflow", "workflow_write", action="start", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
-- A run whose job was stopped gets no further attempt, and `workflow(action="resume", ...)` continues it.
+- A run whose job was stopped gets no further attempt, and `workflow_write(action="resume", ...)` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
-  A job that ended in any other way only fails to deliver the report: the run goes on, and `workflow(action="get", run_id=...)` returns the report in `result`.
+  A job that ended in any other way only fails to deliver the report: the run goes on, and `workflow_read(action="get", run_id=...)` returns the report in `result`.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
 - The report of a run stays saved until its job has delivered it, however long ago the run ended.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
@@ -606,7 +606,7 @@ A run whose script had already returned its report ends with that report and get
 
 A run may work for `max_runtime_hours` of the agent's `workflow` entry, 72 by default.
 Only time in which the run is `running` counts, up to the moment its script ended.
-At the limit the run ends `interrupted` with `The run used its 72 hours of working time. workflow(action="resume", run_id=...) continues it.`, and `workflow(action="resume", ...)` gives it the full time again.
+At the limit the run ends `interrupted` with `The run used its 72 hours of working time. workflow_write(action="resume", run_id=...) continues it.`, and `workflow_write(action="resume", ...)` gives it the full time again.
 An attempt that MindRoom starts on its own after an interruption keeps the time the run had left, and a run with none left gets no such attempt: it ends `interrupted` with the same sentence.
 The time a run waits for its next attempt after an interruption is not counted.
 With `max_runtime_hours: 0` a run has no limit.
@@ -616,19 +616,19 @@ One script process runs for at most 30 days; a run with working time left then c
 
 - With a worker backend (Docker or Kubernetes), each run's script runs in a dedicated worker of its own, as a [background script](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) does, and never falls back to the host when that backend is down.
 - Without a worker backend, the script runs as a child process of MindRoom on Linux, only when `defaults.allow_shell_without_worker` is `true` or `MINDROOM_SANDBOX_EXECUTION_MODE` selects [local execution](https://docs.mindroom.chat/tools/background-scripts/#local-execution).
-  Otherwise `workflow(action="start", ...)` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
+  Otherwise `workflow_write(action="start", ...)` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - The script never runs inside the MindRoom process itself.
 
 ## Saved Workflows
 
 A saved workflow is a Python file at `workflows/<name>.py` in the agent's workspace, where `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
 Its description is the first line of its module docstring, and an optional top-level literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
-`workflow(action="list")` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
+`workflow_read(action="list")` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
 
-- `workflow(action="save", run_id=..., name=..., description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
+- `workflow_write(action="save", run_id=..., name=..., description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
   When the script has no module docstring and `description` is given, MindRoom adds one.
   Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
-- `workflow(action="start", name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
+- `workflow_write(action="start", name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
 - Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
   Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash so calls after the group rerun, while unchanged calls before the first edit inside the child lane are still reused.
   `run(name, args)` is an inline call inside the current run and adds no delegation depth.

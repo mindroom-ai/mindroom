@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, cast
 import mcp.types as mcp_types
 import pytest
 
-from mindroom.agents import build_agent_toolkit
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ModelConfig, ToolConfigEntry
@@ -28,6 +27,7 @@ from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_con
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import replace_test_tool_factory
@@ -56,7 +56,7 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "workflow" in toolkit_function_names(toolkit)
+    assert {"workflow_read", "workflow_write"} <= set(toolkit_function_names(toolkit))
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:

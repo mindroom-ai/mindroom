@@ -1016,7 +1016,9 @@ async def test_crawl4ai_browser_egress_route(
 
 
 # Research toolkits whose URL functions download pages from the MindRoom process through the server-fetch guard.
-_LOCAL_URL_FETCH_TOOLS = ("agentql", "crawl4ai", "newspaper", "trafilatura", "website")
+_LOCAL_URL_FETCH_TOOLS = ("agentql", "browser", "crawl4ai", "newspaper", "trafilatura", "website")
+# Local URL fetch tools with non-URL actions whose URL-taking actions are async.
+_URL_FETCH_ACTIONS = {"browser": ("open", "navigate")}
 # Research toolkits that forward URLs to a hosted service instead of downloading them locally.
 _HOSTED_URL_FETCH_TOOLS = (
     "brightdata",
@@ -1114,7 +1116,9 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
             method = getattr(toolkit, function_name)
             argument = [url] if parameter.endswith("urls") else url
             action_hint = get_type_hints(method).get("action")
-            action_values = get_args(action_hint) if action_hint is not None else ()
+            action_values = _URL_FETCH_ACTIONS.get(tool_name) or (
+                get_args(action_hint) if action_hint is not None else ()
+            )
             call_kwargs_list = (
                 [{"action": action, parameter: argument} for action in action_values]
                 if action_values
@@ -1122,7 +1126,9 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
             )
             for call_kwargs in call_kwargs_list:
                 with contextlib.suppress(ServerFetchUrlError, PublicFetchError):
-                    method(**call_kwargs)
+                    result = method(**call_kwargs)
+                    if inspect.isawaitable(result):
+                        asyncio.run(result)
 
     assert connections == []
 

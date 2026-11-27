@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom import agents
 from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
@@ -23,6 +22,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import Capabilities, ModelRequest
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system import toolkit_builder
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
@@ -52,7 +52,7 @@ def agent_cli_api() -> Iterator[None]:
 
 def install_scripted_shell(monkeypatch: pytest.MonkeyPatch, run_shell_command: Callable[..., Awaitable[str]]) -> None:
     """Keep each agent's real shell toolkit, but run ``run_shell_command`` in place of its subprocess."""
-    original = agents.get_tool_by_name
+    original = toolkit_builder.get_tool_by_name
 
     def build(name: str, *args: object, **kwargs: object) -> object:
         if name != "shell":
@@ -63,7 +63,7 @@ def install_scripted_shell(monkeypatch: pytest.MonkeyPatch, run_shell_command: C
             toolkit.functions["run_shell_command"] = run_shell_command
         return toolkit
 
-    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    monkeypatch.setattr(toolkit_builder, "get_tool_by_name", build)
 
 
 def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:

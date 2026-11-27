@@ -30,6 +30,7 @@ from tests.agno_parity.golden_files import render
 from tests.agno_parity.knowledge_goldens import (
     EMBEDDERS_PATH,
     GOLDEN_DIR,
+    LEGACY_ROW_METADATA_KEYS,
     ROWS_PATH,
     SEARCH_PATH,
     ParityEmbedder,
@@ -92,7 +93,17 @@ async def test_refreshes_write_the_golden_rows(tmp_path: Path) -> None:
     assert set(refreshed) == set(ROW_GOLDENS["bases"])
     for base_id, base in ROW_GOLDENS["bases"].items():
         rows = refreshed[base_id]["rows"]
-        assert [{**row, "embedding": None} for row in rows] == [{**row, "embedding": None} for row in base["rows"]]
+        expected_rows = [
+            {
+                **row,
+                "embedding": None,
+                "metadata": {
+                    key: value for key, value in row["metadata"].items() if key not in LEGACY_ROW_METADATA_KEYS
+                },
+            }
+            for row in base["rows"]
+        ]
+        assert [{**row, "embedding": None} for row in rows] == expected_rows
         for row, golden_row in zip(rows, base["rows"], strict=True):
             assert row["embedding"] == pytest.approx(golden_row["embedding"], rel=1e-6, abs=1e-7)
 

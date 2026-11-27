@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
-from mindroom import agents, constants
+from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api import mcp_gateway as mcp_gateway_api
 from mindroom.api.connections_session_cookie import connections_session_cookie, issue_connections_session
@@ -32,6 +32,7 @@ from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
 from mindroom.mcp_gateway import tools as gateway_tools
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
@@ -488,7 +489,7 @@ def test_native_dispatch_rejects_changed_publication(
     events: list[str] = []
 
     build = _native_dispatch_builder(monkeypatch, phase, async_body, paused, release, events)
-    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
             gateway_client.post,

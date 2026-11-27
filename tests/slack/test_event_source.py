@@ -177,7 +177,8 @@ class _SlackEnv:
         with tool_runtime_context(
             self.ctx(room_id=room_id, requester_id=requester_id, thread_id=thread_id, client=client),
         ):
-            return json.loads(await self.tool.triggers(action=action, **kwargs))
+            fn = self.tool.triggers_read if action in {"list", "history", "test"} else self.tool.triggers_write
+            return json.loads(await fn(action=action, **kwargs))
 
     async def admin_call(self, action: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         return await self.call(action, room_id=ADMIN_ROOM, requester_id=ADMIN, **kwargs)
@@ -862,19 +863,22 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
         (["slack", "triggers"], [{"match": "slack_*", "action": "require_approval"}], True),
         (
             ["slack", "triggers"],
-            [{"match": "slack_*", "action": "require_approval"}, {"match": "triggers", "action": "auto_approve"}],
+            [{"match": "slack_*", "action": "require_approval"}, {"match": "triggers_write", "action": "auto_approve"}],
             False,
         ),
         (
             ["slack", "triggers"],
-            [{"match": "slack_watch", "action": "require_approval"}, {"match": "triggers", "action": "auto_approve"}],
+            [
+                {"match": "slack_watch", "action": "require_approval"},
+                {"match": "triggers_write", "action": "auto_approve"},
+            ],
             True,
         ),
         (
             ["slack", "triggers"],
             [
                 {"match": "slack_watch", "action": "require_approval"},
-                {"match": "triggers", "action": "require_approval"},
+                {"match": "triggers_write", "action": "require_approval"},
             ],
             False,
         ),
@@ -884,20 +888,20 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
             ["slack", "triggers"],
             [
                 {"match": ["slack_watch", "slack_post"], "action": "require_approval"},
-                {"match": "triggers", "action": "auto_approve"},
+                {"match": "triggers_write", "action": "auto_approve"},
             ],
             True,
         ),
         (
             ["slack", "triggers"],
-            [{"match": "triggers", "arguments": {"action": "subscribe_event"}, "action": "require_approval"}],
+            [{"match": "triggers_write", "arguments": {"action": "subscribe_event"}, "action": "require_approval"}],
             False,
         ),
         (
             ["slack", "triggers"],
             [
                 {"match": "slack_watch", "action": "require_approval"},
-                {"match": "triggers", "arguments": {"action": "list"}, "action": "auto_approve"},
+                {"match": "triggers_read", "arguments": {"action": "list"}, "action": "auto_approve"},
             ],
             True,
         ),

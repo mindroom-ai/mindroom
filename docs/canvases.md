@@ -287,7 +287,7 @@ chat_ui.show_canvas(
   Read it defensively, since an earlier version of the page may have saved it in another shape.
   It stays in that browser and reaches the agent only through an answer, or [when the canvas shares it](#let-the-agent-read-the-page-without-a-send-button).
   The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
-- **Checking a page:** an agent with the [`browser`](tools/web-scraping-and-browser.md#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
+- **Checking a page:** an agent with the [`browser`](tools/web-scraping-and-browser.md#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot with `browser_read(action="screenshot")` before showing it.
   Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
   The browser also does not block everything the panel blocks.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.

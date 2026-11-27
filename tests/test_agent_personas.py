@@ -27,6 +27,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -666,7 +667,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
         local.functions["demo_list_tools"] = lambda: "local"
         return local
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build)
 
     with pytest.raises(_PersonaError, match=r"'mcp_demo\.demo_list_tools' is not available to you"):
         agents.create_agent(
@@ -697,7 +698,7 @@ def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, mon
         toolkit.functions["shared"] = lambda: tool_name
         return toolkit
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build)
 
     with pytest.raises(_PersonaError, match=r"'sleep\.shared' is not available to you"):
         agents.create_agent(
@@ -715,7 +716,7 @@ def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, mon
 def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A named toolkit that cannot be built stops construction instead of being skipped."""
     runtime = _runtime(tmp_path, tools=["filesystem", "calculator"])
-    build = agents.build_agent_toolkit
+    build = toolkit_builder.build_agent_toolkit
 
     def failing_build(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "calculator":
@@ -723,7 +724,7 @@ def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypat
             raise ValueError(msg)
         return build(tool_name, **kwargs)
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", failing_build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", failing_build)
 
     with pytest.raises(_PersonaError, match="'calculator' is not available to you"):
         _child(runtime, ["filesystem", "calculator"])

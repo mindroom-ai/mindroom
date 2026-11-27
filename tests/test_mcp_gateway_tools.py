@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from mindroom import agents, constants
+from mindroom import constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
 from mindroom.config.approval import ApprovalRuleConfig
@@ -34,6 +34,7 @@ from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system import toolkits as toolkits_module
 from mindroom.tool_system.authoring import Toolkit, current_call, passthrough_tool
 from mindroom.tool_system.catalog import ConfigField
@@ -112,7 +113,7 @@ async def test_metadata_search_never_constructs_toolkit(
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Metadata search constructed a toolkit")
 
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", forbidden)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", forbidden)
     result = await gateway.search_tools(context)
     assert "error" not in result
     assert {item["toolkit"] for item in result["results"]} == {"calculator", "duckduckgo"}
@@ -155,17 +156,20 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("attachments", "attachment"),
         ("callback_manager", "mint_callback"),
         ("claude_agent", "claude_agent_write"),
-        ("dynamic_workflow", "workflow"),
-        ("workflow", "workflow"),
-        ("external_trigger_manager", "triggers"),
-        ("matrix_api", "matrix_api"),
+        ("dynamic_workflow", "workflow_write"),
+        ("workflow", "workflow_read"),
+        ("workflow", "workflow_write"),
+        ("external_trigger_manager", "triggers_write"),
+        ("matrix_api", "matrix_api_read"),
+        ("matrix_api", "matrix_api_write"),
         ("matrix_message", "matrix_message"),
         ("matrix_room", "matrix_room"),
         ("report_publishing", "publish_report"),
         ("scheduler", "scheduler"),
         ("thread_model", "thread_model"),
         ("thread_summary", "set_thread_summary"),
-        ("triggers", "triggers"),
+        ("triggers", "triggers_read"),
+        ("triggers", "triggers_write"),
         ("usage_stats", "usage_stats"),
     ],
 )
@@ -187,7 +191,7 @@ async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("Gateway constructed a toolkit that MCP calls cannot use")
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", forbidden)
     result = await gateway.search_tools(context)
     assert "error" not in result
     assert [item["toolkit"] for item in result["results"]] == ["calculator"]
@@ -364,13 +368,13 @@ async def test_selected_schema_builds_only_selected_toolkit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Selected schema builds only selected toolkit."""
-    original = agents.build_agent_toolkit
+    original = toolkit_builder.build_agent_toolkit
 
     def selected(name: str, **kwargs: object) -> Toolkit:
         assert name == "calculator", "Unrelated backend initialized"
         return original(name, **cast("dict[str, Any]", kwargs))
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", selected)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", selected)
     result = await gateway.get_tool(context, toolkit="calculator", function="calculate")
     assert "error" not in result
     assert result["inputSchema"]["properties"]["a"]["type"] == "number"
@@ -541,7 +545,7 @@ async def _assert_calculate_needs_approval(context: AgentToolContext) -> None:
 
 
 def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> None:
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", lambda *_args, **_kwargs: toolkit)
 
 
 def _load_plugin_hooks(monkeypatch: pytest.MonkeyPatch, name: str, *hooks: object) -> None:
@@ -702,7 +706,7 @@ async def test_backend_failure_does_not_leak_or_block_another(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Backend failure does not leak or block another."""
-    original = agents.build_agent_toolkit
+    original = toolkit_builder.build_agent_toolkit
 
     def selected(name: str, **kwargs: object) -> Toolkit:
         if name == "duckduckgo":
@@ -710,7 +714,7 @@ async def test_backend_failure_does_not_leak_or_block_another(
             raise RuntimeError(message)
         return original(name, **cast("dict[str, Any]", kwargs))
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", selected)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", selected)
     result = await gateway.search_tools(context, toolkit="duckduckgo")
     assert "results" not in result
     assert "error" in result
@@ -837,7 +841,7 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
         built_from.append(agent_tools.config)
         return ScopedToolkit()
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", build_toolkit)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build_toolkit)
     ambient = _tool_runtime_context(context.runtime_paths.storage_root, agent_name="other")
     with tool_runtime_context(ambient):
         result = await gateway.invoke_tool(context, toolkit="calculator", function="account", arguments={})
@@ -959,7 +963,7 @@ async def test_cancelled_sync_preparation_keeps_cleanup_owner(
         def close(self) -> None:
             closed.set()
 
-    monkeypatch.setattr(agents, "build_agent_toolkit", lambda *_args, **_kwargs: SlowToolkit())
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", lambda *_args, **_kwargs: SlowToolkit())
     task = asyncio.create_task(gateway.get_tool(context, toolkit="calculator", function="missing"))
     try:
         assert await asyncio.to_thread(started.wait, 5)

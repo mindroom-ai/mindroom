@@ -23,6 +23,7 @@ from mindroom.tool_system.authoring import (
     tool,
     toolkit_functions,
 )
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, get_toolkit_construction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -38,6 +39,7 @@ from mindroom.tool_system.toolkits import (
     requires_connect,
     toolkit_function,
     toolkit_function_names,
+    toolkit_worker_stand_ins,
 )
 from tests.conftest import preserved_builtin_tools
 
@@ -745,3 +747,42 @@ def test_meta_schema_opt_out_flags_inherit_and_override_in_order() -> None:
 
     external = _by_name(adapt_toolkit(Toolkit(name="external", tools=[ext])).functions)["ext"]
     assert (external.offer_background_after, external.offer_output_path) == (True, True)
+
+
+def test_toolkit_directly_owns_finishing_and_construction_without_leaking_across_instances() -> None:
+    """Finishing and construction state live on each Toolkit instance, even when a subclass skips super().__init__."""
+
+    class _CustomInitTools(Toolkit):
+        def __init__(self) -> None:
+            self.functions = {"ping": self.ping}
+
+        def ping(self) -> str:
+            """Return pong."""
+            return "pong"
+
+    first = _CustomInitTools()
+    second = _CustomInitTools()
+    assert first.function_finishing is None
+    assert first.tool_construction is None
+    assert toolkit_worker_stand_ins(first) is None
+    assert get_toolkit_construction(first) is None
+    assert toolkit_function_names(first) == ("ping",)
+
+    def stand_in(_name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
+        return entrypoint
+
+    construction = ToolConstruction("custom_init", None)
+    configure_toolkit_functions(first, offered=(), to_worker=stand_in)
+    bind_toolkit_construction(first, construction)
+
+    assert first.function_finishing is not None
+    assert first.tool_construction == construction
+    assert toolkit_function_names(first) == ()
+    assert toolkit_worker_stand_ins(first) is stand_in
+    assert get_toolkit_construction(first) == construction
+
+    assert second.function_finishing is None
+    assert second.tool_construction is None
+    assert toolkit_function_names(second) == ("ping",)
+    assert toolkit_worker_stand_ins(second) is None
+    assert get_toolkit_construction(second) is None

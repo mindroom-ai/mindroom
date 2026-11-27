@@ -323,7 +323,13 @@ class Fixture:
             if request["kind"] == "click":
                 return {"result": (await self.native("browser_click", target=request["ref"])).content}
             raise AssertionError(kwargs)
-        body = await self.execute("browser", "browser_control", kwargs)
+        browser_fn = (
+            "browser_read"
+            if kwargs.get("action")
+            in {"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"}
+            else "browser_control"
+        )
+        body = await self.execute("browser", browser_fn, kwargs)
         assert body["ok"], body
         return json.loads(body["result"])
 
@@ -783,7 +789,7 @@ with sync_playwright() as playwright:
                 await asyncio.sleep(0.2)
                 blocked = await fixture.execute(
                     fixture.args.provider,
-                    "browser_tabs" if fixture.args.provider == "browser_mcp" else "browser_control",
+                    "browser_tabs" if fixture.args.provider == "browser_mcp" else "browser_read",
                     {"action": "list" if fixture.args.provider == "browser_mcp" else "tabs"},
                 )
                 assert not blocked["ok"], blocked

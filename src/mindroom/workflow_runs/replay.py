@@ -21,7 +21,9 @@ TIMED_PREFIX = "timed:"
 OWNER_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
 NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
 RUN_ENDED = "The run ended before the agent did."
-OUT_OF_TIME = 'The run used its {hours:g} hours of working time. workflow(action="resume", run_id=...) continues it.'
+OUT_OF_TIME = (
+    'The run used its {hours:g} hours of working time. workflow_write(action="resume", run_id=...) continues it.'
+)
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
 CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
@@ -107,7 +109,7 @@ def indeterminate(node: WorkflowNode, said: object = None) -> Outcome:
     """Return the end of a call that may have run, with what its tool *said* when it failed after it was invoked."""
     message = (
         f"This call may already have run (attempt {node.attempt}). Check its effect; "
-        f'to run it again call workflow(action="resume", run_id=..., rerun=["n{node.seq}"]).'
+        f'to run it again call workflow_write(action="resume", run_id=..., rerun=["n{node.seq}"]).'
     )
     message = f"{said}\n\n{message}" if said else message
     return WorkflowNodeState.INDETERMINATE, None, {"kind": "indeterminate", "message": message}

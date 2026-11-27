@@ -77,7 +77,7 @@ def _context(tmp_path: Path) -> ToolRuntimeContext:
 
 async def _call(context: ToolRuntimeContext, **arguments: object) -> dict[str, object]:
     with patch("mindroom.custom_tools.matrix_api.logger.warning"), tool_runtime_context(context):
-        return json.loads(await MatrixApiTools().matrix_api(**arguments))
+        return json.loads(await MatrixApiTools().matrix_api_write(**arguments))
 
 
 @pytest.mark.asyncio

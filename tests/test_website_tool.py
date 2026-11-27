@@ -595,3 +595,27 @@ def test_website_reader_reads_only_uncompressed_pages_within_the_limit(
     with pytest.raises(PublicFetchError) as exc_info:
         _MindRoomWebsiteReader().read("https://example.com/")
     assert exc_info.value.code == code
+
+
+def test_website_tool_splits_long_pages_into_5000_char_chunks_preserving_json_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages longer than 5000 characters split on whitespace and keep exact JSON chunk metadata."""
+    start_url = "https://example.test/long"
+    words = " ".join(f"word{index:04d}" for index in range(1200))
+    assert len(words) > 5000
+    _serve(monkeypatch, lambda _url: _page(f"<main><p>{words}</p></main>"))
+
+    payload = json.loads(WebsiteTools().read_url(start_url))
+
+    assert len(payload) > 1
+    for expected_chunk, entry in enumerate(payload, start=1):
+        assert list(entry) == ["name", "meta_data", "content"]
+        assert entry["name"] == start_url
+        assert entry["meta_data"] == {
+            "url": start_url,
+            "chunk": expected_chunk,
+            "chunk_size": len(entry["content"]),
+        }
+        assert 0 < len(entry["content"]) <= 5000
+    assert "".join(entry["content"] for entry in payload) == words

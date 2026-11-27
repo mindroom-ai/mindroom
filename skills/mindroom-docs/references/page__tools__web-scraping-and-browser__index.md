@@ -330,19 +330,23 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 
 ### [`browser`]
 
-`browser` exposes one function, `browser_control(action=...)`, for multi-step browser sessions.
-It can drive two targets:
+`browser` exposes two functions for multi-step browser sessions:
+
+- `browser_read(action=...)` for read-only inspection and discovery (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions`).
+- `browser_control(action=...)` for lifecycle, navigation, and mutation (`start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act`).
+
+Both can drive two targets:
 
 - `target="host"` (default) controls MindRoom's own Chromium on the MindRoom host, or in the agent's worker when `browser` is listed in `worker_tools`.
 - `target="desktop"` controls the user's own signed-in Chrome or Brave profile through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/), which owns extension installation, the local control lease, and the trust model.
 
-Call `action="help"` or `action="actions"` to list the actions and `act` request kinds.
+Call `browser_read(action="help")` or `browser_read(action="actions")` to list the actions and `act` request kinds.
 
-| Action | Host | Desktop |
-| --- | --- | --- |
-| `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `snapshot`, `screenshot`, `console` | Yes | Yes |
-| `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act` | Yes | No |
-| `help`, `actions` | Yes | Yes |
+| Function | Action | Host | Desktop |
+| --- | --- | --- | --- |
+| `browser_read` | `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions` | Yes | Yes |
+| `browser_control` | `start`, `stop`, `open` | Yes | Yes |
+| `browser_control` | `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act` | Yes | No |
 
 On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
@@ -376,7 +380,7 @@ The page cannot load or navigate to other local files, and relative links in it 
 
 ```python
 browser_control(action="open", paths=["slides/deck.html"])
-browser_control(action="screenshot")
+browser_read(action="screenshot")
 ```
 
 #### Profiles and Signed-In Sessions
@@ -414,7 +418,7 @@ agents:
 ```python
 browser_control(action="start", target="desktop")
 browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
+browser_read(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 ## Related Docs

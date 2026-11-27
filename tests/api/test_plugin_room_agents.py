@@ -62,7 +62,7 @@ READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file"),
     "script": ("script_write",),
-    "workflow": ("workflow",),
+    "workflow": ("workflow_write",),
     "claude_agent": ("claude_agent_write",),
     "docker": ("docker_container", "docker_resource"),
 }
@@ -639,8 +639,10 @@ async def test_retired_stored_claude_agent_filters_fail_closed_and_block_workspa
         ),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats", None),
         ("attachments", {"exclude_tools": ["register_attachment"]}, "attachment", None),
-        ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers", None),
-        ("slack", {"exclude_tools": ["slack_watch"]}, "triggers", None),
+        ("triggers", {"exclude_tools": ["create_trigger"]}, "triggers_write", None),
+        ("triggers", {"exclude_tools": ["triggers"]}, "`triggers_read`, `triggers_write`", None),
+        ("slack", {"exclude_tools": ["slack_watch"]}, "triggers_write", None),
+        ("matrix_api", {"exclude_tools": ["matrix_api"]}, "`matrix_api_read`, `matrix_api_write`", None),
     ],
 )
 def test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits(
@@ -671,6 +673,22 @@ def test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits(
         assert expected_guidance in message
         assert "tool_approval.rules" in message
         assert "no per-action allowlist filter" not in message
+
+
+def test_retired_desktop_override_filter_fails_closed(tmp_path: Path) -> None:
+    """Authored desktop function filters naming retired `desktop` fail closed and name the split functions."""
+    paths = test_runtime_paths(tmp_path)
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=r"desktop\.exclude_tools: desktop.*`desktop_read`, `desktop_control`.*`run_desktop_shell`",
+    ):
+        get_tool_by_name(
+            "desktop",
+            paths,
+            tools=builtin_tool_registry(),
+            tool_config_overrides={"exclude_tools": ["desktop"]},
+            worker_target=None,
+        )
 
 
 @pytest.mark.asyncio

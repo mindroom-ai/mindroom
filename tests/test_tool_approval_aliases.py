@@ -61,11 +61,13 @@ def _config(
     tmp_path: Path,
     *rules: dict[str, object],
     plugins: list[str] | None = None,
+    desktop_pairing: str = "explicit_only",
 ) -> tuple[Config, RuntimePaths]:
     """Return a config with approval ``rules`` and ``plugins``, where ``rm_review.py`` is the rm review script."""
     runtime_paths = test_runtime_paths(tmp_path)
     (tmp_path / "rm_review.py").write_text(_RM_REVIEW, encoding="utf-8")
     config = Config(
+        defaults={"desktop_pairing": desktop_pairing},
         agents={"code": AgentConfig(display_name="Code", role="Write code")},
         tool_approval={"rules": list(rules)},
         plugins=plugins or [],

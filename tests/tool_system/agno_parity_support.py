@@ -23,7 +23,6 @@ from unittest.mock import patch
 import httpx
 from packaging.version import Version
 
-from mindroom.agents import build_agent_toolkit
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -40,6 +39,7 @@ from mindroom.tool_system.invocation import (
 )
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from tests.agno_parity import tool_argument_probes as probes

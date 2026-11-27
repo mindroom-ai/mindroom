@@ -19,11 +19,11 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from mindroom import agents
 from mindroom.api import config_lifecycle
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
@@ -353,7 +353,7 @@ def test_external_cancellation_and_user_limit_span_tokens(
         return current.requester_id
 
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[account]),
     )
@@ -405,7 +405,7 @@ def test_external_native_tools_keep_requester_identity(
         return current.requester_id
 
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[identity]),
     )
@@ -472,7 +472,7 @@ def test_external_security_change_between_admission_and_dispatch(
 
     monkeypatch.setattr(runtime.server, "_authenticate", disable_after_admission)
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[forbidden_tool]),
     )
@@ -507,7 +507,7 @@ def _assert_native_call_denied(client: TestClient, headers: dict[str, str], monk
         return "unexpected result"
 
     monkeypatch.setattr(
-        agents,
+        toolkit_builder,
         "build_agent_toolkit",
         lambda *_args, **_kwargs: Toolkit(name="calculator", tools=[account]),
     )

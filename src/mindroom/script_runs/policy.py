@@ -166,9 +166,9 @@ def _build_script_toolkits(
     config: Config,
     tool_entries: Sequence[EffectiveToolConfig],
 ) -> dict[str, Toolkit]:
-    # Imported lazily to keep script-run state imports independent of the agent/model graph.
-    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
+    # Imported lazily to keep script-run state imports independent of the toolkit-builder graph.
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
+    from mindroom.tool_system.toolkit_builder import build_agent_toolkit  # noqa: PLC0415
 
     tools = context.plugins.tools
     agent_tools = resolve_agent_tools(config, context.agent_name, tools)
