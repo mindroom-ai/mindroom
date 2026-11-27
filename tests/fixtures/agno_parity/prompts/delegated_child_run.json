@@ -254,89 +254,40 @@
                 "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {
@@ -615,89 +566,40 @@
                 "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {
@@ -1006,89 +908,40 @@
                 "description": "Self-contained task with context, constraints, and expected output."
               },
               "agent_name": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Allowed subagent name (omit/null selects yourself if allowed)."
               },
               "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Model name or name@level override (omit/null for default)."
               },
               "system_prompt": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Custom prompt replacing your role/instructions on a self-copy."
               },
               "tools": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your toolkits or toolkit.function entries (omit to keep all)."
               },
               "skills": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your skills (omit keeps all only if tools is also omitted)."
               },
               "knowledge": {
-                "anyOf": [
-                  {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
                 "description": "Subset of your knowledge base IDs (omit keeps all only if tools is also omitted)."
               },
               "profile": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge)."
               },
               "title": {

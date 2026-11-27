@@ -187,14 +187,7 @@
                 "description": "The name of the skill."
               },
               "reference_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "The filename of the reference document."
               },
               "mindroom_output_path": {
@@ -224,14 +217,7 @@
                 "description": "The name of the skill."
               },
               "script_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "The filename of the script."
               },
               "mindroom_output_path": {
@@ -304,102 +290,39 @@
                 "description": "Operation to run."
               },
               "task_id": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Task ID from `list` (`edit`/`cancel`)."
               },
               "message": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Trigger text (`create` required); include `@agent`/`@team` to mention responders."
               },
               "new_thread": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "boolean",
                 "description": "`create` required: `False` = current room/thread, `True` = fresh thread per fire (with `silent=True`, findings/failures post as a room-level root)."
               },
               "execute_at": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Future ISO 8601 datetime with time (or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "integer",
                 "description": "One-time delay in seconds (>= 1)."
               },
               "cron": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "5-field cron (`min hour day month weekday`) in `timezone`."
               },
               "description": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Short label (defaults to trimmed `message`)."
               },
               "timezone": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`)."
               },
               "history_limit": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "integer",
                 "description": "Max thread messages per fire (`0` = none; unset = unlimited)."
               },
               "clear_history_limit": {
@@ -407,25 +330,11 @@
                 "description": "`edit` only: set `True` to remove the history limit (unlimited)."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "boolean",
                 "description": "Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`)."
               },
               "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Per-run model alias or `name@level` (pass an empty string on `edit` to reset to default; conversation model unchanged)."
               },
               "mindroom_output_path": {
@@ -466,58 +375,23 @@
                 "description": "Skill directory name, lowercase and hyphenated."
               },
               "content": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Complete SKILL.md for create or edit."
               },
               "old_string": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Exact text to replace for patch; it must occur once unless replace_all is true."
               },
               "new_string": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Replacement text for patch; an empty string deletes the match."
               },
               "file_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Support file such as \"references/topic.md\" or \"scripts/check.sh\"; omit it to patch SKILL.md."
               },
               "file_content": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Complete support file content for write_file."
               },
               "replace_all": {
@@ -727,14 +601,7 @@
                 "description": "The name of the skill."
               },
               "reference_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "The filename of the reference document."
               },
               "mindroom_output_path": {
@@ -764,14 +631,7 @@
                 "description": "The name of the skill."
               },
               "script_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "The filename of the script."
               },
               "mindroom_output_path": {
@@ -844,102 +704,39 @@
                 "description": "Operation to run."
               },
               "task_id": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Task ID from `list` (`edit`/`cancel`)."
               },
               "message": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Trigger text (`create` required); include `@agent`/`@team` to mention responders."
               },
               "new_thread": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "boolean",
                 "description": "`create` required: `False` = current room/thread, `True` = fresh thread per fire (with `silent=True`, findings/failures post as a room-level root)."
               },
               "execute_at": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Future ISO 8601 datetime with time (or naive in `timezone`; pass offset during DST)."
               },
               "delay_seconds": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "integer",
                 "description": "One-time delay in seconds (>= 1)."
               },
               "cron": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "5-field cron (`min hour day month weekday`) in `timezone`."
               },
               "description": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Short label (defaults to trimmed `message`)."
               },
               "timezone": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "IANA timezone (default: agent timezone; legacy UTC cron edit also needs `cron`)."
               },
               "history_limit": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "integer",
                 "description": "Max thread messages per fire (`0` = none; unset = unlimited)."
               },
               "clear_history_limit": {
@@ -947,25 +744,11 @@
                 "description": "`edit` only: set `True` to remove the history limit (unlimited)."
               },
               "silent": {
-                "anyOf": [
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "boolean",
                 "description": "Hidden trigger; suppress empty, whitespace, or `NO_REPLY`-ending finals while findings/failures/tool messages stay visible (defaults to `False` on `create`)."
               },
               "model": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Per-run model alias or `name@level` (pass an empty string on `edit` to reset to default; conversation model unchanged)."
               },
               "mindroom_output_path": {
@@ -1006,58 +789,23 @@
                 "description": "Skill directory name, lowercase and hyphenated."
               },
               "content": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Complete SKILL.md for create or edit."
               },
               "old_string": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Exact text to replace for patch; it must occur once unless replace_all is true."
               },
               "new_string": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Replacement text for patch; an empty string deletes the match."
               },
               "file_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Support file such as \"references/topic.md\" or \"scripts/check.sh\"; omit it to patch SKILL.md."
               },
               "file_content": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "string",
                 "description": "Complete support file content for write_file."
               },
               "replace_all": {

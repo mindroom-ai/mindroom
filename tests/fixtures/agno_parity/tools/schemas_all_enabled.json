@@ -516,25 +516,11 @@
               "description": "Number of results to return."
             },
             "language": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Two-letter language code."
             },
             "country_code": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Two-letter country code."
             },
             "mindroom_output_path": {
@@ -571,14 +557,7 @@
               "description": "URL of the web resource to retrieve data from."
             },
             "num_of_reviews": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Number of reviews to retrieve."
             },
             "mindroom_output_path": {
@@ -625,14 +604,7 @@
               "description": "The URL to navigate to."
             },
             "connect_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
@@ -669,14 +641,7 @@
               "description": "Whether to capture the full page."
             },
             "connect_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
@@ -705,14 +670,7 @@
           "type": "object",
           "properties": {
             "connect_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "The connection URL from an existing session."
             },
             "mindroom_output_path": {
@@ -783,34 +741,13 @@
               ]
             },
             "start_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "end_date": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "email": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -846,54 +783,19 @@
               ]
             },
             "start_time": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "email": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "booking_uid": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "reason": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -957,14 +859,7 @@
               "description": "Cartesia catalog accent ID (e.g. `parisian`, `southern-us`, `general-american`)."
             },
             "voice_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Base voice ID; defaults to the configured `default_voice_id`."
             },
             "mindroom_output_path": {
@@ -1001,14 +896,7 @@
               "description": "Text to synthesize into speech."
             },
             "voice_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional voice ID; defaults to the configured `default_voice_id`."
             },
             "mindroom_output_path": {
@@ -1117,47 +1005,19 @@
           "type": "object",
           "properties": {
             "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Short single-line title (omit on update to keep original)."
             },
             "html": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Inline HTML/CSS/JS (pass `html` or `path`)."
             },
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Workspace-relative HTML file path (instead of `html`)."
             },
             "canvas_event_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Existing canvas event ID in this conversation to update in place."
             },
             "share_state": {
@@ -1173,34 +1033,20 @@
               "description": "Omit Chat styles/theme vars (per revision; re-pass on updates)."
             },
             "width": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Target viewport width in CSS px (320-2560; per revision; panel uses its own width)."
             },
             "libraries": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "chartjs",
-                      "d3",
-                      "mermaid",
-                      "katex"
-                    ]
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "chartjs",
+                  "d3",
+                  "mermaid",
+                  "katex"
+                ]
+              },
               "description": "Bundled libraries for this revision (re-pass on updates)."
             }
           },
@@ -1269,14 +1115,7 @@
               ]
             },
             "search_query": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1325,24 +1164,10 @@
               ]
             },
             "csv_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "row_limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1425,62 +1250,34 @@
               ]
             },
             "params": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "headers": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
             },
             "json_data": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1531,25 +1328,11 @@
               "description": "Read operation."
             },
             "guild_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Discord server ID."
             },
             "channel_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Discord channel ID."
             },
             "limit": {
@@ -1763,14 +1546,7 @@
               "description": "Sound effect description."
             },
             "duration_seconds": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "number",
               "description": "Optional duration in seconds (0.5-22)."
             },
             "mindroom_output_path": {
@@ -1892,14 +1668,7 @@
               "description": "Number of results to return. Defaults to 5."
             },
             "category": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
             },
             "mindroom_output_path": {
@@ -2030,18 +1799,11 @@
               "description": "Research instructions."
             },
             "output_schema": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {},
               "description": "JSON schema for structured output. If not provided, the API will auto-infer a schema."
             },
             "mindroom_output_path": {
@@ -2114,14 +1876,7 @@
               "description": "Text describing the desired edits."
             },
             "image_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "URL of the source image to edit."
             },
             "mindroom_output_path": {
@@ -2198,50 +1953,22 @@
               "description": "File payload matching `format`."
             },
             "filename": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional base filename; extension is appended when missing."
             },
             "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional document title (`pdf`, `docx`)."
             },
             "headers": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
               "description": "Optional column headers (`csv` list-of-rows input)."
             },
             "language": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional programming language (`code`)."
             },
             "mindroom_output_path": {
@@ -2284,25 +2011,11 @@
               "description": "File path (relative to working directory or absolute)."
             },
             "offset": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Starting line number (1-based). Use this to paginate through large files."
             },
             "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Maximum number of lines to return. Defaults to 2000."
             }
           },
@@ -2395,25 +2108,11 @@
               "description": "Regex pattern (or literal string if literal=True) to search for."
             },
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Directory or file to search in. Defaults to working directory."
             },
             "glob": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "File glob pattern to filter (e.g., \"*.py\", \"*.ts\")."
             },
             "ignore_case": {
@@ -2462,14 +2161,7 @@
               "description": "Glob pattern (e.g., \"*.py\", \"**/*.ts\", \"src/**/*.jsx\")."
             },
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Directory to search in. Defaults to working directory."
             },
             "limit": {
@@ -2502,14 +2194,7 @@
           "type": "object",
           "properties": {
             "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Directory to list. Defaults to working directory."
             },
             "limit": {
@@ -2595,14 +2280,7 @@
               "description": "The URL to crawl."
             },
             "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "The maximum number of pages to crawl. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
@@ -2664,14 +2342,7 @@
               "description": "The query to search for."
             },
             "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "The maximum number of results to return. Defaults to the limit set on the toolkit."
             },
             "mindroom_output_path": {
@@ -3221,25 +2892,11 @@
               "description": "Query to search for."
             },
             "depth": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "(deep|standard) Depth of the search. Defaults to 'standard'."
             },
             "output_type": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "(sourcedAnswer|searchResults) Type of output. Defaults to 'searchResults'."
             },
             "mindroom_output_path": {
@@ -3300,26 +2957,19 @@
               "description": "Output aspect ratio."
             },
             "keyframes": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {
-                      "type": "string"
-                    }
-                  }
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
                 },
-                {
-                  "type": "null"
+                "additionalProperties": {
+                  "type": "string"
                 }
-              ],
+              },
               "description": "Optional raw keyframe mapping (e.g. `{\"frame0\": {\"type\": \"image\", \"url\": \"...\"}}`)."
             },
             "mindroom_output_path": {
@@ -3356,14 +3006,7 @@
               "description": "URL of the starting image."
             },
             "end_image_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional URL of the ending image."
             },
             "loop": {
@@ -3430,14 +3073,7 @@
               ]
             },
             "query": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3617,14 +3253,7 @@
               "description": "Input `.srt` subtitle path."
             },
             "output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional output video path (defaults to `<video_stem>_captioned.mp4` beside input)."
             },
             "font_size": {
@@ -3830,44 +3459,16 @@
               ]
             },
             "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "tag": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "content": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "page_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4018,24 +3619,10 @@
               ]
             },
             "symbol": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "company_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "num_stories": {
               "type": "integer"
@@ -4140,18 +3727,11 @@
               "type": "string"
             },
             "function_parameters": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4186,18 +3766,11 @@
               "type": "string"
             },
             "operation_parameters": {
-              "anyOf": [
-                {
-                  "type": "object",
-                  "propertyNames": {
-                    "type": "string"
-                  },
-                  "additionalProperties": {}
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4239,14 +3812,7 @@
               "type": "string"
             },
             "max_results": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -4894,14 +4460,7 @@
               "description": "Output lines to return."
             },
             "timeout": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Stop command + process group after N seconds (<= 120 inline; null/> 120 backgrounds at 120s)."
             },
             "mindroom_output_path": {
@@ -4975,14 +4534,7 @@
               "description": "The query to search the web with."
             },
             "max_results": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
             },
             "mindroom_output_path": {
@@ -5044,14 +4596,7 @@
               "description": "The URL of the webpage to crawl."
             },
             "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "The maximum number of pages to crawl. Defaults to 10."
             },
             "mindroom_output_path": {
@@ -5099,14 +4644,7 @@
               ]
             },
             "table_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5137,14 +4675,7 @@
               "type": "string"
             },
             "limit": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5272,14 +4803,7 @@
               "description": "Read operation."
             },
             "file_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Telegram file ID for `get_file`."
             },
             "mindroom_output_path": {
@@ -5321,58 +4845,23 @@
               "description": "Send operation."
             },
             "message": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Text content for `message`."
             },
             "media_base64": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Base64-encoded media bytes for non-text actions (local paths are not supported)."
             },
             "filename": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Display filename for `document`."
             },
             "caption": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional caption for `photo`, `document`, `video`, `audio`, or `animation`."
             },
             "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional track title for `audio`."
             },
             "mindroom_output_path": {
@@ -5415,25 +4904,11 @@
               "description": "Target Telegram message ID."
             },
             "text": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Replacement text for `edit`."
             },
             "emoji": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Reaction emoji for `react`."
             },
             "disable_notification": {
@@ -5485,14 +4960,7 @@
               "description": "The URL to extract content from."
             },
             "output_format": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
             },
             "mindroom_output_path": {
@@ -5711,14 +5179,7 @@
               "description": "Read operation."
             },
             "call_sid": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Call SID."
             },
             "limit": {
@@ -5774,36 +5235,15 @@
               "description": "Operation to run."
             },
             "query": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Search keywords (`search` required, `random` optional)."
             },
             "photo_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Unsplash photo ID (`get`, `download`)."
             },
             "count": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "integer",
               "description": "Result count (`search` per_page default 10, `random` default 1; clamped to 1-30)."
             },
             "page": {
@@ -6021,78 +5461,43 @@
               "description": "Primary chart dataset (dict, list, or JSON string)."
             },
             "x_data": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      }
-                    ]
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
                   }
-                },
-                {
-                  "type": "null"
-                }
-              ],
+                ]
+              },
               "description": "X-axis numeric series (`scatter`)."
             },
             "y_data": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "anyOf": [
-                      {
-                        "type": "integer"
-                      },
-                      {
-                        "type": "number"
-                      }
-                    ]
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
                   }
-                },
-                {
-                  "type": "null"
-                }
-              ],
+                ]
+              },
               "description": "Y-axis numeric series (`scatter`)."
             },
             "title": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional chart title."
             },
             "x_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional X-axis label."
             },
             "y_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional Y-axis label."
             },
             "bins": {
@@ -6100,14 +5505,7 @@
               "description": "Histogram bin count (default 10)."
             },
             "filename": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional plain filename (no directory components); defaults to `<type>_<n>.png`."
             },
             "mindroom_output_path": {
@@ -6235,25 +5633,11 @@
               "description": "Message type to send."
             },
             "recipient": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Recipient WhatsApp ID or phone number; defaults to configured `recipient_waid`."
             },
             "text": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Message text."
             },
             "preview_url": {
@@ -6261,14 +5645,7 @@
               "description": "Show link previews (`text`)."
             },
             "template_name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Approved template name (`template`)."
             },
             "language_code": {
@@ -6276,196 +5653,126 @@
               "description": "Template locale, e.g. `en_US`."
             },
             "components": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
+              "type": "array",
+              "items": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
                 },
-                {
-                  "type": "null"
-                }
-              ],
+                "additionalProperties": {}
+              },
               "description": "Optional template components (`template`)."
             },
             "buttons": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "description": "A quick-reply button.",
-                    "properties": {
-                      "id": {
-                        "description": "Unique button identifier (e.g. 'yes', 'no').",
-                        "title": "Id",
-                        "type": "string"
-                      },
-                      "title": {
-                        "description": "Button display text, max 20 characters.",
-                        "title": "Title",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "id",
-                      "title"
-                    ],
-                    "title": "ReplyButton",
-                    "type": "object"
+              "type": "array",
+              "items": {
+                "description": "A quick-reply button.",
+                "properties": {
+                  "id": {
+                    "description": "Unique button identifier (e.g. 'yes', 'no').",
+                    "title": "Id",
+                    "type": "string"
+                  },
+                  "title": {
+                    "description": "Button display text, max 20 characters.",
+                    "title": "Title",
+                    "type": "string"
                   }
                 },
-                {
-                  "type": "null"
-                }
-              ],
+                "required": [
+                  "id",
+                  "title"
+                ],
+                "title": "ReplyButton",
+                "type": "object"
+              },
               "description": "1-3 quick-reply buttons (`reply_buttons`)."
             },
             "button_text": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "List button label, max 20 chars (`list`)."
             },
             "sections": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "description": "A titled section containing selectable rows.",
-                    "properties": {
-                      "title": {
-                        "description": "Section heading.",
-                        "title": "Title",
-                        "type": "string"
-                      },
-                      "rows": {
-                        "description": "Selectable rows in this section.",
-                        "items": {
-                          "description": "A selectable row inside a list section.",
-                          "properties": {
-                            "id": {
-                              "description": "Unique row identifier.",
-                              "title": "Id",
-                              "type": "string"
-                            },
-                            "title": {
-                              "description": "Row title text.",
-                              "title": "Title",
-                              "type": "string"
-                            },
-                            "description": {
-                              "anyOf": [
-                                {
-                                  "type": "string"
-                                },
-                                {
-                                  "type": "null"
-                                }
-                              ],
-                              "default": null,
-                              "description": "Optional row description.",
-                              "title": "Description"
-                            }
-                          },
-                          "required": [
-                            "id",
-                            "title"
-                          ],
-                          "title": "ListRow",
-                          "type": "object"
+              "type": "array",
+              "items": {
+                "description": "A titled section containing selectable rows.",
+                "properties": {
+                  "title": {
+                    "description": "Section heading.",
+                    "title": "Title",
+                    "type": "string"
+                  },
+                  "rows": {
+                    "description": "Selectable rows in this section.",
+                    "items": {
+                      "description": "A selectable row inside a list section.",
+                      "properties": {
+                        "id": {
+                          "description": "Unique row identifier.",
+                          "title": "Id",
+                          "type": "string"
                         },
-                        "title": "Rows",
-                        "type": "array"
-                      }
+                        "title": {
+                          "description": "Row title text.",
+                          "title": "Title",
+                          "type": "string"
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "default": null,
+                          "description": "Optional row description.",
+                          "title": "Description"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "title"
+                      ],
+                      "title": "ListRow",
+                      "type": "object"
                     },
-                    "required": [
-                      "title",
-                      "rows"
-                    ],
-                    "title": "ListSection",
-                    "type": "object"
+                    "title": "Rows",
+                    "type": "array"
                   }
                 },
-                {
-                  "type": "null"
-                }
-              ],
+                "required": [
+                  "title",
+                  "rows"
+                ],
+                "title": "ListSection",
+                "type": "object"
+              },
               "description": "1-10 list sections with <=10 total rows (`list`)."
             },
             "header": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional interactive header text (`reply_buttons`, `list`)."
             },
             "footer": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional interactive footer text (`reply_buttons`, `list`)."
             },
             "media_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Public URL for `image` or `document`."
             },
             "media_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "WhatsApp media ID for `image` or `document`."
             },
             "filename": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Display filename for `document`."
             },
             "caption": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional caption for `image` or `document`."
             },
             "latitude": {
@@ -6497,47 +5804,19 @@
               "description": "Location longitude (`location`)."
             },
             "name": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional location name (`location`)."
             },
             "address": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Optional location address (`location`)."
             },
             "message_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Target WhatsApp message ID (`reaction`)."
             },
             "emoji": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "description": "Reaction emoji; an empty string removes the reaction."
             },
             "mindroom_output_path": {
@@ -6639,14 +5918,7 @@
               "type": "string"
             },
             "period": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "interval": {
               "type": "string"
@@ -6838,14 +6110,7 @@
               ]
             },
             "query": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "type": "string"
             },
             "search_scope": {
               "type": "string",
