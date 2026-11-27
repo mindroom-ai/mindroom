@@ -1495,17 +1495,20 @@ def _stub_slice_systemd(
             return f"/usr/bin/{name}"
         return real_which(name, *args, **kwargs)  # type: ignore[arg-type]
 
-    def fake_popen(cmd: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+    def fake_popen(cmd: object, *args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        if not (isinstance(cmd, (list, tuple)) and cmd and Path(str(cmd[0])).name == "systemd-run"):
+            return real_popen(cmd, *args, **kwargs)  # type: ignore[call-overload]
+        cmd_list = [str(part) for part in cmd]
         cmd_env = dict(kwargs.get("env") or {})  # type: ignore[arg-type]
-        spawns.append((list(cmd), cmd_env))
-        if callable(fail_on) and fail_on(cmd):
+        spawns.append((cmd_list, cmd_env))
+        if callable(fail_on) and fail_on(cmd_list):
             return real_popen(
                 [sys.executable, "-c", "import sys; sys.stderr.write('systemd-run failed\n'); sys.exit(1)"],
                 stdin=kwargs.get("stdin"),  # type: ignore[arg-type]
                 stdout=kwargs.get("stdout"),  # type: ignore[arg-type]
                 stderr=kwargs.get("stderr"),  # type: ignore[arg-type]
             )
-        child_argv = cmd[cmd.index("--") + 1 :]
+        child_argv = cmd_list[cmd_list.index("--") + 1 :]
         return real_popen(
             child_argv,
             stdin=kwargs.get("stdin"),  # type: ignore[arg-type]
@@ -1514,11 +1517,12 @@ def _stub_slice_systemd(
             env=cmd_env,
         )
 
-    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        if cmd and Path(cmd[0]).name == "systemctl":
-            stops.append((list(cmd), dict(kwargs.get("env") or {})))  # type: ignore[arg-type]
-            return subprocess.CompletedProcess(cmd, 0)
-        return real_run(cmd, **kwargs)  # type: ignore[call-overload]
+    def fake_run(cmd: object, *args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if isinstance(cmd, (list, tuple)) and cmd and Path(str(cmd[0])).name == "systemctl":
+            cmd_list = [str(part) for part in cmd]
+            stops.append((cmd_list, dict(kwargs.get("env") or {})))  # type: ignore[arg-type]
+            return subprocess.CompletedProcess(cmd_list, 0)
+        return real_run(cmd, *args, **kwargs)  # type: ignore[call-overload]
 
     monkeypatch.setattr(shell_supervisor.shutil, "which", fake_which)
     monkeypatch.setattr(shell_supervisor.subprocess, "Popen", fake_popen)
@@ -1554,7 +1558,9 @@ async def test_slice_manager_reuses_supervisor_unsets_slice_env_and_handles_conf
         assert not any(Path(arg).name in {"chrt", "ionice"} for arg in cmd)
         assert manager._supervisor is not None
         unit_name = manager._supervisor.unit_name
-        assert unit_name == f"{manager._supervisor.runtime_dir.name}.scope"
+        assert (
+            unit_name == f"mindroom-shell-supervisor-{manager._supervisor.runtime_dir.name.removeprefix('mrsh-')}.scope"
+        )
 
         # Config mismatch falls back to None without killing the live supervisor.
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "other.slice")
@@ -1961,6 +1967,27 @@ def _live_systemd_runtime_dir() -> str:
     )
     if live_xdg is None:
         pytest.skip("requires a live systemd --user runtime directory")
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None:
+        pytest.skip("requires systemd-run")
+    probe = subprocess.run(
+        [
+            systemd_run,
+            "--user",
+            "--scope",
+            "--quiet",
+            "--property=OOMPolicy=continue",
+            "--slice=app.slice",
+            "--",
+            "true",
+        ],
+        capture_output=True,
+        timeout=5,
+        check=False,
+        env={"XDG_RUNTIME_DIR": live_xdg, "PATH": os.environ.get("PATH", "")},
+    )
+    if probe.returncode != 0:
+        pytest.skip("requires a live systemd --user bus supporting --property=OOMPolicy=continue on app.slice")
     return live_xdg
 
 
@@ -1981,8 +2008,7 @@ async def test_live_systemd_slice_supervisor_reuse_priority_and_env(
     monkeypatch.setenv("XDG_RUNTIME_DIR", _live_systemd_runtime_dir())
     monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
     monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
-    if await ensure_slice_shell_supervisor_async() is None:
-        pytest.skip("requires a live systemd --user bus supporting --property=OOMPolicy=continue")
+    assert await ensure_slice_shell_supervisor_async() is not None
 
     self_cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
     tool = _get_toolkit(tmp_path)
@@ -2031,8 +2057,7 @@ async def test_live_systemd_slice_supervisor_sigkill_grandchild_and_outage_recov
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_link))
         monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
         monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "app.slice")
-        if await ensure_slice_shell_supervisor_async() is None:
-            pytest.skip("requires a live systemd --user bus supporting --property=OOMPolicy=continue")
+        assert await ensure_slice_shell_supervisor_async() is not None
 
         self_cgroup = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
         tool = _get_toolkit(tmp_path)

@@ -809,9 +809,9 @@ class _SliceShellSupervisorManager:
         runtime_dir: Path | None = None
         unit_name: str | None = None
         try:
-            runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-supervisor-"))
-            socket_path, stderr_path = str(runtime_dir / "supervisor.sock"), runtime_dir / "supervisor.err"
-            unit_name = f"{runtime_dir.name}.scope"
+            runtime_dir = Path(tempfile.mkdtemp(prefix="mrsh-"))
+            socket_path, stderr_path = str(runtime_dir / "s.sock"), runtime_dir / "supervisor.err"
+            unit_name = f"mindroom-shell-supervisor-{runtime_dir.name.removeprefix('mrsh-')}.scope"
             child_argv = [sys.executable, "-m", "mindroom.shell.supervisor", socket_path]
             cmd = [
                 str(Path(systemd_run).absolute()),
