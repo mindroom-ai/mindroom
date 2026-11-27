@@ -390,7 +390,7 @@ def test_each_resolver_picks_the_pinned_workspace(
 def test_a_tool_without_a_base_dir_runs_in_the_agent_workspace(tmp_path: Path, scope: str | None, agent: str) -> None:
     """A tool that declares no base_dir and gets no workspace env still runs its subprocess in the agent's workspace."""
     shape = _shape(tmp_path, scope=scope, agent=agent, client_base_dir="none")
-    request = ExecuteRequest(**shape.execute_payload("calculator", "add"))
+    request = ExecuteRequest(**shape.execute_payload("calculator", "calculate"))
     route = sandbox_runner._prepare_route_with_config(
         request,
         runtime_paths=shape.runtime_paths,

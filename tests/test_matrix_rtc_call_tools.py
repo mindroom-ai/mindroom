@@ -393,11 +393,11 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     config = bind_runtime_paths(
         Config(
             agents={
-                AGENT: AgentConfig(display_name="Helper", tools=["calculator"], delegate_to=["other"]),
+                AGENT: AgentConfig(display_name="Helper", tools=["calculator", "sleep"], delegate_to=["other"]),
                 "other": AgentConfig(display_name="Other"),
             },
             models={"default": ModelConfig(provider="ollama", id="test")},
-            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")]),
+            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="calculate", action="require_approval")]),
             background_tool_jobs=BackgroundToolJobsConfig(enabled=jobs),
         ),
         runtime_paths,
@@ -414,8 +414,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     assert system_text(prompt_for_turn(call_build)) == system_text(
         prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
     )
-    assert chat_functions["add"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
-    add = call_functions["add"]
+    assert chat_functions["calculate"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
+    add = call_functions["calculate"]
     assert add.gate is None
     # Chat runs a subagent call as its job with jobs on, else pauses for the native driver; a call runs it directly.
     assert chat_functions["run_subagent"].gate is (None if jobs else ToolGate.DELEGATION)
@@ -434,20 +434,20 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     with recording_tool_calls(_Recorder()):
         refused = await run_tool_call(
             add,
-            {"a": 1, "b": 2},
+            {"action": "add", "a": 1, "b": 2},
             _CALL_CONTEXT,
             middleware=agent_tool_middleware(call_build),
         )
-        subtracted = await run_tool_call(
-            call_functions["subtract"],
-            {"a": 3, "b": 1},
+        slept = await run_tool_call(
+            call_functions["sleep"],
+            {"seconds": 0},
             _CALL_CONTEXT,
             middleware=agent_tool_middleware(call_build),
         )
 
     assert refused.value == _TEXT_CHAT_REQUIRED_MESSAGE
-    assert '"result": 2' in str(subtracted.value)
-    assert started == ["subtract"]
+    assert "Slept for 0 seconds" in str(slept.value)
+    assert started == ["sleep"]
     # The call refuses only what needs text chat; its delegation goes on to run the child turn.
     refuse = call_build.tool_policy[0]
 
@@ -2318,8 +2318,10 @@ async def test_build_call_tools_hides_the_knowledge_search_when_it_needs_approva
 async def test_build_call_tools_hides_functions_needing_text_chat(tmp_path: Path) -> None:
     """A function an approval rule may gate never enters the voice schema; its toolkit's other functions do."""
     runtime_paths = test_runtime_paths(tmp_path)
-    config = _ollama_config(runtime_paths, tools=["calculator"])
-    config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")])
+    config = _ollama_config(runtime_paths, tools=["hackernews"])
+    config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="get_top_hackernews_stories", action="require_approval")],
+    )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -2332,8 +2334,8 @@ async def test_build_call_tools_hides_functions_needing_text_chat(tmp_path: Path
     )
 
     names = _tool_names(tooling.tools)
-    assert "add" not in names
-    assert "subtract" in names
+    assert "get_top_hackernews_stories" not in names
+    assert "get_user_details" in names
 
 
 @pytest.mark.asyncio

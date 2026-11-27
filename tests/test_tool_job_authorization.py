@@ -94,14 +94,14 @@ def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str)
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "add" in toolkit_function_names(toolkit)
+    assert "calculate" in toolkit_function_names(toolkit)
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:
         return locally_allowed(
             config,
             _OWNER,
-            tool_name="add",
+            tool_name="calculate",
             toolkit_name=entry.name,
             origin={},
             depth=0,
@@ -167,10 +167,10 @@ def test_constructor_identity_is_a_digest_with_separate_function_filters() -> No
 
 
 def _calculator_authority(config: Config) -> dict[str, object]:
-    def add() -> None:
+    def calculate() -> None:
         return None
 
-    toolkit = Toolkit(name="calculator", tools=[add])
+    toolkit = Toolkit(name="calculator", tools=[calculate])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
@@ -182,7 +182,7 @@ def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
     return locally_allowed(
         config,
         _OWNER,
-        tool_name="add",
+        tool_name="calculate",
         toolkit_name="calculator",
         origin={},
         depth=0,
@@ -197,8 +197,8 @@ def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
         pytest.param({}, True, id="absent"),
         pytest.param({"include_tools": None}, True, id="null"),
         pytest.param({"include_tools": []}, False, id="empty"),
-        pytest.param({"include_tools": ["add"]}, True, id="allowed"),
-        pytest.param({"include_tools": ["subtract"]}, False, id="denied"),
+        pytest.param({"include_tools": ["get_top_hackernews_stories"]}, True, id="allowed"),
+        pytest.param({"include_tools": ["get_user_details"]}, False, id="denied"),
     ],
 )
 def test_authored_include_policy_matches_real_toolkit_surface(
@@ -211,7 +211,7 @@ def test_authored_include_policy_matches_real_toolkit_surface(
         agents={
             "lead": AgentConfig(
                 display_name="Lead",
-                tools=[ToolConfigEntry(name="calculator", defer=True, overrides=overrides)],
+                tools=[ToolConfigEntry(name="hackernews", defer=True, overrides=overrides)],
             ),
         },
     )
@@ -219,16 +219,29 @@ def test_authored_include_policy_matches_real_toolkit_surface(
         entry for entry in resolve_agent_tools(config, "lead", builtin_tool_registry()).facts.authored if entry.defer
     )
     toolkit = get_tool_by_name(
-        "calculator",
+        "hackernews",
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         tool_config_overrides=effective.tool_config_overrides,
         runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
-    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
-    assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
+    assert ("get_top_hackernews_stories" in toolkit_function_names(toolkit)) is expected_allowed
+    assert (
+        locally_allowed(
+            config,
+            _OWNER,
+            tool_name="get_top_hackernews_stories",
+            toolkit_name="hackernews",
+            origin={},
+            depth=0,
+            authority=authority,
+            tools=builtin_tool_registry(),
+        )
+        is expected_allowed
+    )
 
 
 @pytest.mark.parametrize(
@@ -246,7 +259,7 @@ def test_nullable_authored_exclusion_matches_inherited_toolkit_surface(
     """A null authored exclusion clears the inherited denylist without crashing authorization."""
     config = Config(
         defaults=DefaultsConfig(
-            tools=[ToolConfigEntry(name="calculator", overrides={"exclude_tools": ["add"]})],
+            tools=[ToolConfigEntry(name="calculator", overrides={"exclude_tools": ["calculate"]})],
         ),
         agents={
             "lead": AgentConfig(
@@ -267,7 +280,7 @@ def test_nullable_authored_exclusion_matches_inherited_toolkit_surface(
         tools=builtin_tool_registry(),
     )
 
-    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
+    assert ("calculate" in toolkit_function_names(toolkit)) is expected_allowed
     assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
 
 
@@ -481,10 +494,10 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
     )
     owner = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
 
-    def add() -> None:
+    def calculate() -> None:
         return None
 
-    toolkit = Toolkit(name="calculator", tools=[add])
+    toolkit = Toolkit(name="calculator", tools=[calculate])
     bind_toolkit_construction(
         toolkit,
         ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
@@ -495,7 +508,7 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
         return locally_allowed(
             config,
             owner,
-            tool_name="add",
+            tool_name="calculate",
             toolkit_name="calculator",
             origin={},
             depth=0,
@@ -504,7 +517,9 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
         )
 
     assert allowed()
-    config.agents["lead"].tools = [ToolConfigEntry(name="calculator", defer=True, overrides={"exclude_tools": ["add"]})]
+    config.agents["lead"].tools = [
+        ToolConfigEntry(name="calculator", defer=True, overrides={"exclude_tools": ["calculate"]}),
+    ]
     assert not allowed()
     config.agents["lead"].tools = [ToolConfigEntry(name="calculator", defer=True)]
     assert allowed()

@@ -763,7 +763,7 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     seen: _Sink,
 ) -> None:
     """A child's run reaches the sink as it starts, with its tool and words, and finally with its result."""
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
@@ -776,7 +776,7 @@ async def test_a_delegated_child_reports_running_text_tools_then_completed(
     assert last.result_preview == "Three"
     assert [item.kind for item in last.items] == ["tool", "text"]
     assert last.items[0].tool is not None
-    assert (last.items[0].tool.tool_name, last.items[0].state) == ("add", "done")
+    assert (last.items[0].tool.tool_name, last.items[0].state) == ("calculate", "done")
     assert _text(last) == "Three"
     assert (last.caller_agent_name, last.agent_name) == ("leader", "child")
     assert (last.task, last.title) == ("Add one and two", "Add numbers")
@@ -793,7 +793,7 @@ async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_f
     """The caller's progress and the feed row agree on when a call started, and the feed row records ended_at."""
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
@@ -807,7 +807,7 @@ async def test_a_childs_progress_reports_compact_tool_lines_and_timestamps_its_f
     assert abs(time.time() - started_at) < 60
     assert ended_at >= started_at
     expected = datetime.fromtimestamp(started_at, UTC).strftime("%H:%M:%S")
-    assert reports[0] == f"\nCalling add (started {expected} UTC)\n"
+    assert reports[0] == f"\nCalling calculate (started {expected} UTC)\n"
 
 
 @pytest.mark.asyncio
@@ -821,7 +821,11 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: next(clock)))
     reports: list[str] = []
     monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), calls(tool_call("add", "add", a=3, b=4)), answer("Done")]
+    child_turns = [
+        calls(tool_call("calculate", "add", action="add", a=1, b=2)),
+        calls(tool_call("calculate", "add", action="add", a=3, b=4)),
+        answer("Done"),
+    ]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
@@ -831,7 +835,7 @@ async def test_a_completed_call_forgets_its_start_so_a_reused_call_id_starts_ane
     (tool_item,) = (item for item in last.items if item.kind == "tool")
     assert tool_item.started_at == 200.0
     assert tool_item.ended_at is not None
-    assert reports[-1] == "\nCalling add (started 00:01:40 UTC)\n\nCalling add (started 00:03:20 UTC)\nDone"
+    assert reports[-1] == "\nCalling calculate (started 00:01:40 UTC)\n\nCalling calculate (started 00:03:20 UTC)\nDone"
 
 
 @pytest.mark.asyncio
@@ -874,7 +878,7 @@ async def test_a_child_stays_on_time_while_the_sink_is_slow(tmp_path: Path, monk
     """A sink that takes a long time per snapshot never fails the child or its caller; the sink still gets the end."""
     seen = _Sink(delay=0.3)
     monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: seen)
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
 
     with tool_runtime_context(runtime):
@@ -957,7 +961,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     In an encrypted room every frame goes out encrypted.
     """
     room = FrameRoom(encrypted=encrypted)
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
     config.models["default"] = ModelConfig(provider="anthropic", id="claude-opus-5-5", display_name="Opus 5.5")
     context, _bot = _in_room(runtime, room)
@@ -977,7 +981,7 @@ async def test_a_delegated_child_streams_frames_to_its_room(
     assert (last["meta"]["status"], last["meta"]["result"]) == ("completed", "Three")
     assert last["snapshot"]["md"].endswith("Three")
     [add] = last["snapshot"]["tools"]
-    assert add["tool_name"] == "add"
+    assert add["tool_name"] == "calculate"
     sent = [call.args[2] for call in room.client.room_send_ephemeral.await_args_list]
     assert len(sent) == len(frames)
     assert all(("encrypted" in content) is encrypted for content in sent)
@@ -1005,7 +1009,7 @@ async def test_subagent_frame_meta_counts_usage_over_requests(tmp_path: Path, mo
 
     first_words, *rest = answer("Three", usage(50, 5))
     child_turns = [
-        calls(tool_call("add", "add", a=1, b=2), metrics=usage(100, 10)),
+        calls(tool_call("calculate", "add", action="add", a=1, b=2), metrics=usage(100, 10)),
         [first_words, Await(first_request_shown), *rest],
     ]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
@@ -1028,7 +1032,10 @@ async def test_subagent_usage_prices_the_run_model(
 ) -> None:
     """A run on a priced model reports what its requests cost at the deployment's prices, as its settlement does."""
     requests = [usage(100, 10), usage(50, 5)]
-    child_turns = [calls(tool_call("add", "add", a=1, b=2), metrics=requests[0]), answer("Three", requests[1])]
+    child_turns = [
+        calls(tool_call("calculate", "add", action="add", a=1, b=2), metrics=requests[0]),
+        answer("Three", requests[1]),
+    ]
     priced = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=1, output=2))
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns, child_model=priced)
     answered_by = model_identity(config.models["default"])
@@ -1105,16 +1112,16 @@ async def test_a_child_stopped_during_a_tool_call_ends_with_the_usage_of_its_end
     """A run cancelled while a tool runs reaches no further request, and its end still names what it used and cost."""
     running = asyncio.Event()
 
-    async def add(_self: object, a: float, b: float) -> str:  # noqa: ARG001
+    async def calculate(_self: object, action: str, a: float, b: float | None = None) -> str:  # noqa: ARG001
         """Never return."""
         running.set()
         await asyncio.Event().wait()
         return ""
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
     request = usage(100, 10)
     priced = ModelConfig(provider="openai", id="gpt-6-astra", pricing=ModelPricing(input=1, output=2))
-    child_turns = [calls(tool_call("add", "add", a=1, b=2), metrics=request)]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2), metrics=request)]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns, child_model=priced)
 
     with tool_runtime_context(runtime):
@@ -1143,7 +1150,7 @@ async def test_a_turn_a_childs_tool_runs_does_not_erase_the_usage_of_the_stopped
     """
     running = asyncio.Event()
 
-    async def add(_self: object, a: float, b: float) -> str:  # noqa: ARG001
+    async def calculate(_self: object, action: str, a: float, b: float | None = None) -> str:  # noqa: ARG001
         """Run a turn of another agent in this context, then never return."""
         helper = replace(
             make_turn_context("grandchild", session_id="helper-session", run_id="helper-run"),
@@ -1156,11 +1163,11 @@ async def test_a_turn_a_childs_tool_runs_does_not_erase_the_usage_of_the_stopped
         await asyncio.Event().wait()
         return ""
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
     turn, runtime, paths, config = _delegating_turn(
         tmp_path,
         monkeypatch,
-        [calls(tool_call("add", "add", a=1, b=2), metrics=usage(100, 10))],
+        [calls(tool_call("calculate", "add", action="add", a=1, b=2), metrics=usage(100, 10))],
         grandchild_turns=[answer("Helped", usage(7, 3))],
     )
 
@@ -1217,7 +1224,7 @@ async def test_nested_child_previews_follow_the_root_turn(
         calls(tool_call("run_subagent", "nested", agent_name="grandchild", task="Add one and two")),
         answer("Child done"),
     ]
-    grandchild_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    grandchild_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(
         tmp_path,
         monkeypatch,
@@ -1235,7 +1242,7 @@ async def test_nested_child_previews_follow_the_root_turn(
     assert (grandchild[-1]["meta"]["parent"], grandchild[-1]["meta"]["root"]) == (child[-1]["run"], "leader")
     [delegated] = child[-1]["snapshot"]["tools"]
     [add] = grandchild[-1]["snapshot"]["tools"]
-    assert (delegated["tool_name"], add["tool_name"]) == ("run_subagent", "add")
+    assert (delegated["tool_name"], add["tool_name"]) == ("run_subagent", "calculate")
     assert ("args_preview" in delegated, "args_preview" in add, "result_preview" in add) == (shown, shown, shown)
     assert ("_preview" in json.dumps(grandchild)) is shown
 
@@ -1245,7 +1252,7 @@ async def test_nested_child_previews_follow_the_root_turn(
 async def test_root_turn_hiding_tools_hides_child_previews(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A turn in the room that hides its tool calls streams its child's tool rows by name only."""
     room = FrameRoom()
-    child_turns = [calls(tool_call("add", "add", a=1, b=2)), answer("Three")]
+    child_turns = [calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")]
     turn, runtime, paths, config = _delegating_turn(tmp_path, monkeypatch, child_turns)
     context, _bot = _in_room(runtime, room, shown=False)
 
@@ -1254,7 +1261,7 @@ async def test_root_turn_hiding_tools_hides_child_previews(tmp_path: Path, monke
 
     assert result.text.endswith("Done")
     frames = await _run_frames(room)
-    assert [tool["tool_name"] for tool in frames[-1]["snapshot"]["tools"]] == ["add"]
+    assert [tool["tool_name"] for tool in frames[-1]["snapshot"]["tools"]] == ["calculate"]
     assert "_preview" not in json.dumps(frames)
 
 

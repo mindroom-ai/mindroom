@@ -16,7 +16,7 @@ import pytest
 
 from mindroom.ai import ai_response
 from mindroom.approval.receipt_readers import approval_receipt_context
-from mindroom.config.agent import AgentPrivateConfig
+from mindroom.config.agent import AgentPrivateConfig, ToolConfigEntry
 from mindroom.config.models import ModelConfig
 from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.summary_message import is_compaction_summary
@@ -889,11 +889,17 @@ async def test_an_approval_resumed_by_a_later_runner_reads_the_hold_and_never_wr
     """
     compacted, held, image = case == "compacted", case in ("held", "compacted"), "image" in case
     paths, config = _usage_config(tmp_path)
+    config.agents["general"].tools.append(ToolConfigEntry(name="sleep"))
     # The paused reply runs without background tool jobs, which its tool definitions show: so do the turns before it.
     config.background_tool_jobs.enabled = False
     identity = _identity("held-session")
-    multiply = calls(tool_call("multiply", "call_2", a=2, b=3), metrics=usage(10, 1))
-    turns = [answer("First."), answer("Second."), _add("approved", 10, 1), multiply, answer("Done.")]
+    turns = [
+        answer("First."),
+        answer("Second."),
+        _add("approved", 10, 1),
+        calls(tool_call("sleep", "call_2", seconds=0), metrics=usage(10, 1)),
+        answer("Done."),
+    ]
     model = _CheckedModel(turns, capabilities=_route(system_updates=_takes_updates))
     install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
     ctx = replace(

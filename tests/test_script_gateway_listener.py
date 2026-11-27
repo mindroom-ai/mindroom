@@ -42,7 +42,7 @@ class _ReceiptBroker:
         return ScriptCallRecord(
             run_id=run_id,
             call_id=call_id,
-            grant=ScriptToolGrant("calculator", "add"),
+            grant=ScriptToolGrant("calculator", "calculate"),
             arguments_digest="digest",
             state=ScriptCallState.COMPLETED,
             created_at="2026-01-01T00:00:00Z",

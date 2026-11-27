@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -12,10 +12,13 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api.proxies import GenericProxyConfig
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from youtube_transcript_api import FetchedTranscript
+
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -47,6 +50,13 @@ _OEMBED_FIELDS = (
     "provider_url",
     "thumbnail_url",
 )
+
+_VideoAction = Literal["captions", "data", "timestamps"]
+_ACTION_FIELDS: dict[str, str] = {
+    "captions": "languages",
+    "data": "",
+    "timestamps": "languages",
+}
 
 
 class _VideoIdError(ValueError):
@@ -84,13 +94,26 @@ class YouTubeTools(Toolkit):
         self.languages = languages
         self.proxies = proxies
         self.timeout = timeout
-        super().__init__(name="youtube_tools")
-        if not (all or enable_get_video_captions):
-            self.functions.pop(self.get_youtube_video_captions.__name__, None)
-        if not (all or enable_get_video_data):
-            self.functions.pop(self.get_youtube_video_data.__name__, None)
-        if not (all or enable_get_video_timestamps):
-            self.functions.pop(self.get_video_timestamps.__name__, None)
+        toggles: dict[_VideoAction, bool] = {
+            "captions": all or enable_get_video_captions,
+            "data": all or enable_get_video_data,
+            "timestamps": all or enable_get_video_timestamps,
+        }
+        self._enabled_actions: tuple[_VideoAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+        super().__init__(name="youtube_tools", tools=(self.youtube_video,) if self._enabled_actions else ())
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``youtube_video`` schema and fields to enabled actions."""
+        if function.name == "youtube_video":
+            return restrict_actions(
+                function,
+                self._enabled_actions,
+                action_fields=_ACTION_FIELDS,
+                common_fields=("url",),
+            )
+        return function
 
     def get_youtube_video_id(self, url: str) -> str | None:
         """Extract the video ID from a YouTube URL."""
@@ -124,59 +147,21 @@ class YouTubeTools(Toolkit):
             raise _VideoIdError(msg)
         return video_id
 
-    def _fetch_captions(self, video_id: str) -> FetchedTranscript:
-        """Fetch transcript snippets for ``video_id`` using configured languages, proxies, and timeout."""
+    def _fetch_captions(self, video_id: str, languages: list[str] | None = None) -> FetchedTranscript:
+        """Fetch transcript snippets for ``video_id`` using effective languages, proxies, and timeout."""
         proxy_config = (
             GenericProxyConfig(http_url=self.proxies.get("http"), https_url=self.proxies.get("https"))
             if self.proxies
             else None
         )
+        effective_languages = self.languages if languages is None else languages
         with _TimeoutSession(self.timeout) as session:
             api = YouTubeTranscriptApi(proxy_config=proxy_config, http_client=session)
-            if self.languages:
-                return api.fetch(video_id, languages=self.languages)
+            if effective_languages:
+                return api.fetch(video_id, languages=effective_languages)
             return api.fetch(video_id)
 
-    @tool
-    def get_youtube_video_captions(self, url: str) -> str:
-        """Use this function to get captions from a YouTube video.
-
-        Args:
-            url: The URL of the YouTube video.
-
-        Returns:
-            str: The captions of the YouTube video.
-
-        """
-        logger.debug("Getting captions for YouTube video", url=url)
-        try:
-            video_id = self._require_video_id(url)
-        except _VideoIdError as exc:
-            return str(exc)
-        try:
-            captions = self._fetch_captions(video_id)
-        except Exception as exc:
-            return f"Error getting captions for video: {exc}"
-        return " ".join(line.text for line in captions) if captions else "No captions found for video"
-
-    @tool
-    def get_youtube_video_data(self, url: str) -> str:
-        """Function to get video data from a YouTube URL.
-
-        Data returned includes {title, author_name, author_url, type, height, width, version, provider_name, provider_url, thumbnail_url}
-
-        Args:
-            url: The URL of the YouTube video.
-
-        Returns:
-            str: JSON data of the YouTube video.
-
-        """
-        logger.debug("Getting video data for YouTube video", url=url)
-        try:
-            video_id = self._require_video_id(url)
-        except _VideoIdError as exc:
-            return str(exc)
+    def _fetch_video_data(self, video_id: str) -> str:
         try:
             response = httpx.get(
                 _YOUTUBE_OEMBED_URL,
@@ -190,29 +175,37 @@ class YouTubeTools(Toolkit):
             return f"Error getting video data: {exc}"
         return json.dumps(clean_data, indent=4)
 
-    @tool
-    def get_video_timestamps(self, url: str) -> str:
-        """Generate timestamps for a YouTube video based on captions.
+    def youtube_video(
+        self,
+        action: _VideoAction,
+        url: str,
+        languages: list[str] | None = None,
+    ) -> str:
+        """Extract info for YouTube `url`.
 
-        Args:
-            url: The URL of the YouTube video.
-
-        Returns:
-            str: Timestamps and summaries for the video.
-
+        - `captions`: Plain transcript text (optional `languages` override).
+        - `data`: JSON oEmbed metadata (`title`, `author_name`, `thumbnail_url`, etc.).
+        - `timestamps`: Timestamped `M:SS - text` lines (optional `languages` override).
         """
-        logger.debug("Getting timestamps for YouTube video", url=url)
+        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
+            return disabled
+        logger.debug("Running YouTube video action", action=action, url=url)
         try:
             video_id = self._require_video_id(url)
         except _VideoIdError as exc:
             return str(exc)
+
+        if action == "data":
+            return self._fetch_video_data(video_id)
         try:
-            captions = self._fetch_captions(video_id)
-            timestamps = [
-                f"{minutes}:{seconds:02d} - {line.text}"
-                for line in captions
-                for minutes, seconds in (divmod(int(line.start), 60),)
-            ]
+            captions = self._fetch_captions(video_id, languages=languages)
         except Exception as exc:
-            return f"Error generating timestamps: {exc}"
-        return "\n".join(timestamps)
+            label = "getting captions for video" if action == "captions" else "generating timestamps"
+            return f"Error {label}: {exc}"
+        if action == "captions":
+            return " ".join(line.text for line in captions) if captions else "No captions found for video"
+        return "\n".join(
+            f"{minutes}:{seconds:02d} - {line.text}"
+            for line in captions
+            for minutes, seconds in (divmod(int(line.start), 60),)
+        )

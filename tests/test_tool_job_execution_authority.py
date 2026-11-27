@@ -258,7 +258,9 @@ def test_mid_turn_runtime_unavailable_reports_runtime_unavailable(
         runs_in_worker=False,
         tools=config_plugins(config, paths).tools,
     )
-    tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))["add"]
+    tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))[
+        "calculate"
+    ]
     owner = replace(completed_delegation_job().owner, transport_agent_name="lead")
     coordinator._authorize_execution(owner, tool)
 

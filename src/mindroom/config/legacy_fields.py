@@ -354,7 +354,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 }
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
-# Legacy format: scheduler, searxng, memory, todo, Wave 3b native toolkits (gmail, google_calendar, github,
+# Legacy format: scheduler, searxng, memory, todo, Wave 2 native toolkits (calculator, duckduckgo, googlesearch,
+#   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github,
 #   google_drive, google_sheets, homeassistant, including prefixed secondary Google Workspace plugin copies),
 #   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
@@ -375,7 +376,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
-#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
+#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -400,6 +402,34 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "get_memory": "memory",
         "update_memory": "memory",
         "delete_memory": "memory",
+    },
+    "calculator": {
+        "add": "calculate",
+        "subtract": "calculate",
+        "multiply": "calculate",
+        "divide": "calculate",
+        "exponentiate": "calculate",
+        "factorial": "calculate",
+        "is_prime": "calculate",
+        "square_root": "calculate",
+    },
+    "duckduckgo": {
+        "web_search": "duckduckgo_search",
+        "search_news": "duckduckgo_search",
+    },
+    "googlesearch": {
+        "web_search": "google_search",
+        "search_news": "google_search",
+    },
+    "serper": {
+        "search_web": "serper_search",
+        "search_news": "serper_search",
+        "search_scholar": "serper_search",
+    },
+    "youtube": {
+        "get_youtube_video_captions": "youtube_video",
+        "get_youtube_video_data": "youtube_video",
+        "get_video_timestamps": "youtube_video",
     },
     "todo": {
         "plan": "todo",
@@ -1015,6 +1045,14 @@ def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tu
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
         return retired
     if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
+        return retired
+    if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
+        retired := _retired_function_filter(
+            overrides,
+            renames,
+            guidance_for=lambda key, new: f"use `{tool_name}: {{{key}: [{new}]}}`",
+        )
+    ) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

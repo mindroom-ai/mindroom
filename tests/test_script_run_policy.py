@@ -87,14 +87,14 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
     )
     context = replace(
         context,
-        tool_function_filter=lambda function: function.name in {"matrix_message", "get_attachment", "add"},
+        tool_function_filter=lambda function: function.name in {"matrix_message", "get_attachment", "calculate"},
     )
 
     grants = resolve_script_launch_grants(context)
 
     assert grants == (
         ScriptToolGrant("matrix_message", "matrix_message"),
-        ScriptToolGrant("calculator", "add"),
+        ScriptToolGrant("calculator", "calculate"),
         ScriptToolGrant("attachments", "get_attachment"),
     )
     assert all(grant.toolkit_name != "workflow" for grant in grants)
@@ -268,7 +268,7 @@ def test_launch_grants_exclude_chat_only_tools(tmp_path: Path, restricted: str) 
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("calculator", "add") in grants
+    assert ScriptToolGrant("calculator", "calculate") in grants
     assert all(grant.toolkit_name != restricted for grant in grants)
 
 
@@ -285,7 +285,7 @@ def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("calculator", "add") in grants
+    assert ScriptToolGrant("calculator", "calculate") in grants
     assert all(grant.toolkit_name != "claude_agent" for grant in grants)
 
 
@@ -302,7 +302,7 @@ def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("calculator", "add") in grants
+    assert ScriptToolGrant("calculator", "calculate") in grants
     assert all(grant.toolkit_name != "slack" for grant in grants)
     assert "slack" not in resolve_script_launch_toolkit_names(context)
     assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
@@ -346,7 +346,7 @@ def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) 
     )
     context = replace(context, config_provider=lambda: removed)
 
-    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add")) is None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate")) is None
 
 
 def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> None:
@@ -359,12 +359,12 @@ def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> 
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
         ),
     )
-    context = replace(context, tool_function_filter=lambda function: function.name == "add")
+    context = replace(context, tool_function_filter=lambda function: function.name == "calculate")
 
-    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate"))
 
     assert resolved is not None
-    assert resolved.function.name == "add"
+    assert resolved.function.name == "calculate"
 
 
 def test_a_requested_toolkit_comes_from_the_plugins_the_call_s_context_captured(tmp_path: Path) -> None:
@@ -399,7 +399,7 @@ def test_requested_toolkit_builds_only_the_granted_toolkit(
 
     monkeypatch.setattr(agents_module, "build_agent_toolkit", recording_build)
 
-    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add")) is not None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate")) is not None
     assert built == ["calculator"]
 
 

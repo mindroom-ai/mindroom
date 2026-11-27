@@ -551,7 +551,7 @@ async def test_deferred_toolkit_is_callable_through_bash_without_loading(respons
         memory_backend="file",
         tools=["shell", {"calculator": {"defer": True}}],
     )
-    result = await h.respond([_bash_call("calculator", "add", {"a": 2, "b": 3}), "done"])
+    result = await h.respond([_bash_call("calculator", "calculate", {"action": "add", "a": 2, "b": 3}), "done"])
     assert "done" in result
     assert len(h.shell.receipts) == 1
     assert '"result": 5' in h.shell.receipts[0]["outcome"]

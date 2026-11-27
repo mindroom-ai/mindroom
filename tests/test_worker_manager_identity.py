@@ -181,7 +181,7 @@ def _calculator_add(runtime_paths: RuntimePaths, config: Config) -> Any:  # noqa
         worker_target=resolve_worker_target("shared", "mind", execution_identity=identity),
         tools=builtin_tool_registry(),
     )
-    return blocking_entrypoint(toolkit, "add")
+    return blocking_entrypoint(toolkit, "calculate")
 
 
 def _turn_context(runtime_paths: RuntimePaths, config: Config) -> object:

@@ -100,7 +100,7 @@ def _calculator_member(config: Config, paths: RuntimePaths) -> JobActor:
 
 
 async def _add(member: JobActor, session_id: str) -> RunRecord:
-    model = ScriptedModel([calls(tool_call("add", "addition", a=2, b=3)), answer("done")])
+    model = ScriptedModel([calls(tool_call("calculate", "addition", action="add", a=2, b=3)), answer("done")])
     return await run_job_turn(member, model, "Calculate", session_id=session_id)
 
 

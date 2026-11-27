@@ -1328,8 +1328,8 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
             sandbox_runner_module._runtime_config_or_empty(runtime_paths),
             runner_token=SANDBOX_TOKEN,
             tool_name="calculator",
-            function_name="add",
-            args=[1, 2],
+            function_name="calculate",
+            args=["add", 1, 2],
             kwargs={},
         ),
     )
@@ -1433,8 +1433,8 @@ def test_subprocess_runtime_payload_preserves_parent_env_file_values(
             runtime_paths,
             sandbox_runner_module._runtime_config_or_empty(runtime_paths),
             tool_name="calculator",
-            function_name="add",
-            args=[1, 2],
+            function_name="calculate",
+            args=["add", 1, 2],
             kwargs={},
         ),
     )
@@ -1863,8 +1863,8 @@ def test_subprocess_worker_consumes_prepared_request_without_repreparing_worker(
     )
     prepared_request = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
         tool_name="calculator",
-        function_name="add",
-        args=[1, 2],
+        function_name="calculate",
+        args=["add", 1, 2],
         kwargs={},
     )
     envelope = sandbox_protocol_module.serialize_subprocess_envelope(
@@ -2143,7 +2143,7 @@ def test_subprocess_serialization_boundary_omits_unrelated_agents(
     monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
-        execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2]),
+        execute_call(runtime_paths, config, tool_name="calculator", function_name="calculate", args=["add", 1, 2]),
     )
 
     config_payload = yaml_io.safe_load(str(captured_envelope["config_yaml"]))
@@ -2757,8 +2757,8 @@ def test_sandbox_runner_executes_tool_call(runner_client: TestClient, monkeypatc
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -2778,8 +2778,8 @@ def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
     request = {
         "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "calculator",
-        "function_name": "add",
-        "args": [1, 2],
+        "function_name": "calculate",
+        "args": ["add", 1, 2],
         "kwargs": {},
         "request_id": request_id,
     }
@@ -2891,8 +2891,8 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
             "request_id": request_id,
         },
@@ -2998,8 +2998,8 @@ def test_sandbox_runner_skips_unavailable_plugins_for_worker_runtime(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "calculator",
-                "function_name": "add",
-                "args": [1, 2],
+                "function_name": "calculate",
+                "args": ["add", 1, 2],
                 "kwargs": {},
             },
         )
@@ -3113,8 +3113,8 @@ def test_sandbox_runner_execute_uses_committed_startup_config_until_explicit_ref
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -3238,8 +3238,8 @@ def test_sandbox_runner_rejects_invalid_config_snapshot(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "routing_agent_name": "mind",
             "config_snapshot": snapshot,
         },
@@ -3264,8 +3264,8 @@ def test_sandbox_runner_drops_unavailable_snapshot_plugins_without_logging(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "calculator",
-                "function_name": "add",
-                "args": [1, 2],
+                "function_name": "calculate",
+                "args": ["add", 1, 2],
                 "routing_agent_name": "mind",
                 "config_snapshot": snapshot,
             },
@@ -3837,8 +3837,8 @@ def test_sandbox_runner_executes_tool_call_in_subprocess_mode(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -3898,8 +3898,8 @@ def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeyp
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -3911,8 +3911,8 @@ def test_sandbox_runner_rejects_missing_token(runner_client: TestClient, monkeyp
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -3932,7 +3932,7 @@ def test_sandbox_runner_refuses_requests_without_token_before_reading_their_bodi
     def body() -> Iterator[bytes]:
         nonlocal body_read
         body_read = True
-        yield b'{"tool_name": "calculator", "function_name": "add", "args": [1, 2]}'
+        yield b'{"tool_name": "calculator", "function_name": "calculate", "args": ["add", 1, 2]}'
 
     for path in ("/api/sandbox-runner/execute", "/computer/control"):
         response = runner_client.post(path, content=body(), headers={"content-type": "application/json"})
@@ -3953,8 +3953,8 @@ def test_sandbox_runner_rejects_when_token_not_configured(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -3977,8 +3977,8 @@ def test_sandbox_runner_rejects_every_request_when_token_is_empty(
     request = {
         "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "calculator",
-        "function_name": "add",
-        "args": [1, 2],
+        "function_name": "calculate",
+        "args": ["add", 1, 2],
         "kwargs": {},
     }
 
@@ -4001,8 +4001,8 @@ def test_sandbox_runner_rejects_direct_credential_overrides(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [2, 3],
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
             "kwargs": {},
             "credential_overrides": {"OPENAI_API_KEY": "test-key"},
         },
@@ -4027,8 +4027,8 @@ def test_sandbox_runner_rejects_execution_env_for_non_execution_tools(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [2, 3],
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
             "kwargs": {},
             "execution_env": {"TEST_EXECUTION_ENV": "visible"},
         },
@@ -4602,8 +4602,8 @@ def test_sandbox_runner_worker_request_does_not_inject_base_dir_into_unrelated_t
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
             "worker_key": "worker-a",
         },
@@ -4628,7 +4628,7 @@ def test_sandbox_runner_worker_request_rejects_invalid_base_dir_type_for_unknown
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "does_not_exist",
-                "function_name": "add",
+                "function_name": "calculate",
                 "args": [],
                 "kwargs": {},
                 "worker_key": "worker-a",
@@ -4712,7 +4712,7 @@ def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeyp
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
+            "function_name": "calculate",
             "credential_overrides": {"OPENAI_API_KEY": "test-key"},
             "ttl_seconds": 60,
             "max_uses": 1,
@@ -4728,8 +4728,8 @@ def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeyp
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [2, 3],
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
             "kwargs": {},
             "lease_id": lease_id,
         },
@@ -4743,8 +4743,8 @@ def test_sandbox_runner_lease_is_one_time_use(runner_client: TestClient, monkeyp
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [2, 3],
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
             "kwargs": {},
             "lease_id": lease_id,
         },
@@ -4765,7 +4765,7 @@ def test_sandbox_runner_subprocess_consumes_lease(runner_client: TestClient, mon
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
+            "function_name": "calculate",
             "credential_overrides": {"OPENAI_API_KEY": "test-key"},
             "ttl_seconds": 60,
             "max_uses": 1,
@@ -4780,8 +4780,8 @@ def test_sandbox_runner_subprocess_consumes_lease(runner_client: TestClient, mon
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "calculator",
-            "function_name": "add",
-            "args": [2, 3],
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
             "kwargs": {},
             "lease_id": lease_id,
         },
@@ -4802,8 +4802,8 @@ def test_sandbox_runner_unknown_tool_is_a_tool_failure(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             "tool_name": "does_not_exist",
-            "function_name": "add",
-            "args": [1, 2],
+            "function_name": "calculate",
+            "args": ["add", 1, 2],
             "kwargs": {},
         },
     )
@@ -7279,8 +7279,8 @@ def test_subprocess_child_ignores_code_planted_in_workspace(
             json={
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "calculator",
-                "function_name": "add",
-                "args": [1, 2],
+                "function_name": "calculate",
+                "args": ["add", 1, 2],
                 "kwargs": {},
                 "worker_key": "v1:tenant-123:shared:general",
                 "base_dir": "agents/general/workspace",
@@ -8032,7 +8032,7 @@ def test_unscoped_dedicated_worker_receives_encrypted_primary_settings_by_lease(
 
 
 _PROTOCOL_PAYLOADS: dict[str, dict[str, object]] = {
-    "execute": {"tool_name": "calculator", "function_name": "add", "args": [2, 3], "kwargs": {}},
+    "execute": {"tool_name": "calculator", "function_name": "calculate", "args": ["add", 2, 3], "kwargs": {}},
     "save-attachment": {
         "attachment_id": "att_sample",
         "mindroom_output_path": "incoming/sample.txt",
@@ -8041,7 +8041,7 @@ _PROTOCOL_PAYLOADS: dict[str, dict[str, object]] = {
         "bytes_b64": base64.b64encode(b"payload").decode("ascii"),
     },
     "view-file": {"path": "sample.png"},
-    "leases": {"tool_name": "calculator", "function_name": "add", "ttl_seconds": 60},
+    "leases": {"tool_name": "calculator", "function_name": "calculate", "ttl_seconds": 60},
     "execute/cancel": {"request_id": "request-1"},
     "execute/shell-scope/kill": {"shell_scope_id": "scope-1"},
 }
@@ -8276,7 +8276,7 @@ async def test_prepared_request_carries_the_parsed_caller_identity(
     call = execute_call(
         runtime_paths,
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         execution_identity=asdict(identity),
     )
 
@@ -8291,7 +8291,7 @@ async def test_prepared_request_carries_the_parsed_caller_identity(
 @pytest.mark.parametrize(
     "payload",
     [
-        {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "shell_scope_id": "scope-1"},
+        {"tool_name": "calculator", "function_name": "calculate", "args": ["add", 1, 2], "shell_scope_id": "scope-1"},
         {"tool_name": "shell", "function_name": "other", "args": [], "shell_scope_id": "scope-1"},
         {
             "tool_name": "shell",

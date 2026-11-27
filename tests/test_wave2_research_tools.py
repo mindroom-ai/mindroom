@@ -14,6 +14,7 @@ from wikipedia.exceptions import DisambiguationError
 
 from mindroom.custom_tools import youtube as youtube_module
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.arxiv import arxiv_tools
 from mindroom.tools.hackernews import hackernews_tools
 from mindroom.tools.pubmed import pubmed_tools
@@ -28,11 +29,7 @@ from mindroom.tools.youtube import youtube_tools
         (arxiv_tools, "arxiv_tools", ["search_arxiv_and_return_articles", "read_arxiv_papers"]),
         (pubmed_tools, "pubmed", ["search_pubmed"]),
         (hackernews_tools, "hackers_news", ["get_top_hackernews_stories", "get_user_details"]),
-        (
-            youtube_tools,
-            "youtube_tools",
-            ["get_youtube_video_captions", "get_youtube_video_data", "get_video_timestamps"],
-        ),
+        (youtube_tools, "youtube_tools", ["youtube_video"]),
     ],
 )
 def test_wave2_research_toolkits_are_native_with_preserved_names_and_order(
@@ -195,14 +192,14 @@ def test_youtube_video_data_uses_oembed_via_httpx(monkeypatch: pytest.MonkeyPatc
         monkeypatch.setattr(httpx, "get", client.get)
         toolkit = youtube_tools()(timeout=12)
 
-        assert toolkit.get_youtube_video_data("") == "No URL provided"
-        assert toolkit.get_youtube_video_data("https://example.com/video") == "No video ID found"
+        assert toolkit.youtube_video("data", "") == "No URL provided"
+        assert toolkit.youtube_video("data", "https://example.com/video") == "No video ID found"
         assert (
-            toolkit.get_youtube_video_data("http://[invalid")
+            toolkit.youtube_video("data", "http://[invalid")
             == "Error getting video ID from URL, please provide a valid YouTube url"
         )
 
-        data = json.loads(toolkit.get_youtube_video_data("https://youtu.be/abc123"))
+        data = json.loads(toolkit.youtube_video("data", "https://youtu.be/abc123"))
         assert data == {
             "title": "Demo Video",
             "author_name": "Channel",
@@ -215,7 +212,7 @@ def test_youtube_video_data_uses_oembed_via_httpx(monkeypatch: pytest.MonkeyPatc
             "provider_url": "https://www.youtube.com/",
             "thumbnail_url": "https://i.ytimg.com/vi/abc123/hqdefault.jpg",
         }
-        assert toolkit.get_youtube_video_data("https://youtu.be/fail123").startswith("Error getting video data:")
+        assert toolkit.youtube_video("data", "https://youtu.be/fail123").startswith("Error getting video data:")
 
     assert len(captured) == 2
     assert str(captured[0].url).startswith("https://www.youtube.com/oembed?")
@@ -282,32 +279,51 @@ def test_youtube_captions_timestamps_languages_proxies_and_timeout(monkeypatch: 
         timeout=17,
     )
 
-    assert toolkit.get_youtube_video_captions("https://youtu.be/abc123") == "Hello world Next section"
-    assert toolkit.get_youtube_video_captions("https://youtu.be/empty123") == "No captions found for video"
-    assert toolkit.get_youtube_video_captions("https://youtu.be/error123") == (
+    assert toolkit.youtube_video("captions", "https://youtu.be/abc123") == "Hello world Next section"
+    assert toolkit.youtube_video("captions", "https://youtu.be/abc123", languages=["fr"]) == "Hello world Next section"
+    assert toolkit.youtube_video("captions", "https://youtu.be/empty123") == "No captions found for video"
+    assert toolkit.youtube_video("captions", "https://youtu.be/error123") == (
         "Error getting captions for video: transcripts disabled"
     )
-    assert toolkit.get_video_timestamps("https://youtu.be/abc123") == "0:05 - Hello world\n2:05 - Next section"
-    assert toolkit.get_video_timestamps("https://youtu.be/error123") == (
+    assert toolkit.youtube_video("timestamps", "https://youtu.be/abc123") == "0:05 - Hello world\n2:05 - Next section"
+    assert toolkit.youtube_video("timestamps", "https://youtu.be/error123") == (
         "Error generating timestamps: transcripts disabled"
     )
-    assert toolkit.get_video_timestamps("") == "No URL provided"
-    assert toolkit.get_video_timestamps("https://example.com/nope") == "No video ID found"
+    assert toolkit.youtube_video("timestamps", "") == "No URL provided"
+    assert toolkit.youtube_video("timestamps", "https://example.com/nope") == "No video ID found"
 
-    assert sent_timeouts == [17, 17, 17, 17, 17]
+    assert sent_timeouts == [17, 17, 17, 17, 17, 17]
     assert calls[0] == {
         "video_id": "abc123",
         "kwargs": {"languages": ["nl", "en"]},
         "proxies": {"http": "http://proxy.internal:8080", "https": "http://proxy.internal:8080"},
     }
+    assert calls[1]["kwargs"] == {"languages": ["fr"]}
 
 
 def test_youtube_enable_flags_and_all() -> None:
-    """YouTubeTools honors individual enable flags and the all override."""
+    """YouTubeTools narrows schema/fields on toggles, omits function when all disabled, and honors all override."""
     tool_class = youtube_tools()
 
+    data_only = tool_class(enable_get_video_captions=False, enable_get_video_timestamps=False)
+    assert list(data_only.functions) == ["youtube_video"]
+    offered_data = adapt_toolkit(data_only).functions[0]
+    assert offered_data.parameters["properties"]["action"]["enum"] == ["data"]
+    assert set(offered_data.parameters["properties"]) == {"action", "url"}
+    assert "`captions`" not in (offered_data.description or "")
+    assert "disabled" in data_only.youtube_video("captions", "https://youtu.be/abc123").lower()
+
     captions_only = tool_class(enable_get_video_data=False, enable_get_video_timestamps=False)
-    assert list(captions_only.functions) == ["get_youtube_video_captions"]
+    offered_captions = adapt_toolkit(captions_only).functions[0]
+    assert offered_captions.parameters["properties"]["action"]["enum"] == ["captions"]
+    assert "languages" in offered_captions.parameters["properties"]
+
+    none_enabled = tool_class(
+        enable_get_video_captions=False,
+        enable_get_video_data=False,
+        enable_get_video_timestamps=False,
+    )
+    assert list(none_enabled.functions) == []
 
     all_override = tool_class(
         enable_get_video_captions=False,
@@ -315,8 +331,6 @@ def test_youtube_enable_flags_and_all() -> None:
         enable_get_video_timestamps=False,
         all=True,
     )
-    assert list(all_override.functions) == [
-        "get_youtube_video_captions",
-        "get_youtube_video_data",
-        "get_video_timestamps",
-    ]
+    offered_all = adapt_toolkit(all_override).functions[0]
+    assert offered_all.parameters["properties"]["action"]["enum"] == ["captions", "data", "timestamps"]
+    assert "languages" in offered_all.parameters["properties"]

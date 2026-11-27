@@ -1265,6 +1265,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
                 {"match": "mem0_add", "action": "require_approval"},
                 {"match": "search_web", "action": "require_approval"},
                 {"match": "searxng_search", "action": "auto_approve"},
+                {"match": "serper_search", "action": "auto_approve"},
             ],
         },
     }
@@ -1275,6 +1276,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
         "mem0_add",
         "search_web",
         "searxng_search",
+        "serper_search",
     ]
 
 
@@ -1426,7 +1428,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     plugin_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="custom_plugin",
-        function_name="search_web",
+        function_name="scrape_webpage",
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1448,18 +1450,18 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     registry = refresh_plugins(config, runtime_paths).tools
     assert "serper" in registry.entries
     assert "custom_plugin" in registry.entries
-    assert "search_web" not in registry.entries["serper"].action_scoped_grants
-    assert "search_web" in registry.entries["custom_plugin"].action_scoped_grants
+    assert "scrape_webpage" not in registry.entries["serper"].action_scoped_grants
+    assert "scrape_webpage" in registry.entries["custom_plugin"].action_scoped_grants
 
     # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
-    serper_op = grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="serper")
+    serper_op = grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="serper")
     assert serper_op is not None
-    assert serper_op.tool_name == "search_web"
+    assert serper_op.tool_name == "scrape_webpage"
     assert serper_op.mcp_server_id is None
     assert serper_op.mcp_tool_name is None
     assert scheduled_call_offers_any_arguments(
         config,
-        "search_web",
+        "scrape_webpage",
         {"query": "x"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1471,19 +1473,21 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # The owning plugin gets per-action scoping and fails closed when action is missing.
     plugin_op = grant_operation(
         config,
-        "search_web",
+        "scrape_webpage",
         {"action": "read"},
         tools=registry,
         toolkit_name="custom_plugin",
     )
     assert plugin_op is not None
-    assert plugin_op.tool_name == "search_web"
+    assert plugin_op.tool_name == "scrape_webpage"
     assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
-    assert grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+    assert (
+        grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+    )
     assert not scheduled_call_offers_any_arguments(
         config,
-        "search_web",
+        "scrape_webpage",
         {"action": "read"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1495,14 +1499,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # timed_grant_operation threads call.toolkit_name into grant_operation.
     serper_tool = ToolExecution(
         tool_call_id="call-serper",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         tool_args={"query": "x"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     serper_call = ApprovalCall(
         tool_call_id="call-serper",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="serper",
@@ -1511,14 +1515,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
 
     plugin_tool = ToolExecution(
         tool_call_id="call-plugin",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         tool_args={"action": "read"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     plugin_call = ApprovalCall(
         tool_call_id="call-plugin",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="custom_plugin",

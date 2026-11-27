@@ -731,7 +731,7 @@ async def test_a_contact_turn_shows_only_eyes_and_offers_only_its_contacts_tools
     assert context.compaction_lifecycle is None
     [request] = model.requests
     offered = {tool.name for tool in request.tools}
-    assert {"matrix_message", "add"} <= offered
+    assert {"matrix_message", "calculate"} <= offered
     excluded = {"sleep", "run_shell_command", "scheduler", "request_contact", "matrix_room", "list_attachments"}
     assert not offered & excluded
     system_prompt = "\n".join(str(message.content) for message in request.messages if message.role == "system")
@@ -841,7 +841,9 @@ async def test_a_contact_turn_runs_its_tools_inline_while_the_instance_runs_back
     """
     config, paths = _setup(tmp_path)
     _contact(paths)
-    model = ScriptedModel([calls(tool_call("add", "call-1", a=1, b=2)), answer("Told Alice's agent the sum.")])
+    model = ScriptedModel(
+        [calls(tool_call("calculate", "call-1", action="add", a=1, b=2)), answer("Told Alice's agent the sum.")],
+    )
     install_model_providers(monkeypatch, {"default": model})
     bot = _bot(config, paths)
     instance = pin_background_tool_jobs(config, paths)
@@ -857,7 +859,7 @@ async def test_a_contact_turn_runs_its_tools_inline_while_the_instance_runs_back
 
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)
     first, second = model.requests
-    [add] = [tool for tool in first.tools if tool.name == "add"]
+    [add] = [tool for tool in first.tools if tool.name == "calculate"]
     assert "background_after" not in json.dumps(add.parameters)
     assert "job" not in {tool.name for tool in first.tools}
     assert "3" in str(second.messages[-1].content)
@@ -881,12 +883,14 @@ async def test_a_contact_turn_s_calls_tell_their_hooks_that_no_reply_shows_them(
     config, paths = _setup(tmp_path)
     _contact(paths)
     publish_hook_plugin(config, paths, "call-mirror", [before])
-    model = ScriptedModel([calls(tool_call("add", "call-1", a=1, b=2)), answer("Told Alice's agent the sum.")])
+    model = ScriptedModel(
+        [calls(tool_call("calculate", "call-1", action="add", a=1, b=2)), answer("Told Alice's agent the sum.")],
+    )
     install_model_providers(monkeypatch, {"default": model})
 
     await _run(_bot(config, paths), room_id)
 
-    assert seen == [(shown, "a=1, b=2" if shown else None)]
+    assert seen == [(shown, "action=add, a=1, b=2" if shown else None)]
 
 
 @pytest.mark.asyncio
@@ -1080,7 +1084,7 @@ async def test_a_contact_tool_that_cannot_be_built_is_left_out_like_in_any_turn(
     [request] = model.requests
     offered = {tool.name for tool in request.tools}
     assert "matrix_message" in offered
-    assert "add" not in offered
+    assert "calculate" not in offered
 
 
 @pytest.mark.asyncio

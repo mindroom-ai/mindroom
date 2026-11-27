@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import httpx
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
 _SERPER_SEARCH_BASE_URL = "https://google.serper.dev"
 _SERPER_SCRAPE_URL = "https://scrape.serper.dev"
+
+_SearchAction = Literal["web", "news", "scholar"]
+_SEARCH_SPECS: dict[_SearchAction, tuple[str, str]] = {
+    "web": ("search", "Please provide a query to search for"),
+    "news": ("news", "Please provide a query to search for news"),
+    "scholar": ("scholar", "Please provide a query to search for academic papers"),
+}
 
 
 def _error_json(message: str) -> str:
@@ -50,15 +63,25 @@ class SerperTools(Toolkit):
         self.date_range = date_range
         self.timeout = timeout
 
-        super().__init__(name="serper_tools")
-        if not (all or enable_search):
-            self.functions.pop(self.search_web.__name__, None)
-        if not (all or enable_search_news):
-            self.functions.pop(self.search_news.__name__, None)
-        if not (all or enable_search_scholar):
-            self.functions.pop(self.search_scholar.__name__, None)
-        if not (all or enable_scrape_webpage):
-            self.functions.pop(self.scrape_webpage.__name__, None)
+        toggles: dict[_SearchAction, bool] = {
+            "web": all or enable_search,
+            "news": all or enable_search_news,
+            "scholar": all or enable_search_scholar,
+        }
+        self._search_actions: tuple[_SearchAction, ...] = tuple(action for action in _SEARCH_SPECS if toggles[action])
+
+        tools: list[Callable[..., Any]] = []
+        if self._search_actions:
+            tools.append(self.serper_search)
+        if all or enable_scrape_webpage:
+            tools.append(self.scrape_webpage)
+        super().__init__(name="serper_tools", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``serper_search`` schema to enabled search actions."""
+        if function.name == "serper_search":
+            return restrict_actions(function, self._search_actions)
+        return function
 
     def _post(self, endpoint: str, params: dict[str, Any]) -> str:
         """Send one POST request to Serper and return raw JSON text or a JSON error."""
@@ -86,73 +109,29 @@ class SerperTools(Toolkit):
             return _error_json(str(exc))
         return response.text
 
-    def _search(self, endpoint: str, query: str, num_results: int | None, *, empty_error: str) -> str:
-        """Validate a search query and dispatch to a Serper search endpoint."""
+    def serper_search(
+        self,
+        query: str,
+        action: Optional[_SearchAction] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+        num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+    ) -> str:
+        """Search Google via Serper for `query` (optional `num_results`).
+
+        - `web`: Web search (default when enabled).
+        - `news`: Recent news articles.
+        - `scholar`: Google Scholar academic papers.
+        """
+        if not self._search_actions:
+            return _error_json("All Serper search actions are disabled.")
+        resolved_action = self._search_actions[0] if action is None else action
+        if (disabled := require_enabled_action(resolved_action, self._search_actions)) is not None:
+            return _error_json(disabled)
+        endpoint, empty_error = _SEARCH_SPECS[resolved_action]
         if not query:
             return _error_json(empty_error)
         logger.debug("Searching via Serper", endpoint=endpoint, query=query)
         return self._post(endpoint, {"q": query, "num": num_results or self.num_results})
 
-    @tool
-    def search_web(
-        self,
-        query: str,
-        num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
-    ) -> str:
-        """Searches Google for the provided query using the Serper API.
-
-        Args:
-            query (str): The search query to search for on Google.
-            num_results (int, optional): Number of search results to retrieve.
-
-        Returns:
-            str: A JSON-formatted string containing the search results or an error message if the search fails.
-
-        """
-        return self._search("search", query, num_results, empty_error="Please provide a query to search for")
-
-    @tool
-    def search_news(
-        self,
-        query: str,
-        num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
-    ) -> str:
-        """Searches for news articles using the Serper News API.
-
-        Args:
-            query (str): The search query for news articles.
-            num_results (int, optional): Number of news results to retrieve.
-
-        Returns:
-            str: A JSON-formatted string containing the news search results or an error message.
-
-        """
-        return self._search("news", query, num_results, empty_error="Please provide a query to search for news")
-
-    @tool
-    def search_scholar(
-        self,
-        query: str,
-        num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
-    ) -> str:
-        """Searches for academic papers using Google Scholar via Serper API.
-
-        Args:
-            query (str): The search query for academic papers.
-            num_results (int, optional): Number of academic papers to retrieve.
-
-        Returns:
-            str: A JSON-formatted string containing the scholar search results or an error message.
-
-        """
-        return self._search(
-            "scholar",
-            query,
-            num_results,
-            empty_error="Please provide a query to search for academic papers",
-        )
-
-    @tool
     def scrape_webpage(self, url: str, markdown: bool = False) -> str:
         """Scrapes and extracts content from a webpage using the Serper scraping API.
 

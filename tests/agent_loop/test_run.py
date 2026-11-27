@@ -655,8 +655,20 @@ def _golden_run(store: str, session_id: str, run_id: str) -> dict[str, Any]:
 
 
 def _gated_calculator(gate: ToolGate = ToolGate.POLICY) -> AdaptedToolkit:
-    """MindRoom's calculator with ``multiply`` under ``gate``, by default the approval policy the capture's config set."""
-    adapted = adapt_toolkit(CalculatorTools())
+    """Legacy Agno 3.0.9 capture calculator exposing ``multiply`` under ``gate`` for frozen-dump replay."""
+    from mindroom.tool_system.authoring import Toolkit, tool  # noqa: PLC0415
+
+    calc = CalculatorTools()
+
+    class _CaptureCalculator(Toolkit):
+        name = "calculator"
+
+        @tool
+        def multiply(self, a: float, b: float) -> str:
+            """Multiply two numbers."""
+            return calc.calculate("multiply", a, b)
+
+    adapted = adapt_toolkit(_CaptureCalculator())
     return replace(
         adapted,
         functions=tuple(

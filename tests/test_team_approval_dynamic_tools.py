@@ -71,8 +71,8 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
             human_approval_required=True,
         )
         for call_id, function_name, member_name in (
-            ("call-one", "add", "alpha"),
-            ("call-two", "subtract", "alpha"),
+            ("call-one", "calculate", "alpha"),
+            ("call-two", "calculate", "alpha"),
             ("call-three", "sleep", "beta"),
         )
     )
@@ -143,7 +143,7 @@ async def test_team_approval_discovers_independent_member_tools_concurrently(
         await barrier.wait()
         if name == "alpha":
             await beta_completed.wait()
-            assert [(call.tool_name, call.toolkit_name) for call in calls] == [("add", "calculator")]
+            assert [(call.tool_name, call.toolkit_name) for call in calls] == [("calculate", "calculator")]
             return ("calculator",)
         assert name == "beta"
         assert calls == ()
@@ -240,7 +240,7 @@ async def _exercise_team_member_assembly(
                 "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "tool_approval": {
                     "default": "auto_approve",
-                    "rules": [{"match": "add", "action": "require_approval"}],
+                    "rules": [{"match": "calculate", "action": "require_approval"}],
                 },
             },
         ),
@@ -265,8 +265,8 @@ async def _exercise_team_member_assembly(
             for agent_name, model_name in members.model_names.items()
         }
         assert set(functions) == {"alpha", "beta"}
-        assert "add" in functions["alpha"]
-        assert "add" not in functions["beta"]
+        assert "calculate" in functions["alpha"]
+        assert "calculate" not in functions["beta"]
         raise _MemberAssemblyObservedError
 
     scope = load_scope_session(
@@ -304,7 +304,7 @@ async def _exercise_team_member_assembly(
             approval_calls=(
                 ApprovalCall(
                     tool_call_id="call-one",
-                    tool_name="add",
+                    tool_name="calculate",
                     invoking_agent="alpha",
                     toolkit_name="calculator",
                     expires_at_ns=2**62,

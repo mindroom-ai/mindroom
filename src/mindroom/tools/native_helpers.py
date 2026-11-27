@@ -87,7 +87,13 @@ def restrict_actions(
         ordered_allowed = list(allowed_actions)
 
     updated_properties = dict(properties)
-    updated_properties["action"] = {**updated_properties["action"], "enum": ordered_allowed}
+    action_property = {**updated_properties["action"], "enum": ordered_allowed}
+    if "default" in action_property and action_property["default"] not in ordered_allowed:
+        if ordered_allowed:
+            action_property["default"] = ordered_allowed[0]
+        else:
+            action_property.pop("default", None)
+    updated_properties["action"] = action_property
     if action_fields is not None:
         keep = {
             "action",

@@ -898,7 +898,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     result = entrypoint("1", 2)
 
     assert result == "sandbox-result"
@@ -917,7 +917,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "config_snapshot": None,
         "base_dir": None,
         "tool_name": "calculator",
-        "function_name": "add",
+        "function_name": "calculate",
         "args": ["1", 2],
         "kwargs": {},
         "lease_id": None,
@@ -1009,7 +1009,7 @@ def test_static_proxy_payload_carries_agent_identity_for_output_redirect(
         worker_target=_worker_target(runtime_paths, None, "general", execution_identity),
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
 
     result = entrypoint(1, 2, mindroom_output_path="tool-results/add.json")
 
@@ -1745,8 +1745,8 @@ def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenClient)
 
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = blocking_entrypoint(tool, "add")
-    result = entrypoint(1, 2)
+    entrypoint = blocking_entrypoint(tool, "calculate")
+    result = entrypoint("add", 1, 2)
     assert '"result": 3' in result
 
 
@@ -1872,16 +1872,19 @@ async def test_a_routed_call_reaches_the_worker_as_sent_which_coerces_and_valida
         proxy_tools=frozenset({"calculator"}),
     )
     tool = get_tool_by_name("calculator", primary_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = _offered_entrypoint(tool, "add")
+    entrypoint = _offered_entrypoint(tool, "calculate")
 
-    added = await entrypoint(a="3", b=4)
+    added = await entrypoint(action="add", a="3", b=4)
     with pytest.raises(RuntimeError) as invalid:
-        await entrypoint(a="x", b=4)
+        await entrypoint(action="add", a="x", b=4)
 
-    assert [payload["kwargs"] for payload in sent_payloads] == [{"a": "3", "b": 4}, {"a": "x", "b": 4}]
+    assert [payload["kwargs"] for payload in sent_payloads] == [
+        {"action": "add", "a": "3", "b": 4},
+        {"action": "add", "a": "x", "b": 4},
+    ]
     assert json.loads(added) == {"operation": "addition", "result": 7.0}
     assert str(invalid.value).startswith(
-        "Sandbox tool execution failed: ValidationError: 1 validation error for CalculatorTools.add\na\n"
+        "Sandbox tool execution failed: ValidationError: 1 validation error for CalculatorTools.calculate\na\n"
         "  Input should be a valid number, unable to parse string as a number",
     )
 
@@ -1910,17 +1913,17 @@ async def test_a_routed_output_path_is_sent_as_given_and_reported_by_the_worker_
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    await _offered_entrypoint(tool, "add")(a=a, b=4, mindroom_output_path=5)
+    await _offered_entrypoint(tool, "calculate")(action="add", a=a, b=4, mindroom_output_path=5)
     _toolkit, worker_entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
         config=Config(agents={}, models={}),
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         tools=builtin_tool_registry(),
         tool_output_workspace_root=tmp_path / "worker",
     )
 
-    assert sent == [{"a": a, "b": 4, OUTPUT_PATH_ARGUMENT: 5}]
+    assert sent == [{"action": "add", "a": a, "b": 4, OUTPUT_PATH_ARGUMENT: 5}]
     assert worker_entrypoint(**sent[0]) == {
         "mindroom_tool_output": {
             "status": "error",
@@ -2002,7 +2005,7 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="all",
-        credential_policy={"calculator.add": ("openai",)},
+        credential_policy={"calculator.calculate": ("openai",)},
     )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
@@ -2023,8 +2026,8 @@ def test_proxy_requests_credential_lease_when_policy_matches(monkeypatch: pytest
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
-    result = entrypoint(1, 2)
+    entrypoint = blocking_entrypoint(tool, "calculate")
+    result = entrypoint("add", 1, 2)
 
     assert result == "proxied"
     assert len(captured_calls) == 2
@@ -2073,7 +2076,7 @@ def test_shared_runner_calls_reach_its_routes_whether_its_url_names_the_runner_o
         proxy_url=proxy_url,
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
-        credential_policy={"calculator.add": ("github_private",)},
+        credential_policy={"calculator.calculate": ("github_private",)},
     )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
@@ -2096,7 +2099,7 @@ def test_shared_runner_calls_reach_its_routes_whether_its_url_names_the_runner_o
         tools=builtin_tool_registry(),
     )
 
-    assert blocking_entrypoint(tool, "add")(1, 2) == "proxied"
+    assert blocking_entrypoint(tool, "calculate")(1, 2) == "proxied"
     assert [url for url, _payload in captured_calls] == [
         "http://sandbox-runner:8765/api/sandbox-runner/leases",
         "http://sandbox-runner:8765/api/sandbox-runner/execute",
@@ -2128,7 +2131,7 @@ def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
         execution_mode="all",
-        credential_policy={} if leased_service == "calculator" else {"calculator.add": (leased_service,)},
+        credential_policy={} if leased_service == "calculator" else {"calculator.calculate": (leased_service,)},
     )
     manager = CredentialsManager(tmp_path / "credentials")
     target = resolve_worker_target("shared", "alpha", None, tenant_id="test-tenant")
@@ -2155,7 +2158,7 @@ def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
         worker_target=target,
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     assert entrypoint(1, 2) == "proxied"
 
     lease_url, lease_payload = captured_calls[0]
@@ -2167,7 +2170,7 @@ def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
     ("credential_policy", "expected_overrides"),
     [
         (None, {"api_key": "saved-key", "region": "eu"}),
-        ({"calculator.add": ("openai",)}, {"api_key": "policy-key", "region": "eu"}),
+        ({"calculator.calculate": ("openai",)}, {"api_key": "policy-key", "region": "eu"}),
     ],
 )
 def test_static_runner_proxy_leases_the_tool_own_saved_settings(
@@ -2209,7 +2212,7 @@ def test_static_runner_proxy_leases_the_tool_own_saved_settings(
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
 
     assert entrypoint(1, 2) == "proxied"
     assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
@@ -2305,7 +2308,7 @@ def test_a_refused_lease_reports_the_runner_own_reason(monkeypatch: pytest.Monke
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
 
     with pytest.raises(RuntimeError, match=re.escape(refusal.error)):
         entrypoint(1, 2)
@@ -2388,7 +2391,7 @@ def test_dedicated_worker_calls_lease_the_callers_own_tool_settings(
             credential_policy={},
             lease_tool_credentials=False,
         ),
-        request=_execute_request("calculator", "add"),
+        request=_execute_request("calculator", "calculate"),
         credentials_manager=manager,
         worker_target=target,
         worker_handle=handle,
@@ -3790,7 +3793,7 @@ async def test_proxy_forwards_configured_shell_execution_env_only_for_execution_
 
     captured.clear()
     calculator = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    await _offered_entrypoint(calculator, "add")(1, 2)
+    await _offered_entrypoint(calculator, "calculate")(1, 2)
 
     assert captured["json"]["execution_env"] == {}
 
@@ -4039,7 +4042,7 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
     def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None, None]:  # noqa: ANN401
         assert route["runtime_paths"] is not None
         assert route["tool_name"] == "calculator"
-        assert route["function_name"] == "add"
+        assert route["function_name"] == "calculate"
         assert route["worker_manager"] is worker_manager
         events.append("build")
         return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle, None
@@ -4059,7 +4062,7 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
     result = call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         args=(1, 2),
         kwargs={},
         credentials_manager=None,
@@ -4116,7 +4119,7 @@ def test_a_worker_call_that_succeeded_is_not_known_to_be_unstarted_when_its_book
         call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
-            function_name="add",
+            function_name="calculate",
             args=(1, 2),
             kwargs={},
             credentials_manager=None,
@@ -4187,7 +4190,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
 
     def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None, None]:  # noqa: ANN401
         assert route["tool_name"] == "calculator"
-        assert route["function_name"] == "add"
+        assert route["function_name"] == "calculate"
         assert route["worker_manager"] is worker_manager
         events.append("build")
         return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle, None
@@ -4208,7 +4211,7 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
         call_proxy_sync_for_test(
             runtime_paths=runtime_paths,
             tool_name="calculator",
-            function_name="add",
+            function_name="calculate",
             args=(1, 2),
             kwargs={},
             credentials_manager=None,
@@ -4243,7 +4246,7 @@ def test_proxy_requires_shared_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_TOKEN"):
         entrypoint(1, 2)
 
@@ -4302,7 +4305,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
-        credential_policy={"calculator.add": ("github_private",)},
+        credential_policy={"calculator.calculate": ("github_private",)},
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
@@ -4314,8 +4317,8 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
-    result = entrypoint(1, 2)
+    entrypoint = blocking_entrypoint(tool, "calculate")
+    result = entrypoint("add", 1, 2)
 
     assert result == "proxied"
     lease_url, lease_payload = captured_calls[0]
@@ -4347,7 +4350,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
-        credential_policy={"calculator.add": ("openai",)},
+        credential_policy={"calculator.calculate": ("openai",)},
     )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
@@ -4370,9 +4373,9 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
         ),
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
 
-    result = entrypoint(1, 2)
+    result = entrypoint("add", 1, 2)
 
     assert result == "proxied"
     assert len(captured_calls) == 1
@@ -4401,7 +4404,7 @@ def test_proxy_worker_routed_lease_uses_build_config_grants_without_tool_context
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="off",
-        credential_policy={"calculator.add": ("openai",)},
+        credential_policy={"calculator.calculate": ("openai",)},
     )
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
@@ -4428,10 +4431,10 @@ def test_proxy_worker_routed_lease_uses_build_config_grants_without_tool_context
         runtime_config=config,
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
 
     with tool_runtime_context(None):
-        result = entrypoint(1, 2)
+        result = entrypoint("add", 1, 2)
 
     assert result == "proxied"
     lease_url, lease_payload = captured_calls[0]
@@ -4499,7 +4502,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
         ),
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
@@ -4527,7 +4530,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     )
 
     with tool_runtime_context(runtime_context):
-        result = entrypoint(1, 2)
+        result = entrypoint("add", 1, 2)
 
     assert result == "sandbox-result"
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
@@ -4609,7 +4612,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
         ),
         tools=builtin_tool_registry(),
     )
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     expected_worker_key = resolve_worker_key("user_agent", execution_identity, agent_name="code")
     assert expected_worker_key is not None
 
@@ -4637,7 +4640,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     )
 
     with tool_runtime_context(runtime_context):
-        result = entrypoint(1, 2)
+        result = entrypoint("add", 1, 2)
 
     assert result == "sandbox-result"
     assert captured["json"]["worker_key"] == expected_worker_key
@@ -4959,7 +4962,7 @@ def test_proxy_surfaces_runner_http_detail(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeClient)
 
     tool = get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "calculate")
     with pytest.raises(RuntimeError, match="base_dir must stay inside a visible workspace or the worker root"):
         entrypoint(1, 2)
 
@@ -5123,7 +5126,7 @@ def test_unscoped_call_to_an_unconfigured_runner_names_the_missing_setting(
 
     entrypoint = blocking_entrypoint(
         get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry()),
-        "add",
+        "calculate",
     )
     with pytest.raises(WorkerBackendError) as exc_info:
         entrypoint(1, 2)
@@ -5146,7 +5149,7 @@ def test_unscoped_call_never_reaches_a_runner_on_another_worker_protocol(monkeyp
 
     entrypoint = blocking_entrypoint(
         get_tool_by_name("calculator", runtime_paths, worker_target=None, tools=builtin_tool_registry()),
-        "add",
+        "calculate",
     )
     with pytest.raises(WorkerBackendError, match="is incompatible with this MindRoom runtime"):
         entrypoint(1, 2)
@@ -6026,7 +6029,7 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
     result = call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         args=(1, 2),
         kwargs={},
         credentials_manager=None,
@@ -6173,7 +6176,7 @@ def test_proxy_sends_live_config_snapshot_without_secrets(
     call_proxy_sync_for_test(
         runtime_paths=runtime_paths,
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         args=(1, 2),
         kwargs={},
         credentials_manager=None,
@@ -7683,8 +7686,8 @@ class TestWorkerToolsOverride:
             worker_target=None,
             tools=builtin_tool_registry(),
         )
-        entrypoint = blocking_entrypoint(tool, "add")
-        result = entrypoint(1, 2)
+        entrypoint = blocking_entrypoint(tool, "calculate")
+        result = entrypoint("add", 1, 2)
         assert result == "sandbox-result"
         assert captured["url"] == "http://sandbox:8765/api/sandbox-runner/execute"
 
@@ -8116,7 +8119,7 @@ async def test_proxy_shell_scope_forwarding_and_stream_io_exclusion(monkeypatch:
             call_proxy_sync_for_test,
             runtime_paths=paths,
             tool_name="calculator",
-            function_name="add",
+            function_name="calculate",
             args=(1, 2),
             kwargs={},
             credentials_manager=None,

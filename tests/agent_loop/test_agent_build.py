@@ -48,16 +48,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 _CLAUDE = {"provider": "anthropic", "id": "claude-sonnet-5-5", "extra_kwargs": {"api_key": "test-key"}}
-_CALCULATOR_FUNCTIONS = {
-    "add",
-    "subtract",
-    "multiply",
-    "divide",
-    "exponentiate",
-    "factorial",
-    "is_prime",
-    "square_root",
-}
+_CALCULATOR_FUNCTIONS = {"calculate"}
 
 
 class _Index:
@@ -223,7 +214,7 @@ def test_a_rule_on_the_function_an_alias_names_gates_the_aliased_function(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The calculator says its ``add`` calls are shell commands, so a shell rule gates ``add`` and nothing else."""
-    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "calculate")
     config, runtime_paths = _config(tmp_path)
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
@@ -232,7 +223,7 @@ def test_a_rule_on_the_function_an_alias_names_gates_the_aliased_function(
     build = _build(config, runtime_paths, supports_native_tool_approval=True)
 
     gated = {name: function.gate for name, function in _offered(build).items() if function.gate is not None}
-    assert gated == {"add": ToolGate.POLICY}
+    assert gated == {"calculate": ToolGate.POLICY}
 
 
 def test_a_rule_hiding_one_skill_function_names_it_in_the_prompt(tmp_path: Path) -> None:
