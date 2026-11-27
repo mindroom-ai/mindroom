@@ -39,7 +39,7 @@ depends_on = ["mindroom.knowledge.chunking"]
 
 [[modules]]
 path = "mindroom.knowledge.chunking"
-depends_on = []
+depends_on = ["mindroom.knowledge.memory_entries"]
 
 [[modules]]
 path = "mindroom.bounded_bytes"
@@ -7403,11 +7403,9 @@ depends_on = [
     "mindroom.embeddings.batching",
     "mindroom.embeddings.errors",
     "mindroom.knowledge.chunk_context",
-    "mindroom.knowledge.chunking",
     "mindroom.knowledge.collections",
     "mindroom.knowledge.corpus_signature",
     "mindroom.knowledge.index_retry",
-    "mindroom.knowledge.memory_entries",
     "mindroom.knowledge.readers",
 ]
 visibility = ["mindroom.knowledge.manager"]
@@ -7415,7 +7413,7 @@ visibility = ["mindroom.knowledge.manager"]
 [[modules]]
 path = "mindroom.knowledge.memory_entries"
 depends_on = []
-visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.indexing_config"]
+visibility = ["mindroom.knowledge.chunking", "mindroom.knowledge.indexing_config"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"

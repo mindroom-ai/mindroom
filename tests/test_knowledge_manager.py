@@ -2530,15 +2530,15 @@ async def test_reindex_skips_files_whose_reader_dependency_is_missing(
         path=str(docs_path),
         extra_extensions=[".pptx"],
     )
-    original_get_reader = knowledge_file_indexer.ReaderFactory.get_reader_for_extension
+    original_ensure = knowledge_file_indexer.ensure_reader_available
 
-    def failing_get_reader(extension: str) -> object:
-        if extension == ".pptx":
+    def failing_ensure(extension: str) -> None:
+        if extension.lower() == ".pptx":
             msg = "The `python-pptx` package is not installed."
             raise ImportError(msg)
-        return original_get_reader(extension)
+        original_ensure(extension)
 
-    monkeypatch.setattr(knowledge_file_indexer.ReaderFactory, "get_reader_for_extension", failing_get_reader)
+    monkeypatch.setattr(knowledge_file_indexer, "ensure_reader_available", failing_ensure)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
 
     assert await manager.reindex_all() == RefreshOutcome(
@@ -5231,14 +5231,14 @@ async def test_vectorless_file_does_not_inherit_process_global_embedder_health(
     (docs_path / "broken.md").write_text("cannot embed", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
 
-    def _no_chunks(documents: object) -> list[object]:
+    def _no_chunks(*args: object, **kwargs: object) -> list[object]:
         # Simulate an unrelated request recording health while this file's
         # read yields nothing to embed.
-        del documents
+        del args, kwargs
         embedder_health.capture_embedder_health_recorder().record("embedder authentication failed (HTTP 401)")
         return []
 
-    monkeypatch.setattr(knowledge_file_indexer, "_knowledge_chunks", _no_chunks)
+    monkeypatch.setattr(knowledge_file_indexer, "read_knowledge_file", _no_chunks)
     embedder_health.capture_embedder_health_recorder().record(None)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
     try:

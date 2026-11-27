@@ -13,10 +13,10 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.chunking import KnowledgeChunk
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock, read_collection
 from mindroom.knowledge.collections import (
     CollectionSpace,
-    KnowledgeChunk,
     cleanup_superseded_collections,
     open_collection,
     write_file_rows,
@@ -125,16 +125,14 @@ def test_write_file_rows_replaces_one_files_rows_and_claims_it(space: Collection
     assert set(metadata) == {
         "chunk",
         "chunk_size",
-        "content_hash",
-        "content_id",
-        "linked_to",
         "name",
         "source_digest",
         "source_mtime_ns",
         "source_path",
         "source_size",
     }
-    assert (metadata["name"], metadata["linked_to"], metadata["chunk_size"]) == ("notes.md", "", 5)
+    assert {"content_hash", "content_id", "linked_to"}.isdisjoint(metadata)
+    assert (metadata["name"], metadata["chunk_size"]) == ("notes.md", 5)
     assert (metadata["source_mtime_ns"], metadata["source_size"], metadata["source_digest"]) == _SIGNATURE
     assert any(row["metadata"]["source_path"] == "other.md" for row in rows)
     assert collection.files() == {"notes.md": _SIGNATURE, "other.md": _SIGNATURE}
