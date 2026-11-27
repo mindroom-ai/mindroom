@@ -11295,6 +11295,7 @@ depends_on = [
     "mindroom.history.summary_fork",
     "mindroom.history.summary_message",
     "mindroom.history.types",
+    "mindroom.hooks",
     "mindroom.llm",
     "mindroom.session_storage.summary_rows",
     "mindroom.usage.storage",

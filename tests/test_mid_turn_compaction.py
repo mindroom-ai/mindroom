@@ -1657,8 +1657,19 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
         )
 
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
-    assert observed[1].token_count_after is not None
-    assert observed[1].token_count_after < observed[1].token_count_before
+    before_ctx, after_ctx = observed[:2]
+    assert before_ctx.kind == after_ctx.kind == "mid_turn"
+    assert before_ctx.mode == after_ctx.mode == "auto"
+    assert before_ctx.workspace_root == after_ctx.workspace_root == hook_context.agent_workspace_root(create=False)
+    assert before_ctx.requester_id == after_ctx.requester_id == "@user:localhost"
+    assert (before_ctx.summary_model, before_ctx.compacted_at, before_ctx.compacted_run_count) == (None, None, None)
+    assert after_ctx.summary_model == "summary"
+    assert after_ctx.compacted_at is not None
+    assert after_ctx.compacted_at.endswith("Z")
+    assert after_ctx.compacted_run_count is not None
+    assert after_ctx.compacted_run_count >= 1
+    assert after_ctx.token_count_after is not None
+    assert after_ctx.token_count_after < after_ctx.token_count_before
     assert {(ctx.turn_id, ctx.parent_turn_id) for ctx in observed} == {("turn-child", "turn-parent")}
 
 
@@ -2381,13 +2392,62 @@ async def test_run_local_mid_turn_budget_error_does_not_mutate_messages_or_recor
         snapshots.append((state, list(state.messages), deepcopy(state.record.metadata)))
         return SendRequest()
 
+    hook_context, observed = _observed_compaction_hooks(config, paths)
     agent = _Agent(model, config, paths, before_request=(capture,))
-    with pytest.raises(mid_turn_compaction.HistorySummaryBudgetError):
+    with tool_runtime_context(hook_context), pytest.raises(mid_turn_compaction.HistorySummaryBudgetError):
         await _run(agent, [Message(role="user", content="p" * 16_000)])
 
     assert summary_calls.inputs
+    assert observed == []
     state, before_messages, before_metadata = snapshots[-1]
     assert state.messages == before_messages
     assert state.record.metadata == before_metadata
     assert not any(is_compaction_summary(m) for m in state.messages)
     assert COMPACTED_REQUESTS_METADATA_KEY not in (state.record.metadata or {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_history", [False, True], ids=["turn_only", "with_history"])
+async def test_run_local_mid_turn_compaction_emits_hooks_with_raw_summary_and_excludes_kept_prompt(
+    tmp_path: Path,
+    summary_calls: SummaryCalls,
+    *,
+    with_history: bool,
+) -> None:
+    """Run-local folds emit before/after hooks with raw summary, accurate run counts, and no kept prompt in transcript."""
+    config, paths = _config(tmp_path)
+    summary_calls.summary = "Raw run-local summary."
+    hook_context, observed = _observed_compaction_hooks(config, paths)
+    model = ToolLoopModel(tool_rounds=5)
+    if with_history:
+        storage = seeded_storage(config, paths)
+        agent = _scoped_agent(model, config, paths, storage, folds_into_scope=False)
+    else:
+        agent = _Agent(model, config, paths)
+
+    with tool_runtime_context(hook_context):
+        await _run(agent, "Keep this current prompt verbatim", user_id="@bob:localhost")
+
+    assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    before_ctx, after_ctx = observed[:2]
+    expected_count = None if with_history else 1
+    assert before_ctx.kind == after_ctx.kind == "run_local"
+    assert before_ctx.mode == after_ctx.mode == "auto"
+    assert before_ctx.compacted_run_count == after_ctx.compacted_run_count == expected_count
+    assert before_ctx.workspace_root == after_ctx.workspace_root == hook_context.agent_workspace_root(create=False)
+    assert before_ctx.requester_id == after_ctx.requester_id == "@user:localhost"
+    assert before_ctx.session_id == after_ctx.session_id == "session-1"
+    assert before_ctx.compaction_summary is None
+    assert after_ctx.compaction_summary == "Raw run-local summary."
+    assert after_ctx.summary_model == "summary"
+    assert after_ctx.compacted_at is not None
+    assert after_ctx.compacted_at.endswith("Z")
+    assert after_ctx.token_count_after is not None
+    assert after_ctx.token_count_after < after_ctx.token_count_before
+    assert before_ctx.transcript == after_ctx.transcript
+    transcript_texts = [line.text for line in before_ctx.transcript]
+    assert "Keep this current prompt verbatim" not in transcript_texts
+    assert any(text.startswith("step ") for text in transcript_texts)
+    if with_history:
+        assert "q1" in transcript_texts
+        assert "a1" in transcript_texts
