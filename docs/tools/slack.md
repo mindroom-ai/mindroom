@@ -224,12 +224,12 @@ A Slack watch forwards a person's own Slack mentions, bound thread replies, and 
 It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
 Existing `<control_state>/slack/watches.json` watches and live thread bindings are migrated automatically on startup and archived as `watches.json.migrated`.
 
-In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers(action="subscribe_event", source_id="slack", ...)`:
+In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers_write(action="subscribe_event", source_id="slack", ...)`:
 
 - `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
 - `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
 - Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives, and `max_fires_per_hour=60` (capped by `external_trigger_policy.max_fires_per_hour`).
-- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers_read(action="test")`), firing history (`triggers_read(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
 Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
 Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.
@@ -242,7 +242,7 @@ A Slack watch delivers only while all of these hold, so someone else never reads
   A [personal room](../personal-rooms.md) MindRoom created already does.
 - The target agent still has personal Slack configured, the Slack app has an `app_token`, and the owner's Slack connection is still the Slack account bound at subscribe time.
 
-`triggers(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
+`triggers_read(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
 
 | `paused_reason` | Fix |
 | --- | --- |
@@ -255,7 +255,7 @@ A Slack watch delivers only while all of these hold, so someone else never reads
 | `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
 | `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_send` and `slack_manage` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_send` and `slack_manage` refuse with `Ask me in a new message to post to Slack`, and `triggers_write` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
 A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 

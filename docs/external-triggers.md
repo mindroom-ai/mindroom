@@ -8,11 +8,11 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
-- **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
+- **Reactive triggers**, created with `triggers_write(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Direct signed triggers**, created with `triggers_write(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes the single `triggers(action=...)` tool.
+`triggers` is the canonical toolkit name and exposes two functions: read-only `triggers_read(action=...)` (`list`, `history`, `test`) and mutating `triggers_write(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `update`, `set_enabled`, `delete`, `rotate_key`).
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](tools/dynamic-tools.md).
 
@@ -89,8 +89,8 @@ Only a trigger's owner can rotate the key of a direct trigger for a [personal ag
 Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
-To stop users from creating or modifying triggers without review, add a [tool approval](tool-approval.md) rule for `triggers`.
-`watch_script` calls are also judged under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers` actions (including in voice calls and other non-resumable surfaces).
+To stop users from creating or modifying triggers without review, add a [tool approval](tool-approval.md) rule for `triggers_write` (and `triggers_read` if inspection should also require approval).
+`watch_script` calls on `triggers_write` are also judged under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers_write` actions (including in voice calls and other non-resumable surfaces).
 
 ## Reactive Triggers
 
@@ -106,7 +106,7 @@ A non-match or failed triage creates neither a Matrix message nor an agent turn,
 
 ### Watching a room (`action="watch_room"`)
 
-`triggers(action="watch_room", ...)` watches new visible messages arriving in a Matrix room.
+`triggers_write(action="watch_room", ...)` watches new visible messages arriving in a Matrix room.
 At creation, MindRoom records the room's current journal head so older history is never replayed.
 Messages stamped as trigger-originated (`reactive_trigger` or `external_trigger`) are always skipped to prevent loops.
 By default (`include_bots=False`), bot and agent messages are skipped; pass `include_bots=True` to watch other configured MindRoom agents (or allowed external bots) while unconditionally blocking messages from the trigger's own target agent (or any member of a target team).
@@ -137,7 +137,7 @@ By default (`include_bots=False`), bot and agent messages are skipped; pass `inc
 
 ### Watching a thread tag (`action="watch_thread"`)
 
-`triggers(action="watch_thread", ...)` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
+`triggers_write(action="watch_thread", ...)` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
 
 At creation, MindRoom reads the thread's current tag state into a checkpoint without firing.
 If the tag is already in the requested state (`transition="added"` when already present, or `"removed"` when already absent), `watch_thread` succeeds, reports `already_in_state: true`, and fires only on a future transition.
@@ -164,7 +164,7 @@ Live tag updates fire immediately, and offline transitions that remain in the ne
 
 ### Subscribing to shared event sources (`action="subscribe_event"`)
 
-`triggers(action="subscribe_event", ...)` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges, generic HMAC-SHA256 webhooks, or shared Ed25519 fan-out events). Call `triggers(action="list")` to discover which event sources you are authorized to subscribe to.
+`triggers_write(action="subscribe_event", ...)` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges, generic HMAC-SHA256 webhooks, or shared Ed25519 fan-out events). Call `triggers_read(action="list")` to discover which event sources you are authorized to subscribe to.
 The requester must be listed in that source's `subscribers` (or be a trigger/platform administrator), and `kind` and `match` are validated against the source's `allowed_events`, `allowed_repos`, or `allowed_kinds`.
 
 | Argument | Default | Meaning |
@@ -191,7 +191,7 @@ The requester must be listed in that source's `subscribers` (or be a trigger/pla
 
 ### Scheduled Python checks (`action="watch_script"`)
 
-`triggers(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
+`triggers_write(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
 On each due tick, MindRoom runs a fresh short-lived `script_runs` process that calls permitted owner-scoped tools directly with persisted JSON `state` across ticks.
 When `check()` returns `None`, updated `state` is saved and **zero LLM tokens** are spent; when `check()` returns a `dict`, it enters the reactive trigger pipeline (optional cheap triage, deduplication, rate limits, cooldown, expiry, `once`, and `reopen_on_fire`).
 
@@ -274,9 +274,9 @@ Users normally describe what they want in plain language in chat and let the age
 
 #### Guardrails and security
 
-- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow(action="start")` may require approval (grant `script` or allow unapproved `workflow` launch).
+- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow_write(action="start")` may require approval (grant `script` or allow unapproved `workflow_write` launch).
 - **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
-- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
+- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers_read(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
 - **Agent and runtime support:** Works for shared agents, personal agents, and `private.per: user_agent` private agents across Linux local mode (`defaults.allow_shell_without_worker: true` or explicit local execution mode), dedicated Docker workers (with `MINDROOM_SCRIPT_GATEWAY_URL` or `MINDROOM_PUBLIC_URL`), and dedicated Kubernetes workers with an isolated gateway (`MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` + `MINDROOM_SCRIPT_GATEWAY_URL`). Not supported on the shared `static_runner` backend, macOS local mode, or `private.per: user` agents under worker placement (rejected up front at authoring/re-enable time).
 
 ### Cheap tool-less triage
@@ -476,7 +476,7 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
    The command prints `private_key`, `public_key`, and `public_key_fingerprint`.
    Keep the private key only in the watcher runtime.
 
-2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers(action="create", ...)`.
+2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers_write(action="create", ...)`.
 
    ```json
    {
@@ -524,19 +524,19 @@ Triggers never create rooms or make agents join rooms.
 
 ### Managing, inspecting, and testing triggers
 
-The `triggers(action=...)` tool provides unified lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
+`triggers_read(action=...)` and `triggers_write(action=...)` provide lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
 
-- `triggers(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
-- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, `update` is metadata-only (delete and call `watch_script` to replace code) and bumps the checkpoint revision atomically when `poll_interval_seconds` changes. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
-- `triggers(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
-- `triggers(action="delete", trigger_id=...)` removes a direct or reactive trigger.
-- `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
-- `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
-- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+- `triggers_read(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
+- `triggers_write(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, `update` is metadata-only (delete and call `watch_script` to replace code) and bumps the checkpoint revision atomically when `poll_interval_seconds` changes. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
+- `triggers_write(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
+- `triggers_write(action="delete", trigger_id=...)` removes a direct or reactive trigger.
+- `triggers_write(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
+- `triggers_read(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
+- `triggers_read(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
 ### Watching GitHub Pull Requests (`action="watch_pr"`)
 
-Use `triggers(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+Use `triggers_write(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
 
 - **Delivery modes (`delivery_mode`):**
   - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
@@ -601,7 +601,7 @@ mindroom trigger send support-inbox \
 ```
 
 Choose a key that names the upstream conversation, not the message, such as a ticket ID, an upstream thread timestamp, or a direct-message channel ID.
-A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `triggers(action="rotate_key", ...)`, the next delivery with the key opens a new thread.
+A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `triggers_write(action="rotate_key", ...)`, the next delivery with the key opens a new thread.
 If two deliveries with a new key arrive together, one may receive `409 External trigger thread is being opened by another delivery`; retry it as a fresh signed request with the same `event_id` and it joins the thread.
 `thread_key` has no effect on triggers with a fixed `target_thread_id` or without `new_thread`.
 
@@ -711,7 +711,7 @@ The [Docker Compose `static_runner` sandbox](deployment/sandbox-proxy.md#sandbox
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
-Unused callbacks never expire, so delete abandoned ones with `triggers(action="delete", trigger_id=...)`.
+Unused callbacks never expire, so delete abandoned ones with `triggers_write(action="delete", trigger_id=...)`.
 
 ### Network Access
 

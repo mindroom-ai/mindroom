@@ -5850,7 +5850,7 @@ The conversion is the last step of every send, on the whole event: an edit's fal
 MindRoom Chat puts the lines back there and gets the version 2 message byte for byte, and so does MindRoom wherever it reads an agent's message from Matrix, so history, summaries, judges and tools read a reply as before.
 Both put the lines back for exactly the accounts whose sends MindRoom converts: those whose username starts with `mindroom_`, on any homeserver (another server's MindRoom, an agent that has left the config, and the internal user), and for no other, whatever trace a message carries.
 The lines go back as the text they were and nothing more: MindRoom reads the trace of a message the same from any sender, as it did before, and the username gives an account no trust.
-The `matrix_api` tool's `get_event` is the exception: it returns the event as Matrix holds it, so a version 3 reply's calls are in `io.mindroom.tool_trace.events` and not in its `body`.
+`matrix_api_read(action="get_event", ...)` is the exception: it returns the event as Matrix holds it, so a version 3 reply's calls are in `io.mindroom.tool_trace.events` and not in its `body`.
 Search runs on the homeserver, over the text Matrix holds: a word of a reply's prose finds it, and a found reply is shown with its lines back, but a tool's name no longer finds a reply that named the tool only in a marker line, unless the reply is tool calls alone.
 A reply or an edit made of tool calls alone keeps its markers, as version 2: without them it would have no text, and a reader that puts no lines back (another client, an earlier MindRoom) would take it for no message.
 A progress edit of a reply that is still streaming is the exception: it shows `Thinking...` as its text, with `placeholder_body: true` in its version 3 trace, and MindRoom Chat and MindRoom put the lines back in place of that text.
@@ -7053,7 +7053,7 @@ chat_ui.show_canvas(
   Read it defensively, since an earlier version of the page may have saved it in another shape.
   It stays in that browser and reaches the agent only through an answer, or [when the canvas shares it](#let-the-agent-read-the-page-without-a-send-button).
   The browser keeps it for the 100 most recently saved canvases and deletes it when the user logs out.
-- **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot before showing it.
+- **Checking a page:** an agent with the [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) tool can open its page file with `browser_control(action="open", paths=[...])` and take a screenshot with `browser_read(action="screenshot")` before showing it.
   Chat's theme variables and `window.mindroom` are not there, so a page that gives its `var(--mr-...)` colors fallbacks looks closest to the panel.
   The browser also does not block everything the panel blocks.
 - **Limits:** the `title` is one line of at most 120 characters, and the page is UTF-8 text of at most 4 MB.
@@ -10259,7 +10259,7 @@ background_tool_jobs:
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
 | `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large, `0` for never by cost; see [Cost Limit](#cost-limit) |
 
-A run is a background job, so `workflow(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
+A run is a background job, so `workflow_write(action="start", ...)` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
 An operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `workflow` asks before anything starts, as for any other call (timed grants are scoped per `action`).
 A plugin's `tool:before_call` or `tool:environment` hook that declines `workflow` (`action="start"` or `action="resume"`) also starts nothing, and `tool:after_call` hooks receive the run's report when it ends.
@@ -10268,15 +10268,15 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 
 ## Functions
 
-All workflow operations use a single unified function `workflow(action=...)`:
+Workflow operations are split into read-only `workflow_read(action=...)` and mutating `workflow_write(action=...)`:
 
 ```text
-workflow(action="start", source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
-workflow(action="get", run_id=..., nodes="active", messages=False)
-workflow(action="cancel", run_id=...)
-workflow(action="resume", run_id=..., source=None, path=None, rerun=None, max_cost_usd=None)
-workflow(action="list")
-workflow(action="save", run_id=..., name=..., description=None)
+workflow_read(action="list")
+workflow_read(action="get", run_id=..., nodes="active", messages=False)
+workflow_write(action="start", source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
+workflow_write(action="cancel", run_id=...)
+workflow_write(action="resume", run_id=..., source=None, path=None, rerun=None, max_cost_usd=None)
+workflow_write(action="save", run_id=..., name=..., description=None)
 ```
 
 - `action="start"` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
@@ -10292,12 +10292,12 @@ workflow(action="save", run_id=..., name=..., description=None)
   The plain `script` tool's `script_read` and `script_write(action="cancel")` neither list nor stop a run's script.
 - `action="resume"` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
 - `action="list"` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
-- `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
+- `action="save"` saves an owned run's script to `workflows/<name>.py` so `workflow_write(action="start", name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
 
 A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
 
-Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `workflow(action="start", ...)` and `workflow(action="resume", ...)` wait for the run and return the report themselves.
+Where a call cannot become a background job, such as inside a subagent or a minimal-mode agent, `workflow_write(action="start", ...)` and `workflow_write(action="resume", ...)` wait for the run and return the report themselves.
 Cancelling that call cancels its run, unless another call still waits for the same run.
 The same call delivered again finds its own run: it waits for it, or returns the report the run ended with, and runs nothing a second time.
 A run that another call resumed since belongs to that call: the earlier one neither cancels it nor returns its report, and ends with `Run <id> was resumed by another call.`
@@ -10341,7 +10341,7 @@ def main(args):
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
   Name the toolkit as it is registered: another name of it, such as `file` for `filesystem`, is refused as a tool the run does not have.
-  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "workflow", action="start", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
+  `tool("delegate", "run_subagent", ...)` and `tool("workflow", "workflow_write", action="start", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
 - `run(name, args=None)` executes the saved workflow `workflows/<name>.py` inline inside the current run and returns what its `main(args)` returns; see [Saved Workflows](#saved-workflows).
@@ -10385,7 +10385,7 @@ The options are those of `run_subagent` under shorter names.
 
 A run may name itself, every agent in its agent's `delegate_to`, and every other agent whose bot is in the run's room and that may reply to the requester there.
 So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
-The description of `workflow` lists the `delegate_to` agents and the agents configured for the room.
+The description of `workflow_write` lists the `delegate_to` agents and the agents configured for the room.
 That list is read from the configuration alone; whether a listed agent's bot is in the room and may reply to the requester is checked when the call starts.
 While the bot of a room's agent has not finished starting, for example right after a restart, or the requester's access to that agent is still loading, the call is not refused: it waits and starts once both are known.
 An agent whose bot failed to start for good is waited for in the same way, until the run is stopped or its working time ends.
@@ -10413,7 +10413,7 @@ A `tool()` or `shell()` call of the script that needs an approval shows `waiting
 An agent of a run acts in the room and the thread the run was started in, for the run's requester.
 A message it sends with `matrix_message` and no other target lands in that thread.
 
-The agents of a run are not listed among the conversation's background jobs: the run reports them, and `workflow(action="get", ...)` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
+The agents of a run are not listed among the conversation's background jobs: the run reports them, and `workflow_read(action="get", ...)` shows each as a node whose `links` hold the IDs of its job and subagent and the agent and model it ran as.
 An agent keeps running when the attempt that asked for it ends, and the next attempt waits for the same turn instead of starting another.
 Cancelling the run stops its agents, and a call whose prompt or options changed stops the agent of the old call.
 
@@ -10565,11 +10565,11 @@ def main(args):
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
   Graph frames and the finished run card carry message-count `edges` (`{"from", "to", "kind": "message", "count"}`) and bounded, redacted peer message previews (`messages`), plus bounded, redacted result `preview` text on completed `agent`, `turn` and `tool` nodes; `shared_state` never enters the workflow graph or run card.
-  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `workflow(action="get", run_id=..., messages=True)` returns the full uncapped message history and shared state to the run's owner.
+  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `workflow_read(action="get", run_id=..., messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
 
-An agent of a run has the `workflow` tool of its agent, so it can call `workflow(action="start", ...)` itself.
+An agent of a run has the `workflow` tool of its agent, so it can call `workflow_write(action="start", ...)` itself.
 That call waits for the new run and returns its report to the agent.
 
 - The new run is a run inside the agent's run: it names that run and the agent's call, and the outer run shows it as a group under that call.
@@ -10594,7 +10594,7 @@ A script can start agents and runs through `tool()` as well.
 
 ## Cost
 
-`workflow(action="get", ...)` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
+`workflow_read(action="get", ...)` returns `usage` with `input_tokens`, `output_tokens`, `tool_calls`, `cost_usd`, `attempt_cost_usd` and `cost_unknown`.
 
 - `cost_usd` is what the run cost so far, over every attempt, and `attempt_cost_usd` is what the current attempt cost.
   After a resume the second number shows what the resume itself spent.
@@ -10612,16 +10612,16 @@ A script can start agents and runs through `tool()` as well.
 
 ### Cost Limit
 
-Nothing caps what a run costs unless its start names a limit: `workflow(action="start", ..., max_cost_usd=5)`.
+Nothing caps what a run costs unless its start names a limit: `workflow_write(action="start", ..., max_cost_usd=5)`.
 
 - When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further call starts.
   Calls that already run finish, and once nothing of the run is working any more, the run ends `interrupted` with `Stopped at the cost limit ($X of $Y).` on its card and in its delivered report.
   An amount under a cent is written with up to six decimal places.
 - A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
   Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
-- To continue a run stopped at its cost limit, call `workflow(action="resume", run_id=..., max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
+- To continue a run stopped at its cost limit, call `workflow_write(action="resume", run_id=..., max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
   Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`, and an interrupted nested child continues under the parent's raised limit.
-  Calling `workflow(action="resume", ...)` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+  Calling `workflow_write(action="resume", ...)` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
   A card Resume control (`io.mindroom.workflow_control`) without `max_cost_usd` on a run stopped at its limit raises `max_cost_usd` to `spent + max_cost_usd` (one more allowance of the same size).
 - A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
 - The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
@@ -10661,7 +10661,7 @@ A graph too large for one event keeps the calls that wait for a person first, th
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
 
 MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
-It resumes the run as `workflow(action="resume", run_id=..., max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
+It resumes the run as `workflow_write(action="resume", run_id=..., max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
 For a run stopped at its cost limit, a Resume control without `max_cost_usd` raises the limit to `spent + current max_cost_usd` (one more allowance of the same size); an explicit `max_cost_usd` that is not above what the run spent changes nothing.
 The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
 The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
@@ -10691,7 +10691,7 @@ def main(args):
   `parallel([agent(a), agent(b)])` is refused with `parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn).`
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
-  The run's `max_concurrent`, 16 unless `workflow(action="start", ...)` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
+  The run's `max_concurrent`, 16 unless `workflow_write(action="start", ...)` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
   A call that waits for an approval keeps its concurrency place until it finishes, so queued calls wait for a free place.
   A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
   An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
@@ -10702,7 +10702,7 @@ def main(args):
   Its message names the failures, for example `2 of 5 calls failed: [1] AgentError(failed): ...; [3] KeyError: 'x'`.
   A `PartialFailure` that the script does not catch fails the run.
 - An exception of the script's own code inside a function, such as a `KeyError`, fails only that item, and the run shows it as a failed call of kind `error` where it happened.
-- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); workflow(action="get", run_id=..., nodes="failed") shows them.`
+- A run that completed although calls failed says so in the first line of its report: `3 calls failed (n4, n9, n12); workflow_read(action="get", run_id=..., nodes="failed") shows them.`
 
 On a resume each item is matched by its value, not by its position, so adding, removing, or reordering items reuses the saved calls of the items that stayed.
 Of two equal items the first and the second are told apart by their order.
@@ -10732,7 +10732,7 @@ def main(args):
 
 ## Resume A Run
 
-`workflow(action="resume", run_id=...)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
+`workflow_write(action="resume", run_id=...)` works on a run that ended in any state: `failed`, `cancelled`, `interrupted`, or `completed`.
 A run that has not ended is refused with `Run <id> is still running. Cancel it first.`
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
 Resume retries only calls proven not to have started.
@@ -10746,12 +10746,12 @@ A call that may have written (a tool that raised, an agent that made tool calls)
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
   That also holds when the call's arguments were edited, as long as no call before it ran again and `rerun` does not name it.
 - A call that ended `indeterminate` raises `ToolError` with kind `indeterminate` on every attempt, whatever its arguments are now.
-  Check its effect, then name it in `rerun`, for example `workflow(action="resume", run_id=..., rerun=["n4"])`, to run it again; `workflow(action="get", run_id=..., nodes="failed")` lists the IDs.
+  Check its effect, then name it in `rerun`, for example `workflow_write(action="resume", run_id=..., rerun=["n4"])`, to run it again; `workflow_read(action="get", run_id=..., nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
 - `max_cost_usd` sets the run's cost limit for the next attempt; when the run stopped at its cost limit, it must exceed what the run has spent.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
-- Every attempt runs in the room and thread the run was started in, also when `workflow(action="resume", ...)` is called from another one by the same requester; the report goes to where it was called.
+- Every attempt runs in the room and thread the run was started in, also when `workflow_write(action="resume", ...)` is called from another one by the same requester; the report goes to where it was called.
 
 One resume takes a run, and it takes it in one step: the run, its new script and the calls named in `rerun` change together or not at all.
 Of two calls made at the same time, the second ends `failed` with `Run <id> was resumed by another call.` and changes nothing, also when the first one took the run and its attempt could not start.
@@ -10776,7 +10776,7 @@ A write that finished before the interruption is not made again, and neither is 
 A run whose script had already returned its report ends with that report and gets no new attempt.
 
 - The next attempt starts once the requester's access to the agent in the run's room is confirmed; while MindRoom cannot check it yet, for example because the agent's bot has not synced or room membership is still loading after a start, the run waits `starting`.
-  Every attempt is checked in this way when it starts, the first one of a run and one that `workflow(action="resume", ...)` asked for included.
+  Every attempt is checked in this way when it starts, the first one of a run and one that `workflow_write(action="resume", ...)` asked for included.
   When the access is gone, or the bot is no longer in the run's room, the run ends `interrupted` with `The requester no longer has access.`
 - While the run's job is unfinished, only that job starts the run's attempts, so a Stop or a cancel of the job always reaches whatever could start one.
   After a restart of MindRoom, the job is first checked again as every background job that a restart stopped is, and only then does the next attempt start.
@@ -10799,19 +10799,19 @@ A run whose script had already returned its report ends with that report and get
 - When that paused turn cannot be resumed, for example because its saved paused run or approval metadata cannot be loaded, no follow-up turn is synthesized for it.
   Instead, the call ends as that of an agent that cannot be continued does: `indeterminate` if its record is unreadable or it had started another tool call, or `failed` with kind `interrupted` if its record proves no tool call started (a call still waiting for its decision counts as not started), in which case the next attempt runs it again.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
-- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow(action="resume", run_id=...).`
-- A run with no job, which is one that `workflow(action="start", ...)` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
-  When the call that waited for it is gone, nothing delivers the report; `workflow(action="get", run_id=...)` returns it in `result`.
+- After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow_write(action="resume", run_id=...).`
+- A run with no job, which is one that `workflow_write(action="start", ...)` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
+  When the call that waited for it is gone, nothing delivers the report; `workflow_read(action="get", run_id=...)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `workflow(action="start", ...)` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `workflow` was cut short).
-  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `workflow(action="start", ...)` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
+  The agent that was inside its `workflow_write(action="start", ...)` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `workflow_write` was cut short).
+  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `workflow_write(action="start", ...)` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
   Stopping the agent while it waits, or cancelling the outer run, cancels the nested run.
-- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `workflow(action="get", ...)` of that run, and cancelling the outer run cancels it.
-  A script's own `tool("workflow", "workflow", action="start", ...)` call that a restart cut short ends `indeterminate` too.
+- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `workflow_read(action="get", ...)` of that run, and cancelling the outer run cancels it.
+  A script's own `tool("workflow", "workflow_write", action="start", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
-- A run whose job was stopped gets no further attempt, and `workflow(action="resume", ...)` continues it.
+- A run whose job was stopped gets no further attempt, and `workflow_write(action="resume", ...)` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`
-  A job that ended in any other way only fails to deliver the report: the run goes on, and `workflow(action="get", run_id=...)` returns the report in `result`.
+  A job that ended in any other way only fails to deliver the report: the run goes on, and `workflow_read(action="get", run_id=...)` returns the report in `result`.
 - A reservation whose job was never admitted when MindRoom stopped is deleted at the next start.
 - The report of a run stays saved until its job has delivered it, however long ago the run ended.
 - Removing the `workflow` tool or the agent, or revoking the requester's access, ends the run `interrupted`; it is not resumed on its own.
@@ -10823,7 +10823,7 @@ A run whose script had already returned its report ends with that report and get
 
 A run may work for `max_runtime_hours` of the agent's `workflow` entry, 72 by default.
 Only time in which the run is `running` counts, up to the moment its script ended.
-At the limit the run ends `interrupted` with `The run used its 72 hours of working time. workflow(action="resume", run_id=...) continues it.`, and `workflow(action="resume", ...)` gives it the full time again.
+At the limit the run ends `interrupted` with `The run used its 72 hours of working time. workflow_write(action="resume", run_id=...) continues it.`, and `workflow_write(action="resume", ...)` gives it the full time again.
 An attempt that MindRoom starts on its own after an interruption keeps the time the run had left, and a run with none left gets no such attempt: it ends `interrupted` with the same sentence.
 The time a run waits for its next attempt after an interruption is not counted.
 With `max_runtime_hours: 0` a run has no limit.
@@ -10833,19 +10833,19 @@ One script process runs for at most 30 days; a run with working time left then c
 
 - With a worker backend (Docker or Kubernetes), each run's script runs in a dedicated worker of its own, as a [background script](https://docs.mindroom.chat/tools/background-scripts/#worker-and-network-requirements) does, and never falls back to the host when that backend is down.
 - Without a worker backend, the script runs as a child process of MindRoom on Linux, only when `defaults.allow_shell_without_worker` is `true` or `MINDROOM_SANDBOX_EXECUTION_MODE` selects [local execution](https://docs.mindroom.chat/tools/background-scripts/#local-execution).
-  Otherwise `workflow(action="start", ...)` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
+  Otherwise `workflow_write(action="start", ...)` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - The script never runs inside the MindRoom process itself.
 
 ## Saved Workflows
 
 A saved workflow is a Python file at `workflows/<name>.py` in the agent's workspace, where `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
 Its description is the first line of its module docstring, and an optional top-level literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
-`workflow(action="list")` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
+`workflow_read(action="list")` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
 
-- `workflow(action="save", run_id=..., name=..., description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
+- `workflow_write(action="save", run_id=..., name=..., description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
   When the script has no module docstring and `description` is given, MindRoom adds one.
   Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
-- `workflow(action="start", name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
+- `workflow_write(action="start", name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
 - Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
   Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash so calls after the group rerun, while unchanged calls before the first edit inside the child lane are still reused.
   `run(name, args)` is an inline call inside the current run and adds no delegation depth.
@@ -11232,7 +11232,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
    The verification value ensures that only the device that claimed the code can confirm it.
 
 Only the same requester with the same agent can confirm or use the pairing.
-Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
+Until pairing is confirmed, `desktop_read`, `desktop_control`, and `run_desktop_shell` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
 Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
@@ -11464,10 +11464,10 @@ On macOS, `get_app_state` returns the app's accessibility tree with roles, names
 The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
 Taking a screenshot on macOS brings the selected app to the front.
 
-Observation actions are `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
+`desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
-Control actions require a control lease or full control:
+`desktop_control(action=...)` provides control actions, which require a control lease or full control:
 
 - `launch_app` launches or foregrounds one allowlisted app.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
@@ -11485,7 +11485,7 @@ Windows on secondary displays are supported when the window lies on one display;
 
 ## Read-Only Folders
 
-The agent can list and read inside locally selected folders, and it cannot write, create, rename, or delete anything there.
+The agent can list and read inside locally selected folders via `desktop_read(action=...)`, and it cannot write, create, rename, or delete anything there.
 
 - `list_folders` returns an ID, name, and absolute path for each selected folder.
 - `list_directory` takes a folder `root_id` and an optional relative `path` and returns at most 200 entries.
@@ -11505,7 +11505,7 @@ A saved folder that no longer exists makes startup fail with `Cannot open local 
 
 Enable shell requests locally with **Allow shell command requests** in the macOS app's **Access** step or with `mindroom desktop access --shell`.
 
-The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, cwd=None)` alongside `desktop(...)`:
+The `desktop` toolkit exposes `run_desktop_shell(args, tail=100, timeout=None, cwd=None)` alongside `desktop_read(...)` and `desktop_control(...)`:
 
 - `args` takes a shell command string or an argv list of strings (converted with POSIX shell quoting), up to 8,192 characters, and runs via `/bin/sh -c` in optional absolute `cwd` (defaulting to the local home directory).
 - `tail` returns the last `tail` lines of stdout then stderr (all stderr on non-zero exit), matching `run_shell_command`.
@@ -11561,7 +11561,7 @@ MindRoom's normal [tool output files](https://docs.mindroom.chat/tools/execution
 ## Uncertain Outcomes
 
 A timeout returns the original `request_id` and an unknown outcome; the action may still be queued or may have run (and `run_desktop_shell` automatically recovers uncertain transport replies via `request_status` without replaying commands).
-Call `desktop(action="request_status", request_id="...")` to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
+Call `desktop_read(action="request_status", request_id="...")` to read `queued`, `running`, `completed`, `unknown`, or `not_found`, including after the bridge restarts.
 Only the requester and agent that sent the action can read its outcome; other callers get `not_found`, and `not_found` does not prove that the action never ran.
 Do not repeat an uncertain action automatically; observe current state first, because some apps change their UI and still report an error.
 Interrupted work is never run again and reports an unknown outcome.
@@ -11569,45 +11569,19 @@ Never resubmit or rephrase a rejected or expired shell command.
 
 ## Require Matrix Approval for App Control
 
-The local lease is the hard authority boundary, but MindRoom's [tool approval](https://docs.mindroom.chat/tool-approval/#tool-approval) cards can add per-action confirmation in the Matrix conversation.
-Create `approval_scripts/desktop_control.py` beside the cloud config:
-
-```python
-CONTROL_ACTIONS = {
-    "launch_app",
-    "click_element",
-    "set_value",
-    "scroll_element",
-    "perform_action",
-    "click",
-    "double_click",
-    "hover",
-    "drag",
-    "type_text",
-    "scroll",
-    "keypress",
-}
-
-
-def check(tool_name: str, arguments: dict[str, object], agent_name: str) -> bool:
-    action = arguments.get("action")
-    return tool_name == "desktop" and isinstance(action, str) and action in CONTROL_ACTIONS
-```
-
-Reference that script from the cloud configuration:
+The local lease is the hard authority boundary, but MindRoom's [tool approval](https://docs.mindroom.chat/tool-approval/#tool-approval) cards can add per-action confirmation in the Matrix conversation because read and control actions are separate functions (`desktop_read` vs `desktop_control`):
 
 ```yaml
 tool_approval:
   default: auto_approve
   rules:
-    - match: desktop
-      script: ./approval_scripts/desktop_control.py
+    - match: desktop_control
+      action: require_approval
 ```
 
-Observation stays immediate while each app-control action waits for the original requester's approval in Matrix.
+Observation and read-only folder access (`desktop_read`) stay immediate while each app-control action (`desktop_control`) waits for the original requester's approval in Matrix.
 Matrix approval does not replace an absent or expired local lease, and it does not cover the separate `browser` tool.
-Existing `desktop` approval rules also apply to `run_desktop_shell`, while configurations using `default: require_approval` with `match: desktop` and `action: auto_approve` should also add a `match: run_desktop_shell` rule.
-Adding a rule matching `run_desktop_shell` adds a chat confirmation before the request is sent, and the command still waits for approval on the computer.
+Adding a rule matching `run_desktop_shell` adds a chat confirmation before a shell request is sent, and the command still waits for approval on the computer.
 
 ## Operations
 
@@ -13349,19 +13323,23 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 
 ### [`browser`]
 
-`browser` exposes one function, `browser_control(action=...)`, for multi-step browser sessions.
-It can drive two targets:
+`browser` exposes two functions for multi-step browser sessions:
+
+- `browser_read(action=...)` for read-only inspection and discovery (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions`).
+- `browser_control(action=...)` for lifecycle, navigation, and mutation (`start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act`).
+
+Both can drive two targets:
 
 - `target="host"` (default) controls MindRoom's own Chromium on the MindRoom host, or in the agent's worker when `browser` is listed in `worker_tools`.
 - `target="desktop"` controls the user's own signed-in Chrome or Brave profile through the [Matrix Desktop Bridge](https://docs.mindroom.chat/tools/desktop/), which owns extension installation, the local control lease, and the trust model.
 
-Call `action="help"` or `action="actions"` to list the actions and `act` request kinds.
+Call `browser_read(action="help")` or `browser_read(action="actions")` to list the actions and `act` request kinds.
 
-| Action | Host | Desktop |
-| --- | --- | --- |
-| `status`, `start`, `stop`, `profiles`, `tabs`, `open`, `snapshot`, `screenshot`, `console` | Yes | Yes |
-| `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act` | Yes | No |
-| `help`, `actions` | Yes | Yes |
+| Function | Action | Host | Desktop |
+| --- | --- | --- | --- |
+| `browser_read` | `status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions` | Yes | Yes |
+| `browser_control` | `start`, `stop`, `open` | Yes | Yes |
+| `browser_control` | `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act` | Yes | No |
 
 On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
@@ -13395,7 +13373,7 @@ The page cannot load or navigate to other local files, and relative links in it 
 
 ```python
 browser_control(action="open", paths=["slides/deck.html"])
-browser_control(action="screenshot")
+browser_read(action="screenshot")
 ```
 
 #### Profiles and Signed-In Sessions
@@ -13433,7 +13411,7 @@ agents:
 ```python
 browser_control(action="start", target="desktop")
 browser_control(action="open", target="desktop", targetUrl="https://matrix.org/blog/")
-browser_control(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
+browser_read(action="screenshot", target="desktop", fullPage=True, returnAttachment=True)
 ```
 
 ## Related Docs
@@ -14322,18 +14300,18 @@ agents:
 
 ## [`matrix_api`]
 
-`matrix_api` gives exact control over Matrix events and room state when `matrix_message` is not enough.
+`matrix_api` gives exact control over Matrix events and room state when `matrix_message` is not enough, split into read-only `matrix_api_read(action=...)` and mutating `matrix_api_write(action=...)`.
 Grant it only to agents that need raw Matrix access.
 Every action returns a JSON payload, including errors.
 
-| Action | Required arguments |
-|--------|--------------------|
-| `send_event` | `event_type`, `content` |
-| `get_state` | `event_type`, optional `state_key` |
-| `put_state` | `event_type`, `content`, optional `state_key` |
-| `redact` | `event_id`, optional `reason` |
-| `get_event` | `event_id` |
-| `search` | `search_term`, optional `keys`, `order_by`, `limit`, `next_batch`, `filter`, `event_context` |
+| Function | Action | Required arguments |
+|----------|--------|--------------------|
+| `matrix_api_read` | `get_state` | `event_type`, optional `state_key` |
+| `matrix_api_read` | `get_event` | `event_id` |
+| `matrix_api_read` | `search` | `search_term`, optional `keys`, `order_by`, `limit`, `next_batch`, `filter`, `event_context` |
+| `matrix_api_write` | `send_event` | `event_type`, `content` |
+| `matrix_api_write` | `put_state` | `event_type`, `content`, optional `state_key` |
+| `matrix_api_write` | `redact` | `event_id`, optional `reason` |
 
 `room_id` defaults to the current room; see [Tool Runtime Context](#tool-runtime-context) for other rooms.
 `dry_run=true` validates `send_event`, `put_state`, and `redact` without writing.
@@ -14353,10 +14331,10 @@ It uses the top-level `limit` (1-50, default 10), rejects `filter.limit`, and `k
 Set `event_context={"include_profile": true}` to include sender profiles in the surrounding context.
 
 ```python
-matrix_api(action="get_event", event_id="$event123")
-matrix_api(action="put_state", event_type="com.example.marker", state_key="status", content={"value": "ready"})
-matrix_api(action="redact", event_id="$event123", reason="Cleanup")
-matrix_api(
+matrix_api_read(action="get_event", event_id="$event123")
+matrix_api_write(action="put_state", event_type="com.example.marker", state_key="status", content={"value": "ready"})
+matrix_api_write(action="redact", event_id="$event123", reason="Cleanup")
+matrix_api_read(
     action="search",
     search_term="deployment incident",
     keys=["content.body"],
@@ -14676,7 +14654,7 @@ None of the actions touches the user's own computer or browser:
 
 | Call | What the user sees | What it works on | What comes back to the agent |
 | --- | --- | --- | --- |
-| `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
+| `open_panel(panel="computer")` | Computer panel | The agent's own worker browser, the one `browser_read`/`browser_control` drives with `target="host"`; real websites | Nothing; if the user takes control and hands it back, a message mentioning the agent |
 | `show_canvas(title=None, html=None, path=None, canvas_event_id=None, share_state=False, inline=False, raw=False, width=None)` | Canvas panel, or the conversation with `inline=True` | A web page the agent wrote; it cannot open websites | The user's confirmed answer, as their next message |
 | `read_canvas_state(canvas_event_id)` | Nothing | A canvas shown with `share_state=True` | What the page last saved, as the user's Chat last shared it |
 | `open_panel(panel="members")` | Members panel | The people and agents in this room | Nothing |
@@ -14693,7 +14671,7 @@ A sent request returns `UI action request sent.`
 ## Show the worker browser
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-The agent's first worker browser call in a conversation, `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
+The agent's first worker browser call in a conversation, `browser_read` or `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
 The agent calls `open_panel(panel="computer")` only to show the panel again in a later reply, for example when the user should log in or after they closed it.
 One reply shows the panel once.
 Opening the Computer panel does not navigate or take control:
@@ -15946,12 +15924,12 @@ A Slack watch forwards a person's own Slack mentions, bound thread replies, and 
 It works with a personal agent, needs the app-level token, and needs the person's connected Slack account.
 Existing `<control_state>/slack/watches.json` watches and live thread bindings are migrated automatically on startup and archived as `watches.json.migrated`.
 
-In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers(action="subscribe_event", source_id="slack", ...)`:
+In a private room, ask the agent, for example "Tell me when someone messages or mentions me in Slack", and it calls `triggers_write(action="subscribe_event", source_id="slack", ...)`:
 
 - `kind="message"` (mentions, bound channel thread replies, and direct/group direct messages), `kind="mention"` (mentions and bound channel thread replies, including mentions inside direct messages), or `kind="direct_message"` (direct messages and group direct messages).
 - `match={"channel_id": "C0123ABCD"}` or `match={"channel_id": ["C0123ABCD", "C0456EFGH"]}` (optional) limits channel messages and bound thread replies to those channels; direct messages are never limited by it, and `channel_id` is rejected for `kind="direct_message"`.
 - Defaults for `source_id="slack"` are persistent (`once=False`), per-conversation threads (`new_thread=True`, `thread_key_from_event=True`), `reopen_on_fire=True` so resolved Matrix threads reopen automatically when a new Slack reply arrives, and `max_fires_per_hour=60` (capped by `external_trigger_policy.max_fires_per_hour`).
-- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers(action="test")`), firing history (`triggers(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
+- Because Slack watches are reactive triggers, they support optional LLM triage (`triage_instructions` / `triage_model`), dry-run testing (`triggers_read(action="test")`), firing history (`triggers_read(action="history")`, private rooms only), and management in the Room Triggers UI (hidden from non-owners).
 
 Each delivery opens or continues a thread in the room with the untrusted Slack event payload (text, author, channel label for channel messages, and permalink).
 Messages in the same direct message conversation join one thread, and replies in a Slack channel thread join that thread, with a sliding 7-day window from the latest message.
@@ -15964,7 +15942,7 @@ A Slack watch delivers only while all of these hold, so someone else never reads
   A [personal room](https://docs.mindroom.chat/personal-rooms/) MindRoom created already does.
 - The target agent still has personal Slack configured, the Slack app has an `app_token`, and the owner's Slack connection is still the Slack account bound at subscribe time.
 
-`triggers(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
+`triggers_read(action="list")` and the Room Triggers UI report a paused Slack trigger in `paused_reason`:
 
 | `paused_reason` | Fix |
 | --- | --- |
@@ -15977,7 +15955,7 @@ A Slack watch delivers only while all of these hold, so someone else never reads
 | `people who join this room later could read earlier messages` | Change the room's history visibility so that people who join later do not see earlier messages, or use a personal room. |
 | `room members could not be checked` | Try again when the homeserver answers. |
 
-Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_send` and `slack_manage` refuse with `Ask me in a new message to post to Slack`, and mutating `triggers` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
+Security: Slack text comes from other people, so during a turn started by a Slack trigger (`event_source:slack`), `slack_send` and `slack_manage` refuse with `Ask me in a new message to post to Slack`, and `triggers_write` actions (`subscribe_event`, `update`, `set_enabled`, `delete`, etc.) refuse with `Ask me in a new message to change your triggers.`.
 A new message from the owner in the same thread can post or change triggers normally.
 Work that turn schedules or delegates still runs as the owner, so add the [approval](#approval) rules below to keep Slack writes behind a person's approval.
 
@@ -18046,7 +18024,7 @@ The approved call runs only with the exact arguments shown on the card.
 ### Auto-Approval for a Few Minutes
 
 Eligible cards also offer auto-approval for 5, 10, or 30 minutes.
-It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments (for non-action-scoped tools such as `matrix_message` or `desktop`, a timed grant covers the whole function just as it does with `script` rules).
+It covers the original call, matching pending calls, and later calls for the same room, thread, requester, agent, and exact tool operation, with any arguments (for non-action-scoped tools such as `matrix_message` or `run_shell_command`, a timed grant covers the whole function just as it does with `script` rules).
 It is offered only in a thread and when the card shows the complete arguments, and never for tools that request confirmation themselves, background-script approvals, or scheduled calls.
 The requester can stop auto-approval from the originating card, and any config change or room membership change ends matching grants; calls already approved still run.
 
@@ -19017,11 +18995,11 @@ The rest require the primary runtime and cannot run in a worker (`claude_agent`,
 `workflow` runs in the primary process in the same way: it reads only the one source file a run starts from, and declares no file access.
 Its scripts run in a dedicated worker when a worker backend is configured, and never fall back to the host when that backend is down.
 Without a worker backend they run as a child process of the primary, as the primary's operating-system user, only on Linux and only when `defaults.allow_shell_without_worker` is `true` or the sandbox mode is local; that is the operator's existing statement that code may run there ([Workflows](https://docs.mindroom.chat/tools/workflows/#where-the-script-runs)).
-Scheduled `script_check` triggers (`triggers(action="watch_script", ...)`) keep `triggers` at `executes_code=False` so `triggers`-only agents never gain code execution or workspace write authority.
-Authoring a `script_check` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns tracked via `com.mindroom.automation_origin`, event-source watch turns, tool-filtered turns, tool-restricted personas, detached or background-script/workflow contexts, and non-Matrix turns), and the same `workflow_placement` check as `workflow` (dedicated worker when configured, local only under `defaults.allow_shell_without_worker` or explicit local mode, never falling back to the host); `triggers(action="update")` is metadata-only and never accepts `source` or `path`.
-`triggers` registers `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` so only `watch_script` calls are judged under `script_write` approval rules (failing closed on missing, invalid, or unknown actions and keeping timed approval grants exact-call-only, while leaving other `triggers` actions usable on non-resumable surfaces and voice calls).
+Scheduled `script_check` triggers (`triggers_write(action="watch_script", ...)`) keep `triggers` at `executes_code=False` so `triggers`-only agents never gain code execution or workspace write authority.
+Authoring a `script_check` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns tracked via `com.mindroom.automation_origin`, event-source watch turns, tool-filtered turns, tool-restricted personas, detached or background-script/workflow contexts, and non-Matrix turns), and the same `workflow_placement` check as `workflow` (dedicated worker when configured, local only under `defaults.allow_shell_without_worker` or explicit local mode, never falling back to the host); `triggers_write(action="update")` is metadata-only and never accepts `source` or `path`.
+`triggers` registers `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` on `triggers_write` so only `watch_script` calls are judged under `script_write` approval rules (failing closed on missing, invalid, or unknown actions and keeping timed approval grants exact-call-only, while leaving other `triggers_write` actions usable on non-resumable surfaces and voice calls).
 Each tick runs in a short-lived `script_runs` process only after live rechecks of policy, `workflow_placement`, executing-agent capability, live owner membership in the source room, and owner reply authority; ticks enforce `_SCRIPT_CHECK_RESTRICTED_TOOLKITS` plus optional `external_trigger_policy.script_check_allowed_tools` (and live `tool_approval`) rather than an agent's `script.allowed_tools`, block `agent()`, evaluate live `tool_approval` rules and `ToolGate.CONFIRM` non-interactively and fail-closed (never posting approval cards or honoring transient `!auto_approve` windows, and rejecting state commits or event emission if any tool call was denied even when user code catches the error), and wrap emitted payloads inside `<untrusted_event_data>`.
-Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` live solely in the primary-only `script_check_checkpoints` table inside `control_state/reactive_triggers.db` and are redacted from `spec_json`, `triggers(action="list")`, and `/api/rooms/{room_id}/triggers`.
+Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` live solely in the primary-only `script_check_checkpoints` table inside `control_state/reactive_triggers.db` and are redacted from `spec_json`, `triggers_read(action="list")`, and `/api/rooms/{room_id}/triggers`.
 `terminal` also runs in the primary process, but it only types into and reads the terminals of the agent's shell in its worker, so it declares no file access, and it offers nothing to an agent whose shell runs in the primary.
 It types only for an agent whose `run_shell_command` calls never ask for approval, because approval rules judge a command's text and what text typed into a persistent shell runs depends on what ran there before; any other agent is offered only reading and listing, on every path ([Persistent Terminals](https://docs.mindroom.chat/architecture/terminals/#agent-typing)).
 MindRoom logs a warning when an agent routes code-execution tools to a worker while primary-process tools stay unconfined, meaning unconfined tools, path tools under `file_access: unrestricted`, or `script` under a local `MINDROOM_SANDBOX_EXECUTION_MODE`, which runs scripts in the primary process, because those tools can then read runtime secrets the worker was meant to keep away.
@@ -19120,7 +19098,7 @@ So any page holding a user's session can act on GitHub as that user: with a save
 Such a page can also replace the saved token, so later calls go out as the account of a token it chose, or remove it, so they fall back to the App connection.
 `GET /api/github/status` reports which of the two calls go out with, and its login, from stored state, without refreshing it or calling GitHub.
 The route's own log lines name the method, the path's kind (such as `/repos/{owner}/{repo}/pulls`), and GitHub's status, never the token or a body; httpx and httpcore may log the full URL, including the repository and query, as they do for every outbound call.
-`github_pr` reactive triggers created with `triggers(action="watch_pr", ...)`—whether poll-backed or webhook-nudged—reuse the same owner-scoped credential resolution on the primary: they authenticate with the trigger owner's own `github_user_token` or GitHub App OAuth connection—never another user's credentials or a process environment token—fail closed when a saved personal access token is unreadable, and fall back to anonymous public requests only when neither is configured.
+`github_pr` reactive triggers created with `triggers_write(action="watch_pr", ...)`—whether poll-backed or webhook-nudged—reuse the same owner-scoped credential resolution on the primary: they authenticate with the trigger owner's own `github_user_token` or GitHub App OAuth connection—never another user's credentials or a process environment token—fail closed when a saved personal access token is unreadable, and fall back to anonymous public requests only when neither is configured.
 Their outbound ETag REST polls stay pinned to `https://api.github.com` with at most 3 same-host redirects (no userinfo or non-default port), webhook-nudged watches recheck their bound webhook source grant fail-closed without falling back to periodic polling, and observed PR facts are delivered inside `<untrusted_event_data>` boundaries only to Matrix rooms and agents the trigger owner is authorized to address.
 
 A plugin's `origin_module` router answers every request on its hosts, `<label>.<plugin>.<MINDROOM_PLUGIN_ORIGIN_DOMAIN>`, on the listener `MINDROOM_PLUGIN_ORIGIN_PORT` turns on, beside the API; MindRoom adds no authentication there, only the API's request body limit, so the plugin's router decides who sees each page, and a plugin reaches only hosts with its own name, which comes from the host, never from the request's path or query.
@@ -21054,7 +21032,7 @@ A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its ma
 
 ## Event sources
 
-A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers_write(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
 
 Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
 Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
@@ -21669,7 +21647,7 @@ See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, prec
 ## Reserved namespaces
 
 A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
-While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+While the plugin is loaded, `matrix_api_write` (in the `matrix_api` toolkit) refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
 Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
 An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
@@ -22583,11 +22561,11 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
-- **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
+- **Reactive triggers**, created with `triggers_write(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Direct signed triggers**, created with `triggers_write(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name and exposes the single `triggers(action=...)` tool.
+`triggers` is the canonical toolkit name and exposes two functions: read-only `triggers_read(action=...)` (`list`, `history`, `test`) and mutating `triggers_write(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `update`, `set_enabled`, `delete`, `rotate_key`).
 `external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
 Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](https://docs.mindroom.chat/tools/dynamic-tools/).
 
@@ -22664,8 +22642,8 @@ Only a trigger's owner can rotate the key of a direct trigger for a [personal ag
 Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
-To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers`.
-`watch_script` calls are also judged under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers` actions (including in voice calls and other non-resumable surfaces).
+To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers_write` (and `triggers_read` if inspection should also require approval).
+`watch_script` calls on `triggers_write` are also judged under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`, without prompting for or blocking other `triggers_write` actions (including in voice calls and other non-resumable surfaces).
 
 ## Reactive Triggers
 
@@ -22681,7 +22659,7 @@ A non-match or failed triage creates neither a Matrix message nor an agent turn,
 
 ### Watching a room (`action="watch_room"`)
 
-`triggers(action="watch_room", ...)` watches new visible messages arriving in a Matrix room.
+`triggers_write(action="watch_room", ...)` watches new visible messages arriving in a Matrix room.
 At creation, MindRoom records the room's current journal head so older history is never replayed.
 Messages stamped as trigger-originated (`reactive_trigger` or `external_trigger`) are always skipped to prevent loops.
 By default (`include_bots=False`), bot and agent messages are skipped; pass `include_bots=True` to watch other configured MindRoom agents (or allowed external bots) while unconditionally blocking messages from the trigger's own target agent (or any member of a target team).
@@ -22712,7 +22690,7 @@ By default (`include_bots=False`), bot and agent messages are skipped; pass `inc
 
 ### Watching a thread tag (`action="watch_thread"`)
 
-`triggers(action="watch_thread", ...)` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
+`triggers_write(action="watch_thread", ...)` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
 
 At creation, MindRoom reads the thread's current tag state into a checkpoint without firing.
 If the tag is already in the requested state (`transition="added"` when already present, or `"removed"` when already absent), `watch_thread` succeeds, reports `already_in_state: true`, and fires only on a future transition.
@@ -22739,7 +22717,7 @@ Live tag updates fire immediately, and offline transitions that remain in the ne
 
 ### Subscribing to shared event sources (`action="subscribe_event"`)
 
-`triggers(action="subscribe_event", ...)` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges, generic HMAC-SHA256 webhooks, or shared Ed25519 fan-out events). Call `triggers(action="list")` to discover which event sources you are authorized to subscribe to.
+`triggers_write(action="subscribe_event", ...)` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges, generic HMAC-SHA256 webhooks, or shared Ed25519 fan-out events). Call `triggers_read(action="list")` to discover which event sources you are authorized to subscribe to.
 The requester must be listed in that source's `subscribers` (or be a trigger/platform administrator), and `kind` and `match` are validated against the source's `allowed_events`, `allowed_repos`, or `allowed_kinds`.
 
 | Argument | Default | Meaning |
@@ -22766,7 +22744,7 @@ The requester must be listed in that source's `subscribers` (or be a trigger/pla
 
 ### Scheduled Python checks (`action="watch_script"`)
 
-`triggers(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
+`triggers_write(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
 On each due tick, MindRoom runs a fresh short-lived `script_runs` process that calls permitted owner-scoped tools directly with persisted JSON `state` across ticks.
 When `check()` returns `None`, updated `state` is saved and **zero LLM tokens** are spent; when `check()` returns a `dict`, it enters the reactive trigger pipeline (optional cheap triage, deduplication, rate limits, cooldown, expiry, `once`, and `reopen_on_fire`).
 
@@ -22849,9 +22827,9 @@ Users normally describe what they want in plain language in chat and let the age
 
 #### Guardrails and security
 
-- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow(action="start")` may require approval (grant `script` or allow unapproved `workflow` launch).
+- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow_write(action="start")` may require approval (grant `script` or allow unapproved `workflow_write` launch).
 - **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
-- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
+- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers_read(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
 - **Agent and runtime support:** Works for shared agents, personal agents, and `private.per: user_agent` private agents across Linux local mode (`defaults.allow_shell_without_worker: true` or explicit local execution mode), dedicated Docker workers (with `MINDROOM_SCRIPT_GATEWAY_URL` or `MINDROOM_PUBLIC_URL`), and dedicated Kubernetes workers with an isolated gateway (`MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` + `MINDROOM_SCRIPT_GATEWAY_URL`). Not supported on the shared `static_runner` backend, macOS local mode, or `private.per: user` agents under worker placement (rejected up front at authoring/re-enable time).
 
 ### Cheap tool-less triage
@@ -23051,7 +23029,7 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
    The command prints `private_key`, `public_key`, and `public_key_fingerprint`.
    Keep the private key only in the watcher runtime.
 
-2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers(action="create", ...)`.
+2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers_write(action="create", ...)`.
 
    ```json
    {
@@ -23099,19 +23077,19 @@ Triggers never create rooms or make agents join rooms.
 
 ### Managing, inspecting, and testing triggers
 
-The `triggers(action=...)` tool provides unified lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
+`triggers_read(action=...)` and `triggers_write(action=...)` provide lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
 
-- `triggers(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
-- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, `update` is metadata-only (delete and call `watch_script` to replace code) and bumps the checkpoint revision atomically when `poll_interval_seconds` changes. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
-- `triggers(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
-- `triggers(action="delete", trigger_id=...)` removes a direct or reactive trigger.
-- `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
-- `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
-- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+- `triggers_read(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
+- `triggers_write(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, `update` is metadata-only (delete and call `watch_script` to replace code) and bumps the checkpoint revision atomically when `poll_interval_seconds` changes. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
+- `triggers_write(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
+- `triggers_write(action="delete", trigger_id=...)` removes a direct or reactive trigger.
+- `triggers_write(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
+- `triggers_read(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
+- `triggers_read(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
 ### Watching GitHub Pull Requests (`action="watch_pr"`)
 
-Use `triggers(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
+Use `triggers_write(action="watch_pr", repo="owner/repo", number=..., events=..., ...)` for native GitHub PR/CI watching on one open pull request (`events` defaults to `["activity", "ci", "merge", "close"]`, `include_bots=False` to ignore bot activity by default, `reopen_on_fire=True`, `auto_disable_on_close=True`, and `expires_in_hours=720`).
 
 - **Delivery modes (`delivery_mode`):**
   - **`"webhook"`:** Selected automatically at creation when an authorized shared `github` webhook event source covers `repo` **and** its `allowed_events` covers every requested category (`"pull_request"` always; `"issue_comment"`, `"pull_request_review"`, and `"pull_request_review_comment"` when `"activity"` is watched; at least one of `"check_run"` or `"check_suite"` when `"ci"` is watched). Webhook-backed watches do zero idle polling (`next_poll_at=None`) and wake the ETag REST poller immediately whenever a signed webhook arrives for `repo`. Later revocation fails closed without falling back to periodic polling.
@@ -23176,7 +23154,7 @@ mindroom trigger send support-inbox \
 ```
 
 Choose a key that names the upstream conversation, not the message, such as a ticket ID, an upstream thread timestamp, or a direct-message channel ID.
-A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `triggers(action="rotate_key", ...)`, the next delivery with the key opens a new thread.
+A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `triggers_write(action="rotate_key", ...)`, the next delivery with the key opens a new thread.
 If two deliveries with a new key arrive together, one may receive `409 External trigger thread is being opened by another delivery`; retry it as a fresh signed request with the same `event_id` and it joins the thread.
 `thread_key` has no effect on triggers with a fixed `target_thread_id` or without `new_thread`.
 
@@ -23286,7 +23264,7 @@ The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployme
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
-Unused callbacks never expire, so delete abandoned ones with `triggers(action="delete", trigger_id=...)`.
+Unused callbacks never expire, so delete abandoned ones with `triggers_write(action="delete", trigger_id=...)`.
 
 ### Network Access
 

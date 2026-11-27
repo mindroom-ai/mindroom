@@ -1597,7 +1597,7 @@ A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its ma
 
 ## Event sources
 
-A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers_write(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
 
 Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
 Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
@@ -2212,7 +2212,7 @@ See [Skills](https://docs.mindroom.chat/skills/) for the `SKILL.md` format, prec
 ## Reserved namespaces
 
 A plugin whose Matrix events clients trust, such as cards it sends, lists their prefixes in the manifest `reserved_namespaces` so agents cannot forge them.
-While the plugin is loaded, the `matrix_api` tool refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
+While the plugin is loaded, `matrix_api_write` (in the `matrix_api` toolkit) refuses an event type starting with one of those prefixes (`Event type '...' is reserved by a plugin and cannot be written by a tool.`) and `content` holding such a key at any depth, as in the `m.new_content` of an edit (`content must not set plugin-reserved keys (...)`).
 Every other built-in tool fixes the event type and top-level content keys it sends, and the plugin's own sends are not affected.
 An agent whose code execution tools run in the primary process instead of a worker is fully trusted and can still send anything; see [Security posture](https://docs.mindroom.chat/architecture/security-posture/).
 
