@@ -55,6 +55,11 @@ _RETIRED_GRAPH_FUNCTIONS = (
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("knowledge_graph", *_RETIRED_GRAPH_FUNCTIONS)
 _CALL_TOOL_GRAPH_RE = re.compile(r"""\bcall_tool\s*\(\s*(?:name\s*=\s*)?\\?['"]knowledge_graph\\?['"]""")
+_CLI_GRAPH_CALL_RE = re.compile(
+    r"\bmindroom-agent\b[^\n;&|]*\btools\s+call\s+"
+    r"(?:-\S+(?:\s+\S+)?\s+)*"
+    r"\\?['\"]?knowledge_graph(?:\.knowledge_graph|\s+knowledge_graph)?(?=\\?['\"\s]|$)",
+)
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.
@@ -101,7 +106,7 @@ def is_evidence(execution: ToolExecution) -> bool:
         return False
     return not (
         "knowledge_graph.knowledge_graph" in arguments
-        or ("mindroom-agent" in arguments and "knowledge_graph" in arguments)
+        or _CLI_GRAPH_CALL_RE.search(arguments) is not None
         or _CALL_TOOL_GRAPH_RE.search(arguments) is not None
     )
 

@@ -433,6 +433,22 @@ def test_knowledge_graph_evidence_keeps_unrelated_paths_and_urls_but_drops_wrapp
     """Bare `knowledge_graph` in URLs/file paths stays evidence while wrapper invocations are dropped."""
     assert is_evidence(_tool("read_url", "Project docs...", url="https://example.com/projects/knowledge_graph"))
     assert is_evidence(_tool("read_file", "class KnowledgeGraphTools...", path="src/mindroom/tools/knowledge_graph.py"))
+    assert is_evidence(
+        _tool(
+            "bash",
+            "Project docs...",
+            command=(
+                'mindroom-agent tools call website.read_url \'{"url":"https://example.org/projects/knowledge_graph"}\''
+            ),
+        ),
+    )
+    assert is_evidence(
+        _tool(
+            "bash",
+            "class KnowledgeGraphTools...",
+            command='mindroom-agent tools call filesystem.read_file \'{"path":"src/mindroom/tools/knowledge_graph.py"}\'',
+        ),
+    )
     assert not is_evidence(
         _tool(
             "call_tool",
@@ -446,6 +462,20 @@ def test_knowledge_graph_evidence_keeps_unrelated_paths_and_urls_but_drops_wrapp
             "bash",
             "Alice leads Atlas",
             command='mindroom-agent tools call knowledge_graph --json \'{"action": "search", "query": "Atlas"}\'',
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="mindroom-agent tools call knowledge_graph.knowledge_graph --json '{}'",
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command="mindroom-agent tools call --agent foo knowledge_graph --json '{}'",
         ),
     )
     assert not is_evidence(

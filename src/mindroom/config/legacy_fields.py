@@ -417,7 +417,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
 #   workflow/thread_tags: v2026.11.658; google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659;
 #   Wave 2/4: v2026.11.663; 7-toolkit collapse incl. thread_snooze, thread_resolution, hackernews, google_bigquery, and
-#   second-generation thread_model/knowledge_graph/serper splits: unreleased); replacement: unreleased; consolidated into
+#   second-generation thread_model_read/thread_model_write, knowledge_graph_read/knowledge_graph_write, serper_search,
+#   scrape_webpage shipped in v2026.11.665-v2026.11.668: v2026.11.668); replacement: unreleased; consolidated into
 #   action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
@@ -1170,9 +1171,9 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     #   second-generation knowledge_graph_read and knowledge_graph_write), agent_manager, and email_invite (including
     #   the renamed single-verb reads shared_directories_read, contacts_read, and email_invite_read; agent_settings
     #   remains the kept zero-arg read).
-    # Last legacy release: v2026.11.662 (knowledge_graph_read/knowledge_graph_write shipped v2026.11.665-v2026.11.668);
-    #   replacement: unreleased; consolidated into action-dispatched functions (unified `knowledge_graph` and read/write
-    #   splits for the others) with ToolMetadata.action_scoped_grants.
+    # Last legacy release: v2026.11.662 (second-generation knowledge_graph_read/knowledge_graph_write shipped in
+    #   v2026.11.665-v2026.11.668: v2026.11.668); replacement: unreleased; consolidated into action-dispatched functions
+    #   (unified `knowledge_graph` and read/write splits for the others) with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
     #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
     #   in include_tools/exclude_tools (both authored overrides and stored dashboard settings) at config load.
@@ -1717,15 +1718,22 @@ def _retired_atlassian_setting(settings: Mapping[str, object]) -> tuple[str, str
 
 def _retired_consolidated_filter_checker(
     toolkit_name: str,
+    *,
+    toggle_hint: str | None = None,
 ) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
     """Build a setting checker rejecting retired consolidated function filters for ``toolkit_name``."""
     renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
-
-    def _check(settings: Mapping[str, object]) -> tuple[str, str] | None:
-        return _retired_function_filter(
-            settings,
-            renames,
-            guidance_for=lambda key, old, new: (
+    guidance_for: Callable[[str, str, str], str] = (
+        (
+            lambda _key, _old, new: (
+                f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+                f"disable unwanted actions via `{toolkit_name}`'s {toggle_hint} (or `tool_approval.rules` "
+                f"matching `{new}`) so permissions are not broadened"
+            )
+        )
+        if toggle_hint is not None
+        else (
+            lambda key, old, new: (
                 _single_verb_rename_filter_guidance(toolkit_name, key, old, new)
                 if _is_single_verb_renamed_target(new)
                 else (
@@ -1734,30 +1742,12 @@ def _retired_consolidated_filter_checker(
                     f"or remove the per-function filter and use `tool_approval.rules` matching `{new}` "
                     "if per-action gating is needed"
                 )
-            ),
+            )
         )
-
-    return _check
-
-
-def _retired_toggle_filter_checker(
-    toolkit_name: str,
-    *,
-    toggle_label: str = "`enable_*` settings",
-) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
-    """Build a setting checker rejecting retired consolidated function filters for a toggleable toolkit."""
-    renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
+    )
 
     def _check(settings: Mapping[str, object]) -> tuple[str, str] | None:
-        return _retired_function_filter(
-            settings,
-            renames,
-            guidance_for=lambda _key, _old, new: (
-                f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
-                f"disable unwanted actions via `{toolkit_name}`'s {toggle_label} (or `tool_approval.rules` "
-                f"matching `{new}`) so permissions are not broadened"
-            ),
-        )
+        return _retired_function_filter(settings, renames, guidance_for=guidance_for)
 
     return _check
 
@@ -1768,11 +1758,11 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
     "attachments": _retired_attachments_setting,
     "atlassian": _retired_atlassian_setting,
     "slack": _retired_slack_setting,
-    "serper": _retired_toggle_filter_checker("serper"),
-    "hackernews": _retired_toggle_filter_checker("hackernews"),
-    "google_bigquery": _retired_toggle_filter_checker(
+    "serper": _retired_consolidated_filter_checker("serper", toggle_hint="`enable_*` settings"),
+    "hackernews": _retired_consolidated_filter_checker("hackernews", toggle_hint="`enable_*` settings"),
+    "google_bigquery": _retired_consolidated_filter_checker(
         "google_bigquery",
-        toggle_label="`list_tables`/`describe_table` settings",
+        toggle_hint="`list_tables`/`describe_table` settings",
     ),
     **{
         name: _retired_consolidated_filter_checker(name)
