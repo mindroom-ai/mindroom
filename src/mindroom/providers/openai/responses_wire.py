@@ -16,7 +16,8 @@ import copy
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.llm.messages import FALLBACK_MODEL_KEY, media_items, tool_result_view
@@ -343,9 +344,34 @@ def responses_input(
 # --- Request --------------------------------------------------------------------------------------------------
 
 
+def _has_optional_properties(parameters: Mapping[str, Any]) -> bool:
+    """Return whether ``parameters`` declares at least one property not listed in ``required``."""
+    properties = parameters.get("properties")
+    if not isinstance(properties, Mapping) or not properties:
+        return False
+    raw_required = parameters.get("required")
+    required = {item for item in raw_required if isinstance(item, str)} if isinstance(raw_required, list) else set()
+    return any(name not in required for name in properties)
+
+
 def _tool_dicts(tools: Sequence[ToolSpec]) -> list[dict[str, Any]]:
-    """Return tools sorted by name with function definitions flattened as Responses expects, schemas as authored."""
-    functions = [{**function_definition(tool), "type": "function"} for tool in tools]
+    """Return tools sorted by name with function definitions flattened as Responses expects, schemas as authored.
+
+    OpenAI's Responses API defaults an omitted ``strict`` field to ``true``, which would normalize optional
+    parameters into required ones; tools with unset ``strict`` and optional properties therefore send
+    ``strict: false`` explicitly.
+    """
+    functions = [
+        {
+            **function_definition(
+                replace(tool, strict=False)
+                if tool.strict is None and _has_optional_properties(tool.parameters)
+                else tool,
+            ),
+            "type": "function",
+        }
+        for tool in tools
+    ]
     return sorted(functions, key=lambda tool: tool["name"])
 
 
