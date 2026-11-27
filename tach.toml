@@ -8171,6 +8171,7 @@ expose = [
     "_resolve_plugin_root",
     "_restore_plugin_package_chain",
     "_snapshot_plugin_package_chain",
+    "agno_migration_error",
     "declared_tool_metadata",
 ]
 from = ["mindroom.tool_system.plugin_imports"]
