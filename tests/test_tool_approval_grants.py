@@ -1172,9 +1172,18 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("github", "get_pull_request", "github_read_issues_prs"),
         ("google_drive", "google_drive_trash_file", "google_drive_write"),
         ("google_drive", "google_drive_download_file", "google_drive_read"),
+        ("google_docs", "google_docs_create_document", "google_docs_write"),
+        ("google_docs", "google_docs_insert_text", "google_docs_write"),
+        ("google_docs", "google_docs_replace_text", "google_docs_write"),
+        ("google_docs", "google_docs_batch_update", "google_docs_write"),
         ("google_sheets", "create_sheet", "google_sheets_write"),
         ("google_sheets", "create_duplicate_sheet", "google_sheets_write"),
         ("google_sheets", "read_sheet", "google_sheets_read"),
+        ("google_tasks", "google_tasks_list_task_lists", "google_tasks_read"),
+        ("google_tasks", "google_tasks_list_tasks", "google_tasks_read"),
+        ("google_tasks", "google_tasks_create_task", "google_tasks_write"),
+        ("google_tasks", "google_tasks_update_task", "google_tasks_write"),
+        ("google_tasks", "google_tasks_delete_task", "google_tasks_write"),
         ("homeassistant", "call_service", "homeassistant_control"),
         ("homeassistant", "list_entities", "homeassistant_read"),
         ("file_generation", "generate_json_file", "generate_file"),
@@ -3080,7 +3089,10 @@ async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
         ("github", "github_write_repo", ("create_file", "delete_repository")),
         ("google_drive", "google_drive_read", ("list", "download")),
         ("google_drive", "google_drive_write", ("upload", "trash")),
+        ("google_docs", "google_docs_write", ("create", "insert_text", "replace_text", "batch_update")),
         ("google_sheets", "google_sheets_write", ("create", "update", "batch_update")),
+        ("google_tasks", "google_tasks_read", ("list_task_lists", "list_tasks")),
+        ("google_tasks", "google_tasks_write", ("create", "update", "delete")),
         ("homeassistant", "homeassistant_read", ("list_entities", "get_state")),
         ("homeassistant", "homeassistant_control", ("turn_on", "call_service")),
     ],
@@ -3110,6 +3122,7 @@ def test_wave3b_registry_action_scoped_grants_bind_per_action(
     ("toolkit_name", "tool_name"),
     [
         ("gmail", "gmail_send_to_self"),
+        ("google_docs", "google_docs_get_document"),
         ("google_sheets", "google_sheets_read"),
     ],
 )
@@ -3151,7 +3164,7 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
         "    display_name='Work Google',\n"
         "    client_config_service='work_google_oauth_client',\n"
         "    allowed_hosted_domains=('work.example',),\n"
-        "    services=('gmail',),\n"
+        "    services=('gmail', 'google_docs', 'google_tasks'),\n"
         ")\n"
     )
     (plugin_root / "oauth.py").write_text(
@@ -3172,13 +3185,24 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     base_data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "plugins": [str(plugin_root)],
-        "agents": {"a": {"display_name": "A", "tools": ["work_gmail"], "include_default_tools": False}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": ["work_gmail", "work_google_docs", "work_google_tasks"],
+                "include_default_tools": False,
+            },
+        },
     }
-    with pytest.raises(ConfigRuntimeValidationError, match="work_gmail_send"):
-        Config.validate_with_runtime(
-            {**base_data, "tool_approval": {"rules": [{"match": "work_send_email", "action": "require_approval"}]}},
-            runtime_paths,
-        )
+    for retired_match, replacement in (
+        ("work_send_email", "work_gmail_send"),
+        ("work_google_docs_batch_update", "work_google_docs_write"),
+        ("work_google_tasks_delete_task", "work_google_tasks_write"),
+    ):
+        with pytest.raises(ConfigRuntimeValidationError, match=replacement):
+            Config.validate_with_runtime(
+                {**base_data, "tool_approval": {"rules": [{"match": retired_match, "action": "require_approval"}]}},
+                runtime_paths,
+            )
 
     loaded = Config.validate_with_runtime(
         {**base_data, "tool_approval": {"rules": [{"match": "work_gmail_send", "action": "require_approval"}]}},
@@ -3186,6 +3210,11 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     )
     registry = refresh_plugins(loaded, runtime_paths).tools
     assert "work_gmail_manage" in registry.entries["work_gmail"].action_scoped_grants
+    assert registry.entries["work_google_docs"].action_scoped_grants == ("work_google_docs_write",)
+    assert registry.entries["work_google_tasks"].action_scoped_grants == (
+        "work_google_tasks_read",
+        "work_google_tasks_write",
+    )
     star_op = grant_operation(
         loaded,
         "work_gmail_manage",
