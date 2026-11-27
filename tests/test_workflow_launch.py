@@ -240,9 +240,9 @@ async def _call_add(
     live_rules: tuple[ApprovalRuleConfig, ...] = (),
     decision: ToolApprovalDecision | None = None,
 ) -> tuple[ScriptCallRecord, list[str]]:
-    """Launch one run under the operator's *default*, call `calculator.add` and return the receipt and the asks."""
+    """Launch one run under the operator's *default*, call `calculator.calculate` and return the receipt and the asks."""
     manager, _backend, worker_client = _manager(tmp_path)
-    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
+    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "calculate"),)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n", workflow_run_id=RUN if workflow else None)
     # Tool routing stays independent of the faked script-process worker, so the calculator runs here.
@@ -267,8 +267,8 @@ async def _call_add(
     request = ScriptToolCallRequest(
         run_id=run.run_id,
         call_id="call-1",
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
     )
     if workflow:
         # A workflow attempt's calls enter through its engine, which the workflow routes authenticated.
@@ -313,7 +313,7 @@ async def test_rule_added_during_a_run_is_honoured_and_its_denial_stops_the_call
         tmp_path,
         workflow=True,
         default="auto_approve",
-        live_rules=(ApprovalRuleConfig(match="add", action="require_approval"),),
+        live_rules=(ApprovalRuleConfig(match="calculate", action="require_approval"),),
         decision=ToolApprovalDecision(approved=False, reason="Not this sum."),
     )
 
@@ -357,7 +357,7 @@ def test_workflow_refuses_plain_script_toolkit(tmp_path: Path) -> None:
 
     assert "script" not in {entry.name for entry in entries}
     assert resolve_current_script_tool(context, ScriptToolGrant("script", "start_script"), workflow=True) is None
-    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"), workflow=True) is not None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate"), workflow=True) is not None
 
 
 def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> None:
@@ -367,14 +367,14 @@ def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> Non
         return resolve_current_script_tool(context, ScriptToolGrant(toolkit, function), workflow=True) is not None
 
     context = _owner_context(tmp_path, ["calculator"])
-    assert offered(context, "calculator", "add")
+    assert offered(context, "calculator", "calculate")
     assert not offered(context, "memory", "memory")
     assert not offered(context, "calculator", "no_such_function")
 
     live = _owner_context(tmp_path, ["memory"])
     reloaded = replace(context, config_provider=lambda: live.config)
 
-    assert not offered(reloaded, "calculator", "add")
+    assert not offered(reloaded, "calculator", "calculate")
     assert offered(reloaded, "memory", "memory")
     assert not offered(reloaded, "compact_context", "compact_context")
 
@@ -422,7 +422,7 @@ async def test_workflow_attempts_take_no_script_slot_and_the_script_limit_refuse
     Plain scripts keep their own limit, which counts plain scripts only.
     """
     manager, _backend, _client = _manager(tmp_path)
-    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
+    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "calculate"),)
     context = _context(tmp_path)
     one = ScriptRunLimits(max_concurrent_runs=1)
 
@@ -440,7 +440,7 @@ async def test_workflow_attempts_take_no_script_slot_and_the_script_limit_refuse
 async def test_plain_scripts_at_their_limit_do_not_refuse_a_workflow_attempt(tmp_path: Path) -> None:
     """The plain-script limit counts plain scripts only, so a workflow attempt still starts beside a full set."""
     manager, _backend, _client = _manager(tmp_path)
-    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
+    manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "calculate"),)
     context = _context(tmp_path)
 
     for _ in range(3):

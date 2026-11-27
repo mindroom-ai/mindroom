@@ -290,7 +290,10 @@ def validate_authored_tool_entry_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    retired = retired_tool_override(tool_name, overrides)
+    has_enable_toggles = any(
+        field.name.startswith("enable_") and field.authored_override for field in (metadata.config_fields or ())
+    )
+    retired = retired_tool_override(tool_name, overrides, has_enable_toggles=has_enable_toggles)
     if retired is not None:
         field_name, guidance = retired
         path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)

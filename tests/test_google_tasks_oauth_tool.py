@@ -137,12 +137,13 @@ def _worker_target() -> ResolvedWorkerTarget:
     return resolve_worker_target("user_agent", "general", execution_identity=identity)
 
 
-def _connected_tool(tmp_path: Path) -> tuple[GoogleTasksTools, _FakeTasksService]:
+def _connected_tool(tmp_path: Path, **kwargs: object) -> tuple[GoogleTasksTools, _FakeTasksService]:
     tool = GoogleTasksTools(
         runtime_paths=_runtime_paths(tmp_path),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
         creds=_valid_credentials(),
+        **kwargs,
     )
     service = _FakeTasksService()
     tool.service = service
@@ -156,7 +157,7 @@ def test_google_tasks_missing_credentials_returns_scoped_connect_instruction(tmp
         worker_target=_worker_target(),
     )
 
-    result = json.loads(tool.google_tasks_list_tasks())
+    result = json.loads(tool.google_tasks_read(action="list_tasks"))
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "google_tasks"
@@ -189,7 +190,7 @@ def test_google_tasks_tokens_stay_separate_from_dashboard_settings(tmp_path: Pat
 def test_google_tasks_list_task_lists(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_list_task_lists())
+    result = json.loads(tool.google_tasks_read(action="list_task_lists"))
 
     assert service.tasklists_resource.list_calls == [{"maxResults": 1000}]
     assert result == {"taskLists": [{"id": "list-1", "title": "My Tasks"}]}
@@ -199,7 +200,7 @@ def test_google_tasks_list_task_lists_pages_beyond_first_response(tmp_path: Path
     tool, service = _connected_tool(tmp_path)
     service.tasklists_resource.next_page_token = "lists-page-3"  # noqa: S105
 
-    result = json.loads(tool.google_tasks_list_task_lists(page_token="lists-page-2"))  # noqa: S106
+    result = json.loads(tool.google_tasks_read(action="list_task_lists", page_token="lists-page-2"))  # noqa: S106
 
     assert service.tasklists_resource.list_calls == [{"maxResults": 1000, "pageToken": "lists-page-2"}]
     assert result["nextPageToken"] == "lists-page-3"
@@ -208,7 +209,7 @@ def test_google_tasks_list_task_lists_pages_beyond_first_response(tmp_path: Path
 def test_google_tasks_list_tasks_defaults_to_open_tasks_in_default_list(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_list_tasks())
+    result = json.loads(tool.google_tasks_read(action="list_tasks"))
 
     assert service.tasks_resource.list_calls == [
         {
@@ -230,8 +231,9 @@ def test_google_tasks_list_tasks_includes_tasks_completed_in_google_clients(tmp_
     service.tasks_resource.next_page_token = "page-3"  # noqa: S105
 
     result = json.loads(
-        tool.google_tasks_list_tasks(
-            "list-1",
+        tool.google_tasks_read(
+            action="list_tasks",
+            task_list_id="list-1",
             show_completed=True,
             max_results=5,
             page_token="page-2",  # noqa: S106
@@ -255,7 +257,7 @@ def test_google_tasks_list_tasks_includes_tasks_completed_in_google_clients(tmp_
 def test_google_tasks_list_tasks_rejects_out_of_range_page_sizes(tmp_path: Path, max_results: int) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_list_tasks(max_results=max_results))
+    result = json.loads(tool.google_tasks_read(action="list_tasks", max_results=max_results))
 
     assert result == {"error": "Google Tasks max_results must be between 1 and 100"}
     assert service.tasks_resource.list_calls == []
@@ -265,8 +267,9 @@ def test_google_tasks_create_task_sends_due_date_as_google_timestamp(tmp_path: P
     tool, service = _connected_tool(tmp_path)
 
     result = json.loads(
-        tool.google_tasks_create_task(
-            "Buy milk",
+        tool.google_tasks_write(
+            action="create",
+            title="Buy milk",
             notes="Oat milk",
             due="2026-10-01",
             task_list_id="list-1",
@@ -287,7 +290,7 @@ def test_google_tasks_create_task_sends_due_date_as_google_timestamp(tmp_path: P
 def test_google_tasks_create_task_defaults_to_default_list(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_create_task("Buy milk")
+    tool.google_tasks_write(action="create", title="Buy milk")
 
     assert service.tasks_resource.insert_calls == [{"tasklist": "@default", "body": {"title": "Buy milk"}}]
 
@@ -295,7 +298,7 @@ def test_google_tasks_create_task_defaults_to_default_list(tmp_path: Path) -> No
 def test_google_tasks_create_task_skips_empty_optional_fields(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_create_task("Buy milk", notes="", due="", parent_task_id="")
+    tool.google_tasks_write(action="create", title="Buy milk", notes="", due="", parent_task_id="")
 
     assert service.tasks_resource.insert_calls == [{"tasklist": "@default", "body": {"title": "Buy milk"}}]
 
@@ -303,6 +306,7 @@ def test_google_tasks_create_task_skips_empty_optional_fields(tmp_path: Path) ->
 @pytest.mark.parametrize(
     ("title", "due", "error"),
     [
+        (None, None, "Google Tasks title must not be empty"),
         ("  ", None, "Google Tasks title must not be empty"),
         ("Buy milk", "2026-10-01T09:00:00Z", "Google Tasks due must be a date in YYYY-MM-DD format"),
         ("Buy milk", "2026-02-30", "Google Tasks due must be a date in YYYY-MM-DD format"),
@@ -310,22 +314,37 @@ def test_google_tasks_create_task_skips_empty_optional_fields(tmp_path: Path) ->
 )
 def test_google_tasks_create_task_rejects_invalid_input(
     tmp_path: Path,
-    title: str,
+    title: str | None,
     due: str | None,
     error: str,
 ) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_create_task(title, due=due))
+    result = json.loads(tool.google_tasks_write(action="create", title=title, due=due))
 
     assert result == {"error": error}
+    assert service.tasks_resource.insert_calls == []
+
+
+@pytest.mark.parametrize("extra_kwargs", [{"completed": True}, {"completed": False}, {"task_id": "task-1"}])
+def test_google_tasks_create_rejects_update_only_fields_without_api_call(
+    tmp_path: Path,
+    extra_kwargs: dict[str, object],
+) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(tool.google_tasks_write(action="create", title="Buy milk", **extra_kwargs))
+
+    assert "update" in result["error"]
     assert service.tasks_resource.insert_calls == []
 
 
 def test_google_tasks_update_task_patches_only_supplied_fields(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_update_task("task-1", task_list_id="list-1", title="Buy oat milk"))
+    result = json.loads(
+        tool.google_tasks_write(action="update", task_id="task-1", task_list_id="list-1", title="Buy oat milk"),
+    )
 
     assert service.tasks_resource.patch_calls == [
         {"tasklist": "list-1", "task": "task-1", "body": {"title": "Buy oat milk"}},
@@ -336,8 +355,9 @@ def test_google_tasks_update_task_patches_only_supplied_fields(tmp_path: Path) -
 def test_google_tasks_update_task_changes_several_fields_at_once(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_update_task(
-        "task-1",
+    tool.google_tasks_write(
+        action="update",
+        task_id="task-1",
         title="Buy oat milk",
         notes="Two cartons",
         due="2026-10-02",
@@ -361,7 +381,7 @@ def test_google_tasks_update_task_changes_several_fields_at_once(tmp_path: Path)
 def test_google_tasks_update_task_completes_task(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_update_task("task-1", completed=True)
+    tool.google_tasks_write(action="update", task_id="task-1", completed=True)
 
     assert service.tasks_resource.patch_calls == [
         {"tasklist": "@default", "task": "task-1", "body": {"status": "completed"}},
@@ -371,7 +391,7 @@ def test_google_tasks_update_task_completes_task(tmp_path: Path) -> None:
 def test_google_tasks_update_task_reopens_task_and_clears_completion_time(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_update_task("task-1", completed=False)
+    tool.google_tasks_write(action="update", task_id="task-1", completed=False)
 
     assert service.tasks_resource.patch_calls == [
         {"tasklist": "@default", "task": "task-1", "body": {"status": "needsAction", "completed": None}},
@@ -381,7 +401,7 @@ def test_google_tasks_update_task_reopens_task_and_clears_completion_time(tmp_pa
 def test_google_tasks_update_task_can_clear_notes_and_due_date(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    tool.google_tasks_update_task("task-1", notes="", due="")
+    tool.google_tasks_write(action="update", task_id="task-1", notes="", due="")
 
     assert service.tasks_resource.patch_calls == [
         {"tasklist": "@default", "task": "task-1", "body": {"notes": "", "due": None}},
@@ -391,6 +411,7 @@ def test_google_tasks_update_task_can_clear_notes_and_due_date(tmp_path: Path) -
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
+        ({}, "Google Tasks task_id must not be empty"),
         ({"task_id": " "}, "Google Tasks task_id must not be empty"),
         ({"task_id": "task-1"}, "Google Tasks update requires at least one field to change"),
         ({"task_id": "task-1", "title": " "}, "Google Tasks title must not be empty"),
@@ -404,7 +425,7 @@ def test_google_tasks_update_task_rejects_invalid_input(
 ) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_update_task(**kwargs))
+    result = json.loads(tool.google_tasks_write(action="update", **kwargs))
 
     assert result == {"error": error}
     assert service.tasks_resource.patch_calls == []
@@ -413,7 +434,7 @@ def test_google_tasks_update_task_rejects_invalid_input(
 def test_google_tasks_delete_task(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_delete_task("task-1", task_list_id="list-1"))
+    result = json.loads(tool.google_tasks_write(action="delete", task_id="task-1", task_list_id="list-1"))
 
     assert service.tasks_resource.delete_calls == [{"tasklist": "list-1", "task": "task-1"}]
     assert result == {"deleted": True, "taskListId": "list-1", "taskId": "task-1"}
@@ -422,7 +443,7 @@ def test_google_tasks_delete_task(tmp_path: Path) -> None:
 def test_google_tasks_delete_task_rejects_empty_task_id(tmp_path: Path) -> None:
     tool, service = _connected_tool(tmp_path)
 
-    result = json.loads(tool.google_tasks_delete_task(" "))
+    result = json.loads(tool.google_tasks_write(action="delete", task_id=" "))
 
     assert result == {"error": "Google Tasks task_id must not be empty"}
     assert service.tasks_resource.delete_calls == []
@@ -458,11 +479,11 @@ def test_google_tasks_provider_failures_preserve_status_without_provider_text(
     tool.service = Service()
 
     result = {
-        "list_task_lists": tool.google_tasks_list_task_lists,
-        "list_tasks": tool.google_tasks_list_tasks,
-        "create": lambda: tool.google_tasks_create_task("Buy milk"),
-        "update": lambda: tool.google_tasks_update_task("task-1", completed=True),
-        "delete": lambda: tool.google_tasks_delete_task("task-1"),
+        "list_task_lists": lambda: tool.google_tasks_read(action="list_task_lists"),
+        "list_tasks": lambda: tool.google_tasks_read(action="list_tasks"),
+        "create": lambda: tool.google_tasks_write(action="create", title="Buy milk"),
+        "update": lambda: tool.google_tasks_write(action="update", task_id="task-1", completed=True),
+        "delete": lambda: tool.google_tasks_write(action="delete", task_id="task-1"),
     }[operation]()
 
     assert json.loads(result) == {"error": "Google Tasks request failed (HTTP 404)"}
@@ -470,27 +491,33 @@ def test_google_tasks_provider_failures_preserve_status_without_provider_text(
 
 
 def test_google_tasks_config_flags_control_registered_functions(tmp_path: Path) -> None:
-    read_only = GoogleTasksTools(
-        runtime_paths=_runtime_paths(tmp_path),
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        worker_target=None,
-        creds=_valid_credentials(),
-        manage_tasks=False,
-    )
-    write_only = GoogleTasksTools(
-        runtime_paths=_runtime_paths(tmp_path),
-        credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        worker_target=None,
-        creds=_valid_credentials(),
-        read_tasks=False,
-    )
+    read_only, _ = _connected_tool(tmp_path, manage_tasks=False)
+    write_only, _ = _connected_tool(tmp_path, read_tasks=False)
+    neither, _ = _connected_tool(tmp_path, read_tasks=False, manage_tasks=False)
 
-    assert set(read_only.functions) == {"google_tasks_list_task_lists", "google_tasks_list_tasks"}
-    assert set(write_only.functions) == {
-        "google_tasks_create_task",
-        "google_tasks_update_task",
-        "google_tasks_delete_task",
-    }
+    assert set(read_only.functions) == {"google_tasks_read"}
+    assert set(write_only.functions) == {"google_tasks_write"}
+    assert set(neither.functions) == set()
+
+
+@pytest.mark.parametrize(
+    ("retired_name", "replacement"),
+    [
+        ("google_tasks_list_task_lists", "google_tasks_read"),
+        ("google_tasks_list_tasks", "google_tasks_read"),
+        ("google_tasks_create_task", "google_tasks_write"),
+        ("google_tasks_update_task", "google_tasks_write"),
+        ("google_tasks_delete_task", "google_tasks_write"),
+    ],
+)
+def test_google_tasks_filters_fail_closed_on_retired_names(
+    tmp_path: Path,
+    retired_name: str,
+    replacement: str,
+) -> None:
+    for param in ("include_tools", "exclude_tools"):
+        with pytest.raises(ValueError, match=replacement):
+            _connected_tool(tmp_path, **{param: [retired_name]})
 
 
 def test_google_tasks_agent_config_accepts_inline_operation_flags() -> None:

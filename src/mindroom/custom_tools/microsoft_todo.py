@@ -5,28 +5,28 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
+    MicrosoftGraphToolkit,
     graph_call,
+    graph_error_payload,
     graph_int,
     graph_object,
     graph_records,
-    graph_session,
     html_to_text,
+    invalid_action,
     next_page_token,
     page_path,
     path_segment,
+    reject_unexpected_args,
     required_text,
     text_to_html,
     time_zone_name,
 )
-from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -34,9 +34,17 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-_WRITE_FUNCTIONS = frozenset(
-    {"microsoft_todo_create_task", "microsoft_todo_update_task", "microsoft_todo_delete_task"},
-)
+_ReadAction = Literal["list_lists", "list_tasks"]
+_WriteAction = Literal["create_task", "update_task", "delete_task"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "create_task": frozenset({"list_id", "title", "due_date", "notes", "importance", "time_zone"}),
+    "update_task": frozenset(
+        {"list_id", "task_id", "title", "due_date", "notes", "importance", "completed", "time_zone"},
+    ),
+    "delete_task": frozenset({"list_id", "task_id"}),
+}
+_Importance = Literal["low", "normal", "high"]
+
 # A listing returns up to 50 tasks, so each task's notes stay short.
 _MAX_NOTES_CHARACTERS = 2_000
 _MAX_TASKS = 50
@@ -56,11 +64,11 @@ class _Request:
     body: dict[str, object] | None = None
 
 
-def _list_path(list_id: str) -> str:
+def _list_path(list_id: str | None) -> str:
     return f"/me/todo/lists/{path_segment(list_id, 'list_id')}"
 
 
-def _task_path(list_id: str, task_id: str) -> str:
+def _task_path(list_id: str | None, task_id: str | None) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
 
 
@@ -124,7 +132,7 @@ def _list(task_list: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-class MicrosoftTodoTools(Toolkit):
+class MicrosoftTodoTools(MicrosoftGraphToolkit):
     """List, create, update, complete, and delete Microsoft To Do tasks as the requester."""
 
     def __init__(
@@ -136,27 +144,16 @@ class MicrosoftTodoTools(Toolkit):
         runtime_config: Config | None = None,
         write: bool = True,
     ) -> None:
-        if credentials_manager is None:
-            msg = "MicrosoftTodoTools requires an explicit credentials_manager"
-            raise RuntimeError(msg)
-        self._session = partial(
-            graph_session,
-            microsoft_oauth_provider(_TOOL_NAME),
-            runtime_paths,
-            credentials_manager,
-            worker_target,
-            runtime_config,
-        )
-        functions: dict[str, Callable[..., str]] = {
-            "microsoft_todo_list_lists": self.microsoft_todo_list_lists,
-            "microsoft_todo_list_tasks": self.microsoft_todo_list_tasks,
-            "microsoft_todo_create_task": self.microsoft_todo_create_task,
-            "microsoft_todo_update_task": self.microsoft_todo_update_task,
-            "microsoft_todo_delete_task": self.microsoft_todo_delete_task,
-        }
+        tools: list[Callable[..., str]] = [self.microsoft_todo_read]
+        if write:
+            tools.append(self.microsoft_todo_write)
         super().__init__(
-            name=_TOOL_NAME,
-            tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
+            tool_name=_TOOL_NAME,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            tools=tools,
         )
 
     def _send(
@@ -174,96 +171,70 @@ class MicrosoftTodoTools(Toolkit):
             ),
         )
 
-    def microsoft_todo_list_lists(self, page_token: str | None = None) -> str:
-        """List the requester's Microsoft To Do task lists.
-
-        The list whose wellknown_list_name is defaultList is the requester's default Tasks list, and flaggedEmails
-        holds flagged Outlook messages.
-
-        Args:
-            page_token: The next_page_token of the previous call, to continue the same listing.
-
-        """
-
-        def build() -> _Request:
-            if page_token is not None:
-                return _Request("GET", page_path(page_token, "/me/todo/lists"))
-            return _Request("GET", "/me/todo/lists", params={"$top": str(_MAX_LISTS)})
-
-        return self._send(
-            build,
-            lambda payload: {
-                "lists": [_list(task_list) for task_list in graph_records(payload)],
-                "next_page_token": next_page_token(payload),
-            },
-        )
-
-    def microsoft_todo_list_tasks(
+    def microsoft_todo_read(
         self,
-        list_id: str,
+        action: _ReadAction,
+        list_id: str | None = None,
         include_completed: bool = False,
         limit: int = 50,
         page_token: str | None = None,
     ) -> str:
-        """List the tasks in one Microsoft To Do list; completed tasks are left out unless include_completed is true.
+        """List Microsoft To Do task lists and tasks as the requester.
 
-        Each task's notes are cut at 2,000 characters, and notes_truncated is true when they were cut.
-        A task's due is the date, time, and zone Graph reports; a due date is midnight in the zone of whoever set
-        it, usually reported in UTC, so convert it to the requester's zone before naming the day.
-
-        Args:
-            list_id: The list's id from microsoft_todo_list_lists.
-            include_completed: Also return completed tasks.
-            limit: Maximum number of tasks to return, from 1 to 50.
-            page_token: The next_page_token of the previous call, to continue the same listing.
-
+        - `list_lists`: list task lists (`defaultList` is the default Tasks list; `flaggedEmails` holds flagged
+          Outlook messages; optional `page_token`)
+        - `list_tasks`: list tasks in `list_id` (open tasks only unless `include_completed=True`; `limit` 1-50
+          default 50; optional `page_token`). Notes cap at 2,000 chars (`notes_truncated=True`). A task's `due` is
+          midnight in the zone of whoever set it (usually returned in UTC), so convert it to the requester's zone
+          before naming the day.
         """
+        if action == "list_lists":
 
-        def build() -> _Request:
-            if page_token is not None:
-                return _Request("GET", page_path(page_token, r"/me/todo/lists/[^/]+/tasks"))
-            params = {"$top": str(graph_int(limit, "limit", maximum=_MAX_TASKS))}
-            if not include_completed:
-                params["$filter"] = _OPEN_TASKS_FILTER
-            return _Request("GET", f"{_list_path(list_id)}/tasks", params=params)
+            def build_lists() -> _Request:
+                if page_token is not None:
+                    return _Request("GET", page_path(page_token, "/me/todo/lists"))
+                return _Request("GET", "/me/todo/lists", params={"$top": str(_MAX_LISTS)})
 
-        return self._send(
-            build,
-            lambda payload: {
-                "tasks": [_task(task) for task in graph_records(payload)],
-                "next_page_token": next_page_token(payload),
-            },
-        )
+            return self._send(
+                build_lists,
+                lambda payload: {
+                    "lists": [_list(task_list) for task_list in graph_records(payload)],
+                    "next_page_token": next_page_token(payload),
+                },
+            )
+        if action == "list_tasks":
 
-    def microsoft_todo_create_task(
+            def build_tasks() -> _Request:
+                if page_token is not None:
+                    return _Request("GET", page_path(page_token, r"/me/todo/lists/[^/]+/tasks"))
+                params = {"$top": str(graph_int(limit, "limit", maximum=_MAX_TASKS))}
+                if not include_completed:
+                    params["$filter"] = _OPEN_TASKS_FILTER
+                return _Request("GET", f"{_list_path(list_id)}/tasks", params=params)
+
+            return self._send(
+                build_tasks,
+                lambda payload: {
+                    "tasks": [_task(task) for task in graph_records(payload)],
+                    "next_page_token": next_page_token(payload),
+                },
+            )
+        return graph_error_payload(_TOOL_NAME, invalid_action(action))
+
+    def _create_task(
         self,
         list_id: str,
-        title: str,
-        due_date: str | None = None,
-        notes: str | None = None,
-        importance: Literal["low", "normal", "high"] = "normal",
-        time_zone: str = "UTC",
+        title: str | None,
+        due_date: str | None,
+        notes: str | None,
+        importance: _Importance | None,
+        time_zone: str,
     ) -> str:
-        """Create a task in one Microsoft To Do list.
-
-        Before calling, tell the requester the task's title and the list's name, because an approval prompt may
-        show only IDs.
-        Read the returned task's due as microsoft_todo_list_tasks says: convert it to the requester's zone before
-        naming the day.
-
-        Args:
-            list_id: The list's id from microsoft_todo_list_lists.
-            title: The task's title.
-            due_date: The due date as YYYY-MM-DD.
-            notes: Notes for the task, as plain text.
-            importance: low, normal, or high.
-            time_zone: The requester's time zone, so the due date is their midnight: a Windows name such as
-                "Pacific Standard Time" or an IANA name such as "America/Los_Angeles". Defaults to UTC.
-
-        """
-
         def build() -> _Request:
-            body: dict[str, object] = {"title": required_text(title, "title"), "importance": importance}
+            body: dict[str, object] = {
+                "title": required_text(title, "title"),
+                "importance": "normal" if importance is None else importance,
+            }
             if due_date is not None:
                 body["dueDateTime"] = _due(due_date, time_zone)
             if notes is not None:
@@ -272,36 +243,17 @@ class MicrosoftTodoTools(Toolkit):
 
         return self._send(build, lambda payload: {"task": _task(payload)})
 
-    def microsoft_todo_update_task(
+    def _update_task(
         self,
         list_id: str,
-        task_id: str,
-        title: str | None = None,
-        due_date: str | None = None,
-        notes: str | None = None,
-        importance: Literal["low", "normal", "high"] | None = None,
-        completed: bool | None = None,
-        time_zone: str = "UTC",
+        task_id: str | None,
+        title: str | None,
+        due_date: str | None,
+        notes: str | None,
+        importance: _Importance | None,
+        completed: bool | None,
+        time_zone: str,
     ) -> str:
-        """Change a Microsoft To Do task's title, due date, notes, importance, or completion; omitted fields stay unchanged.
-
-        Before calling, tell the requester the task's title, its list, and what will change, because an approval
-        prompt may show only IDs.
-        Read the returned task's due as microsoft_todo_list_tasks says: convert it to the requester's zone before
-        naming the day.
-
-        Args:
-            list_id: The list's id from microsoft_todo_list_lists.
-            task_id: The task's id from microsoft_todo_list_tasks.
-            title: The new title.
-            due_date: The new due date as YYYY-MM-DD; an empty string removes the due date.
-            notes: The complete new notes, which replace the current notes; an empty string removes them.
-            importance: low, normal, or high.
-            completed: True marks the task completed; False reopens it as not started.
-            time_zone: The requester's time zone for due_date, as for microsoft_todo_create_task.
-
-        """
-
         def build() -> _Request:
             path = _task_path(list_id, task_id)
             body: dict[str, object] = {}
@@ -324,18 +276,58 @@ class MicrosoftTodoTools(Toolkit):
 
         return self._send(build, lambda payload: {"task": _task(payload)})
 
-    def microsoft_todo_delete_task(self, list_id: str, task_id: str) -> str:
-        """Delete one Microsoft To Do task.
+    def microsoft_todo_write(
+        self,
+        action: _WriteAction,
+        list_id: str,
+        task_id: str | None = None,
+        title: str | None = None,
+        due_date: str | None = None,
+        notes: str | None = None,
+        importance: _Importance | None = None,
+        completed: bool | None = None,
+        time_zone: str | None = None,
+    ) -> str:
+        """Create, update, complete, or delete a Microsoft To Do task as the requester.
 
-        Before calling, tell the requester the task's title and its list, because an approval prompt may show
-        only IDs.
+        Before calling, tell the requester the task's title, its list, and what will change, because an approval
+        prompt may show only IDs. Read returned `due` dates by converting them to the requester's zone before naming
+        the day. Pass `list_id` (and `task_id` for update/delete) from `microsoft_todo_read`; `time_zone` accepts
+        Windows or IANA names (default `"UTC"`).
 
-        Args:
-            list_id: The list's id from microsoft_todo_list_lists.
-            task_id: The task's id from microsoft_todo_list_tasks.
-
+        - `create_task`: create in `list_id` with `title` (optional `due_date` YYYY-MM-DD, plain-text `notes`,
+          `importance` low/normal/high default normal, `time_zone`)
+        - `update_task`: update `task_id` in `list_id`; omitted fields stay unchanged (`title`, `due_date` YYYY-MM-DD
+          where an empty string removes the due date, `notes` replacing current notes where `""` removes them,
+          `importance`, `completed` True/False, `time_zone`)
+        - `delete_task`: delete `task_id` from `list_id`
         """
-        return self._send(
-            lambda: _Request("DELETE", _task_path(list_id, task_id)),
-            lambda _payload: {"deleted": {"list_id": list_id, "task_id": task_id}},
-        )
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "list_id": list_id,
+                    "task_id": task_id,
+                    "title": title,
+                    "due_date": due_date,
+                    "notes": notes,
+                    "importance": importance,
+                    "completed": completed,
+                    "time_zone": time_zone,
+                },
+            )
+        ) is not None:
+            return rejected
+        effective_zone = "UTC" if time_zone is None else time_zone
+        if action == "create_task":
+            return self._create_task(list_id, title, due_date, notes, importance, effective_zone)
+        if action == "update_task":
+            return self._update_task(list_id, task_id, title, due_date, notes, importance, completed, effective_zone)
+        if action == "delete_task":
+            return self._send(
+                lambda: _Request("DELETE", _task_path(list_id, task_id)),
+                lambda _payload: {"deleted": {"list_id": list_id, "task_id": task_id}},
+            )
+        return graph_error_payload(_TOOL_NAME, invalid_action(action))

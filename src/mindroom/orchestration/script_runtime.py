@@ -18,6 +18,7 @@ from mindroom.approval.tool_approval import (
     ToolApprovalDecision,
     human_gate,
     resolve_tool_approval_approver,
+    tool_may_require_approval,
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -84,6 +85,7 @@ logger = get_logger(__name__)
 _SCRIPT_RETENTION_SECONDS_ENV = "MINDROOM_SCRIPT_RETENTION_SECONDS"
 _DEFAULT_SCRIPT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_SCRIPT_CHECK_LAUNCH_GRACE_SECONDS = 60.0
 
 
 class _ScriptRuntimeUnavailableError(RuntimeError):
@@ -646,16 +648,31 @@ class ScriptRuntimeLifecycle:
             if None not in (old_new := [script_process_authority(c, agent_name, entry) for c in configs])
             and old_new[0] != old_new[1]
         }
+        script_check_policy_revoked = _script_check_policy_enabled(current_config) and not _script_check_policy_enabled(
+            new_config,
+        )
+        script_check_agent_lost = {
+            agent_name
+            for agent_name in continuing_agents
+            if _agent_supports_script_check(current_config, agent_name)
+            and not _agent_supports_script_check(new_config, agent_name)
+        }
         if (
             not removed_agents
             and not isolation_changes
             and not script_tool_removals
             and not process_authority_changes
+            and not script_check_policy_revoked
+            and not script_check_agent_lost
             and not authorization_changed
             and not plugins_changed
         ):
             return
 
+        script_check_disabled = not _script_check_policy_enabled(new_config)
+        script_check_agent_removals = {
+            agent_name for agent_name in continuing_agents if not _agent_supports_script_check(new_config, agent_name)
+        }
         launch_fence_started = False
 
         async def apply_update_boundary() -> None:
@@ -670,6 +687,8 @@ class ScriptRuntimeLifecycle:
                 removed_agents=removed_agents,
                 isolation_changes=isolation_changes,
                 script_tool_removals=script_tool_removals,
+                script_check_disabled=script_check_disabled,
+                script_check_agent_removals=script_check_agent_removals,
                 process_authority_changes=process_authority_changes,
                 authorization_config=new_config if authorization_changed else None,
                 plugins_changed=plugins_changed,
@@ -694,6 +713,8 @@ class ScriptRuntimeLifecycle:
         removed_agents: set[str],
         isolation_changes: set[str],
         script_tool_removals: set[tuple[str, str]],
+        script_check_disabled: bool,
+        script_check_agent_removals: set[str],
         process_authority_changes: set[str],
         authorization_config: Config | None,
         plugins_changed: bool,
@@ -714,7 +735,11 @@ class ScriptRuntimeLifecycle:
                 for run in runs
                 if run.run_id in unauthorized_ids
                 or run.agent_name in affected_agents
-                or (run.agent_name, run.entry) in script_tool_removals
+                or (
+                    (script_check_disabled or run.agent_name in script_check_agent_removals)
+                    if run.is_script_check
+                    else (run.agent_name, run.entry) in script_tool_removals
+                )
             ]
         )
         await self._interrupt_runs(
@@ -727,6 +752,8 @@ class ScriptRuntimeLifecycle:
                     removed_agents=removed_agents,
                     isolation_changes=isolation_changes,
                     script_tool_removals=script_tool_removals,
+                    script_check_disabled=script_check_disabled,
+                    script_check_agent_removals=script_check_agent_removals,
                     process_authority_changes=process_authority_changes,
                     plugins_changed=plugins_changed,
                 )
@@ -896,9 +923,24 @@ class ScriptRuntimeLifecycle:
                         exc_info=True,
                     )
 
-        await asyncio.gather(*(reconcile_run(run) for run in runs))
+        reconcile_targets = [run for run in runs if not self._runner_owns_script_check(run)]
+        await asyncio.gather(*(reconcile_run(run) for run in reconcile_targets))
         if self.after_reconcile is not None:
             await self.after_reconcile()
+
+    def _runner_owns_script_check(self, run: ScriptRunRecord) -> bool:
+        """Return whether an active script_check tick runner currently owns exit observation for *run*."""
+        if (
+            not run.is_script_check
+            or run.finished_at is not None
+            or run.cancel_requested_at is not None
+            or not self.broker.has_active_check_tick(run.run_id)
+        ):
+            return False
+        started = datetime.fromisoformat(run.started_at or run.created_at)
+        return (self.manager.clock() - started).total_seconds() < (
+            run.max_runtime_seconds + _SCRIPT_CHECK_LAUNCH_GRACE_SECONDS
+        )
 
     async def _startup_cleanup_pass(self) -> None:
         """Adopt compatible surviving workers and retire other inherited ownership."""
@@ -917,6 +959,7 @@ class ScriptRuntimeLifecycle:
                 run_ids=[run.run_id for run in pending],
             )
             return
+        await self._prune_pass(script_checks_only=True)
         if not adopted_ids:
             await self._release_current_worker_lease()
         if self.api_enabled:
@@ -935,7 +978,11 @@ class ScriptRuntimeLifecycle:
         its recovery signature matches the current backend, configuration, and gateway, and its
         owner authorization is confirmed. Anything unresolved stays interruptible.
         """
-        runs = await asyncio.to_thread(self.store.list_runs, include_finished=False)
+        runs = [
+            run
+            for run in await asyncio.to_thread(self.store.list_runs, include_finished=False)
+            if not run.is_script_check
+        ]
         config = self.config_provider()
         return [
             ActiveScriptRunInfo(
@@ -1057,25 +1104,29 @@ class ScriptRuntimeLifecycle:
                 )
                 raise
 
-    async def _prune_pass(self, *, now: datetime | None = None) -> None:
+    async def _prune_pass(self, *, now: datetime | None = None, script_checks_only: bool = False) -> None:
         cutoff = (now or datetime.now(UTC)) - timedelta(seconds=self.retention_seconds)
         finished_before = utc_timestamp(cutoff)
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=True)
         for run in runs:
             if run.state not in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is None:
                 continue
-            if run.finished_at > finished_before:
+            if script_checks_only and not run.is_script_check:
                 continue
+            if not run.is_script_check and run.finished_at > finished_before:
+                continue
+            prune_before = run.finished_at if run.is_script_check else finished_before
             try:
-                approvals_pruned = await self.resolver.prune_approvals(run.run_id)
-                if not approvals_pruned:
-                    continue
+                if not run.is_script_check:
+                    approvals_pruned = await self.resolver.prune_approvals(run.run_id)
+                    if not approvals_pruned:
+                        continue
                 await asyncio.to_thread(
                     self.store.prune_terminal_run,
                     run.run_id,
-                    finished_before=finished_before,
+                    finished_before=prune_before,
                 )
-            except (ScriptRunManagerError, WorkerBackendError, _ScriptRuntimeUnavailableError):
+            except (ScriptRunManagerError, ScriptRunStoreError, WorkerBackendError, _ScriptRuntimeUnavailableError):
                 logger.warning(
                     "script_run_retention_pending",
                     run_id=run.run_id,
@@ -1267,12 +1318,33 @@ def _agent_has_tool(config: Config, agent_name: str, tool_name: str) -> bool:
     return tool_name in config.resolve_agent(agent_name).tools.tool_names
 
 
+def _script_check_policy_enabled(config: Config) -> bool:
+    pol = config.external_trigger_policy
+    return pol.is_reactive_active and pol.script_check_enabled
+
+
+def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
+    return (
+        agent_name in config.agents
+        and _agent_has_tool(config, agent_name, "triggers")
+        and (
+            _agent_has_tool(config, agent_name, "script")
+            or (
+                _agent_has_tool(config, agent_name, "workflow")
+                and not tool_may_require_approval(config, "start_workflow")
+            )
+        )
+    )
+
+
 def _reload_reason_for(
     run: ScriptRunRecord,
     *,
     removed_agents: set[str],
     isolation_changes: set[str],
     script_tool_removals: set[tuple[str, str]],
+    script_check_disabled: bool,
+    script_check_agent_removals: set[str],
     process_authority_changes: set[str],
     plugins_changed: bool,
 ) -> str:
@@ -1282,7 +1354,11 @@ def _reload_reason_for(
         return OWNER_AGENT_REMOVED
     if run.agent_name in isolation_changes:
         return AGENT_ISOLATION_CHANGED
-    if (run.agent_name, run.entry) in script_tool_removals:
+    if (
+        (script_check_disabled or run.agent_name in script_check_agent_removals)
+        if run.is_script_check
+        else (run.agent_name, run.entry) in script_tool_removals
+    ):
         return SCRIPT_TOOL_REMOVED if run.entry == "script" else WORKFLOW_TOOL_REMOVED
     if run.agent_name in process_authority_changes:
         return WORKER_CONFIGURATION_CHANGED

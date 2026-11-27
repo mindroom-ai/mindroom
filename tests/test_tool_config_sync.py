@@ -335,11 +335,7 @@ def test_zoom_never_offers_its_access_token_to_the_model() -> None:
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
     assert _BUILTINS.entries["pubmed"].function_names == ("search_pubmed",)
-    assert _BUILTINS.entries["youtube"].function_names == (
-        "get_video_timestamps",
-        "get_youtube_video_captions",
-        "get_youtube_video_data",
-    )
+    assert _BUILTINS.entries["youtube"].function_names == ("youtube_video",)
     assert _BUILTINS.entries["twilio"].function_names == ("send_sms", "twilio_read")
     assert _BUILTINS.entries["x"].function_names == ("x_read", "x_write")
 

@@ -155,8 +155,8 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("attachments", "attachment"),
         ("callback_manager", "mint_callback"),
         ("claude_agent", "claude_send"),
-        ("dynamic_workflow", "list_workflow_runs"),
-        ("workflow", "list_workflow_runs"),
+        ("dynamic_workflow", "workflow"),
+        ("workflow", "workflow"),
         ("external_trigger_manager", "triggers"),
         ("matrix_api", "matrix_api"),
         ("matrix_message", "matrix_message"),
@@ -269,8 +269,13 @@ async def test_gateway_rechecks_tool_metadata_after_discovery(
     assert "error" not in result
     assert [item["toolkit"] for item in result["results"]] == ["duckduckgo"]
     for response in (
-        await gateway.get_tool(context, toolkit="calculator", function="add"),
-        await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3}),
+        await gateway.get_tool(context, toolkit="calculator", function="calculate"),
+        await gateway.invoke_tool(
+            context,
+            toolkit="calculator",
+            function="calculate",
+            arguments={"action": "add", "a": 2, "b": 3},
+        ),
     ):
         assert response == {
             "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
@@ -298,9 +303,14 @@ async def test_a_publication_during_a_request_leaves_the_request_on_the_tools_it
     if operation == "search":
         response = await gateway.search_tools(context, toolkit="calculator")
     elif operation == "schema":
-        response = await gateway.get_tool(context, toolkit="calculator", function="add")
+        response = await gateway.get_tool(context, toolkit="calculator", function="calculate")
     else:
-        response = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3})
+        response = await gateway.invoke_tool(
+            context,
+            toolkit="calculator",
+            function="calculate",
+            arguments={"action": "add", "a": 2, "b": 3},
+        )
 
     assert "error" not in response
     assert built_with == [selected_tools]
@@ -362,10 +372,15 @@ async def test_selected_schema_builds_only_selected_toolkit(
         return original(name, **cast("dict[str, Any]", kwargs))
 
     monkeypatch.setattr(agents, "build_agent_toolkit", selected)
-    result = await gateway.get_tool(context, toolkit="calculator", function="add")
+    result = await gateway.get_tool(context, toolkit="calculator", function="calculate")
     assert "error" not in result
     assert result["inputSchema"]["properties"]["a"]["type"] == "number"
-    call = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3})
+    call = await gateway.invoke_tool(
+        context,
+        toolkit="calculator",
+        function="calculate",
+        arguments={"action": "add", "a": 2, "b": 3},
+    )
     assert "error" not in call
     assert json.loads(call["result"])["result"] == 5
 
@@ -461,13 +476,13 @@ async def test_invalid_arguments_are_rejected_before_tool_body(
 ) -> None:
     """Invalid arguments are rejected before tool body."""
 
-    def add(a: float, b: float) -> float:
-        del a, b
+    def calculate(action: str, a: float, b: float) -> float:
+        del action, a, b
         pytest.fail("Invalid arguments reached the tool body")
 
-    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[add]))
+    _replace_calculator(monkeypatch, Toolkit(name="calculator", tools=[calculate]))
     for arguments in [{"a": "wrong", "b": 1}, {"a": 1}, {"a": float("nan"), "b": 1}, {"x": "a" * 65536}]:
-        result = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments=arguments)
+        result = await gateway.invoke_tool(context, toolkit="calculator", function="calculate", arguments=arguments)
         assert "result" not in result
         assert "error" in result
         assert result["error"]["code"] == "invalid_arguments"
@@ -491,7 +506,7 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rule on the shell blocks ``add`` once the calculator says its calls are shell commands, and only ``add``."""
-    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "calculate")
     config = context.config.model_copy(deep=True)
     config.tool_approval.rules = [ApprovalRuleConfig(match="run_shell_command", action="require_approval")]
     context = replace(context, config=config)
@@ -499,8 +514,7 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     search_result = await gateway.search_tools(context, toolkit="calculator")
     assert "error" not in search_result
     found = {item["function"] for item in search_result["results"]}
-    assert "add" not in found
-    assert "subtract" in found
+    assert "calculate" not in found
     await _assert_add_needs_approval(context)
 
     other_agent_config = context.config.model_copy(deep=True)
@@ -514,14 +528,14 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
 
 async def _assert_add_needs_approval(context: AgentToolContext) -> None:
     """Assert the gateway neither describes nor runs the calculator's ``add``, which needs approval."""
-    schema_result = await gateway.get_tool(context, toolkit="calculator", function="add")
+    schema_result = await gateway.get_tool(context, toolkit="calculator", function="calculate")
     assert "inputSchema" not in schema_result
     assert schema_result["error"]["code"] == "approval_required"
     invocation_result = await gateway.invoke_tool(
         context,
         toolkit="calculator",
-        function="add",
-        arguments={"a": 1, "b": 2},
+        function="calculate",
+        arguments={"action": "add", "a": 1, "b": 2},
     )
     assert "result" not in invocation_result
     assert invocation_result["error"]["code"] == "approval_required"
@@ -703,7 +717,7 @@ async def test_backend_failure_does_not_leak_or_block_another(
     assert "error" in result
     assert result["error"]["code"] == "tool_unavailable"
     assert "secret" not in json.dumps(result)
-    assert "inputSchema" in await gateway.get_tool(context, toolkit="calculator", function="add")
+    assert "inputSchema" in await gateway.get_tool(context, toolkit="calculator", function="calculate")
 
 
 @pytest.mark.asyncio
@@ -857,7 +871,12 @@ async def test_a_tool_named_like_a_disabled_mcp_server_is_the_tool_not_the_serve
     local = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
 
     searched = await gateway.search_tools(local)
-    invoked = await gateway.invoke_tool(local, toolkit="mcp_demo", function="add", arguments={"a": 2, "b": 3})
+    invoked = await gateway.invoke_tool(
+        local,
+        toolkit="mcp_demo",
+        function="calculate",
+        arguments={"action": "add", "a": 2, "b": 3},
+    )
 
     assert "error" not in searched
     assert [(item["toolkit"], item["description"]) for item in searched["results"]] == [
@@ -882,22 +901,34 @@ async def test_gateway_leaves_a_worker_routed_toolkit_s_connection_to_the_worker
     routed = resolve_connection_agent(resolve_connection_user(snapshot, context.requester_id), "personal")
 
     with _routed_connection_calculator(monkeypatch) as lifecycle:
-        result = await gateway.invoke_tool(routed, toolkit="calculator", function="add", arguments={"a": 1, "b": 2})
+        result = await gateway.invoke_tool(
+            routed,
+            toolkit="calculator",
+            function="calculate",
+            arguments={"action": "add", "a": 1, "b": 2},
+        )
 
     assert result == {"result": "3"}
-    assert lifecycle == ["worker calculator.add"]
+    assert lifecycle == ["worker calculator.calculate"]
 
 
 @pytest.mark.asyncio
 async def test_native_deferred_filters_remain_authoritative(context: AgentToolContext) -> None:
     """Deferred discovery must not remove authored function restrictions."""
     raw = context.config.model_dump()
-    raw["agents"]["personal"]["tools"] = [{"calculator": {"defer": True, "include_tools": ["add"]}}]
+    raw["agents"]["personal"]["tools"] = [
+        {"hackernews": {"defer": True, "include_tools": ["get_top_hackernews_stories"]}},
+    ]
     context = replace(context, config=Config.model_validate(raw))
-    result = await gateway.search_tools(context, toolkit="calculator")
+    result = await gateway.search_tools(context, toolkit="hackernews")
     assert "error" not in result
-    assert [item["function"] for item in result["results"]] == ["add"]
-    result = await gateway.invoke_tool(context, toolkit="calculator", function="multiply", arguments={"a": 2, "b": 3})
+    assert [item["function"] for item in result["results"]] == ["get_top_hackernews_stories"]
+    result = await gateway.invoke_tool(
+        context,
+        toolkit="hackernews",
+        function="get_user_details",
+        arguments={"username": "pg"},
+    )
     assert "result" not in result
     assert "error" in result
     assert result["error"]["code"] == "tool_not_found"

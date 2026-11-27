@@ -58,9 +58,9 @@
     "body": [
       "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}],\"system_fingerprint\":null}",
       "",
-      "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tool id=\\\"1\\\" state=\\\"start\\\">add(a=2, b=3)</tool>\"},\"finish_reason\":null}],\"system_fingerprint\":null}",
+      "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tool id=\\\"1\\\" state=\\\"start\\\">calculate(action=add, a=2, b=3)</tool>\"},\"finish_reason\":null}],\"system_fingerprint\":null}",
       "",
-      "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tool id=\\\"1\\\" state=\\\"done\\\">add(a=2, b=3)\\n{&quot;operation&quot;: &quot;addition&quot;, &quot;result&quot;: 5.0}</tool>\"},\"finish_reason\":null}],\"system_fingerprint\":null}",
+      "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<tool id=\\\"1\\\" state=\\\"done\\\">calculate(action=add, a=2, b=3)\\n{&quot;operation&quot;: &quot;addition&quot;, &quot;result&quot;: 5.0}</tool>\"},\"finish_reason\":null}],\"system_fingerprint\":null}",
       "",
       "data: {\"id\":\"chatcmpl-000000000002\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"writer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The sum \"},\"finish_reason\":null}],\"system_fingerprint\":null}",
       "",

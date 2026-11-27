@@ -25,6 +25,7 @@ import nio
 
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
+    AUTOMATION_ORIGIN_KEY,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -502,6 +503,7 @@ _LONG_TEXT_FILE_KEYS = ("io.mindroom.long_text", "url", "file")
 # The relay context a route carries for its responder. Any other content of a route is dropped.
 _ROUTE_CONTEXT_KEYS = (
     SOURCE_KIND_KEY,
+    AUTOMATION_ORIGIN_KEY,
     ORIGINAL_SENDER_KEY,
     ATTACHMENT_IDS_KEY,
     PER_FIRE_THREAD_ROOT_KEY,

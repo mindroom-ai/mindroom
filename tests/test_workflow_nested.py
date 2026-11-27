@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 _PROMPT = {"prompt": "Run the nested workflow."}
 _SOURCE = "def main(args):\n    return 'nested'\n"
-_START = tool_call("start_workflow", "c1", source=_SOURCE, args={"n": 1})
+_START = tool_call("workflow", "c1", action="start", source=_SOURCE, args={"n": 1})
 _RUNNING, _COMPLETED, _CANCELLED = WorkflowNodeState.RUNNING, WorkflowNodeState.COMPLETED, WorkflowNodeState.CANCELLED
 
 
@@ -65,7 +65,7 @@ async def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
 @pytest_asyncio.fixture
 async def gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The same harness, whose operator asks before an agent or a run is started, and whose owner may delegate."""
-    asks = ("run_subagent", "start_workflow")
+    asks = ("run_subagent", "workflow")
     options = {"other_agents": ("helper",), "delegate_to": ("helper",), "require_approval": asks}
     with workflow_stack(tmp_path, extra_tools=("workflow",), **options) as stack:
         async for opened in _opened(stack, monkeypatch):
@@ -102,7 +102,7 @@ def _group(stack: WorkflowStack, child: WorkflowRun) -> WorkflowNode:
 
 @pytest.mark.asyncio
 async def test_agent_starts_a_nested_run_inline_and_gets_its_report(stack: WorkflowStack) -> None:
-    """An agent's `start_workflow` waits for a run of its own inside the agent's run, and returns that run's report.
+    """An agent's `workflow(action="start", ...)` waits for a run of its own inside the agent's run, and returns that run's report.
 
     The nested run has its own limit, so a parent that works on one call at a time does not wait for itself, and it
     is no top-level run, so the requester's limit of those does not refuse it.
@@ -145,23 +145,29 @@ async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: Workf
     await stack.start()
     parent = stack.run_id
     with pytest.raises(NodeFailed) as refused:
-        await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
+        await asyncio.wait_for(
+            stack.result("@0", "tool", tool_args("workflow", "workflow", action="cancel", run_id=parent)),
+            5,
+        )
     assert (refused.value.kind, str(refused.value).startswith(_OWN_RUN)) == ("indeterminate", True)
 
-    await stack.submit("@1", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
+    await stack.submit("@1", "tool", tool_args("workflow", "workflow", action="start", source=_SOURCE))
     child = await _nested(stack, parent)
     stack.run_id = child.run_id
     with pytest.raises(NodeFailed) as refused:
-        await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
+        await asyncio.wait_for(
+            stack.result("@0", "tool", tool_args("workflow", "workflow", action="cancel", run_id=parent)),
+            5,
+        )
     assert str(refused.value).startswith(_OWN_RUN)
 
     stack.run_id = parent
-    model = stack.child_script(calls(tool_call("cancel_workflow", "c1", run_id=parent)), answer("done"))
+    model = stack.child_script(calls(tool_call("workflow", "c1", action="cancel", run_id=parent)), answer("done"))
     assert await asyncio.wait_for(stack.result("@2", "agent", _PROMPT), 10) == "done"
     assert _OWN_RUN in str(model.requests[1].messages[-1].content)
     assert [stack.store.get_run(run_id).state for run_id in (parent, child.run_id)] == [WorkflowRunState.RUNNING] * 2
     # A run inside may still be cancelled from the run around it.
-    stopped = await stack.result("@3", "tool", tool_args("workflow", "cancel_workflow", run_id=child.run_id))
+    stopped = await stack.result("@3", "tool", tool_args("workflow", "workflow", action="cancel", run_id=child.run_id))
     assert (child.run_id in str(stopped), stack.store.get_run(child.run_id).state) == (True, WorkflowRunState.CANCELLED)
 
 
@@ -328,7 +334,7 @@ async def test_repeated_call_of_the_same_agent_finds_the_same_nested_run(stack: 
     await stack.start()
     parent = stack.run_id
     gate = asyncio.Event()
-    again = tool_call("start_workflow", "c2", source=_SOURCE, args={"n": 1})
+    again = tool_call("workflow", "c2", action="start", source=_SOURCE, args={"n": 1})
     model = stack.child_script(calls(_START), calls(again), [Await(gate.wait), *answer("done")])
     receipt = await stack.submit("@0", "agent", _PROMPT)
     child = await _nested(stack, parent)
@@ -347,7 +353,7 @@ async def test_other_arguments_and_a_rerun_of_the_call_start_runs_of_their_own(s
     """The nested run's key holds the arguments and the generation of the call: either one changed is another run."""
     await stack.start()
     parent = stack.run_id
-    other = tool_call("start_workflow", "c2", source=_SOURCE, args={"n": 2})
+    other = tool_call("workflow", "c2", action="start", source=_SOURCE, args={"n": 2})
     stack.child_script(calls(_START), calls(other), answer("done"), calls(_START), answer("again"))
 
     async def report_the_next(total: int) -> None:
@@ -447,13 +453,13 @@ async def test_denied_or_approval_required_script_tool_delegate_launches_nothing
 
 @pytest.mark.asyncio
 async def test_script_tool_start_workflow_passes_the_same_gate(gated: WorkflowStack) -> None:
-    """A script's `tool("workflow", "start_workflow", ...)` asks as the rule says, and then runs a run inside its run."""
+    """A script's `tool("workflow", "workflow", action="start", ...)` asks as the rule says, and then runs a run inside its run."""
     await gated.start(depth=1)
     parent = gated.run_id
     gated.resolver.hold_approvals = asyncio.Event()
 
-    receipt = await gated.submit("@0", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
-    await gated.until(lambda: gated.resolver.asks == ["workflow.start_workflow"])
+    receipt = await gated.submit("@0", "tool", tool_args("workflow", "workflow", action="start", source=_SOURCE))
+    await gated.until(lambda: gated.resolver.asks == ["workflow.workflow"])
     assert gated.store.child_runs(parent) == []
     gated.resolver.hold_approvals.set()
     child = await _nested(gated, parent)
@@ -529,13 +535,13 @@ async def test_workflow_agent_message_lands_in_the_originating_thread(stack: Wor
 
 @pytest.mark.asyncio
 async def test_restart_during_a_scripts_nested_run_ends_its_call_indeterminate(stack: WorkflowStack) -> None:
-    """A script's `start_workflow` call that a restart cut short may have done anything: it is not made again.
+    """A script's `workflow(action="start", ...)` call that a restart cut short may have done anything: it is not made again.
 
     The run it started goes on by itself, as the one run it is.
     """
     await stack.start()
     parent = stack.run_id
-    start = tool_args("workflow", "start_workflow", source=_SOURCE)
+    start = tool_args("workflow", "workflow", action="start", source=_SOURCE)
     await stack.submit("@0", "tool", start)
     child = await _nested(stack, parent)
 
@@ -561,7 +567,7 @@ async def test_a_run_started_by_the_script_of_a_narrowed_run_has_no_more_tools_t
     with pytest.raises(NodeFailed, match="not a tool of the agent"):
         await stack.result("@0", "tool", tool_args("counter", "append", line="outer"))
 
-    await stack.submit("@1", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
+    await stack.submit("@1", "tool", tool_args("workflow", "workflow", action="start", source=_SOURCE))
     child = await _nested(stack, parent)
     stack.run_id = child.run_id
 
@@ -583,7 +589,7 @@ async def test_a_resume_made_by_the_script_of_a_narrowed_run_narrows_the_run_it_
     persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
     limited = await stack.start(persona=asdict(persona))
 
-    resume = tool_args("workflow", "resume_workflow", run_id=full.run_id, source=_SOURCE)
+    resume = tool_args("workflow", "workflow", action="resume", run_id=full.run_id, source=_SOURCE)
     await stack.submit("@0", "tool", resume)
     await stack.until(lambda: stack.store.get_run(full.run_id).state is WorkflowRunState.RUNNING)
 

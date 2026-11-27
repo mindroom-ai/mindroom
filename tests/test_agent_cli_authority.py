@@ -176,7 +176,7 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="calculator",
-                    function="add",
+                    function="calculate",
                 ),
             )
             receipt = await settled_receipt(owner, receipt["call_id"])
@@ -195,11 +195,11 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
     ("initial_rules", "reloaded_rules", "should_refuse"),
     [
         ([], [ApprovalRuleConfig(match="google_drive_*", script="approval_other_agent_only.py")], False),
-        ([], [ApprovalRuleConfig(match="add", script="approval_other_agent_only.py")], True),
-        ([], [ApprovalRuleConfig(match="add", agents="other_agent", action="require_approval")], False),
+        ([], [ApprovalRuleConfig(match="calculate", script="approval_other_agent_only.py")], True),
+        ([], [ApprovalRuleConfig(match="calculate", agents="other_agent", action="require_approval")], False),
         (
-            [ApprovalRuleConfig(match="add", arguments={"flag": True}, action="require_approval")],
-            [ApprovalRuleConfig(match="add", arguments={"flag": 1}, action="require_approval")],
+            [ApprovalRuleConfig(match="calculate", arguments={"flag": True}, action="require_approval")],
+            [ApprovalRuleConfig(match="calculate", arguments={"flag": 1}, action="require_approval")],
             True,
         ),
     ],
@@ -236,7 +236,7 @@ async def test_a_reload_adding_approval_rules_checks_only_the_called_tool_before
                     operation="tools.call",
                     call_id=uuid4(),
                     toolkit="calculator",
-                    function="add",
+                    function="calculate",
                 ),
             )
             receipt = await settled_receipt(owner, receipt["call_id"])
@@ -357,7 +357,7 @@ def test_call_payload_cannot_choose_identity_or_worker() -> None:
         "operation": "tools.call",
         "call_id": "12345678-1234-4234-8234-123456789abc",
         "toolkit": "calculator",
-        "function": "add",
+        "function": "calculate",
         "arguments": {"a": 1, "nested": {"requester_id": "legitimate-tool-data"}},
     }
     for forbidden in ("requester_id", "agent_name", "worker_id", "turn_id", "generation", "room_id"):
@@ -371,7 +371,7 @@ def test_protocol_requires_uuid_object_arguments_and_known_operation() -> None:
         "operation": "tools.call",
         "call_id": "12345678-1234-4234-8234-123456789abc",
         "toolkit": "calculator",
-        "function": "add",
+        "function": "calculate",
         "arguments": {},
     }
     assert isinstance(parse_operation(base), ToolCallOperation)
@@ -390,7 +390,7 @@ def test_call_canonical_arguments_reject_nonfinite_values_and_have_stable_serial
             "operation": "tools.call",
             "call_id": "12345678-1234-4234-8234-123456789abc",
             "toolkit": "calculator",
-            "function": "add",
+            "function": "calculate",
             "arguments": {"b": 2, "a": 1},
         },
     )
@@ -401,7 +401,7 @@ def test_call_canonical_arguments_reject_nonfinite_values_and_have_stable_serial
                 "operation": "tools.call",
                 "call_id": "12345678-1234-4234-8234-123456789abc",
                 "toolkit": "calculator",
-                "function": "add",
+                "function": "calculate",
                 "arguments": {"value": float("nan")},
             },
         )
@@ -411,7 +411,7 @@ def test_call_canonical_arguments_reject_nonfinite_values_and_have_stable_serial
                 "operation": "tools.call",
                 "call_id": "12345678-1234-4234-8234-123456789abc",
                 "toolkit": "calculator",
-                "function": "add",
+                "function": "calculate",
                 "arguments": {"value": "x" * (64 * 1024)},
             },
         )
@@ -421,7 +421,7 @@ def test_receipt_model_forbids_identity_and_routing_fields() -> None:
     receipt = {
         "call_id": "12345678-1234-4234-8234-123456789abc",
         "toolkit": "calculator",
-        "function": "add",
+        "function": "calculate",
         "status": "queued",
     }
     assert ToolCallReceipt.model_validate(receipt).status == "queued"

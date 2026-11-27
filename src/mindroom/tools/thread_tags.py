@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     icon="Tags",
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_tags",
-    function_names=("list_thread_tags", "tag_thread", "untag_thread"),
+    function_names=("thread_tags",),
+    action_scoped_grants=("thread_tags",),
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CURRENT_ROOM_ID,

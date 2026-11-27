@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     icon_color="text-blue-500",  # Tailwind color class
     config_fields=[],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
-    function_names=("add", "divide", "exponentiate", "factorial", "is_prime", "multiply", "square_root", "subtract"),
+    function_names=("calculate",),
+    action_scoped_grants=("calculate",),
 )
 def calculator_tools() -> type[CalculatorTools]:
     """Return calculator tools for mathematical operations."""

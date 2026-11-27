@@ -526,9 +526,9 @@ def test_a_plugin_whose_import_hangs_is_given_up_with_all_it_started_and_other_c
     started_at = time.monotonic()
     preloading = _serve_preload(runtime_paths, [hangs], budget_seconds=1)
 
-    assert _call(runtime_paths, [], "calculator", "add", 1, 2) is not None
+    assert _call(runtime_paths, [], "calculator", "calculate", "add", 1, 2) is not None
     assert "ok" in str(_call(runtime_paths, [], "shell", "run_shell_command", ["bash", "-c", "printf ok"]))
-    assert _call(runtime_paths, [], "calculator", "add", 1, 2) is not None
+    assert _call(runtime_paths, [], "calculator", "calculate", "add", 1, 2) is not None
 
     assert time.monotonic() - started_at < 20
     # Only the first template tried the preload; the one that serves never does.
@@ -877,7 +877,7 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
         _wait_for_setup(client, "failed")
         started_at = time.monotonic()
 
-        assert _http_call(client, [], "calculator", "add", 1, 2)["ok"] is True
+        assert _http_call(client, [], "calculator", "calculate", "add", 1, 2)["ok"] is True
         shell = _http_call(client, [], "shell", "run_shell_command", ["bash", "-c", "printf ok"])
         assert shell["ok"] is True, shell
         assert "ok" in str(shell["result"])
@@ -942,7 +942,9 @@ def test_a_call_that_arrives_during_the_setup_leaves_the_health_check_answering(
     with TestClient(app) as client:
         assert client.get("/healthz").json()["setup"] == "preparing"
         answers: list[dict[str, object]] = []
-        call = threading.Thread(target=lambda: answers.append(_http_call(client, [], "calculator", "add", 1, 2)))
+        call = threading.Thread(
+            target=lambda: answers.append(_http_call(client, [], "calculator", "calculate", "add", 1, 2)),
+        )
         call.start()
         # Long enough for the call to reach the lock that the setup holds.
         time.sleep(0.5)

@@ -212,7 +212,7 @@ def _provider_unavailable() -> list[ScriptStep]:
 
 def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
     """Script the child's requests for approval, nested work, deferred tools, and failures."""
-    turns = [calls(tool_call("add", "approved-add", a=1, b=2))]
+    turns = [calls(tool_call("calculate", "approved-add", action="add", a=1, b=2))]
     if continuation == "model_switch":
         turns.insert(
             0,
@@ -272,7 +272,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
                 delegate_to=["child"],
             ),
         },
-        tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
+        tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}] if approval else []},
         prompts={"INTERACTIVE_QUESTION_PROMPT": "UNSUPPORTED_INTERACTIVE_MARKER"},
         models={
             "default": ModelConfig(provider="openai", id="default-model"),
@@ -343,7 +343,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
         return
     assert model.turns == []
     assert json.loads(run_path.read_text())["output"] == "Child finished the requested work."
-    [approved] = [tool for tool in _child_tools(state.children[0], config, paths) if tool.tool_name == "add"]
+    [approved] = [tool for tool in _child_tools(state.children[0], config, paths) if tool.tool_name == "calculate"]
     assert not approved.is_error
     assert "3" in str(approved.result)
     prompts = system_prompts(model)
@@ -373,7 +373,7 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
                 max_tool_calls_per_turn=1,
             ),
         },
-        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
+        tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}]},
         models={
             "default": ModelConfig(provider="openai", id="default-model"),
             "alternate": ModelConfig(provider="openai", id="alternate-model"),
@@ -390,7 +390,7 @@ async def test_a_resumed_child_that_answered_after_a_refused_model_switch_is_not
     )
     model = ScriptedModel(
         [
-            calls(tool_call("add", "approved-add", a=1, b=2)),
+            calls(tool_call("calculate", "approved-add", action="add", a=1, b=2)),
             calls(tool_call("switch_thread_model", "switch-model", model_name="alternate", when="after-toolcall")),
             answer("Child finished the requested work."),
             answer("Child started over."),

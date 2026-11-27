@@ -433,7 +433,7 @@ def _manager(
             if isolated_script_gateway
             else "http://primary.test/api/script-gateway"
         ),
-        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
+        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "calculate"),),
         cancellation_grace_seconds=0,
         cancellation_poll_interval_seconds=0,
     )
@@ -1034,7 +1034,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
     """The authored allowlist can only narrow the agent's resolved launch surface."""
     manager, _backend, _client = _manager(tmp_path)
     manager.grant_resolver = lambda _context: (
-        ScriptToolGrant("calculator", "add"),
+        ScriptToolGrant("calculator", "calculate"),
         ScriptToolGrant("website", "read_url"),
     )
     manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})
@@ -1045,7 +1045,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
         limits=ScriptRunLimits(allowed_tools=("calculator",)),
     )
 
-    assert run.grants == (ScriptToolGrant("calculator", "add"),)
+    assert run.grants == (ScriptToolGrant("calculator", "calculate"),)
     assert run.preapprove_launch_grants is True
 
 
@@ -1053,7 +1053,7 @@ async def test_launch_grants_are_restricted_by_configured_allowed_tools(tmp_path
 async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_path: Path) -> None:
     """A degraded optional integration must not make the entire allowlist invalid."""
     manager, _backend, _client = _manager(tmp_path)
-    manager.grant_resolver = lambda _context: (ScriptToolGrant("calculator", "add"),)
+    manager.grant_resolver = lambda _context: (ScriptToolGrant("calculator", "calculate"),)
     manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "temporarily-empty"})
 
     run = await manager.run(
@@ -1062,7 +1062,7 @@ async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_p
         limits=ScriptRunLimits(allowed_tools=("calculator", "temporarily-empty")),
     )
 
-    assert run.grants == (ScriptToolGrant("calculator", "add"),)
+    assert run.grants == (ScriptToolGrant("calculator", "calculate"),)
     assert run.preapprove_launch_grants is True
 
 
@@ -1194,7 +1194,7 @@ async def test_concurrent_scripts_use_run_pinned_worker_roots_and_routes(tmp_pat
     """A narrow run's worker cannot select or locate a sibling run's snapshot."""
     manager, backend, _client = _manager(tmp_path)
     manager.grant_resolver = lambda _context: (
-        ScriptToolGrant("calculator", "add"),
+        ScriptToolGrant("calculator", "calculate"),
         ScriptToolGrant("website", "read_url"),
     )
     manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "website"})

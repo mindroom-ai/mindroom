@@ -5,16 +5,19 @@ from __future__ import annotations
 import json
 import re
 from datetime import date
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from googleapiclient.errors import HttpError
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
+from mindroom.custom_tools.google_service import GoogleApiToolkit, filter_google_tools, google_http_error_result
 from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -25,6 +28,9 @@ _MAX_TASKS_PAGE_SIZE = 100
 _DUE_DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _INVALID_DUE_ERROR = "Google Tasks due must be a date in YYYY-MM-DD format"
 _EMPTY_TITLE_ERROR = "Google Tasks title must not be empty"
+
+_ReadAction = Literal["list_task_lists", "list_tasks"]
+_WriteAction = Literal["create", "update", "delete"]
 
 
 class _InvalidTaskInputError(ValueError):
@@ -96,17 +102,20 @@ class GoogleTasksTools(GoogleApiToolkit):
         manage_tasks: bool = True,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
-        tools = []
+        include_tools = kwargs.pop("include_tools", None)
+        exclude_tools = kwargs.pop("exclude_tools", None)
+        tools: list[Callable[..., str]] = []
         if read_tasks:
-            tools.extend([self.google_tasks_list_task_lists, self.google_tasks_list_tasks])
+            tools.append(self.google_tasks_read)
         if manage_tasks:
-            tools.extend(
-                [
-                    self.google_tasks_create_task,
-                    self.google_tasks_update_task,
-                    self.google_tasks_delete_task,
-                ],
-            )
+            tools.append(self.google_tasks_write)
+        tools = filter_google_tools(
+            tools,
+            include_tools,
+            exclude_tools,
+            retired_tools=RETIRED_CONSOLIDATED_FUNCTIONS["google_tasks"],
+            known_tools=("google_tasks_read", "google_tasks_write"),
+        )
         super().__init__(
             name="google_tasks",
             tools=tools,
@@ -117,16 +126,7 @@ class GoogleTasksTools(GoogleApiToolkit):
             **kwargs,
         )
 
-    def google_tasks_list_task_lists(self, page_token: str | None = None) -> str:
-        """List the connected user's Google Tasks lists.
-
-        Args:
-            page_token: nextPageToken from a previous call, to fetch the following page.
-
-        Returns:
-            JSON containing up to 1000 task lists with their IDs and titles and, when more remain, a nextPageToken.
-
-        """
+    def _list_task_lists(self, page_token: str | None) -> str:
         params: dict[str, object] = {"maxResults": _MAX_TASK_LISTS}
         if page_token:
             params["pageToken"] = page_token
@@ -136,25 +136,13 @@ class GoogleTasksTools(GoogleApiToolkit):
             return google_http_error_result(_SERVICE_NAME, "list_task_lists", exc)
         return _page_result({"taskLists": response.get("items", [])}, response)
 
-    def google_tasks_list_tasks(
+    def _list_tasks(
         self,
-        task_list_id: str = _DEFAULT_TASK_LIST_ID,
-        show_completed: bool = False,
-        max_results: int = _MAX_TASKS_PAGE_SIZE,
-        page_token: str | None = None,
+        task_list_id: str,
+        show_completed: bool,
+        max_results: int,
+        page_token: str | None,
     ) -> str:
-        """List tasks in one Google Tasks list, including subtasks and tasks assigned to the user.
-
-        Args:
-            task_list_id: Task list ID from google_tasks_list_task_lists; "@default" is the user's default list.
-            show_completed: Whether to include completed tasks, including tasks completed in Google's own apps.
-            max_results: Maximum number of tasks to return, from 1 to 100.
-            page_token: nextPageToken from a previous call, to fetch the following page.
-
-        Returns:
-            JSON containing the tasks and, when more tasks remain, a nextPageToken.
-
-        """
         if not 1 <= max_results <= _MAX_TASKS_PAGE_SIZE:
             return _error_result(f"Google Tasks max_results must be between 1 and {_MAX_TASKS_PAGE_SIZE}")
         # Tasks completed in Google's own apps are hidden, so showCompleted alone would miss them.
@@ -173,28 +161,34 @@ class GoogleTasksTools(GoogleApiToolkit):
             return google_http_error_result(_SERVICE_NAME, "list_tasks", exc)
         return _page_result({"taskListId": task_list_id, "tasks": response.get("items", [])}, response)
 
-    def google_tasks_create_task(
+    def google_tasks_read(
         self,
-        title: str,
-        notes: str | None = None,
-        due: str | None = None,
+        action: _ReadAction,
         task_list_id: str = _DEFAULT_TASK_LIST_ID,
-        parent_task_id: str | None = None,
+        show_completed: bool = False,
+        max_results: int = _MAX_TASKS_PAGE_SIZE,
+        page_token: str | None = None,
     ) -> str:
-        """Create a task, optionally as a subtask of another task.
+        """List Google Tasks lists or tasks (returns `nextPageToken` when more pages remain).
 
-        Args:
-            title: Title of the task.
-            notes: Optional task description.
-            due: Optional due date in YYYY-MM-DD format; Google Tasks stores dates without times.
-            task_list_id: Task list ID from google_tasks_list_task_lists; "@default" is the user's default list.
-            parent_task_id: Optional ID of the task this new task becomes a subtask of.
-
-        Returns:
-            JSON containing the created task.
-
+        - `list_task_lists`: list up to 1000 task lists with IDs and titles (optional `page_token`)
+        - `list_tasks`: list up to `max_results` (1-100) tasks in `task_list_id` (default `@default`), including subtasks and Docs/Chat-assigned tasks; set `show_completed=True` to include completed/hidden tasks (optional `page_token`)
         """
-        if not title.strip():
+        if action == "list_task_lists":
+            return self._list_task_lists(page_token)
+        if action == "list_tasks":
+            return self._list_tasks(task_list_id, show_completed, max_results, page_token)
+        return _error_result(f"Unsupported Google Tasks read action {action!r}")
+
+    def _create_task(
+        self,
+        title: str | None,
+        notes: str | None,
+        due: str | None,
+        task_list_id: str,
+        parent_task_id: str | None,
+    ) -> str:
+        if not title or not title.strip():
             return _error_result(_EMPTY_TITLE_ERROR)
         body: dict[str, object] = {"title": title}
         if notes:
@@ -213,30 +207,16 @@ class GoogleTasksTools(GoogleApiToolkit):
             return google_http_error_result(_SERVICE_NAME, "create_task", exc)
         return json.dumps({"task": task})
 
-    def google_tasks_update_task(
+    def _update_task(
         self,
-        task_id: str,
-        task_list_id: str = _DEFAULT_TASK_LIST_ID,
-        title: str | None = None,
-        notes: str | None = None,
-        due: str | None = None,
-        completed: bool | None = None,
+        task_id: str | None,
+        task_list_id: str,
+        title: str | None,
+        notes: str | None,
+        due: str | None,
+        completed: bool | None,
     ) -> str:
-        """Change a task's title, notes, due date, or completion state; omitted fields stay unchanged.
-
-        Args:
-            task_id: ID of the task to update.
-            task_list_id: ID of the task list containing the task; "@default" is the user's default list.
-            title: New task title.
-            notes: New task description; an empty string removes it.
-            due: New due date in YYYY-MM-DD format; an empty string removes it.
-            completed: True marks the task completed, False reopens it.
-
-        Returns:
-            JSON containing the updated task.
-
-        """
-        if not task_id.strip():
+        if not task_id or not task_id.strip():
             return _error_result("Google Tasks task_id must not be empty")
         try:
             body = _task_patch_body(title, notes, due, completed)
@@ -248,21 +228,42 @@ class GoogleTasksTools(GoogleApiToolkit):
             return google_http_error_result(_SERVICE_NAME, "update_task", exc)
         return json.dumps({"task": task})
 
-    def google_tasks_delete_task(self, task_id: str, task_list_id: str = _DEFAULT_TASK_LIST_ID) -> str:
-        """Delete a task; deleting a task assigned from Google Docs or Chat also deletes its original assignment.
-
-        Args:
-            task_id: ID of the task to delete.
-            task_list_id: ID of the task list containing the task; "@default" is the user's default list.
-
-        Returns:
-            JSON confirming the deletion.
-
-        """
-        if not task_id.strip():
+    def _delete_task(self, task_id: str | None, task_list_id: str) -> str:
+        if not task_id or not task_id.strip():
             return _error_result("Google Tasks task_id must not be empty")
         try:
             self._google_api_service().tasks().delete(tasklist=task_list_id, task=task_id).execute()
         except HttpError as exc:
             return google_http_error_result(_SERVICE_NAME, "delete_task", exc)
         return json.dumps({"deleted": True, "taskListId": task_list_id, "taskId": task_id})
+
+    def google_tasks_write(
+        self,
+        action: _WriteAction,
+        task_list_id: str = _DEFAULT_TASK_LIST_ID,
+        task_id: str | None = None,
+        title: str | None = None,
+        notes: str | None = None,
+        due: str | None = None,
+        completed: bool | None = None,
+        parent_task_id: str | None = None,
+    ) -> str:
+        """Create, update, complete, or delete Google Tasks (`task_list_id` defaults to `@default`).
+
+        - `create`: create task with `title` (optional `notes`, `due` YYYY-MM-DD, `parent_task_id` for subtask)
+        - `update`: patch `task_id` with supplied fields (`title`, `notes`, `due` YYYY-MM-DD, `completed`); pass `""` for `notes` or `due` to clear
+        - `delete`: delete `task_id` (deleting a Docs/Chat-assigned task also deletes the original assignment)
+        """
+        if action == "create":
+            if completed is not None:
+                return _error_result(
+                    "Google Tasks create cannot set completed; call action='update' after creating the task",
+                )
+            if task_id is not None:
+                return _error_result("Google Tasks create does not accept task_id; use action='update' instead")
+            return self._create_task(title, notes, due, task_list_id, parent_task_id)
+        if action == "update":
+            return self._update_task(task_id, task_list_id, title, notes, due, completed)
+        if action == "delete":
+            return self._delete_task(task_id, task_list_id)
+        return _error_result(f"Unsupported Google Tasks write action {action!r}")

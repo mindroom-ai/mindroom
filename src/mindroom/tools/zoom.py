@@ -112,19 +112,12 @@ class _ZoomTools(Toolkit):
         user_id: str = "me",
         meeting_type: _ZoomMeetingType = "scheduled",
     ) -> str:
-        """Read Zoom meetings or meeting recordings.
+        """Read Zoom meetings or recordings (`user_id` defaults to `"me"`).
 
         - `get_meeting`: `meeting_id`
-        - `list_meetings`: no required arguments.
-        - `get_upcoming_meetings`: no required arguments.
+        - `list_meetings`: `user_id`, `meeting_type`
+        - `get_upcoming_meetings`: `user_id`
         - `get_meeting_recordings`: `meeting_id`
-
-        Args:
-            action: Read operation.
-            meeting_id: Zoom meeting ID or UUID for `get_meeting` or `get_meeting_recordings`.
-            user_id: Zoom user ID or `"me"` for `list_meetings` or `get_upcoming_meetings`.
-            meeting_type: Meeting filter for `list_meetings`.
-
         """
         try:
             if action == "get_meeting":
@@ -203,18 +196,8 @@ class _ZoomTools(Toolkit):
     ) -> str:
         """Schedule or delete a Zoom meeting.
 
-        - `schedule_meeting`: `topic`, `start_time`, `duration`
-        - `delete_meeting`: `meeting_id`
-
-        Args:
-            action: Meeting operation.
-            topic: Meeting title for `schedule_meeting`.
-            start_time: ISO 8601 start time for `schedule_meeting`.
-            duration: Duration in minutes for `schedule_meeting`.
-            timezone: IANA timezone name for `schedule_meeting`.
-            meeting_id: Target Zoom meeting ID for `delete_meeting`.
-            schedule_for_reminder: Whether to email cancellation notices on `delete_meeting`.
-
+        - `schedule_meeting`: `topic`, ISO 8601 `start_time`, `duration` (minutes), optional IANA `timezone`
+        - `delete_meeting`: `meeting_id` (`schedule_for_reminder` emails cancellation notices)
         """
         try:
             if action == "schedule_meeting":

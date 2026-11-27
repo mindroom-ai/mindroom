@@ -50,7 +50,7 @@ The barriers are `workflow_runs.faults.hold`, which does nothing unless `MINDROO
 The script restarts the backend with that variable set, and starts it without the variable after the kill.
 
 In the `before-receipt` case the second attempt fails, because the script does not catch the error of the call that may already have run.
-That failure is delivered once, no report is, and `resume_workflow(run_id, rerun=["n1"])` runs the call again on purpose.
+That failure is delivered once, no report is, and `workflow(action="resume", run_id=..., rerun=["n1"])` runs the call again on purpose.
 
 Each script edits the slot's `config.yaml`: the Helper gets the `workflow` toolkit, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
 Every edit goes through `Deployment.edit_config`, and the script's exit writes the file back as the script found it, so no script meets the edit of another.
@@ -158,4 +158,4 @@ Minimal agents in Docker workers (`agents_restart.py`'s `first` agent) also requ
 - The stderr line `processes of the killed backend still running` names what the kill left behind after the run ended; it should say `none`.
 - After `agents_restart.py`, the Sub-agents panel of the thread lists three agents, `first`, `second` and `third`, and none of them twice.
   The third call starts after the restart, when the bot of `deckhand` may not have synced yet: the call must then wait and run, not fail with `refused`.
-- `get_workflow(run_id)` in the thread shows the run's attempts and the call's state as the result line reports them.
+- `workflow(action="get", run_id=...)` in the thread shows the run's attempts and the call's state as the result line reports them.

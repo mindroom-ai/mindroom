@@ -127,6 +127,7 @@ class ToolRuntimeContext:
     parent_turn_id: str | None = None
     # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
     fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
+    automation_origin: str | None = None
 
     @property
     def current_config(self) -> Config:
@@ -366,6 +367,9 @@ class ToolRuntimeSupport:
             membership=self.membership,
             membership_turn_id=source_envelope.source_event_id if source_envelope is not None else None,
             source_kind=source_envelope.source_kind if source_envelope is not None else None,
+            automation_origin=(
+                source_envelope.origin.effective_automation_origin if source_envelope is not None else None
+            ),
             hook_source=source_envelope.hook_source if source_envelope is not None else None,
             agent_reply_memberships=self.runtime.agent_reply_memberships,
             config_provider=lambda: self.runtime.config,

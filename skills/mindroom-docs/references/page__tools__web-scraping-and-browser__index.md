@@ -65,10 +65,10 @@ agents:
 
 ### [`trafilatura`]
 
-`trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
-`extract_batch()` returns one JSON payload listing successes and failures.
+`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=None)` (`text`, `metadata`, `batch`), `html_to_text()`, and `crawl_website()`.
+`trafilatura_extract(action="batch")` returns one JSON payload listing successes and failures.
 `crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that; `extract_content=True` reports each refused page it tries to extract.
-`extract_batch()` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
+`trafilatura_extract(action="batch")` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
 A crawl stops visiting new pages after 90 seconds, so the pages it found can still be extracted in the rest of that time.
 
 | Option | Type | Default | Notes |
@@ -87,10 +87,10 @@ A crawl stops visiting new pages after 90 seconds, so the pages it found can sti
 | `max_tree_size` | `number` | `null` | Parser tree-size limit. |
 | `max_crawl_urls` | `number` | `10` | Maximum URLs visited per crawl. |
 | `max_known_urls` | `number` | `100000` | Maximum discovered URLs tracked per crawl. |
-| `enable_extract_text` | `boolean` | `true` | Enable `extract_text()`. |
-| `enable_extract_metadata_only` | `boolean` | `true` | Enable `extract_metadata_only()`. |
+| `enable_extract_text` | `boolean` | `true` | Enable `trafilatura_extract(action="text")`. |
+| `enable_extract_metadata_only` | `boolean` | `true` | Enable `trafilatura_extract(action="metadata")`. |
 | `enable_html_to_text` | `boolean` | `true` | Enable `html_to_text()`. |
-| `enable_extract_batch` | `boolean` | `true` | Enable `extract_batch()`. |
+| `enable_extract_batch` | `boolean` | `true` | Enable `trafilatura_extract(action="batch")`. |
 | `enable_crawl_website` | `boolean` | `true` | Enable `crawl_website()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
@@ -194,17 +194,17 @@ agents:
 
 ### [`spider`]
 
-`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
+`spider` exposes `spider(action, query=None, url=None, max_results=None, limit=None)` with actions `search`, `scrape`, and `crawl`, returning Markdown.
 Search results do not include full page content.
 It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `max_results` | `number` | `null` | Default result count for `search_web()`. |
-| `url` | `url` | `null` | Unused; `scrape()` and `crawl()` always take the URL as an argument. |
-| `enable_search` | `boolean` | `true` | Enable `search_web()`. |
-| `enable_scrape` | `boolean` | `true` | Enable `scrape()`. |
-| `enable_crawl` | `boolean` | `true` | Enable `crawl()`. |
+| `max_results` | `number` | `null` | Default result count for `action="search"`. |
+| `url` | `url` | `null` | Unused; `scrape` and `crawl` always take `url` as an argument. |
+| `enable_search` | `boolean` | `true` | Enable `action="search"`. |
+| `enable_scrape` | `boolean` | `true` | Enable `action="scrape"`. |
+| `enable_crawl` | `boolean` | `true` | Enable `action="crawl"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ### [`scrapegraph`]
@@ -249,17 +249,17 @@ agents:
 
 ### [`brightdata`]
 
-`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()` for Google, Bing, and Yandex, and `web_data_feed()` for Bright Data's supported source types.
-`get_screenshot()` returns the image directly to the model rather than a file path.
+`brightdata` exposes `brightdata(action, ...)` with actions `scrape_markdown`, `screenshot`, `search_engine` (Google, Bing, and Yandex), and `web_data_feed` (Bright Data's supported source types).
+`action="screenshot"` returns the image directly to the model rather than a file path.
 It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `BRIGHT_DATA_API_KEY`. |
-| `enable_scrape_markdown` | `boolean` | `true` | Enable `scrape_as_markdown()`. |
-| `enable_screenshot` | `boolean` | `true` | Enable `get_screenshot()`. |
-| `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
-| `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
+| `enable_scrape_markdown` | `boolean` | `true` | Enable `action="scrape_markdown"`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `action="screenshot"`. |
+| `enable_search_engine` | `boolean` | `true` | Enable `action="search_engine"`. |
+| `enable_web_data_feed` | `boolean` | `true` | Enable `action="web_data_feed"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
 | `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
@@ -268,8 +268,8 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
 ### [`oxylabs`]
 
-`oxylabs` exposes `search_google()`, `get_amazon_product()`, `search_amazon_products()`, and `scrape_website()`.
-`search_google()` returns organic results with title, URL, description, and position.
+`oxylabs` exposes `oxylabs(action, ...)` with actions `search_google`, `amazon_product`, `search_amazon`, and `scrape`.
+`action="search_google"` returns organic results with title, URL, description, and position.
 Pass `domain_code`, such as `com` or `de`, to choose the regional Google or Amazon domain.
 It requires both a username and password.
 
@@ -277,7 +277,7 @@ It requires both a username and password.
 | --- | --- | --- | --- |
 | `username` | `text` | `null` | Falls back to `OXYLABS_USERNAME`. |
 | `password` | `password` | `null` | Falls back to `OXYLABS_PASSWORD`. |
-| `markdown` | `boolean` | `false` | Return `scrape_website()` content as Markdown instead of parsed HTML. |
+| `markdown` | `boolean` | `false` | Return `action="scrape"` content as Markdown instead of parsed HTML. |
 
 ## Browser Tools
 
@@ -310,7 +310,7 @@ agents:
 
 ### [`browserbase`]
 
-`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()` against a hosted Browserbase session that it creates automatically.
+`browserbase` exposes `browserbase(action, ...)` (`navigate`, `get_page_content`, `close_session`) and `screenshot(path, full_page=True, connect_url=None)` against a hosted Browserbase session that it creates automatically.
 It still needs local Playwright to connect to the remote browser.
 It requires an API key and project ID.
 Use it when you need remote navigation, screenshots, and page reads without the full action set of `browser`.
@@ -320,10 +320,10 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 | `api_key` | `password` | `null` | Falls back to `BROWSERBASE_API_KEY`. |
 | `project_id` | `text` | `null` | Falls back to `BROWSERBASE_PROJECT_ID`. |
 | `base_url` | `url` | `null` | Browserbase API endpoint, not the site to visit; falls back to `BROWSERBASE_BASE_URL`. |
-| `enable_navigate_to` | `boolean` | `true` | Enable `navigate_to()`. |
+| `enable_navigate_to` | `boolean` | `true` | Enable `action="navigate"`. |
 | `enable_screenshot` | `boolean` | `true` | Enable `screenshot()`. |
-| `enable_get_page_content` | `boolean` | `true` | Enable `get_page_content()`. |
-| `enable_close_session` | `boolean` | `true` | Enable `close_session()`. |
+| `enable_get_page_content` | `boolean` | `true` | Enable `action="get_page_content"`. |
+| `enable_close_session` | `boolean` | `true` | Enable `action="close_session"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `parse_html` | `boolean` | `true` | Return visible text instead of raw HTML. |
 | `max_content_length` | `number` | `100000` | Maximum returned characters of page content. |

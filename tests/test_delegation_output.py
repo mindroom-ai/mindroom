@@ -70,7 +70,9 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
             tool_output_auto_save_threshold_bytes=16 if mode == "automatic" else 100_000,
         ),
         memory={"backend": "none"},
-        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]} if mode.startswith("resumed") else {},
+        tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}]}
+        if mode.startswith("resumed")
+        else {},
     )
     entity_ids(config, paths)
     identity = ToolExecutionIdentity(
@@ -97,7 +99,9 @@ async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR091
             signal.set()
         await release.wait()
 
-    child = ScriptedModel([[Await(start_child), *calls(tool_call("add", "sum", a=1, b=2))], answer("Child report")])
+    child = ScriptedModel(
+        [[Await(start_child), *calls(tool_call("calculate", "sum", action="add", a=1, b=2))], answer("Child report")],
+    )
     output_args: dict[str, object] = (
         {} if mode == "automatic" else {"mindroom_output_path": "../escape.txt" if mode == "invalid" else "report.txt"}
     )
