@@ -1281,6 +1281,9 @@ async def test_tool_search_avoids_chat_ui_browser_false_positives_and_finds_scre
     ]
     assert screenshot_matches[0] == "browser_read"
 
+    logs_matches = [m["name"] for m in cast("list[dict[str, str]]", (await _search(agent, "logs"))["matches"])]
+    assert logs_matches[0] == "browser_read"
+
     for noisy_word in ("jobs", "messages", "copy", "account"):
         names = [m["name"] for m in cast("list[dict[str, str]]", (await _search(agent, noisy_word))["matches"])]
         assert "show_canvas" not in names

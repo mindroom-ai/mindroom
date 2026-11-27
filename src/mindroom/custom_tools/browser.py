@@ -173,7 +173,7 @@ def _browser_read_description(*, offers_desktop: bool) -> str:
     )
     return (
         f"Inspect {subject} without mutating pages: check status/profiles/tabs, "
-        "snapshot element refs (for browser_control), take a screenshot, read console, or fetch help/actions.\n"
+        "snapshot element refs (for browser_control), take a screenshot, read console logs, or fetch help/actions.\n"
         'Examples: {"action":"snapshot"} | {"action":"screenshot","fullPage":true}.\n'
         f"{target_note}"
     )
@@ -990,7 +990,7 @@ class BrowserTools(Toolkit):
             target: host (worker browser) or desktop (user's browser).
             node: Unsupported compatibility field.
             profile: Host-target profile (default mindroom).
-            targetId: Host tab ID (rejected by desktop; desktop observes active tab only; host omits for active tab or all-tab console).
+            targetId: Host tab ID (rejected by desktop; desktop observes active tab only; on host, omit for active tab or all-tab console).
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text char limit (0: unlimited on host; desktop keeps its cap).
             mode: Host-target snapshot mode.

@@ -549,7 +549,7 @@ def test_browser_desktop_schema_documents_desktop_fields_and_host_examples() -> 
     assert desktop_read_props["target"]["enum"] == ["host", "desktop"]
     assert desktop_control_props["target"]["enum"] == ["host", "desktop"]
     assert "desktop observes active tab only" in desktop_read_props["targetId"]["description"]
-    assert "host omits for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
+    assert "on host, omit for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
     assert (
         desktop_read_props["maxChars"]["description"]
         == "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."

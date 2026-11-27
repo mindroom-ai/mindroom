@@ -947,7 +947,7 @@
     "functions": [
       {
         "name": "browser_read",
-        "description": "Inspect Chromium without mutating pages: check status/profiles/tabs, snapshot element refs (for browser_control), take a screenshot, read console, or fetch help/actions.\nExamples: {\"action\":\"snapshot\"} | {\"action\":\"screenshot\",\"fullPage\":true}.\ntarget=host uses MindRoom's worker browser (tabs returns empty when stopped without launching Chromium). target=desktop observes the user's browser.",
+        "description": "Inspect Chromium without mutating pages: check status/profiles/tabs, snapshot element refs (for browser_control), take a screenshot, read console logs, or fetch help/actions.\nExamples: {\"action\":\"snapshot\"} | {\"action\":\"screenshot\",\"fullPage\":true}.\ntarget=host uses MindRoom's worker browser (tabs returns empty when stopped without launching Chromium). target=desktop observes the user's browser.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -979,7 +979,7 @@
             },
             "targetId": {
               "type": "string",
-              "description": "Host tab ID (rejected by desktop; desktop observes active tab only; host omits for active tab or all-tab console)."
+              "description": "Host tab ID (rejected by desktop; desktop observes active tab only; on host, omit for active tab or all-tab console)."
             },
             "limit": {
               "type": "integer",
