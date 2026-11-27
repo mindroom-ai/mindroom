@@ -108,7 +108,7 @@ async def _run_automatic_summary(
         client = make_matrix_client_mock()
     client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id="!room:x")
     client.room_send.return_value = nio.RoomSendResponse(event_id="$automatic", room_id="!room:x")
-    model = ScriptedModel([answer('{"title": "Automatic"}')])
+    model = ScriptedModel([answer('{"keep_current": false, "title": "Automatic", "tags": ["topic"]}')])
     install_model_providers(monkeypatch, {"default": model})
     reader = make_conversation_reader_mock()
     serve_conversation_reader(reader, history, room_id="!room:x", thread_id="$thread1")
@@ -196,6 +196,7 @@ async def test_later_human_pin_overrides_unseen_future_release(
         event_id="$old-release",
         sender=_agent(config),
         pinned=False,
+        initial_enrichment_complete=None,
         generated_at="2099-01-01T00:00:00+00:00",
     )
     release.timestamp = 1000
@@ -232,6 +233,7 @@ async def test_later_agent_release_overrides_future_human_pin(
         event_id="$later-release",
         sender=_agent(config),
         pinned=False,
+        initial_enrichment_complete=None,
     )
     release.timestamp = 500 if edited_release else 2000
     if edited_release:
@@ -579,6 +581,7 @@ async def test_automatic_summary_advances_past_future_explicit_release(
         message_count=1,
         sender=_agent(config),
         pinned=False,
+        initial_enrichment_complete=None,
         generated_at=future.isoformat(),
     )
     history = _make_thread_history(12)
@@ -653,6 +656,7 @@ async def test_a_released_human_pin_is_neither_a_message_nor_conversation(
         event_id="$release",
         sender=_agent(config),
         pinned=False,
+        initial_enrichment_complete=None,
     )
     release.timestamp = 2000
     history = [*_make_thread_history(3), pin, release]

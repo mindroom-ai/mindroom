@@ -55,12 +55,13 @@ logger = get_logger(__name__)
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    title: str = Field(description="Short one-line title of the thread conversation")
     # ``default_factory``: strict OpenAI schemas refuse a ``default`` keyword.
+    # Declared before ``title`` so constrained decoding decides keep-vs-replace first.
     keep_current: bool = Field(
         default_factory=bool,
         description="True to keep the thread's current title, when one is shown",
     )
+    title: str = Field(description="Short one-line title of the thread conversation")
 
 
 class _ThreadEnrichment(_ThreadSummary):

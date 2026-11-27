@@ -1188,6 +1188,12 @@ COMPACTIONS_CONTENT_KEY = "io.mindroom.compactions"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 TODO_POKE_CONTENT_KEY = "io.mindroom.todo_poke"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
+# MindRoom runtime meta notices that are never conversation turns (excludes thread summaries).
+NON_TURN_META_NOTICE_CONTENT_KEYS = (
+    COMPACTION_NOTICE_CONTENT_KEY,
+    SKILL_REVIEW_NOTICE_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
+)
 # Per-message map of encrypted inline <img src="mxc://..."> URIs to their Matrix EncryptedFile descriptors.
 INLINE_MEDIA_CONTENT_KEY = "io.mindroom.inline_media"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"

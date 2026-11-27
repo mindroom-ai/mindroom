@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from mindroom.thread_summary.state import trusted_summary_metadata
+from mindroom.thread_summary.state import is_trusted_meta_notice, trusted_summary_metadata
 from mindroom.thread_tag_vocabulary import claim_vocabulary_check
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ class _ThreadSummaryBaselines:
     _provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
     _superseded_provisional_titles: set[tuple[str, str]] = field(default_factory=set, init=False)
     _retry_after: dict[tuple[str, str], float] = field(default_factory=dict, init=False)
+    _finalized: set[tuple[str, str]] = field(default_factory=set, init=False)
 
     def claim_provisional_title(self, room_id: str, thread_id: str) -> bool:
         """Claim one thread's single prompt-only title attempt, so only the first responder in the process makes it."""
@@ -92,6 +93,14 @@ class _ThreadSummaryBaselines:
         self._retry_after.pop(key, None)
         return False
 
+    def mark_finalized(self, room_id: str, thread_id: str) -> None:
+        """Record that one thread's automatic summary and initial enrichment have completed."""
+        self._finalized.add((room_id, thread_id))
+
+    def is_finalized(self, room_id: str, thread_id: str) -> bool:
+        """Return whether one thread's automatic summaries have completed."""
+        return (room_id, thread_id) in self._finalized
+
     def next_threshold(self, room_id: str, thread_id: str, config: Config) -> int:
         """Return the message count at which one thread's next automatic summary is due."""
         last_summarized_count = self.count(room_id, thread_id)
@@ -117,6 +126,7 @@ def thread_summary_message_count_hint(
         1
         for message in thread_history
         if trusted_summary_metadata(message, trusted_sender_ids=trusted_sender_ids) is None
+        and not is_trusted_meta_notice(message, trusted_sender_ids=trusted_sender_ids)
     )
     return ordinary + 1
 
@@ -138,10 +148,14 @@ def should_queue_thread_summary(
     message_count_hint: int | None,
 ) -> bool:
     """Return whether summary generation or room-vocabulary upkeep is due."""
-    summary_due = not THREAD_SUMMARY_BASELINES.in_failure_cooldown(room_id, thread_id) and (
-        message_count_hint is None
-        or message_count_hint
-        >= THREAD_SUMMARY_BASELINES.next_threshold(room_id, thread_id, config) - _PREQUEUE_CONCURRENCY_MARGIN
+    summary_due = (
+        not THREAD_SUMMARY_BASELINES.is_finalized(room_id, thread_id)
+        and not THREAD_SUMMARY_BASELINES.in_failure_cooldown(room_id, thread_id)
+        and (
+            message_count_hint is None
+            or message_count_hint
+            >= THREAD_SUMMARY_BASELINES.next_threshold(room_id, thread_id, config) - _PREQUEUE_CONCURRENCY_MARGIN
+        )
     )
     return summary_due or claim_vocabulary_check(
         room_id,

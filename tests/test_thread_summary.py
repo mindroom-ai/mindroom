@@ -24,9 +24,12 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    COMPACTION_NOTICE_CONTENT_KEY,
     FORK_CONTENT_KEY,
+    SKILL_REVIEW_NOTICE_CONTENT_KEY,
     SUPPRESS_PUSH_KEY,
     THREAD_SUMMARY_CONTENT_KEY,
+    UI_ACTION_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     resolve_runtime_paths,
 )
@@ -475,9 +478,15 @@ _EIGHTY_CHARACTER_TITLE = "🧵 " + " ".join(["a" * 15] * 4 + ["b" * 14])
 
 @pytest.mark.parametrize("schema", [_ThreadSummary, _ThreadEnrichment])
 def test_title_schemas_are_valid_strict_openai_schemas(schema: type[BaseModel]) -> None:
-    """Strict OpenAI schemas refuse a ``default`` keyword, so ``keep_current`` must not emit one."""
+    """Strict OpenAI schemas emit ``keep_current`` before ``title`` with no ``default`` keyword."""
+    raw = schema.model_json_schema()
     emitted = strict_response_schema(schema)
 
+    assert list(raw["properties"])[:2] == ["keep_current", "title"]
+    assert list(emitted["properties"])[:2] == ["keep_current", "title"]
+    if schema is _ThreadEnrichment:
+        assert list(raw["properties"]) == ["keep_current", "title", "tags"]
+        assert list(emitted["properties"]) == ["keep_current", "title", "tags"]
     assert '"default"' not in json.dumps(emitted)
     assert "keep_current" in emitted["required"]
     assert schema.model_validate({"title": "🧵 Trip", "tags": ["x"]}).keep_current is False
@@ -551,6 +560,12 @@ class TestNextThreshold:
         baselines.record(_ROOM, _THREAD, last_summarized_count)
         config = _mock_config(first_threshold=first_threshold, subsequent_interval=subsequent_interval)
         return baselines.next_threshold(_ROOM, _THREAD, config)
+
+    def test_shipped_defaults_run_pass1_at_1_and_pass2_at_plus_4(self) -> None:
+        """Shipped defaults generate Pass 1 at 1 message and Pass 2 after +4 more ordinary messages."""
+        config = Config()
+        assert config.defaults.thread_summary_first_threshold == 1
+        assert config.defaults.thread_summary_subsequent_interval == 4
 
     def test_first_threshold(self) -> None:
         """First summary threshold should come from config values."""
@@ -832,6 +847,38 @@ class TestThreadSummaryMessageCountHint:
 
         assert thread_summary_message_count_hint(thread_history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) == 6
 
+    @pytest.mark.parametrize(
+        "meta_key",
+        [UI_ACTION_CONTENT_KEY, SKILL_REVIEW_NOTICE_CONTENT_KEY, COMPACTION_NOTICE_CONTENT_KEY],
+        ids=["ui-action", "skill-review", "compaction"],
+    )
+    def test_excludes_trusted_meta_notices_from_state_and_hint_but_not_untrusted_ones(self, meta_key: str) -> None:
+        """Trusted MindRoom meta notices are excluded from counting and summarization; spoofed human ones are kept."""
+        trusted_notice = ResolvedVisibleMessage.synthetic(
+            sender="@bot:localhost",
+            body="Runtime meta notice",
+            event_id="$trusted-meta",
+            content={"msgtype": "m.notice", "body": "Runtime meta notice", meta_key: {"ok": True}},
+            thread_id=_THREAD,
+        )
+        spoofed_notice = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="Spoofed meta notice",
+            event_id="$spoofed-meta",
+            content={"msgtype": "m.text", "body": "Spoofed meta notice", meta_key: {"ok": True}},
+            thread_id=_THREAD,
+        )
+        history = [*_make_thread_history(2), trusted_notice, spoofed_notice]
+
+        state = _state(history)
+        assert state.message_count == 3
+        assert [m.event_id for m in state.ordinary_messages] == ["$event0", "$event1", "$spoofed-meta"]
+        conversation = _conversation_text(state.ordinary_messages)
+        assert "Runtime meta notice" not in conversation
+        assert "Spoofed meta notice" in conversation
+        # 3 ordinary messages in history + 1 for the reply being sent.
+        assert thread_summary_message_count_hint(history, trusted_sender_ids=_TRUSTED_SUMMARY_SENDERS) == 4
+
 
 class TestShouldQueueThreadSummary:
     """Cheap pre-queue gating based on the cached threshold and the conservative hint."""
@@ -894,6 +941,22 @@ class TestShouldQueueThreadSummary:
         fresh_vocab = _runtime_paths(tmp_path / "fresh-vocab")
         assert should_queue_thread_summary(_ROOM, _THREAD, config, fresh_vocab, message_count_hint=None)
         assert claim_vocabulary_check(_ROOM, config, fresh_vocab, now=datetime.now(UTC))
+
+    def test_finalized_thread_suppresses_summary_queue_without_blocking_vocabulary(
+        self,
+        tmp_path: Path,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+    ) -> None:
+        """Once finalized, automatic summaries never queue again, while daily vocabulary upkeep still runs."""
+        config = _mock_config()
+        thread_summary_baselines.mark_finalized(_ROOM, _THREAD)
+        assert thread_summary_baselines.is_finalized(_ROOM, _THREAD)
+
+        for hint in (None, 10, 50, 200):
+            assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=hint)
+
+        due_vocab = _runtime_paths(tmp_path / "due-vocab")
+        assert should_queue_thread_summary(_ROOM, _THREAD, config, due_vocab, message_count_hint=50)
 
 
 @pytest.mark.asyncio
@@ -1264,7 +1327,12 @@ class TestMaybeGenerateThreadSummary:
         config = _mock_config(first_threshold=2)
 
         await self._provisional(config=config)
-        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        self._history(
+            [
+                *_make_thread_history(2),
+                _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None),
+            ],
+        )
         await self._maybe_generate(config)
         await self._maybe_generate(config, retitle=True)
 
@@ -1291,7 +1359,12 @@ class TestMaybeGenerateThreadSummary:
         config.room_thread_summary_models[_ROOM] = "default"
 
         await self._provisional(config=config)
-        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        self._history(
+            [
+                *_make_thread_history(2),
+                _make_summary_notice_message(_THREAD, message_count=0, initial_enrichment_complete=None),
+            ],
+        )
         await self._maybe_generate(config)
         await self._maybe_generate(config, retitle=True)
 
@@ -1701,7 +1774,12 @@ class TestMaybeGenerateThreadSummary:
         """
         config = _mock_config()
         model = self._summarizer()
-        self._history([*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=2, pinned=True)])
+        self._history(
+            [
+                *_make_thread_history(12),
+                _make_summary_notice_message(_THREAD, message_count=2, pinned=True, initial_enrichment_complete=None),
+            ],
+        )
 
         await self._maybe_generate(config)
 
@@ -1712,14 +1790,26 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_released_thread_resumes_generation(self) -> None:
         """A later pinned=False summary lets automatic generation resume."""
-        model = self._summarizer(_title("Fresh summary"))
+        model = self._summarizer(_ThreadEnrichment(title="Fresh summary", tags=["topic"]))
         # 15 messages clears the threshold that the recovered baseline of 3
         # pushes to 13, so only the pin state decides whether generation runs.
         self._history(
             [
                 *_make_thread_history(15),
-                _make_summary_notice_message(_THREAD, message_count=2, event_id="$s1", pinned=True),
-                _make_summary_notice_message(_THREAD, message_count=3, event_id="$s2", pinned=False),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=2,
+                    event_id="$s1",
+                    pinned=True,
+                    initial_enrichment_complete=None,
+                ),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=3,
+                    event_id="$s2",
+                    pinned=False,
+                    initial_enrichment_complete=None,
+                ),
             ],
         )
 
@@ -1884,82 +1974,211 @@ class TestMaybeGenerateThreadSummary:
         assert self.room_state.tags(_THREAD) == ([] if prior == "prior-manual-mutation" else ["question"])
         assert _sent_summaries(self.client)[0]["initial_enrichment_complete"] is True
 
-    async def test_later_summary_refresh_does_not_touch_tag_state(self) -> None:
-        """Later threshold calls should use the summary-only schema and never retag."""
+    async def test_completed_enrichment_stops_automatic_retitling_while_retitle_still_updates(self) -> None:
+        """Once initial enrichment completes, automatic passes stop while vocabulary upkeep and explicit retitle still work."""
         self.baselines.record(_ROOM, _THREAD, 5)
-        model = self._summarizer(_title("🧵 Refreshed"))
-        self._history([*_make_thread_history(15), _make_summary_notice_message(_THREAD, message_count=5)])
+        model = self._summarizer(_title("🧵 Call notes retitle"))
+        self._history(
+            [
+                *_make_thread_history(15),
+                _make_summary_notice_message(_THREAD, message_count=5, initial_enrichment_complete=True),
+            ],
+        )
 
         await self._maybe_generate(_mock_config())
 
-        (request,) = model.requests
-        assert request.output_schema is _ThreadSummary
-        assert "(tags are not requested for this summary refresh)" in _prompt(request)
-        # The vocabulary upkeep still ran, and nothing wrote tag state.
+        assert not model.requests
+        assert _sent_summaries(self.client) == []
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+        # Vocabulary upkeep still ran, and nothing wrote tag state.
         assert load_tag_vocabulary_snapshot(self.rp, _ROOM) is not None
         self.client.room_put_state.assert_not_awaited()
 
+        # Explicit retitle=True bypasses finalized state, writes a fresh title, and never retags.
+        await self._maybe_generate(_mock_config(), retitle=True)
+
+        (request,) = model.requests
+        assert request.output_schema is _ThreadSummary
+        assert "<current_title>" not in _prompt(request)
+        assert "(tags are not requested for this summary refresh)" in _prompt(request)
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Call notes retitle"
+        assert "initial_enrichment_complete" not in sent
+        self.client.room_put_state.assert_not_awaited()
+
     def _refresh_due(self, summary: str = "🧵 Existing thread summary", count: int = 15) -> None:
-        """Serve a thread titled ``summary`` at 5 messages that has reached ``count``."""
+        """Serve a Pass-1-titled thread at 5 messages that has reached ``count`` and is due for Pass 2."""
         self.baselines.record(_ROOM, _THREAD, 5)
         self._history(
-            [*_make_thread_history(count), _make_summary_notice_message(_THREAD, message_count=5, summary=summary)],
+            [
+                *_make_thread_history(count),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=5,
+                    summary=summary,
+                    initial_enrichment_complete=None,
+                ),
+            ],
         )
 
     def _restart(self) -> None:
         """Start a fresh process: no in-memory baselines."""
         self.baselines = fresh_thread_summary_baselines(self.monkeypatch)
 
-    async def test_refresh_that_keeps_the_title_sends_nothing_and_waits_a_full_interval(self) -> None:
-        """A kept title posts no notice, and this process checks again only a full interval later."""
-        model = self._summarizer(_title("🧵 existing thread  summary"), _title("🧵 Existing thread summary"))
+    async def test_pass1_generates_fresh_without_keep_current_and_pass2_at_plus_4_stops_forever(self) -> None:
+        """Pass 1 ignores provisional titles; Pass 2 runs at +4 by default, applies tags, and stops forever."""
+        config = Config()
+        model = self._summarizer(
+            _title("🔧 Auth token refresh fix"),
+            _ThreadEnrichment(keep_current=True, title="🔧 Ignored replacement", tags=["auth"]),
+        )
+        provisional = _make_summary_notice_message(
+            _THREAD,
+            message_count=0,
+            summary="🧵 Blind prompt title",
+            initial_enrichment_complete=None,
+        )
+
+        # Pass 1 replaces Pass 0 without offering <current_title> or keep_current instructions.
+        self._history([*_make_thread_history(2), provisional])
+        await self._maybe_generate(config)
+
+        assert len(model.requests) == 1
+        assert model.requests[0].output_schema is _ThreadSummary
+        assert "<current_title>" not in _prompt(model.requests[0])
+        assert "keep_current" not in model.requests[0].messages[0].get_content_string()
+        assert not self.baselines.is_finalized(_ROOM, _THREAD)
+        pass1_sent = _sent_summaries(self.client)[0]
+        assert (pass1_sent["summary"], pass1_sent["message_count"]) == ("🔧 Auth token refresh fix", 2)
+        assert "initial_enrichment_complete" not in pass1_sent
+
+        pass1_notice = _make_summary_notice_message(
+            _THREAD,
+            message_count=2,
+            event_id="$pass1",
+            summary="🔧 Auth token refresh fix",
+            initial_enrichment_complete=None,
+        )
+
+        # At +3 messages (5 total), Pass 2 is not due yet (default interval is 4).
+        self._history([*_make_thread_history(5), provisional, pass1_notice])
+        await self._maybe_generate(config)
+        assert len(model.requests) == 1
+
+        # At +4 messages (6 total), Pass 2 sees <current_title>, keeps it, applies tags, and finalizes.
+        self._history([*_make_thread_history(6), provisional, pass1_notice])
+        await self._maybe_generate(config)
+
+        assert len(model.requests) == 2
+        assert model.requests[1].output_schema is _ThreadEnrichment
+        assert "<current_title>\n🔧 Auth token refresh fix\n</current_title>" in _prompt(model.requests[1])
+        assert "set keep_current to true" in model.requests[1].messages[0].get_content_string()
+        pass2_sent = _sent_summaries(self.client)[1]
+        assert pass2_sent["summary"] == "🔧 Auth token refresh fix"
+        assert pass2_sent["message_count"] == 6
+        assert pass2_sent["initial_enrichment_complete"] is True
+        assert self.room_state.tags(_THREAD) == ["auth"]
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+
+        pass2_notice = _make_summary_notice_message(
+            _THREAD,
+            message_count=6,
+            event_id="$pass2",
+            summary="🔧 Auth token refresh fix",
+            initial_enrichment_complete=True,
+        )
+        # Subsequent turns (+4, +20, +50) never queue or call the model again.
+        for total in (10, 26, 56):
+            assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=total)
+            self._history([*_make_thread_history(total), provisional, pass1_notice, pass2_notice])
+            await self._maybe_generate(config)
+        assert len(model.requests) == 2
+        assert len(_sent_summaries(self.client)) == 2
+
+        # After a restart, history restores finalized state without calling the model.
+        self._restart()
+        self._history([*_make_thread_history(56), provisional, pass1_notice, pass2_notice])
+        await self._maybe_generate(config)
+        assert len(model.requests) == 2
+        assert len(_sent_summaries(self.client)) == 2
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+
+    @pytest.mark.parametrize(
+        ("answer", "expected_title"),
+        [
+            (
+                _ThreadEnrichment(keep_current=True, title="🔧 Ignored", tags=["resolved"]),
+                "🧵 Existing thread summary",
+            ),
+            (
+                _ThreadEnrichment(keep_current=False, title="🔧 Deploy pipeline migration", tags=["!!!"]),
+                "🔧 Deploy pipeline migration",
+            ),
+        ],
+        ids=["kept-title-excluded-tags", "new-title-invalid-tags"],
+    )
+    async def test_pass2_with_no_usable_tags_still_records_enrichment_complete_and_stops(
+        self,
+        answer: _ThreadEnrichment,
+        expected_title: str,
+    ) -> None:
+        """Pass 2 returning only excluded/invalid tags still marks enrichment complete so Pass 2 does not loop."""
+        model = self._summarizer(answer)
         self._refresh_due()
 
         await self._maybe_generate(_mock_config())
 
-        (request,) = model.requests
-        assert "<current_title>\n🧵 Existing thread summary\n</current_title>" in _prompt(request)
-        assert "set keep_current to true" in request.messages[0].get_content_string()
-        assert _sent_summaries(self.client) == []
-        assert self._count() == 15
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == expected_title
+        assert sent["initial_enrichment_complete"] is True
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
+        self.client.room_put_state.assert_not_awaited()
 
-        self._refresh_due(count=24)
+        # Neither another pass in this process nor after restart re-runs Pass 2.
+        finalized_notice = _make_summary_notice_message(
+            _THREAD,
+            message_count=15,
+            event_id="$pass2",
+            summary=expected_title,
+            initial_enrichment_complete=True,
+        )
+        self._history([*_make_thread_history(30), finalized_notice])
+        await self._maybe_generate(_mock_config())
+        self._restart()
+        self._history([*_make_thread_history(30), finalized_notice])
         await self._maybe_generate(_mock_config())
         assert len(model.requests) == 1
-        self._refresh_due(count=25)
-        await self._maybe_generate(_mock_config())
-        assert len(model.requests) == 2
 
-    @pytest.mark.parametrize("redacted", [False, True], ids=["title-kept", "title-redacted"])
-    async def test_a_restart_after_a_keep_checks_once_more_and_titles_a_redacted_thread(self, redacted: bool) -> None:
-        """Nothing outside Matrix remembers a keep: a fresh process checks once, and a thread with no title gets one."""
-        model = self._summarizer(_title("🧵 Existing thread summary"), _title("🧵 Existing thread summary"))
+    async def test_pass2_send_failure_does_not_mark_finalized(self) -> None:
+        """Failed Matrix summary delivery must not mark the thread finalized in memory."""
+        self.client.room_send.return_value = nio.RoomSendError(message="forbidden")
+        self._summarizer(_ThreadEnrichment(title="🧵 Existing thread summary", tags=["bug"], keep_current=True))
         self._refresh_due()
+
         await self._maybe_generate(_mock_config())
 
-        self._restart()
-        if redacted:
-            self._history(_make_thread_history(16))
-        else:
-            self._refresh_due(count=16)
-        await self._maybe_generate(_mock_config())
-
-        assert len(model.requests) == 2
-        assert ("<current_title>" in _prompt(model.requests[1])) is not redacted
-        assert [sent["summary"] for sent in _sent_summaries(self.client)] == (
-            ["🧵 Existing thread summary"] if redacted else []
-        )
+        assert not self.baselines.is_finalized(_ROOM, _THREAD)
+        assert self._count() == 15
 
     @pytest.mark.parametrize(
         ("current", "answer"),
         [
-            ("🧵 Q&A prep", _title("🧵 Q&amp;A prep")),
-            ("🧵 A&not B review", _title("🧵 A&not B review")),
-            ("🧵 Login failure investigation", _title("🧵 Login failure investigation.")),
-            ("🛠 Deploy fix", _title("🛠️ Deploy fix")),
-            ("🧵 Login failure investigation", _ThreadSummary(title="🔧 Something else", keep_current=True)),
-            ("🧵 Trip plan (forked)", _title("🧵 Trip plan (forked).")),
-            (_EIGHTY_CHARACTER_TITLE, _title(f"{_EIGHTY_CHARACTER_TITLE}.")),
+            ("🧵 Q&A prep", _ThreadEnrichment(title="🧵 Q&amp;A prep", tags=["topic"])),
+            ("🧵 A&not B review", _ThreadEnrichment(title="🧵 A&not B review", tags=["topic"])),
+            (
+                "🧵 Login failure investigation",
+                _ThreadEnrichment(title="🧵 Login failure investigation.", tags=["topic"]),
+            ),
+            ("🛠 Deploy fix", _ThreadEnrichment(title="🛠️ Deploy fix", tags=["topic"])),
+            (
+                "🧵 Login failure investigation",
+                _ThreadEnrichment(title="🔧 Something else", tags=["topic"], keep_current=True),
+            ),
+            ("🧵 Trip plan (forked)", _ThreadEnrichment(title="🧵 Trip plan (forked).", tags=["topic"])),
+            (
+                _EIGHTY_CHARACTER_TITLE,
+                _ThreadEnrichment(title=f"{_EIGHTY_CHARACTER_TITLE}.", tags=["topic"], keep_current=True),
+            ),
         ],
         ids=[
             "escaped-echo",
@@ -1971,19 +2190,26 @@ class TestMaybeGenerateThreadSummary:
             "eighty-characters-period",
         ],
     )
-    async def test_a_cosmetic_echo_or_keep_current_keeps_the_title(self, current: str, answer: _ThreadSummary) -> None:
-        """An echo that differs only in escaping, end punctuation or emoji style keeps the title, as keep_current does."""
+    async def test_a_cosmetic_echo_or_keep_current_keeps_the_title(
+        self,
+        current: str,
+        answer: _ThreadEnrichment,
+    ) -> None:
+        """On Pass 2, a cosmetic echo or keep_current preserves the current title verbatim and records completion."""
         self._summarizer(answer)
         self._refresh_due(summary=current)
 
         await self._maybe_generate(_mock_config())
 
-        assert _sent_summaries(self.client) == []
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == current
+        assert sent["initial_enrichment_complete"] is True
         assert self._count() == 15
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
 
     async def test_a_forks_echo_with_a_trailing_period_keeps_its_title(self) -> None:
         """In a forked thread, an echo of "X (forked)" ending in a period keeps the title, not "X (forked). (forked)"."""
-        self._summarizer(_title("🧵 Trip plan (forked)."))
+        self._summarizer(_ThreadEnrichment(title="🧵 Trip plan (forked).", tags=["topic"]))
         root = ResolvedVisibleMessage.synthetic(
             sender="@user0:localhost",
             body="carry on",
@@ -1991,18 +2217,25 @@ class TestMaybeGenerateThreadSummary:
             event_id=_THREAD,
             content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": "$parent", "event_id": "$p1"}},
         )
-        notice = _make_summary_notice_message(_THREAD, message_count=5, summary="🧵 Trip plan (forked)")
+        notice = _make_summary_notice_message(
+            _THREAD,
+            message_count=5,
+            summary="🧵 Trip plan (forked)",
+            initial_enrichment_complete=None,
+        )
         self.baselines.record(_ROOM, _THREAD, 5)
         self._history([root, *_make_thread_history(14), notice])
 
         await self._maybe_generate(_mock_config())
 
-        assert _sent_summaries(self.client) == []
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == "🧵 Trip plan (forked)"
+        assert sent["initial_enrichment_complete"] is True
         assert self._count() == 15
 
     async def test_refresh_on_a_changed_topic_sends_the_new_title(self) -> None:
-        """A different title still replaces the current one."""
-        self._summarizer(_title("🔧 Deploy pipeline migration"))
+        """A different title on Pass 2 replaces the current one and completes initial enrichment."""
+        self._summarizer(_ThreadEnrichment(title="🔧 Deploy pipeline migration", tags=["deploy"]))
         self._refresh_due()
 
         await self._maybe_generate(_mock_config())
@@ -2010,20 +2243,39 @@ class TestMaybeGenerateThreadSummary:
         (sent,) = _sent_summaries(self.client)
         assert sent["summary"] == "🔧 Deploy pipeline migration"
         assert sent["message_count"] == 15
+        assert sent["initial_enrichment_complete"] is True
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
 
     @pytest.mark.parametrize("case", ["long-legacy-title", "retitle"])
     async def test_keep_is_not_offered_for_a_long_title_or_a_retitle(self, case: str) -> None:
-        """A title past the 6-word rule is rewritten once, and a retitle asks for a new title outright."""
+        """A title past the 6-word rule is rewritten on Pass 2, and a retitle asks for a new title outright."""
         long_title = case == "long-legacy-title"
         title = "🧵 Review of PR #548 session persistence hooks" if long_title else "🧵 Short title"
-        # The model repeats the long title, which is rejected like any new title that is too long.
-        retry = [_title("🧵 PR #548 session persistence")] if long_title else []
-        model = self._summarizer(_title(title), *retry)
-        self._refresh_due(summary=title)
+        if long_title:
+            # The model repeats the long title, which is rejected like any new title that is too long.
+            model = self._summarizer(
+                _ThreadEnrichment(title=title, tags=["pr"]),
+                _ThreadEnrichment(title="🧵 PR #548 session persistence", tags=["pr"]),
+            )
+            self._refresh_due(summary=title)
+        else:
+            model = self._summarizer(_title(title))
+            self.baselines.record(_ROOM, _THREAD, 5)
+            self._history(
+                [
+                    *_make_thread_history(15),
+                    _make_summary_notice_message(
+                        _THREAD,
+                        message_count=5,
+                        summary=title,
+                        initial_enrichment_complete=True,
+                    ),
+                ],
+            )
 
         await self._maybe_generate(_mock_config(), retitle=case == "retitle")
 
-        assert len(model.requests) == 1 + len(retry)
+        assert len(model.requests) == (2 if long_title else 1)
         assert "<current_title>" not in _prompt(model.requests[0])
         assert "keep_current" not in model.requests[0].messages[0].get_content_string()
         (sent,) = _sent_summaries(self.client)
@@ -2067,6 +2319,8 @@ class TestMaybeGenerateThreadSummary:
         await self._maybe_generate(config)
 
         assert [request.output_schema for request in model.requests] == [_ThreadSummary, _ThreadEnrichment]
+        assert "<current_title>" not in _prompt(model.requests[0])
+        assert "<current_title>" in _prompt(model.requests[1])
         assert self.room_state.tags(_THREAD) == ["bug"]
 
     async def test_vocabulary_and_summary_send_failures_do_not_block_initial_tags(self) -> None:
@@ -2369,7 +2623,12 @@ class TestMaybeGenerateThreadSummary:
         """Existing thread summary notices must not count toward the next automatic threshold."""
         self.baselines.record(_ROOM, _THREAD, 5)
         model = self._summarizer()
-        self._history([*_make_thread_history(14), _make_summary_notice_message(_THREAD, message_count=5)])
+        self._history(
+            [
+                *_make_thread_history(14),
+                _make_summary_notice_message(_THREAD, message_count=5, initial_enrichment_complete=None),
+            ],
+        )
 
         await self._maybe_generate(_mock_config())
 
@@ -2506,7 +2765,12 @@ class TestMaybeGenerateThreadSummary:
         self._history(
             [
                 *_make_thread_history(thread_size),
-                _make_summary_notice_message(_THREAD, message_count=existing_count, summary="Existing title"),
+                _make_summary_notice_message(
+                    _THREAD,
+                    message_count=existing_count,
+                    summary="Existing title",
+                    initial_enrichment_complete=None,
+                ),
             ],
         )
 
@@ -2550,7 +2814,10 @@ class TestMaybeGenerateThreadSummary:
         retitle: bool,
     ) -> None:
         """Already-titled threads never use overlong fallback and record message_count without failure cooldown."""
-        model = self._summarizer(*[_title("🧵 Plan migration for all backend service instances")] * 3)
+        overlong = "🧵 Plan migration for all backend service instances"
+        enrichment_pass = existing_count > 0 and not retitle
+        answer: BaseModel = _ThreadEnrichment(title=overlong, tags=["ops"]) if enrichment_pass else _title(overlong)
+        model = self._summarizer(*[answer] * 3)
         self._history(
             [
                 *_make_thread_history(thread_size),
@@ -2558,7 +2825,7 @@ class TestMaybeGenerateThreadSummary:
                     _THREAD,
                     message_count=existing_count,
                     summary=existing_summary,
-                    initial_enrichment_complete=True if existing_count > 0 else None,
+                    initial_enrichment_complete=True if retitle else None,
                 ),
             ],
         )
@@ -2597,24 +2864,36 @@ class TestMaybeGenerateThreadSummary:
     async def test_recovery_seeds_cache_on_restart(self) -> None:
         """On cache miss, recovery from existing events seeds the baseline."""
         model = self._summarizer()
-        self._history([*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=10)])
+        self._history(
+            [
+                *_make_thread_history(12),
+                _make_summary_notice_message(_THREAD, message_count=10, initial_enrichment_complete=None),
+            ],
+        )
 
         await self._maybe_generate(_mock_config())
 
         # Recovered count 10 → next threshold 20 → 12 messages < 20 → skip
         assert not model.requests
         assert self._count() == 10
+        assert not self.baselines.is_finalized(_ROOM, _THREAD)
 
-    async def test_recovered_summary_uses_summary_only_call(self) -> None:
-        """A recovered summary baseline must prevent initial tags from being regenerated after restart."""
-        model = self._summarizer(_title("Later summary after restart"))
-        self._history([*_make_thread_history(15), _make_summary_notice_message(_THREAD, message_count=5)])
+    async def test_recovered_completed_enrichment_marks_finalized_and_skips_generation(self) -> None:
+        """After restart, a thread with initial_enrichment_complete=True marks finalized and never calls the model."""
+        model = self._summarizer()
+        self._history(
+            [
+                *_make_thread_history(15),
+                _make_summary_notice_message(_THREAD, message_count=5, initial_enrichment_complete=True),
+            ],
+        )
 
         await self._maybe_generate(_mock_config())
 
-        (request,) = model.requests
-        assert request.output_schema is _ThreadSummary
-        assert self._count() == 15
+        assert not model.requests
+        assert _sent_summaries(self.client) == []
+        assert self._count() == 5
+        assert self.baselines.is_finalized(_ROOM, _THREAD)
 
     async def test_recovered_incomplete_enrichment_retries_tags_at_next_threshold(self) -> None:
         """A durable failed marker should retry structured enrichment after restart."""
@@ -3947,11 +4226,13 @@ class TestPinLandingDuringGeneration:
         client: AsyncMock,
         history: list[ResolvedVisibleMessage],
         source: list[ResolvedVisibleMessage] | None = None,
+        *,
+        answer: BaseModel | None = None,
     ) -> AsyncMock:
         """Run one pass over a projection holding ``history`` until the re-check walks a server holding ``source``."""
         client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_ROOM)
         client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
-        self.models["default"] = _summary_model(_title("Freshly generated title"))
+        self.models["default"] = _summary_model(answer or _title("Freshly generated title"))
         serve_conversation_reader(self.conversation_reader, history, room_id=_ROOM, thread_id=_THREAD)
         walk = serve_source_thread(self.conversation_reader, history if source is None else source)
         await _summary_pass(client, _mock_config(), self.rp, self.conversation_reader)
@@ -3975,6 +4256,7 @@ class TestPinLandingDuringGeneration:
         client.room_send.assert_not_awaited()
         walk.assert_awaited_once()
         assert self.baselines.count(_ROOM, _THREAD) == 12
+        assert not self.baselines.is_finalized(_ROOM, _THREAD)
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
         """The re-check must not suppress ordinary summaries."""
@@ -3992,7 +4274,13 @@ class TestPinLandingDuringGeneration:
         """
         history = [
             *_make_thread_history(20),
-            _make_summary_notice_message(_THREAD, message_count=6, event_id="$old-summary", pinned=False),
+            _make_summary_notice_message(
+                _THREAD,
+                message_count=6,
+                event_id="$old-summary",
+                pinned=False,
+                initial_enrichment_complete=None,
+            ),
             _make_summary_notice_message(
                 _THREAD,
                 message_count=0,
@@ -4002,7 +4290,11 @@ class TestPinLandingDuringGeneration:
             ),
         ]
 
-        walk = await self._run(make_matrix_client_mock(), history)
+        walk = await self._run(
+            make_matrix_client_mock(),
+            history,
+            answer=_ThreadEnrichment(title="Freshly generated title", tags=["topic"]),
+        )
 
         assert walk.await_args.kwargs["edits_of"] == ("$old-summary", "$human-summary")
 

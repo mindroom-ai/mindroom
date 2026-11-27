@@ -730,9 +730,12 @@ class DefaultsConfig(BaseModel):
         description="Message count required before the first automatic thread summary is generated.",
     )
     thread_summary_subsequent_interval: int = Field(
-        default=10,
+        default=4,
         ge=1,
-        description="Additional message count required between automatic thread summaries after the first one.",
+        description=(
+            "Additional messages required after the first automatic thread summary before the final "
+            "automatic title check and initial tagging pass."
+        ),
     )
 
     @model_validator(mode="before")

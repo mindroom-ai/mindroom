@@ -66,15 +66,15 @@
         "json_schema": {
           "description": "Structured thread summary response.",
           "properties": {
-            "title": {
-              "description": "Short one-line title of the thread conversation",
-              "title": "Title",
-              "type": "string"
-            },
             "keep_current": {
               "description": "True to keep the thread's current title, when one is shown",
               "title": "Keep Current",
               "type": "boolean"
+            },
+            "title": {
+              "description": "Short one-line title of the thread conversation",
+              "title": "Title",
+              "type": "string"
             }
           },
           "required": [
