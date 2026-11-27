@@ -661,9 +661,9 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
 
 @pytest.mark.asyncio
 async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_requires_approval(tmp_path: Path) -> None:
-    """Astra fresh P1 #1: workflow-only agents fail closed when start_workflow may require approval."""
+    """Astra fresh P1 #1: workflow-only agents fail closed when workflow may require approval."""
     tool = TriggersTools()
-    for idx, rule_match in enumerate(("start_workflow", "*workflow*")):
+    for idx, rule_match in enumerate(("workflow", "*workflow*")):
         approval_cfg = ToolApprovalConfig(
             default="auto_approve",
             rules=[ApprovalRuleConfig(match=rule_match, action="require_approval")],
@@ -671,7 +671,7 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
         ctx_wf, _ = _make_ctx(tmp_path / f"wf_{idx}", agent_name="planner", tool_approval=approval_cfg)
         err = await _call(tool, ctx_wf, action="watch_script", prompt="Alert", source=_SRC)
         assert err["status"] == "error"
-        assert "start_workflow" in err["message"]
+        assert "'workflow'" in err["message"]
         tick_failure = check_script_check_access(
             ctx_wf.config,
             ctx_wf.runtime_paths,
@@ -708,17 +708,52 @@ async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_req
         )
         reenable_err = await _call(tool, ctx_wf, action="set_enabled", trigger_id="sc_wf_reenable", enabled=True)
         assert reenable_err["status"] == "error"
-        assert "start_workflow" in reenable_err["message"]
+        assert "'workflow'" in reenable_err["message"]
 
         # An agent that ALSO has 'script' is judged by script_write and remains allowed.
         ctx_both, _ = _make_ctx(tmp_path / f"both_{idx}", agent_name="both", tool_approval=approval_cfg)
         ok_both = await _call(tool, ctx_both, action="watch_script", prompt="Alert", source=_SRC)
         assert ok_both["status"] == "ok"
 
-    # Workflow-only agent succeeds when start_workflow is auto-approved.
-    ctx_wf_ok, _ = _make_ctx(tmp_path / "wf_ok", agent_name="planner")
-    ok_wf = await _call(tool, ctx_wf_ok, action="watch_script", prompt="Alert", source=_SRC)
-    assert ok_wf["status"] == "ok"
+    # Approval rules targeting action="start" (including partial argument matchers) still reject workflow-only agents.
+    for idx, args_rule in enumerate(({"action": "start"}, {"action": "start", "source": "*"})):
+        start_cfg = ToolApprovalConfig(
+            default="auto_approve",
+            rules=[ApprovalRuleConfig(match="workflow", arguments=args_rule, action="require_approval")],
+        )
+        ctx_start, _ = _make_ctx(tmp_path / f"wf_start_{idx}", agent_name="planner", tool_approval=start_cfg)
+        err_start = await _call(tool, ctx_start, action="watch_script", prompt="Alert", source=_SRC)
+        assert err_start["status"] == "error"
+        assert "'workflow'" in err_start["message"]
+
+    # Rules scoped to another agent, non-start workflow actions, or explicit action="start" auto-approval allow it.
+    allowed_cfgs = (
+        (
+            "wf_other_agent",
+            ToolApprovalConfig(
+                default="auto_approve",
+                rules=[ApprovalRuleConfig(match="workflow", agents="other_agent", action="require_approval")],
+            ),
+        ),
+        (
+            "wf_cancel_only",
+            ToolApprovalConfig(
+                default="auto_approve",
+                rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "cancel"}, action="require_approval")],
+            ),
+        ),
+        (
+            "wf_start_auto",
+            ToolApprovalConfig(
+                default="require_approval",
+                rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "start"}, action="auto_approve")],
+            ),
+        ),
+        ("wf_ok", None),
+    )
+    for label, approval_cfg in allowed_cfgs:
+        ctx_ok, _ = _make_ctx(tmp_path / label, agent_name="planner", tool_approval=approval_cfg)
+        assert (await _call(tool, ctx_ok, action="watch_script", prompt="Alert", source=_SRC))["status"] == "ok"
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,8 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths, workspace_home_identity_env
+from mindroom.custom_tools.thread_tags import validate_thread_tags_params
+from mindroom.custom_tools.workflow import validate_workflow_params
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -59,9 +61,11 @@ _SHELL_FLAGS = frozenset({"-c", "-lc", "-ec", "-e"})
 _PORTABLE_PROJ = RequestProjection(lambda _inner, req: portable_tool_search_request(req))
 _DECODE_KEYS = ("decoding function arguments", "not a valid json object", "invalid json", "must be a json object")
 _INVALID_KEYS = ("invalid value for parameter", "type=literal_error", "validation error", "must be a positive")
+_REQ_KEYS = ("missing a required", "type=missing_argument", "missing required parameter", "is required for action=")
+_UNEXP_KEYS = ("unexpected keyword argument", "type=unexpected_keyword_argument", "cannot be used with action=")
 _FAIL_RULES = (
-    ("missing_required_param", ("missing a required argument", "type=missing_argument", "missing required parameter")),
-    ("unexpected_param", ("unexpected keyword argument", "type=unexpected_keyword_argument")),
+    ("missing_required_param", _REQ_KEYS),
+    ("unexpected_param", _UNEXP_KEYS),
     ("invalid_param_value", (*_INVALID_KEYS, *_DECODE_KEYS)),
 )
 _EVAL_TOOLS: list[Any] = [
@@ -71,7 +75,7 @@ _EVAL_TOOLS: list[Any] = [
 ]
 _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 _BASE_ENV = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PYTHONDONTWRITEBYTECODE": "1", **dict.fromkeys(_PROXY_KEYS, "")}
-_REQ_A = frozenset({"browser_control", "show_canvas", "list_workflow_runs", "list_thread_tags", "tag_thread"})
+_REQ_A = frozenset({"browser_control", "show_canvas", "workflow", "thread_tags"})
 _REQ_B = frozenset({"scheduler", "memory", "skill", "run_shell_command", "view_file", "attachment"})
 _REQUIRED_SURFACE = _REQ_A | _REQ_B | {"matrix_message", "tool_search", "call_tool"}
 
@@ -137,6 +141,18 @@ def _check_attachment(action: str, kw: Mapping[str, Any], ws: Path) -> None:
         _require_file(ws, str(kw["path"]), "Attachment")
 
 
+def _check_workflow_or_tags(name: str, action: str, kw: Mapping[str, Any]) -> None:
+    args = {k: v for k, v in kw.items() if k != "action"}
+    if name == "thread_tags":
+        _need(not (err := validate_thread_tags_params(action, args)), err or "")
+        return
+    validate_workflow_params(action, args)
+    if action == "start":
+        sources = sum(_str(args.get(k)) for k in ("source", "path", "name"))
+        _need(sources >= 1, "Missing required parameter: give one of source, path, or name.")
+        _need(sources == 1, "Invalid value for parameter: give only one of source, path, or name.")
+
+
 def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) -> None:
     if name == "show_canvas":
         _need(bool(kw.get("canvas_event_id")) or _str(kw.get("title")), "Missing required parameter 'title'.")
@@ -164,6 +180,8 @@ def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) ->
         _need(has_target, f"Missing required parameter 'targetUrl' for action={action!r}.")
     elif name == "attachment":
         _check_attachment(action, kw, ws)
+    elif name in {"workflow", "thread_tags"}:
+        _check_workflow_or_tags(name, action, kw)
     elif name == "matrix_message" and action == "send":
         has_body = _str(kw.get("message")) or bool(kw.get("attachments"))
         _need(has_body, "Missing required parameter 'message' or 'attachments'.")
@@ -206,18 +224,19 @@ def _stateful_stub(name: str, action: str, kw: Mapping[str, Any], state: dict[st
         return _memory_stub(action, kw, state["memories"])
     if name == "attachment":
         return _attachment_stub(action, kw, state["attachments"])
-    if name in {"tag_thread", "untag_thread", "list_thread_tags"}:
+    if name == "thread_tags":
         tags: dict[str, dict[str, Any]] = state["tags"]
-        if name == "tag_thread":
+        if action == "tag":
             tags[str(kw["tag"])] = {}
-        elif name == "untag_thread":
+        elif action == "untag":
             tags.pop(str(kw["tag"]), None)
-        extra: dict[str, Any] = {"tags": dict(tags)} if name == "list_thread_tags" else {"tag": kw["tag"]}
-        return {"status": "ok", "tool": "thread_tags", "action": name.split("_", 1)[0], **extra}
+        extra: dict[str, Any] = {"tags": dict(tags)} if action == "list" else {"tag": kw["tag"]}
+        return {"status": "ok", "tool": "thread_tags", "action": action, **extra}
     wf_run = {"run_id": "wf_01", "title": "nightly-smoke", "status": "completed"}
+    if name == "workflow":
+        return {"runs": [wf_run], "saved": []} if action == "list" else {"status": "ok", "action": action, **wf_run}
     stubs: dict[str, dict[str, Any]] = {
         "show_canvas": {"status": "ok", "tool": "chat_ui", "action": "show_canvas", "event_id": "$canvas_eval_1"},
-        "list_workflow_runs": {"runs": [wf_run], "saved": []},
         "scheduler": {"status": "ok", "tool": "scheduler", "action": action, "task_id": "task_eval_1"},
         "browser_control": {"status": "ok", "action": action, "targetId": "tab_1", "url": kw.get("targetUrl") or ""},
         "matrix_message": {"status": "ok", "tool": "matrix_message", "action": action, "event_id": "$msg_eval_1"},
@@ -236,7 +255,7 @@ def _validate_and_stub(call: ToolCall, workspace: Path, state: dict[str, Any]) -
     for req in call.function.parameters.get("required", ()):
         _need(req in kw, f"Missing required parameter: '{req}'.")
     try:
-        validate_tool_arguments(dict(call.function.parameters), kw)
+        validate_tool_arguments(call.function, kw)
     except Exception as exc:
         msg = f"Invalid value for parameter: {exc.__cause__ or exc}"
         raise ValueError(msg) from exc

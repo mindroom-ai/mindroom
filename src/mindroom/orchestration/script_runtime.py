@@ -1331,7 +1331,12 @@ def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
             _agent_has_tool(config, agent_name, "script")
             or (
                 _agent_has_tool(config, agent_name, "workflow")
-                and not tool_may_require_approval(config, "start_workflow")
+                and not tool_may_require_approval(
+                    config,
+                    "workflow",
+                    agent_name=agent_name,
+                    fixed_arguments={"action": "start"},
+                )
             )
         )
     )

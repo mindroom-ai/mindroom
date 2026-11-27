@@ -496,7 +496,7 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
     search_result = await gateway.search_tools(context, toolkit="calculator")
     assert "error" not in search_result
     assert search_result["results"] == []
-    await _assert_add_needs_approval(context)
+    await _assert_calculate_needs_approval(context)
 
 
 @pytest.mark.asyncio
@@ -504,7 +504,7 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rule on the shell blocks ``add`` once the calculator says its calls are shell commands, and only ``add``."""
+    """A rule on the shell blocks ``calculate`` once the calculator says its calls are shell commands."""
     judge_test_tool_function_as_shell(monkeypatch, "calculator", "calculate")
     config = context.config.model_copy(deep=True)
     config.tool_approval.rules = [ApprovalRuleConfig(match="run_shell_command", action="require_approval")]
@@ -514,7 +514,7 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     assert "error" not in search_result
     found = {item["function"] for item in search_result["results"]}
     assert "calculate" not in found
-    await _assert_add_needs_approval(context)
+    await _assert_calculate_needs_approval(context)
 
     other_agent_config = context.config.model_copy(deep=True)
     other_agent_config.tool_approval.rules = [
@@ -522,11 +522,11 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     ]
     other_search = await gateway.search_tools(replace(context, config=other_agent_config), toolkit="calculator")
     assert "error" not in other_search
-    assert "add" in {item["function"] for item in other_search["results"]}
+    assert "calculate" in {item["function"] for item in other_search["results"]}
 
 
-async def _assert_add_needs_approval(context: AgentToolContext) -> None:
-    """Assert the gateway neither describes nor runs the calculator's ``add``, which needs approval."""
+async def _assert_calculate_needs_approval(context: AgentToolContext) -> None:
+    """Assert the gateway neither describes nor runs the calculator's ``calculate``, which needs approval."""
     schema_result = await gateway.get_tool(context, toolkit="calculator", function="calculate")
     assert "inputSchema" not in schema_result
     assert schema_result["error"]["code"] == "approval_required"

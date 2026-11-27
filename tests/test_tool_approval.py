@@ -2469,3 +2469,86 @@ async def test_static_approval_checks_scope_agents_arguments_timeouts_and_approv
     )
     assert _generated_function_visible(config, None, skill_fn, agent_name="guarded") is False
     assert _generated_function_visible(config, None, skill_fn, agent_name="free") is True
+
+
+def test_tool_may_require_approval_with_fixed_arguments() -> None:
+    """fixed_arguments skips mismatched argument rules, short-circuits fully matched ones, and fails closed on partial."""
+    cancel_only = Config(
+        tool_approval=ToolApprovalConfig(
+            default="auto_approve",
+            rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "cancel"}, action="require_approval")],
+        ),
+    )
+    assert tool_may_require_approval(cancel_only, "workflow", fixed_arguments={"action": "start"}) is False
+    assert tool_may_require_approval(cancel_only, "workflow", fixed_arguments={"action": "cancel"}) is True
+
+    start_or_partial = Config(
+        tool_approval=ToolApprovalConfig(
+            default="auto_approve",
+            rules=[
+                ApprovalRuleConfig(
+                    match="workflow",
+                    arguments={"action": "start", "source": "*"},
+                    action="require_approval",
+                ),
+            ],
+        ),
+    )
+    assert tool_may_require_approval(start_or_partial, "workflow", fixed_arguments={"action": "start"}) is True
+    assert tool_may_require_approval(start_or_partial, "workflow", fixed_arguments={"action": "list"}) is False
+
+    default_req_start_auto = Config(
+        tool_approval=ToolApprovalConfig(
+            default="require_approval",
+            rules=[ApprovalRuleConfig(match="workflow", arguments={"action": "start"}, action="auto_approve")],
+        ),
+    )
+    assert tool_may_require_approval(default_req_start_auto, "workflow", fixed_arguments={"action": "start"}) is False
+    assert tool_may_require_approval(default_req_start_auto, "workflow", fixed_arguments={"action": "cancel"}) is True
+
+    default_req_partial_auto = Config(
+        tool_approval=ToolApprovalConfig(
+            default="require_approval",
+            rules=[
+                ApprovalRuleConfig(
+                    match="workflow",
+                    arguments={"action": "start", "source": "safe*"},
+                    action="auto_approve",
+                ),
+            ],
+        ),
+    )
+    assert tool_may_require_approval(default_req_partial_auto, "workflow", fixed_arguments={"action": "start"}) is True
+
+    agent_scoped_auto = Config(
+        tool_approval=ToolApprovalConfig(
+            default="require_approval",
+            rules=[
+                ApprovalRuleConfig(
+                    match="workflow",
+                    agents="planner",
+                    arguments={"action": "start"},
+                    action="auto_approve",
+                ),
+            ],
+        ),
+    )
+    assert (
+        tool_may_require_approval(
+            agent_scoped_auto,
+            "workflow",
+            agent_name="planner",
+            fixed_arguments={"action": "start"},
+        )
+        is False
+    )
+    assert (
+        tool_may_require_approval(
+            agent_scoped_auto,
+            "workflow",
+            agent_name="other",
+            fixed_arguments={"action": "start"},
+        )
+        is True
+    )
+    assert tool_may_require_approval(agent_scoped_auto, "workflow", fixed_arguments={"action": "start"}) is True

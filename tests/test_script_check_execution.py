@@ -383,7 +383,9 @@ async def test_policy_gateway_routes_and_manager_isolation(tmp_path: Path) -> No
         tools=["triggers", "script", "calculator", "website"],
         policy={"script_check_allowed_tools": ["calculator", "triggers"]},
     )
-    assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("calculator", "add"), script_check=True) is not None
+    assert (
+        resolve_current_script_tool(ctx_pol, ScriptToolGrant("calculator", "calculate"), script_check=True) is not None
+    )
     assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("website", "read_url"), script_check=True) is None
     assert resolve_current_script_tool(ctx_pol, ScriptToolGrant("triggers", "triggers"), script_check=True) is None
 
@@ -667,22 +669,60 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path, monke
             )
             assert {r.run_id for r in interrupt_m.await_args.args[0]} == expected_ids
 
-    # Workflow-only agent loses script_check eligibility on reload when start_workflow requires approval.
+    # Workflow-only agent loses script_check eligibility on reload only when workflow(action="start") may ask.
     cfg_box[0] = _script_ctx(tmp_path / "lc", tools=["triggers", "workflow"], allow_local=True).config
-    cfg_wf_gated = _script_ctx(
-        tmp_path / "lc",
-        tools=["triggers", "workflow"],
-        tool_approval={"default": "auto_approve", "rules": [{"match": "start_workflow", "action": "require_approval"}]},
-        allow_local=True,
-    ).config
-    with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_m:
-        await lifecycle._apply_update(
-            cfg_wf_gated,
-            removed_entities=frozenset(),
-            authorization_changed=False,
-            plugins_changed=False,
-        )
-        assert {r.run_id for r in interrupt_m.await_args.args[0]} == {sc_active.run_id}
+    for allowed_approval in (
+        {
+            "default": "auto_approve",
+            "rules": [{"match": "workflow", "agents": "other_agent", "action": "require_approval"}],
+        },
+        {
+            "default": "auto_approve",
+            "rules": [{"match": "workflow", "arguments": {"action": "cancel"}, "action": "require_approval"}],
+        },
+        {
+            "default": "require_approval",
+            "rules": [{"match": "workflow", "arguments": {"action": "start"}, "action": "auto_approve"}],
+        },
+    ):
+        cfg_allowed = _script_ctx(
+            tmp_path / "lc",
+            tools=["triggers", "workflow"],
+            tool_approval=allowed_approval,
+            allow_local=True,
+        ).config
+        with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_m:
+            await lifecycle._apply_update(
+                cfg_allowed,
+                removed_entities=frozenset(),
+                authorization_changed=False,
+                plugins_changed=False,
+            )
+            interrupt_m.assert_not_awaited()
+
+    for gated_approval in (
+        {"default": "auto_approve", "rules": [{"match": "workflow", "action": "require_approval"}]},
+        {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "workflow", "arguments": {"action": "start", "source": "*"}, "action": "require_approval"},
+            ],
+        },
+    ):
+        cfg_wf_gated = _script_ctx(
+            tmp_path / "lc",
+            tools=["triggers", "workflow"],
+            tool_approval=gated_approval,
+            allow_local=True,
+        ).config
+        with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_m:
+            await lifecycle._apply_update(
+                cfg_wf_gated,
+                removed_entities=frozenset(),
+                authorization_changed=False,
+                plugins_changed=False,
+            )
+            assert {r.run_id for r in interrupt_m.await_args.args[0]} == {sc_active.run_id}
 
     rule = ReactiveTriggerRecord(
         trigger_id="sc_disp",

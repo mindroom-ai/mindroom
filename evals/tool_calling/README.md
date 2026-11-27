@@ -16,7 +16,7 @@ Workspace-local tools (`run_shell_command`, `filesystem`, `skill`, `view_file`, 
 
 - `nested_call_tool_name`: `call_tool` failed to rewrite due to missing/nested `name` or non-object `arguments`.
 - `shell_argv_syntax`: `run_shell_command` passed a multi-item argv `list` with shell syntax (`|`, `&&`, `||`, `;`, `>`, `<`, `~`, `$(`, `<<`).
-- `hallucinated_action`: passed `action=` to a function whose schema has no `action` parameter (e.g. `list_workflow_runs`, `list_thread_tags`, `view_file`).
+- `hallucinated_action`: passed `action=` to a function whose schema has no `action` parameter (e.g. `show_canvas`, `view_file`).
 - `missing_required_param`, `unexpected_param`, `invalid_param_value`, `unknown_tool`, `tool_error`.
 
 ## Usage

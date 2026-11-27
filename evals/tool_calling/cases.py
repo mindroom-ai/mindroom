@@ -218,12 +218,15 @@ CASES: tuple[EvalCase, ...] = (
     EvalCase(
         "workflow_runs_check",
         "Check what workflow runs are currently sitting around in this conversation and report their status.",
-        lambda _w, c: _ok(c, "list_workflow_runs"),
+        lambda _w, c: _ok(c, "workflow", lambda a: a.get("action") == "list"),
     ),
     EvalCase(
         "thread_tags_audit",
         "Check what tags are on this thread right now, and add the `triage` tag if it isn't already there.",
-        lambda _w, c: _ok(c, "list_thread_tags") and _ok(c, "tag_thread", lambda a: a.get("tag") == "triage"),
+        lambda _w, c: (
+            _ok(c, "thread_tags", lambda a: a.get("action") == "list")
+            and _ok(c, "thread_tags", lambda a: a.get("action") == "tag" and a.get("tag") == "triage")
+        ),
     ),
     EvalCase(
         "scheduler_reminder",

@@ -132,8 +132,10 @@ def test_update_agent_schema_lets_a_model_send_text_and_name_lists() -> None:
 
     assert function.parameters["required"] == ["action"]
     changes_schema = function.parameters["properties"]["changes"]
-    object_branch = next(branch for branch in changes_schema["anyOf"] if branch.get("type") == "object")
-    value_types = object_branch["additionalProperties"]["anyOf"]
+    assert changes_schema["type"] == "object"
+    assert changes_schema["propertyNames"] == {"type": "string"}
+    assert "anyOf" not in changes_schema
+    value_types = changes_schema["additionalProperties"]["anyOf"]
     assert {"type": "string"} in value_types
     assert {"type": "array", "items": {"type": "string"}} in value_types
     assert {"type": "null"} in value_types

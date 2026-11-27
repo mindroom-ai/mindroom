@@ -238,13 +238,18 @@ def _script_check_agent_failure(config: Config, agent_name: str) -> _ScriptCheck
             "agent",
             f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
         )
-    if "script" not in resolved and tool_may_require_approval(config, "start_workflow"):
+    if "script" not in resolved and tool_may_require_approval(
+        config,
+        "workflow",
+        agent_name=agent_name,
+        fixed_arguments={"action": "start"},
+    ):
         return _ScriptCheckAccessFailure(
             "workflow_approval_required",
             "agent",
             (
-                f"Agent {agent_name!r} relies on 'workflow' without 'script', and 'start_workflow' may require "
-                "tool approval. Grant 'script' or auto-approve 'start_workflow' to use script_check triggers."
+                f"Agent {agent_name!r} relies on 'workflow' without 'script', and 'workflow' (action='start') may "
+                "require tool approval. Grant 'script' or auto-approve 'workflow' launch to use script_check triggers."
             ),
         )
     return None

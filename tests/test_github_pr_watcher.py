@@ -927,7 +927,7 @@ async def test_watch_pr_action_governed_by_triggers_approval_rules(tmp_path: Pat
     assert meta.function_names == ("triggers",)
     assert set(meta.approval_aliases) == {"triggers"}
     triggers_alias = meta.approval_aliases["triggers"]
-    assert triggers_alias.judged_as == "start_script"
+    assert triggers_alias.judged_as == "script_write"
     assert toolkit_approval_alias(req_cfg, registry, "triggers", "watch_pr") is None
 
     args: dict[str, object] = {"action": "watch_pr", "repo": "org/owned", "number": 40}
