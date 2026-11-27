@@ -244,7 +244,7 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
 
 
 def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
-    """A created agent lives in the roster, so saving the config would drop the change; its owners use update_agent."""
+    """A created agent lives in the roster, so saving the config would drop the change; its owners use agent_manager_write."""
     paths = test_runtime_paths(tmp_path)
     data = GENERATED_BASE | {"administrators": ["@admin:example.org"]}
     config = load_generated(tmp_path, data, created=[created_entry()])

@@ -1738,11 +1738,14 @@ class Config(BaseModel):
             for override in overrides:
                 raw_tools = override.get("tools")
                 if isinstance(raw_tools, list):
-                    enabled_toolkits.update(
-                        self.expand_tool_names(
-                            [canonical_tool_name(ToolConfigEntry.model_validate(item).name) for item in raw_tools],
-                        ),
-                    )
+                    override_tool_names: list[str] = []
+                    for item in raw_tools:
+                        try:
+                            override_tool_names.append(canonical_tool_name(ToolConfigEntry.model_validate(item).name))
+                        except ValueError:
+                            # Let the generated-agent template validator report malformed entries with their exact path.
+                            continue
+                    enabled_toolkits.update(self.expand_tool_names(override_tool_names))
         for agent_name in self.agents:
             enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
         return enabled_toolkits

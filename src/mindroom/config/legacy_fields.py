@@ -898,7 +898,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
     #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
     #   and list_email_invites).
-    # Last legacy release: v2026.11.651; replacement: unreleased; consolidated into action-dispatched read/write
+    # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
     #   functions with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
     #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names

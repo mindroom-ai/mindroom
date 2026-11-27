@@ -3617,3 +3617,29 @@ def test_retired_identity_access_graph_include_exclude_overrides_fail_config_loa
             runtime_paths,
         )
         assert valid.agents["a"].tools[0].overrides == {"exclude_tools": [kept_read]}
+
+
+def test_malformed_personal_agent_user_override_keeps_template_error_path_with_approval_rules(
+    tmp_path: Path,
+) -> None:
+    """Malformed personal_agents user tool overrides still report the template path when approval rules are active."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "personal_agents": {
+            "mind": {
+                "agent": {
+                    "display_name": "{user_first_name}",
+                    "role": "Personal assistant",
+                    "include_default_tools": False,
+                },
+                "users": {"@alice:example.org": {"tools": [123]}},
+            },
+        },
+        "tool_approval": {"rules": [{"match": "agent_manager_write", "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents"):
+        Config.validate_with_runtime(data, runtime_paths)
