@@ -110,6 +110,8 @@ def _normalize_topic_tool_tag(tag: str) -> str:
 class ThreadTagsTools(Toolkit):
     """Tools for tagging Matrix threads via shared room state."""
 
+    offer_output_path = False
+
     def __init__(
         self,
         runtime_paths: RuntimePaths | None = None,
@@ -126,7 +128,9 @@ class ThreadTagsTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Describe ``tag_thread`` with the tags its room declares."""
+        """Describe ``tag_thread`` with the tags its room declares and allow redirecting tag listings."""
+        if function.name == "list_thread_tags":
+            return replace(function, offer_output_path=True)
         if function.name == "tag_thread" and self._tag_thread_description is not None:
             return replace(function, description=self._tag_thread_description)
         return function

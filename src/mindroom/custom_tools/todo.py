@@ -743,6 +743,9 @@ def _validate_todo_params(
 class TodoTools(Toolkit):
     """Tools for managing per-thread work plans with dependencies."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="todo",

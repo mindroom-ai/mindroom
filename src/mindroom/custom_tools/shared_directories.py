@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 def _payload(status: str, **fields: object) -> str:
@@ -115,6 +117,9 @@ def _answer_error(context: ToolRuntimeContext, agent: str, action: str) -> str |
 class SharedDirectoryTools(Toolkit):
     """Create directories other agents can read from their own workers."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(self, agent_name: str | None = None) -> None:
         # The calling agent, bound when the tool is built, so a team member shares as itself rather than as the team.
         self._agent_name = agent_name
@@ -130,6 +135,12 @@ class SharedDirectoryTools(Toolkit):
                 self.decline_shared_directory,
             ],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Keep wait budgets on recursive directory deletion while omitting them from metadata operations."""
+        if function.name == "delete_shared_directory":
+            return replace(function, offer_background_after=True)
+        return function
 
     def _context(self) -> tuple[ToolRuntimeContext, str] | str:
         context = get_tool_runtime_context()

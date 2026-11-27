@@ -816,9 +816,11 @@ async def test_the_prompt_says_where_the_tools_work_beside_a_workdir(
     assert "(`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir;" in system
     assert f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; " in system
     assert "code that `python` runs uses this process's current directory, so give it absolute paths." in system
-    (write_file,) = (tool for tool in provider.requests[0].tools if tool.name == "write_file")
-    description = write_file.parameters["properties"]["mindroom_output_path"]["description"]
-    assert description.startswith("Optional path under saved tool outputs dir:")
+    by_name = {tool.name: tool for tool in provider.requests[0].tools}
+    assert "mindroom_output_path" not in by_name["write_file"].parameters["properties"]
+    grep_output_path = by_name["grep"].parameters["properties"]["mindroom_output_path"]
+    assert "default" not in grep_output_path
+    assert grep_output_path["description"].startswith("Optional path under saved tool outputs dir:")
 
 
 @pytest.mark.asyncio

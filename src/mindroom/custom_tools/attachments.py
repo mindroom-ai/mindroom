@@ -39,6 +39,7 @@ from mindroom.path_confinement import open_regular_file_within_root
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
+    OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
     current_tool_workdir,
     saved_tool_output_receipt,
@@ -411,6 +412,9 @@ async def send_resolved_attachments(
 class AttachmentTools(Toolkit):
     """Toolkit for reading and sending context-scoped attachments."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(
         self,
         *,
@@ -492,15 +496,19 @@ class AttachmentTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Offer ``get_attachment``'s output path as every tool offers one, and describe its attachment ID."""
+        """Offer ``get_attachment``'s output path and wait budget, and describe its attachment ID."""
         if function.name != "get_attachment":
             return function
         parameters = with_optional_output_path(function.parameters)
+        parameters["properties"][OUTPUT_PATH_ARGUMENT] = {
+            **parameters["properties"][OUTPUT_PATH_ARGUMENT],
+            "description": "Save attachment bytes to a workspace-relative file.",
+        }
         parameters["properties"]["attachment_id"] = {
             **parameters["properties"]["attachment_id"],
             "description": "Context-scoped attachment ID returned by list_attachments.",
         }
-        return replace(function, parameters=parameters)
+        return replace(function, parameters=parameters, offer_background_after=True, offer_output_path=True)
 
     async def list_attachments(self, target: str | None = None) -> str:
         """List attachment metadata for current tool context."""

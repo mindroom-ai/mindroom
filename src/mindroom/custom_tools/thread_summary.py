@@ -15,6 +15,8 @@ from mindroom.tool_system.authoring import Toolkit
 class ThreadSummaryTools(Toolkit):
     """Tools for manually setting Matrix thread summaries."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="thread_summary",
