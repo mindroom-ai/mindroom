@@ -65,6 +65,10 @@ _QUALIFYING = [
     ("sticker", _reply(event_type="m.sticker", content={"body": "cat", "m.relates_to": THREAD_REL})),
     ("pending", _reply(sender=BOT, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_PENDING}))),
     ("streaming", _reply(sender=BOT, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}))),
+    (
+        "pending-secret",
+        _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "pending"}})),
+    ),
     ("approval", _reply(event_type="io.mindroom.tool_approval", sender=BOT, content={"m.relates_to": THREAD_REL})),
     ("human-spoof-resolved", _reply(sender=HUMAN, content=_msg(**{RESOLVED_IN_TURN_KEY: True}))),
     ("human-spoof-snooze", _reply(sender=HUMAN, content=_msg(**{THREAD_SNOOZE_CONTENT_KEY: {"event": "ended"}}))),
@@ -84,6 +88,14 @@ _IGNORED = [
     ("managed-voice-echo", _reply(sender=BOT, content=_msg(**{VISIBLE_ROUTER_VOICE_ECHO_KEY: True}))),
     ("managed-plain-notice", _reply(sender=BOT, content=_msg("m.notice"))),
     ("completed-notice", _reply(sender=BOT, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED}))),
+    (
+        "saved-secret",
+        _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "saved"}})),
+    ),
+    (
+        "human-secret",
+        _reply(sender=HUMAN, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "pending"}})),
+    ),
     ("human-streaming", _reply(sender=HUMAN, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}))),
     (
         "human-approval",
