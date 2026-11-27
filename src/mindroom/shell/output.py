@@ -1,7 +1,6 @@
-"""Pure shell output primitives: rolling tail buffers, temp spools, background logs, and formatters.
+"""Pure shell output primitives: rolling tail buffers, temp spools, and formatters.
 
-This module stays free of ``mindroom.tools``, ``mindroom.tool_jobs``, ``mindroom.tool_system``, and
-``mindroom.shell.background_scope`` imports so the worker-local shell supervisor starts fast and
+This module stays free of ``mindroom.*`` imports so the worker-local shell supervisor starts fast and
 desktop code remains import-safe across platforms.
 """
 
@@ -12,21 +11,16 @@ import codecs
 import contextlib
 import itertools
 import os
-import re
 import shlex
-import signal
-import stat
 import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NamedTuple
-
-from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
+from typing import TYPE_CHECKING, Any, BinaryIO, NamedTuple
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
@@ -40,14 +34,6 @@ _CAPPED_STREAM_PACE_SECONDS = 0.02
 _PROGRESS_INTERVAL_SECONDS = 0.5
 # Numbers every append to any output buffer, so a reader can tell which stream printed last.
 _APPEND_SEQUENCE = itertools.count(1)
-
-_LOG_MAX_BYTES = 4 * 1024 * 1024
-_LOG_MAX_AGE_SECONDS = 24 * 3600
-_LOG_MAX_FILES = 64
-_LOG_RECENT_PROTECT_SECONDS = 5 * 60
-_BACKGROUND_LOG_NAME_RE = re.compile(r"^\d+-(?:[0-9a-f]{8}|[0-9a-f]{32})\.log$")
-
-StopReason = Literal["timeout", "scope_ended", "stopped"]
 
 
 class _OutputChunk(NamedTuple):
@@ -113,9 +99,9 @@ class ShellOutputBuffer:
 
     def render(self, *, tail: int | None = None) -> str:
         """Return the last ``tail`` retained lines, after one notice of what was left out."""
-        return "\n".join(part for part in self._render_parts(tail=tail) if part)
+        return "\n".join(part for part in self.render_parts(tail=tail) if part)
 
-    def _render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
+    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
         """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
         lines = self.lines()
         shown = lines if tail is None else lines[-tail:]
@@ -277,6 +263,11 @@ class SpoolStream:
         self.file.flush()
         return os.fstat(self.file.fileno()).st_size
 
+    @property
+    def truncated(self) -> bool:
+        """Return whether output was dropped past ``max_bytes`` or lost to a capture error."""
+        return self.error is not None
+
     def read(self) -> str:
         """Read the retained complete stream as UTF-8 text."""
         self.file.seek(0)
@@ -309,8 +300,6 @@ class SpoolCapture:
             self.stdout.close()
             raise
         self.incomplete = False
-        # Why incomplete output went unsaved, when its owner knows better than "interrupted".
-        self.interruption: str | None = None
         self.closed = False
 
     def close(self) -> None:
@@ -318,191 +307,6 @@ class SpoolCapture:
         self.closed = True
         self.stdout.close()
         self.stderr.close()
-
-
-@dataclass(frozen=True)
-class BackgroundLogPolicy:
-    """Where and how much output an auto-backgrounded shell command writes to its live log."""
-
-    log_dir: str
-    display_root: str | None = None
-    max_bytes: int = _LOG_MAX_BYTES
-
-    @classmethod
-    def from_payload(cls, payload: object) -> BackgroundLogPolicy | None:
-        """Validate the optional serialized log policy sent to the supervisor."""
-        if payload is None:
-            return None
-        if not isinstance(payload, dict):
-            msg = "Invalid background shell log policy."
-            raise TypeError(msg)
-        log_dir = payload.get("log_dir")
-        display_root = payload.get("display_root")
-        max_bytes = payload.get("max_bytes", _LOG_MAX_BYTES)
-        if (
-            not isinstance(log_dir, str)
-            or not log_dir
-            or (display_root is not None and not isinstance(display_root, str))
-            or not isinstance(max_bytes, int)
-            or isinstance(max_bytes, bool)
-            or max_bytes <= 0
-        ):
-            msg = "Invalid background shell log policy."
-            raise ValueError(msg)
-        return cls(log_dir=log_dir, display_root=display_root, max_bytes=max_bytes)
-
-
-class BackgroundLogFile:
-    """Bounded live log file for one auto-backgrounded shell process."""
-
-    def __init__(self, *, path: Path, file: BinaryIO, max_bytes: int) -> None:
-        self.path = path
-        self._file = file
-        self._max_bytes = max_bytes
-        self._written_bytes = 0
-        self._truncated = False
-        self.closed = False
-
-    def write(self, text: str) -> None:
-        """Append *text* up to the byte cap, writing a single truncation notice if exceeded."""
-        if self.closed or self._truncated or not text:
-            return
-        data = text.encode("utf-8", errors="replace")
-        remaining = self._max_bytes - self._written_bytes
-        try:
-            if len(data) <= remaining:
-                self._file.write(data)
-                self._written_bytes += len(data)
-            else:
-                if remaining > 0:
-                    clipped = data[:remaining].decode("utf-8", errors="ignore").encode("utf-8")
-                    self._file.write(clipped)
-                    self._written_bytes += len(clipped)
-                self._file.write(self._truncation_notice().encode("utf-8"))
-                self._truncated = True
-            self._file.flush()
-        except OSError:
-            self._truncated = True
-
-    def finish(self, trailer: str | None = None) -> None:
-        """Write an optional status trailer and close the log file once."""
-        if self.closed:
-            return
-        self.closed = True
-        try:
-            if trailer is not None:
-                self._file.write(trailer.encode("utf-8"))
-                self._file.flush()
-        except OSError:
-            pass
-        finally:
-            with contextlib.suppress(OSError):
-                self._file.close()
-
-    def _truncation_notice(self) -> str:
-        limit = (
-            f"{self._max_bytes // (1024 * 1024)} MiB"
-            if self._max_bytes % (1024 * 1024) == 0
-            else f"{self._max_bytes} bytes"
-        )
-        return f"\n[Log truncated at {limit} limit; command output continues without being logged.]\n"
-
-
-@contextlib.contextmanager
-def _open_log_dir(log_dir: Path) -> Iterator[int]:
-    root, relative_dir = (
-        (log_dir.parent.parent, Path(".mindroom", log_dir.name))
-        if log_dir.parent.name == ".mindroom"
-        else (log_dir.parent, Path(log_dir.name))
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        with open_directory_within_root(root_fd, relative_dir, create=True, mode=0o700) as dir_fd:
-            if os.fstat(dir_fd).st_uid != os.geteuid():
-                msg = f"Shell log directory is not owned by the current user: {log_dir}"
-                raise PermissionError(msg)
-            yield dir_fd
-    finally:
-        os.close(root_fd)
-
-
-def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
-    now = time.time()
-    age_cutoff = now - _LOG_MAX_AGE_SECONDS
-    recent_cutoff = now - _LOG_RECENT_PROTECT_SECONDS
-    evictable_logs: list[tuple[float, str]] = []
-    protected_count = 0
-    try:
-        names = os.listdir(dir_fd)
-    except OSError:
-        return
-    for name in names:
-        if not _BACKGROUND_LOG_NAME_RE.match(name):
-            continue
-        try:
-            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            continue
-        if name in active_names:
-            protected_count += 1
-            continue
-        mtime = st.st_mtime
-        if mtime < age_cutoff:
-            with contextlib.suppress(OSError):
-                os.unlink(name, dir_fd=dir_fd)
-        elif mtime >= recent_cutoff:
-            # Protect recently written logs from another concurrent scope in the same workspace.
-            protected_count += 1
-        else:
-            evictable_logs.append((mtime, name))
-    evictable_logs.sort(key=lambda item: item[0], reverse=True)
-    for _, old_name in evictable_logs[max(0, _LOG_MAX_FILES - protected_count) :]:
-        with contextlib.suppress(OSError):
-            os.unlink(old_name, dir_fd=dir_fd)
-
-
-def open_background_log(
-    policy: BackgroundLogPolicy,
-    *,
-    pid: int,
-    handle: str,
-    active_paths: set[str],
-) -> BackgroundLogFile:
-    """Create a private log file for one auto-backgrounded process and sweep expired generated logs."""
-    log_dir = Path(policy.log_dir)
-    filename = f"{pid}-{handle.removeprefix('shell:')}.log"
-    log_path = log_dir / filename
-    with _open_log_dir(log_dir) as dir_fd:
-        file_fd = open_regular_file_at(dir_fd, filename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        try:
-            stream = os.fdopen(file_fd, "wb")
-        except BaseException:
-            os.close(file_fd)
-            raise
-        active_names = {Path(path).name for path in active_paths if Path(path).parent == log_dir} | {filename}
-        _sweep_old_log_files(dir_fd, active_names=active_names)
-    return BackgroundLogFile(path=log_path, file=stream, max_bytes=policy.max_bytes)
-
-
-def seed_background_log(
-    log_file: BackgroundLogFile,
-    stdout_buf: ShellOutputBuffer,
-    stderr_buf: ShellOutputBuffer,
-) -> None:
-    """Write buffered foreground stdout and stderr into a newly opened background log file."""
-    prev_ended_newline = True
-    for buf, stream in ((stdout_buf, ""), (stderr_buf, "stderr")):
-        raw = buf.text()
-        if not raw:
-            continue
-        if not prev_ended_newline:
-            log_file.write("\n")
-        notice, _ = buf._render_parts(tail=None, stream=stream)
-        log_file.write(f"{notice}\n{raw}" if notice else raw)
-        prev_ended_newline = raw.endswith("\n")
 
 
 def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int) -> str:
@@ -535,8 +339,8 @@ def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_
 
 def format_shell_success(stdout_buf: ShellOutputBuffer, stderr_buf: ShellOutputBuffer, tail: int) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
-    output_notice, output = stdout_buf._render_parts(tail=tail)
-    errors_notice, errors = stderr_buf._render_parts(tail=tail, stream="stderr")
+    output_notice, output = stdout_buf.render_parts(tail=tail)
+    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
     return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
@@ -578,25 +382,6 @@ def format_auto_background_message(
     if stderr_buf:
         lines += ["Stderr:", stderr_buf.render()]
     return "\n".join(lines)
-
-
-def format_log_trailer(
-    return_code: int | None,
-    *,
-    stop_reason: StopReason | None,
-    max_runtime_seconds: float | None,
-) -> str:
-    """Return the final status line appended when a backgrounded process stops or exits."""
-    if stop_reason == "scope_ended":
-        return "\n[MindRoom: stopped when turn ended]\n"
-    if stop_reason == "stopped":
-        return "\n[MindRoom: stopped]\n"
-    rc = -signal.SIGKILL if return_code is None else return_code
-    if stop_reason == "timeout" and max_runtime_seconds is not None:
-        return f"\n[MindRoom: stopped after {max_runtime_seconds:g}s timeout (exit code {rc})]\n"
-    if rc < 0:
-        return f"\n[MindRoom: killed by signal {-rc} (exit code {rc})]\n"
-    return f"\n[MindRoom: exited with code {rc}]\n"
 
 
 async def _pace_capped_stream(stream: asyncio.StreamReader) -> None:

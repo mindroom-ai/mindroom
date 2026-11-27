@@ -343,8 +343,8 @@ class ManagedProcess:
         process: asyncio.subprocess.Process,
         scope: ProcessScope | None = None,
     ) -> None:
-        self._process = process
-        self._scope = scope
+        self.process = process
+        self.scope = scope
 
     @classmethod
     async def spawn(
@@ -376,16 +376,6 @@ class ManagedProcess:
         return cls(process, launch.scope)
 
     @property
-    def process(self) -> asyncio.subprocess.Process:
-        """Return the underlying asyncio subprocess."""
-        return self._process
-
-    @property
-    def scope(self) -> ProcessScope | None:
-        """Return the verified systemd scope metadata attached at spawn, if any."""
-        return self._scope
-
-    @property
     def pid(self) -> int:
         """Return the spawned leader PID."""
         return self.process.pid
@@ -410,10 +400,6 @@ class ManagedProcess:
         """Return the subprocess stderr reader when spawned with a stderr pipe."""
         return self.process.stderr
 
-    async def wait(self) -> int:
-        """Wait for the underlying subprocess to exit and return its exit code."""
-        return await self.process.wait()
-
     async def wait_exit(
         self,
         timeout_seconds: float | None = None,
@@ -425,7 +411,7 @@ class ManagedProcess:
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise TimeoutError
 
-        wait_task = asyncio.create_task(self.wait())
+        wait_task = asyncio.create_task(self.process.wait())
         deadline = None if timeout_seconds is None else asyncio.get_running_loop().time() + timeout_seconds
         try:
             while self.returncode is None:
@@ -458,7 +444,7 @@ class ManagedProcess:
         """Force-kill this process's group, Linux session members, and verified systemd scope."""
         kill_command_processes(self.pid, scope=self.scope)
 
-    def processes_exist(self) -> bool:
+    def _processes_exist(self) -> bool:
         """Return whether any process of this command still exists in its group, Linux session, or verified scope."""
         return command_processes_exist(self.pid, scope=self.scope)
 
@@ -482,14 +468,14 @@ class ManagedProcess:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + grace_period
         try:
-            while loop.time() < deadline and self.processes_exist():  # noqa: ASYNC110 - a process tree has no exit event
+            while loop.time() < deadline and self._processes_exist():  # noqa: ASYNC110 - a process tree has no exit event
                 await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
         finally:
             # A stop cancelled during the grace still kills what ignored SIGTERM.
             self.kill_tree()
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self.wait(), timeout=grace_period)
+            await asyncio.wait_for(self.process.wait(), timeout=grace_period)
         deadline = loop.time() + grace_period
-        while whole_group and self.processes_exist() and loop.time() < deadline:  # noqa: ASYNC110 - as above
+        while whole_group and self._processes_exist() and loop.time() < deadline:  # noqa: ASYNC110 - as above
             await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
-        return not self.processes_exist()
+        return not self._processes_exist()

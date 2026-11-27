@@ -46,6 +46,7 @@ from mindroom.script_runs.wire import (
     WorkerScriptStatus,
 )
 from mindroom.shell import supervisor as shell_supervisor_module
+from mindroom.shell.registry import ProcessStatus, SignalResult
 from mindroom.shell.runner import ShellRunResult
 from mindroom.shell.supervisor import ShellSupervisorStartupError
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -444,27 +445,33 @@ async def _started(*_args: object, **kwargs: object) -> ShellRunResult:
     return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
 
 
+_DEFAULT_LOCAL_CHECK = ProcessStatus(state="exited", exit_code=-9)
+
+
 def _fake_local_supervisor(
     monkeypatch: pytest.MonkeyPatch,
     *,
     launch: Callable[..., Awaitable[ShellRunResult]] = _started,
-    kill: str | Callable[[bool], str] = lambda force: "Force-killed process" if force else "Terminated process",
-    check: str | Callable[[], str] = "Status: FINISHED (exit code -9)",
+    kill: SignalResult | Callable[[bool], SignalResult] = lambda force: SignalResult(
+        outcome="signalled",
+        message="Force-killed process" if force else "Terminated process",
+    ),
+    check: ProcessStatus | Callable[[], ProcessStatus] = _DEFAULT_LOCAL_CHECK,
 ) -> list[tuple[str, bool]]:
     """Route unsafe-local runs through a fake primary shell supervisor and return the signals it receives."""
     signals: list[tuple[str, bool]] = []
 
-    def signal(_socket_path: str, *, namespace: str, handle: str, force: bool) -> str:
+    def signal(_socket_path: str, *, namespace: str, handle: str, force: bool) -> SignalResult:
         del namespace
         signals.append((handle, force))
-        return kill if isinstance(kill, str) else kill(force)
+        return kill if isinstance(kill, SignalResult) else kill(force)
 
-    def status(_socket_path: str, *, namespace: str, handle: str) -> str:
+    def status(_socket_path: str, *, namespace: str, handle: str) -> ProcessStatus:
         del namespace, handle
-        return check if isinstance(check, str) else check()
+        return check if isinstance(check, ProcessStatus) else check()
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch)
+    monkeypatch.setattr(supervised_module, "spawn_background_via_supervisor", launch)
     monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", signal)
     monkeypatch.setattr(supervised_module, "check_command_via_supervisor", status)
     return signals
@@ -1545,9 +1552,19 @@ async def test_local_status_reports_pending_cancellation_when_its_supervisor_fal
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
     unavailable = "Error: Shell supervisor is unavailable: [Errno 111] Connection refused"
-    status_replies = [unavailable, "Status: RUNNING (PID 7, elapsed 1.0s)\nPartial output:\nstill working"]
+    status_replies = [
+        ProcessStatus(state="error", message=unavailable),
+        ProcessStatus(
+            state="running",
+            message="Status: RUNNING (PID 7, elapsed 1.0s)\nPartial output:\nstill working",
+        ),
+    ]
 
-    _fake_local_supervisor(monkeypatch, kill=unavailable, check=lambda: status_replies.pop(0))
+    _fake_local_supervisor(
+        monkeypatch,
+        kill=SignalResult(outcome="error", message=unavailable),
+        check=lambda: status_replies.pop(0),
+    )
     run = await manager.run(context, source="print('ok')\n")
     manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
 
@@ -1630,7 +1647,7 @@ async def _cancel_local_launch_after_spawn(
     context: ToolRuntimeContext,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    check: str,
+    check: ProcessStatus,
 ) -> list[tuple[str, bool]]:
     """Cancel one local launch while its first post-spawn store read is in flight; return the signals it sent."""
     spawned = False
@@ -1677,7 +1694,7 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
         manager,
         context,
         monkeypatch,
-        check="Status: FINISHED (exit code -9)",
+        check=ProcessStatus(state="exited", exit_code=-9),
     )
 
     [stored] = manager.store.list_runs()
@@ -1693,7 +1710,12 @@ async def test_post_spawn_task_cancellation_keeps_an_unconfirmed_local_process_r
     """Task cancellation after local spawn cannot end a run whose process is not yet confirmed gone."""
     manager, _backend, _client = _manager(tmp_path, mode="local")
     context = _context(tmp_path, mode="local")
-    signals = await _cancel_local_launch_after_spawn(manager, context, monkeypatch, check="Status: RUNNING")
+    signals = await _cancel_local_launch_after_spawn(
+        manager,
+        context,
+        monkeypatch,
+        check=ProcessStatus(state="running"),
+    )
 
     [stored] = manager.store.list_runs()
     assert stored.state is ScriptRunState.STARTING
@@ -1931,7 +1953,7 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
         return original_write_snapshot(*args, **kwargs)
 
     monkeypatch.setattr(manager_module, "_write_snapshot", blocked_write_snapshot)
-    _fake_local_supervisor(monkeypatch, check="Status: FINISHED (exit code -15)")
+    _fake_local_supervisor(monkeypatch, check=ProcessStatus(state="exited", exit_code=-15))
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     assert await asyncio.to_thread(write_started.wait, SETTLE_TIMEOUT_SECONDS)
     [starting] = manager.store.list_runs(include_finished=False)
@@ -2792,7 +2814,6 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         env: dict[str, str],
         cwd: str | None,
         tail: int,
-        timeout: float,  # noqa: ASYNC109
         handle: str | None = None,
         max_runtime_seconds: float | None = None,
     ) -> ShellRunResult:
@@ -2805,7 +2826,6 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
             env=env,
             cwd=cwd,
             tail=tail,
-            timeout=timeout,
             handle=handle,
         )
         assert handle is not None
@@ -2915,7 +2935,9 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
     signals = _fake_local_supervisor(
         monkeypatch,
         launch=failed_launch,
-        check=lambda: "Status: FINISHED (exit code -9)" if termination_confirmed else "Status: RUNNING",
+        check=lambda: (
+            ProcessStatus(state="exited", exit_code=-9) if termination_confirmed else ProcessStatus(state="running")
+        ),
     )
 
     with pytest.raises(RuntimeError, match="launch response lost"):
@@ -2985,7 +3007,7 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
     _fake_local_supervisor(
         monkeypatch,
         launch=launch_local,
-        check=lambda: "Status: FINISHED (exit code -9)" if process_exited else "Status: RUNNING",
+        check=lambda: ProcessStatus(state="exited", exit_code=-9) if process_exited else ProcessStatus(state="running"),
     )
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
@@ -3218,7 +3240,12 @@ async def test_a_refused_local_launch_fails_its_start_and_ends_its_run(
     async def refuse(*_args: object, **_kwargs: object) -> ShellRunResult:
         return ShellRunResult(message="Error: handle is already in use")
 
-    _fake_local_supervisor(monkeypatch, launch=refuse, kill="Error: Unknown handle", check="Error: Unknown handle")
+    _fake_local_supervisor(
+        monkeypatch,
+        launch=refuse,
+        kill=SignalResult(outcome="unknown"),
+        check=ProcessStatus(state="unknown"),
+    )
 
     with pytest.raises(ScriptRunManagerError, match="handle is already in use"):
         await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")

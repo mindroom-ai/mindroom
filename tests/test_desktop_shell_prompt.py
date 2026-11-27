@@ -113,7 +113,7 @@ async def _stop(task: asyncio.Task[None]) -> None:
 
 
 def _release(result: DesktopShellResult) -> None:
-    result.output.release()
+    result.output.close()
 
 
 @pytest.mark.parametrize(

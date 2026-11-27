@@ -13,9 +13,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.shell.output import BackgroundLogPolicy
+from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.process import ManagedProcess
 from mindroom.shell.registry import ProcessRegistry
+from mindroom.shell.runner import ActiveCommand
 from tests.test_shell_async import _get_toolkit
 
 if TYPE_CHECKING:
@@ -235,7 +236,7 @@ async def test_cancellation_after_backgrounding_drops_the_undeliverable_handle(
         )
         pid = await _wait_for_pid(pid_file)
         await background_registered.wait()
-        assert registry.record_count == 1
+        assert len(registry._records) == 1
 
         task.cancel()
         release_background_sleep.set()
@@ -257,12 +258,11 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
     release_grace = asyncio.Event()
 
     async def blocked_reader_grace(
-        stdout_reader: object,
-        stderr_reader: object,
+        self: ActiveCommand,
         *,
-        grace_seconds: float,
+        grace_seconds: float = 0.5,
     ) -> None:
-        del stdout_reader, stderr_reader, grace_seconds
+        del self, grace_seconds
         grace_entered.set()
         await release_grace.wait()
 
@@ -270,7 +270,7 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
     terminate_process_group = AsyncMock()
 
     with (
-        patch("mindroom.shell.runner._await_reader_tasks_with_grace", new=blocked_reader_grace),
+        patch.object(ActiveCommand, "_drain_readers", new=blocked_reader_grace),
         patch.object(ManagedProcess, "terminate_tree", new=terminate_process_group),
     ):
         task = asyncio.create_task(run_shell_command(command, timeout=120))
@@ -353,7 +353,7 @@ async def test_handoff_window_race_leaves_zero_leaked_processes_records_or_open_
         )
         pid = await _wait_for_pid(pid_file)
         await handoff_entered.wait()
-        log_file = next(r for r in registry.records_view.values() if r.namespace == "ns-a").log_file
+        log_file = next(r for r in registry._records.values() if r.namespace == "ns-a").log_file
         assert log_file is not None
         assert log_file.closed is False
 
@@ -362,14 +362,14 @@ async def test_handoff_window_race_leaves_zero_leaked_processes_records_or_open_
             release_handoff.set()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            assert registry.record_count == 0
+            assert len(registry._records) == 0
         elif race_kind == "close":
             close_task = asyncio.create_task(registry.close())
             await real_sleep(0.05)
             release_handoff.set()
             result = await task
             await close_task
-            assert (result.background_rejected, result.handle, registry.closed, registry.record_count) == (
+            assert (result.background_rejected, result.handle, registry.closed, len(registry._records)) == (
                 True,
                 None,
                 True,
@@ -385,8 +385,8 @@ async def test_handoff_window_race_leaves_zero_leaked_processes_records_or_open_
             assert (result.background_rejected, result.handle) == (True, None)
             assert sibling is not None
             assert sibling.handle is not None
-            assert sibling.handle in registry.records_view
-            os.kill(registry.records_view[sibling.handle].pid, 0)
+            assert sibling.handle in registry._records
+            os.kill(registry._records[sibling.handle].pid, 0)
 
     assert log_file.closed is True
     await _assert_pid_dead(pid)

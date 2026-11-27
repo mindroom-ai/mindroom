@@ -2438,11 +2438,11 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
+    from mindroom.shell.background_log import BackgroundLogPolicy  # noqa: PLC0415
     from mindroom.shell.background_scope import (  # noqa: PLC0415
         ShellBackgroundScope,
         current_shell_background_scope,
     )
-    from mindroom.shell.output import BackgroundLogPolicy  # noqa: PLC0415
 
     log: list[str] = []
     observed: dict[str, Any] = {}
@@ -2460,10 +2460,10 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
             background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
         )
         assert result.handle is not None
-        record = scope.registry.records_view[result.handle]
+        record = scope.registry._records[result.handle]
         observed["scope"] = scope
         observed["pid"] = record.pid
-        observed["log_path"] = record.log_path
+        observed["log_path"] = record._log_path
         return result.message
 
     build = _connected_build(log, runner=("run_bg", run_bg))
@@ -2476,13 +2476,13 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
     pid = observed["pid"]
     os.kill(pid, 0)
     assert not scope.closed
-    assert scope.registry.record_count == 1
+    assert len(scope.registry._records) == 1
 
     assert tooling.close is not None
     await tooling.close()
 
     assert scope.closed
-    assert scope.registry.record_count == 0
+    assert len(scope.registry._records) == 0
     assert log == ["runner connect", "runner close"]
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:

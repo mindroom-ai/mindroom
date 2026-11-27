@@ -24,11 +24,11 @@ from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import registry as shell_registry_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.output import BackgroundLogPolicy
+from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.shell.process import ManagedProcess
-from mindroom.shell.registry import BackgroundProcess, ProcessRegistry
+from mindroom.shell.registry import BackgroundProcess, ProcessRegistry, ProcessStatus, SignalResult
 from mindroom.shell.runner import ShellRunResult, run_foreground
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
@@ -38,9 +38,8 @@ from mindroom.shell.supervisor import (
     check_command_via_supervisor,
     kill_command_via_supervisor,
     kill_shell_supervisor_namespace,
-    parse_shell_supervisor_kill,
-    parse_shell_supervisor_status,
     run_command_via_supervisor,
+    spawn_background_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -58,40 +57,109 @@ _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
 
 @pytest.mark.parametrize(
-    ("message", "state", "exit_code"),
+    ("payload", "state", "exit_code"),
     [
-        ("Status: RUNNING (PID 123, elapsed 1.0s)", "running", None),
-        ("Status: FINISHED (exit code -9, ran for 1.0s)", "exited", -9),
-        ("Error: Unknown handle shell:missing", "unknown", None),
-        ("unexpected supervisor reply", "error", None),
+        ({"state": "running", "exit_code": None, "message": "Status: RUNNING (PID 123)"}, "running", None),
+        ({"state": "exited", "exit_code": -9, "message": "Status: FINISHED (exit code -9)"}, "exited", -9),
+        ({"state": "unknown", "exit_code": None, "message": "Error: Unknown handle 'shell:missing'"}, "unknown", None),
+        ({"state": "exited", "exit_code": None, "message": "missing exit code"}, "error", None),
+        ({"state": "exited", "exit_code": True, "message": "bool exit code"}, "error", None),
+        ({"state": "running", "exit_code": 0, "message": "unexpected exit code"}, "error", None),
+        ({"state": "mystery", "exit_code": None, "message": "bogus"}, "error", None),
+        ({"message": "Error: Invalid shell supervisor request: bad"}, "error", None),
     ],
 )
-def test_supervisor_status_parser_is_canonical(
-    message: str,
+def test_supervisor_status_wire_parser_fails_closed(
+    payload: dict[str, object],
     state: str,
     exit_code: int | None,
 ) -> None:
-    """Every status reply has one interpretation, and anything unrecognized fails closed."""
-    status = parse_shell_supervisor_status(message)
+    """Structured status replies decode canonically, and any malformed payload fails closed to error."""
+    status = shell_supervisor._parse_status_response(json.dumps(payload).encode())
 
     assert status.state == state
     assert status.exit_code == exit_code
 
 
 @pytest.mark.parametrize(
-    ("message", "outcome"),
+    ("payload", "outcome"),
     [
-        ("Terminated process 123 (SIGTERM sent).", "signalled"),
-        ("Force-killed process 123 (SIGKILL sent).", "signalled"),
-        ("Process already finished (exit code 0)", "finished"),
-        ("Process 123 already exited", "finished"),
-        ("Error: Unknown handle 'shell:missing'", "unknown"),
-        ("Error: Shell supervisor is unavailable: [Errno 111] Connection refused", "error"),
+        ({"outcome": "signalled", "message": "Terminated process 123 (SIGTERM sent)."}, "signalled"),
+        ({"outcome": "finished", "message": "Process already finished (exit code 0)"}, "finished"),
+        ({"outcome": "unknown", "message": "Error: Unknown handle 'shell:missing'"}, "unknown"),
+        ({"outcome": "error", "message": "Error: boom"}, "error"),
+        ({"outcome": "bogus", "message": "unexpected"}, "error"),
+        ({"message": "Error: Invalid shell supervisor request: bad"}, "error"),
     ],
 )
-def test_supervisor_kill_parser_is_canonical(message: str, outcome: str) -> None:
-    """Every kill reply the supervisor sends has one interpretation, and anything else fails closed."""
-    assert parse_shell_supervisor_kill(message) == outcome
+def test_supervisor_signal_wire_parser_fails_closed(payload: dict[str, object], outcome: str) -> None:
+    """Structured signal replies decode canonically, and any malformed payload fails closed to error."""
+    assert shell_supervisor._parse_signal_response(json.dumps(payload).encode()).outcome == outcome
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_and_structured_status_signal_round_trip() -> None:
+    """spawn_background_via_supervisor, check_command_via_supervisor, and kill_command_via_supervisor use structured replies."""
+    registry = ProcessRegistry()
+    try:
+        async with _running_server(registry) as socket_path:
+            spawned = await spawn_background_via_supervisor(
+                socket_path,
+                namespace="ns",
+                argv=[sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
+                env=_MINIMAL_ENV,
+                cwd=None,
+                handle="shell:" + "b" * 32,
+            )
+            assert spawned.handle == "shell:" + "b" * 32
+            running = await asyncio.to_thread(
+                check_command_via_supervisor,
+                socket_path,
+                namespace="ns",
+                handle=spawned.handle,
+            )
+            assert running.state == "running"
+            assert running.exit_code is None
+
+            unknown_status = await asyncio.to_thread(
+                check_command_via_supervisor,
+                socket_path,
+                namespace="other",
+                handle=spawned.handle,
+            )
+            assert unknown_status.state == "unknown"
+
+            killed = await asyncio.to_thread(
+                kill_command_via_supervisor,
+                socket_path,
+                namespace="ns",
+                handle=spawned.handle,
+                force=True,
+            )
+            assert killed.outcome == "signalled"
+
+            for _ in range(50):
+                exited = await asyncio.to_thread(
+                    check_command_via_supervisor,
+                    socket_path,
+                    namespace="ns",
+                    handle=spawned.handle,
+                )
+                if exited.state == "exited":
+                    break
+                await asyncio.sleep(0.05)
+            assert exited.state == "exited"
+            assert exited.exit_code == -signal.SIGKILL
+
+            already_done = await asyncio.to_thread(
+                kill_command_via_supervisor,
+                socket_path,
+                namespace="ns",
+                handle=spawned.handle,
+            )
+            assert already_done.outcome == "finished"
+    finally:
+        registry.kill_all()
 
 
 @pytest.mark.parametrize(
@@ -161,17 +229,21 @@ def _extract_handle(message: str) -> str:
 
 
 async def _check(socket_path: str, handle: str, *, namespace: str = "ns") -> str:
-    return await asyncio.to_thread(check_command_via_supervisor, socket_path, namespace=namespace, handle=handle)
+    return (
+        await asyncio.to_thread(check_command_via_supervisor, socket_path, namespace=namespace, handle=handle)
+    ).message
 
 
 async def _kill(socket_path: str, handle: str, *, namespace: str = "ns", force: bool = False) -> str:
-    return await asyncio.to_thread(
-        kill_command_via_supervisor,
-        socket_path,
-        namespace=namespace,
-        handle=handle,
-        force=force,
-    )
+    return (
+        await asyncio.to_thread(
+            kill_command_via_supervisor,
+            socket_path,
+            namespace=namespace,
+            handle=handle,
+            force=force,
+        )
+    ).message
 
 
 async def _wait_for_finished(socket_path: str, handle: str) -> str:
@@ -218,7 +290,7 @@ async def test_a_stopping_run_has_no_limit_without_a_timeout_and_stops_at_one() 
 
     assert finished == "done"
     assert stopped == "Stopped after 0.5s.\nOutput:\nstarted"
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
 
 
 @pytest.mark.asyncio
@@ -298,7 +370,6 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
         namespace="test",
         handle=handle,
         pid=process.pid,
-        args=[sys.executable, "-c", "pass"],
         managed=ManagedProcess(process),
         kill_group_after_exit=True,
     )
@@ -356,7 +427,7 @@ async def test_invalid_process_deadline_returns_structured_error(runtime_seconds
         result = await _run(socket_path, ["sleep", "300"], timeout=0, max_runtime_seconds=runtime_seconds)
 
     assert result.startswith("Error: Invalid shell supervisor request:")
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
 
 
 @pytest.mark.asyncio
@@ -419,7 +490,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert "exit code -9" in await _check(socket_path, resistant_handle)
             assert "RUNNING" in await _check(socket_path, ordinary_handle)
             for handle in (resistant_handle, completed_handle, cancelled_handle):
-                monitor = registry.records_view[handle].monitor_task
+                monitor = registry._records[handle].monitor_task
                 assert monitor is None or monitor.done()
         finally:
             await _kill(socket_path, resistant_handle, force=True)
@@ -459,16 +530,16 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
             child_pid = int(child_pid_text)
             release_path.touch()
             for _ in range(100):
-                if registry.records_view[handle].process.returncode is not None:
+                if registry._records[handle].process.returncode is not None:
                     break
                 await asyncio.sleep(0.01)
-            assert registry.records_view[handle].process.returncode == 0
+            assert registry._records[handle].process.returncode == 0
             # The monitor may already have killed the group when the leader exits.
             assert "FINISHED" in await _wait_for_finished(socket_path, handle)
             await _assert_pid_dead(child_pid)
         finally:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(registry.records_view[handle].pid, signal.SIGKILL)
+                os.killpg(registry._records[handle].pid, signal.SIGKILL)
             await _wait_for_finished(socket_path, handle)
 
 
@@ -723,7 +794,7 @@ async def test_caller_supplied_handle_is_registered_once() -> None:
         try:
             assert _extract_handle(first) == requested_handle
             assert "already registered" in duplicate
-            assert list(registry.records_view) == [requested_handle]
+            assert list(registry._records) == [requested_handle]
         finally:
             await _kill(socket_path, requested_handle, force=True)
 
@@ -814,7 +885,7 @@ async def test_caller_supplied_handle_requires_full_random_identifier() -> None:
         result = await _run(socket_path, ["sleep", "300"], timeout=0, handle="shell:1234abcd")
 
     assert "Invalid caller-supplied shell handle" in result
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
 
 
 @pytest.mark.asyncio
@@ -856,7 +927,7 @@ async def test_client_disconnect_cancels_foreground_run() -> None:
                 await writer.wait_closed()
 
             await _assert_pid_dead(pid)
-            assert registry.record_count == 0
+            assert len(registry._records) == 0
     finally:
         shutil.rmtree(pid_dir, ignore_errors=True)
 
@@ -880,8 +951,8 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         timeout=0,
     )
     assert result.handle is not None
-    assert result.handle in registry.records_view
-    pid = registry.records_view[result.handle].pid
+    assert result.handle in registry._records
+    pid = registry._records[result.handle].pid
 
     async def completed_run(*_args: object, **_kwargs: object) -> object:
         return result
@@ -899,10 +970,10 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         "timeout": 0,
     }
 
-    message = await shell_supervisor._handle_run(registry, payload, eof_reader)
+    message = await shell_supervisor._handle_launch(registry, payload, eof_reader, immediate=False)
 
     assert message is None
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
     await _assert_pid_dead(pid)
 
 
@@ -932,7 +1003,7 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
         "timeout": 30,
     }
 
-    message = await shell_supervisor._handle_run(registry, payload, reader)
+    message = await shell_supervisor._handle_launch(registry, payload, reader, immediate=False)
 
     assert message is not None
     assert message.message == "ordinary result"
@@ -1313,8 +1384,16 @@ async def test_supervised_script_refuses_replies_the_supervisor_does_not_vouch_f
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unrecognized status or kill reply raises instead of reading as a process state."""
-    monkeypatch.setattr(supervised, "check_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
-    monkeypatch.setattr(supervised, "kill_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
+    monkeypatch.setattr(
+        supervised,
+        "check_command_via_supervisor",
+        lambda *_args, **_kwargs: ProcessStatus(state="error", message="Error: broken"),
+    )
+    monkeypatch.setattr(
+        supervised,
+        "kill_command_via_supervisor",
+        lambda *_args, **_kwargs: SignalResult(outcome="error", message="Error: broken"),
+    )
 
     with pytest.raises(ScriptWorkerError, match="broken"):
         await supervised.supervised_script_status("sock", namespace="ns", run_id=_SUPERVISED_RUN_ID)
@@ -1334,7 +1413,7 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         calls.append(kwargs)
         return ShellRunResult(message="refused: busy", handle=handle if len(calls) == 1 else None)
 
-    monkeypatch.setattr(supervised, "run_command_via_supervisor", fake_run)
+    monkeypatch.setattr(supervised, "spawn_background_via_supervisor", fake_run)
     snapshot = supervised.ScriptSnapshot(root=tmp_path / "root", source=tmp_path / "s.py", capability=tmp_path / "cap")
     launch = partial(
         supervised.launch_supervised_script,
@@ -1417,14 +1496,14 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
         assert "Still running after 0.2s; moved to the background" in first.message
         assert "Log: .mindroom/shell/" in first.message
         assert "Too many backgrounded processes (1/1)" in rejected.message
-        first_pid = registry.records_view[first.handle].pid
-        first_log = Path(registry.records_view[first.handle].log_path or "")
-        other_pid = registry.records_view[other.handle].pid
+        first_pid = registry._records[first.handle].pid
+        first_log = Path(registry._records[first.handle]._log_path or "")
+        other_pid = registry._records[other.handle].pid
 
         try:
             await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
-            assert first.handle not in registry.records_view
-            assert other.handle in registry.records_view
+            assert first.handle not in registry._records
+            assert other.handle in registry._records
             await _assert_pid_dead(first_pid)
             assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
             os.kill(other_pid, 0)
@@ -1504,15 +1583,15 @@ async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_othe
         assert other.handle is not None
         assert "child-ready" in trapped.message
         trapped_pid, trapped_log = (
-            registry.records_view[trapped.handle].pid,
-            Path(registry.records_view[trapped.handle].log_path or ""),
+            registry._records[trapped.handle].pid,
+            Path(registry._records[trapped.handle]._log_path or ""),
         )
-        other_pid = registry.records_view[other.handle].pid
+        other_pid = registry._records[other.handle].pid
 
         try:
             await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:graceful")
-            assert trapped.handle not in registry.records_view
-            assert other.handle in registry.records_view
+            assert trapped.handle not in registry._records
+            assert other.handle in registry._records
             await _assert_pid_dead(trapped_pid)
             log_text = trapped_log.read_text(encoding="utf-8")
             assert "child-trap-cleanup-done" in log_text

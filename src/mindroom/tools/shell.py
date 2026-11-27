@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import os
 import re
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -21,8 +22,8 @@ from mindroom.constants import (
 )
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import current_shell_background_scope
-from mindroom.shell.output import BackgroundLogPolicy
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.policy import (
     default_run_timeout_seconds,
@@ -62,7 +63,7 @@ from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.shell.background_scope import ShellBackgroundScope
     from mindroom.shell.runner import ShellRunResult
@@ -532,66 +533,31 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 display_root=display_root,
             )
 
-        async def _execute_command(
+        def _command_runner(
             self,
             *,
-            argv: list[str],
-            env: dict[str, str],
-            cwd: str | None,
-            tail: int,
-            timeout: int | None,  # noqa: ASYNC109
-            wait_limit: float,
             bg_scope: ShellBackgroundScope | None,
-            output_destination: ShellOutputDestination | None,
-            launch_failure_exits: bool,
-        ) -> ShellRunResult:
+            timeout: int | None,
+        ) -> Callable[..., Awaitable[ShellRunResult]]:
             if self._supervisor_socket is not None:
-                on_timeout: Literal["background", "kill"] = "background" if bg_scope is not None else "kill"
-                return await run_command_via_supervisor(
+                return functools.partial(
+                    run_command_via_supervisor,
                     self._supervisor_socket,
                     namespace=bg_scope.namespace if bg_scope is not None else _SHELL_NAMESPACE,
-                    argv=argv,
-                    env=env,
-                    cwd=cwd,
-                    tail=tail,
-                    timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
-                    on_timeout=on_timeout,
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=launch_failure_exits,
+                    on_timeout="background" if bg_scope is not None else "kill",
                     max_runtime_seconds=timeout if bg_scope is not None else None,
                     background_log=self._background_log_policy() if bg_scope is not None else None,
                 )
             if bg_scope is not None:
-                return await bg_scope.registry.run_or_background(
+                return functools.partial(
+                    bg_scope.registry.run_or_background,
                     namespace=bg_scope.namespace,
-                    argv=argv,
-                    env=env,
-                    cwd=cwd,
-                    tail=tail,
-                    timeout=wait_limit,
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
                     # Never the terminal MindRoom runs in, where a prompting command would wait forever.
                     stdin=subprocess.DEVNULL,
-                    kill_group_after_exit=False,
-                    launch_failure_exits=launch_failure_exits,
                     max_runtime_seconds=timeout,
                     background_log=self._background_log_policy(),
                 )
-            return await run_foreground(
-                argv=argv,
-                env=env,
-                cwd=cwd,
-                tail=tail,
-                timeout=shell_call_timeout(timeout),
-                on_progress=report_tool_progress,
-                output_destination=output_destination,
-                # Never the terminal MindRoom runs in, where a prompting command would wait forever.
-                stdin=subprocess.DEVNULL,
-                kill_group_after_exit=False,
-                launch_failure_exits=launch_failure_exits,
-            )
+            return functools.partial(run_foreground, stdin=subprocess.DEVNULL)
 
         async def run_shell_command(
             self,
@@ -671,14 +637,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             scope = current_shell_background_scope()
             wait_limit = default_run_timeout_seconds()
             bg_scope = scope if scope is not None and (timeout is None or timeout > wait_limit) else None
-            result = await self._execute_command(
+            result = await self._command_runner(bg_scope=bg_scope, timeout=timeout)(
                 argv=argv,
                 env=subprocess_env,
                 cwd=cwd,
                 tail=tail,
-                timeout=timeout,
-                wait_limit=wait_limit,
-                bg_scope=bg_scope,
+                timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
+                on_progress=report_tool_progress,
                 output_destination=output_destination,
                 launch_failure_exits=worker is not None,
             )

@@ -20,11 +20,11 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
+from mindroom.shell.background_log import BackgroundLogPolicy, open_background_log
 from mindroom.shell.background_scope import shell_background_scope
 from mindroom.shell.output import (
     _CAPPED_STREAM_BURST_READS,
     _MAX_OUTPUT_BYTES,
-    BackgroundLogPolicy,
     ShellOutputBuffer,
     ShellOutputProgress,
     SpoolStream,
@@ -32,7 +32,6 @@ from mindroom.shell.output import (
     _progress_lines,
     drain_text_stream,
     format_auto_background_message,
-    open_background_log,
 )
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.shell.process import ManagedProcess
@@ -1190,7 +1189,7 @@ async def test_scoped_short_timeout_kills_inline_without_backgrounding(tmp_path:
                 counts_as_tool_failure=False,
             )
             assert scope.had_backgrounded is False
-            assert scope.registry.record_count == 0
+            assert len(scope.registry._records) == 0
             assert not (workspace / ".mindroom" / "shell").exists()
 
 
@@ -1276,7 +1275,7 @@ async def test_background_log_size_cap_writes_truncation_notice_and_exit_trailer
             background_log=BackgroundLogPolicy(log_dir=str(log_dir), max_bytes=120),
         )
         assert result.handle is not None
-        log_path = Path(registry.records_view[result.handle].log_path or "")
+        log_path = Path(registry._records[result.handle]._log_path or "")
         log_text = await _wait_for_log_marker(log_path, "[MindRoom: exited with code 0]")
         assert "[Log truncated at 120 bytes limit; command output continues without being logged.]" in log_text
         assert log_text.count("[Log truncated") == 1
@@ -1321,7 +1320,7 @@ async def test_background_log_rejects_symlink_directories(tmp_path: Path, symlin
             assert isinstance(result, ToolOutcome)
             assert result.is_error
             assert result.content.startswith("Error: Failed to open background shell log:")
-            assert scope.registry.record_count == 0
+            assert len(scope.registry._records) == 0
             assert list(outside.iterdir()) == []
 
 
@@ -1331,7 +1330,6 @@ def test_background_rejection_enforces_per_namespace_and_total_caps(monkeypatch:
         namespace="ns-a",
         handle="shell:11111111",
         pid=1234,
-        args=["sleep", "10"],
         managed=ManagedProcess(SimpleNamespace(pid=1234, returncode=None)),  # type: ignore[arg-type]
     )
     registry = ProcessRegistry()
@@ -1370,7 +1368,7 @@ def test_background_log_dir_ownership_checks_leaf_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A foreign-owned .mindroom parent is allowed when the leaf log directory is owned by the current user."""
-    from mindroom.shell import output as output_module  # noqa: PLC0415
+    from mindroom.shell import background_log as background_log_module  # noqa: PLC0415
 
     mounted_ws = tmp_path / "mounted"
     parent_mindroom = mounted_ws / ".mindroom"
@@ -1384,21 +1382,24 @@ def test_background_log_dir_ownership_checks_leaf_only(
         return SimpleNamespace(st_uid=os.geteuid() + 1) if st.st_ino == parent_ino else st
 
     monkeypatch.setattr(os, "fstat", fake_fstat)
-    with output_module._open_log_dir(leaf_shell):
+    with background_log_module._open_log_dir(leaf_shell):
         pass
     monkeypatch.undo()
 
     owned_dir = tmp_path / "foreign"
     owned_dir.mkdir()
     monkeypatch.setattr(os, "geteuid", lambda: owned_dir.stat().st_uid + 1)
-    with pytest.raises(PermissionError, match="not owned by the current user"), output_module._open_log_dir(owned_dir):
+    with (
+        pytest.raises(PermissionError, match="not owned by the current user"),
+        background_log_module._open_log_dir(owned_dir),
+    ):
         pass
 
 
 @pytest.mark.asyncio
 async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer(tmp_path: Path) -> None:
     """Sweep only touches generated <pid>-<hex>.log names, protects recent logs, and kill_all writes a trailer."""
-    from mindroom.shell import output as output_module  # noqa: PLC0415
+    from mindroom.shell import background_log as background_log_module  # noqa: PLC0415
 
     log_dir = tmp_path / "sweep"
     log_dir.mkdir()
@@ -1413,12 +1414,12 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
     unrelated.write_text("keep", encoding="utf-8")
     os.utime(unrelated, (now - 25 * 3600, now - 25 * 3600))
     recent_files = []
-    for idx in range(output_module._LOG_MAX_FILES + 2):
+    for idx in range(background_log_module._LOG_MAX_FILES + 2):
         recent = log_dir / f"{2000 + idx}-{idx:08x}.log"
         recent.write_text("live", encoding="utf-8")
         recent_files.append(recent)
-    with output_module._open_log_dir(log_dir) as dir_fd:
-        output_module._sweep_old_log_files(dir_fd, active_names=set())
+    with background_log_module._open_log_dir(log_dir) as dir_fd:
+        background_log_module._sweep_old_log_files(dir_fd, active_names=set())
     assert not expired.exists()
     assert not old_evict.exists()
     assert unrelated.exists()
@@ -1437,7 +1438,7 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
         background_log=policy,
     )
     assert result.handle is not None
-    log_path = Path(registry.records_view[result.handle].log_path or "")
+    log_path = Path(registry._records[result.handle]._log_path or "")
     registry.kill_all()
     assert "[MindRoom: stopped]" in log_path.read_text(encoding="utf-8")
 
@@ -1455,15 +1456,15 @@ async def test_auto_backgrounded_natural_exit_preserves_detached_nohup_child(tmp
                 result = await fn.entrypoint(["bash", "-c", cmd])
                 assert isinstance(result, str)
                 assert "Still running after 0.15s" in result
-                assert scope.registry.record_count == 1
-                record = next(iter(scope.registry.records_view.values()))
+                assert len(scope.registry._records) == 1
+                record = next(iter(scope.registry._records.values()))
                 assert record.monitor_task is not None
                 await asyncio.wait_for(record.monitor_task, timeout=5.0)
                 assert record.finished
                 assert record.return_code == 0
                 detached_pid = int(detached_pid_file.read_text(encoding="utf-8").strip())
                 os.kill(detached_pid, 0)
-                log_text = Path(record.log_path or "").read_text(encoding="utf-8")
+                log_text = Path(record._log_path or "").read_text(encoding="utf-8")
                 assert "[MindRoom: exited with code 0]" in log_text
         # Still alive after the scope closes cleanly because the parent command already exited naturally.
         os.kill(detached_pid, 0)
@@ -1498,7 +1499,7 @@ async def test_sigterm_to_backgrounded_leader_still_kills_sigterm_ignoring_child
                 result = await fn.entrypoint([sys.executable, "-c", parent_script, child_script, str(child_pid_file)])
                 assert isinstance(result, str)
                 assert "Still running after 0.2s" in result
-                record = next(iter(scope.registry.records_view.values()))
+                record = next(iter(scope.registry._records.values()))
                 deadline = time.monotonic() + 3.0
                 while time.monotonic() < deadline:
                     if child_pid_file.exists():

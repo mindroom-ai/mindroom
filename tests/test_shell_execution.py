@@ -25,9 +25,9 @@ from mindroom.shell._process_target import (
     _scan_session_members,
     is_safe_slice_name,
 )
+from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import ShellBackgroundScope
-from mindroom.shell.output import BackgroundLogPolicy, SpoolCapture
-from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.output import SpoolCapture
 from mindroom.shell.process import (
     ManagedProcess,
     _idle_io_launcher,
@@ -47,24 +47,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 _FD0_IDENTITY = "import os, sys; info = os.fstat(0); sys.stdout.write(f'{info.st_dev}:{info.st_ino}')"
-
-
-class _RecordingCapture(ShellOutputCapture):
-    """Keep the spool readable after the engine reports completion."""
-
-    def __init__(self, directory: Path) -> None:
-        super().__init__(ShellOutputDestination(workspace_root=str(directory), path="", max_bytes=1024))
-        self.return_codes: list[int | None] = []
-
-    def publish(self, return_code: int | None) -> str:
-        self.return_codes.append(return_code)
-        return "published"
-
-    def close(self) -> None:
-        """Defer release until the test has read the spool."""
-
-    def release(self) -> None:
-        super().close()
 
 
 @pytest.fixture
@@ -95,17 +77,17 @@ async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_
     tmp_path: Path,
 ) -> None:
     """Desktop shell and script handles stay readable for ten minutes after their command ends."""
-    finished = await registry.run_or_background(
+    finished = await registry.spawn_background(
         namespace="test",
         argv=["echo", "long-output"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,
-        timeout=10,
-        register_finished=True,
     )
     assert finished.handle is not None
-    record = registry.records_view[finished.handle]
+    record = registry._records[finished.handle]
+    assert record.monitor_task is not None
+    await asyncio.wait_for(record.monitor_task, timeout=5)
     # It started long ago but finished just now.
     record.started_at -= 900
 
@@ -115,7 +97,7 @@ async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_
     assert record.finished_at is not None
     record.finished_at -= 700
     await _run(registry, ["true"], tmp_path)
-    assert finished.handle not in registry.records_view
+    assert finished.handle not in registry._records
 
 
 async def _wait_until_gone(pid: int) -> bool:
@@ -226,25 +208,31 @@ async def test_cancelling_a_running_command_kills_its_term_resistant_group_membe
 
 
 @pytest.mark.asyncio
-async def test_caller_capture_receives_exit_code_and_full_spool(
+async def test_caller_spool_receives_exit_code_and_full_output_without_workspace_files(
     registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
-    """A caller-owned capture sees completion without any workspace output file being written."""
-    capture = _RecordingCapture(tmp_path)
+    """A caller-owned SpoolCapture stays readable via pread after exit without creating workspace files."""
+    spool = SpoolCapture(max_bytes=1024, directory=str(tmp_path))
     try:
-        message = await _run(
-            registry,
-            ["/bin/sh", "-c", "printf 'kept output'; exit 3"],
-            tmp_path,
-            output_capture=capture,
+        result = await registry.run_or_background(
+            namespace="test",
+            argv=["/bin/sh", "-c", "printf 'kept output'; exit 3"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=100,
+            timeout=10,
+            spool=spool,
         )
-        assert message == "published"
-        assert capture.return_codes == [3]
-        assert capture.stdout.read() == "kept output"
+        assert result.handle is None
+        assert result.return_code == 3
+        assert len(registry._records) == 0
+        assert not spool.closed
+        assert spool.stdout.pread() == b"kept output"
+        assert spool.stdout.pread(5, 6) == b"output"
         assert list(tmp_path.iterdir()) == []
     finally:
-        capture.release()
+        spool.close()
 
 
 @pytest.mark.asyncio
@@ -254,7 +242,7 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Callers learn whether a signal reached the group, and kill_command says which signal it sent."""
-    capture = _RecordingCapture(tmp_path)
+    spool = SpoolCapture(max_bytes=1024, directory=str(tmp_path))
     try:
         started = await registry.run_or_background(
             namespace="test",
@@ -263,10 +251,10 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
             cwd=str(tmp_path),
             tail=100,
             timeout=0.2,
-            output_capture=capture,
+            spool=spool,
         )
         assert started.handle is not None
-        record = registry.records_view[started.handle]
+        record = registry._records[started.handle]
 
         def vanished(_pid: int, _signal: int) -> None:
             raise ProcessLookupError
@@ -275,12 +263,12 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
             patch.setattr(os, "killpg", vanished)
             assert record.signal() is False
             assert registry.signal("test", started.handle).message == (f"Process {record.pid} already exited")
-        assert capture.incomplete is False
+        assert spool.incomplete is False
         assert registry.signal("test", started.handle).message == (f"Terminated process {record.pid} (SIGTERM sent).")
-        assert capture.incomplete is True
+        assert spool.incomplete is True
         assert await _wait_until_gone(record.pid)
     finally:
-        capture.release()
+        spool.close()
 
 
 @pytest.mark.asyncio
@@ -289,16 +277,17 @@ async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
     tmp_path: Path,
 ) -> None:
     """A finished background success shows its stderr, tailed like its stdout, after the status and output."""
-    result = await registry.run_or_background(
+    result = await registry.spawn_background(
         namespace="test",
         argv=["/bin/sh", "-c", "echo out; echo warn >&2; echo again >&2"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=1,
-        timeout=10,
-        register_finished=True,
     )
     assert result.handle is not None
+    record = registry._records[result.handle]
+    assert record.monitor_task is not None
+    await asyncio.wait_for(record.monitor_task, timeout=5)
 
     status, rest = registry.status("test", result.handle).message.split("\n", 1)
     assert status.startswith("Status: FINISHED (exit code 0, ")
@@ -332,33 +321,33 @@ async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_d
 
 
 @pytest.mark.asyncio
-async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_finished_record(
+async def test_backgrounded_spool_stays_open_for_pread_after_completion(
     registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
-    """An opted-in caller gets a finished record to page later, while the default still registers nothing."""
-    capture = _RecordingCapture(tmp_path)
+    """A caller-owned SpoolCapture remains open for byte-offset pread after background exit until closed."""
+    spool = SpoolCapture(max_bytes=1024, directory=str(tmp_path))
     try:
         result = await registry.run_or_background(
             namespace="test",
-            argv=["/bin/sh", "-c", "printf kept; exit 3"],
+            argv=["/bin/sh", "-c", "printf head; sleep 0.25; printf tail; exit 3"],
             env={"PATH": os.environ["PATH"]},
             cwd=str(tmp_path),
             tail=100,
-            timeout=10,
-            output_capture=capture,
-            register_finished=True,
+            timeout=0.05,
+            spool=spool,
         )
         assert result.handle is not None
-        record = registry.records_view[result.handle]
-        assert (record.finished, record.return_code, record.namespace) == (True, 3, "test")
-        assert record.finished_at is not None
-        assert (capture.return_codes, capture.stdout.read()) == ([3], "kept")
-        assert registry.signal("test", result.handle).message == ("Process already finished (exit code 3)")
-        await _run(registry, ["/bin/sh", "-c", "true"], tmp_path)
-        assert list(registry.records_view) == [result.handle]
+        record = registry._records[result.handle]
+        assert record.monitor_task is not None
+        await asyncio.wait_for(record.monitor_task, timeout=5)
+        assert (record.finished, record.return_code) == (True, 3)
+        assert not spool.closed
+        assert spool.stdout.pread(0, 4) == b"head"
+        assert spool.stdout.pread(4) == b"tail"
+        assert registry.signal("test", result.handle).outcome == "finished"
     finally:
-        capture.release()
+        spool.close()
 
 
 _TERM_IGNORING_CHILD = (
@@ -383,7 +372,7 @@ async def test_a_command_past_its_timeout_is_stopped_with_its_output_so_far(
 
     assert result.handle is None
     assert result.message == "Stopped after 0.5s.\nOutput:\nstarted\nStderr:\nwarming up"
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
 
 
 @pytest.mark.asyncio
@@ -1271,9 +1260,9 @@ async def test_linux_session_scan_stops_new_pgid_timeout_children(
             assert bg.handle is not None
             leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
             if mode == "signal_term":
-                assert registry.records_view[bg.handle].signal(force=False) is True
+                assert registry._records[bg.handle].signal(force=False) is True
             elif mode == "signal_kill":
-                assert registry.records_view[bg.handle].signal(force=True) is True
+                assert registry._records[bg.handle].signal(force=True) is True
             else:
                 registry.kill_all()
         assert child_pgid != leader_pid
@@ -1425,7 +1414,7 @@ def test_managed_process_owns_scope_directly_and_forwards_it_to_target_ops(
     )
 
     assert managed.signal(signal.SIGTERM) is True
-    assert managed.processes_exist() is True
+    assert managed._processes_exist() is True
     managed.kill_tree()
     assert seen == [
         ("signal", 43210, (signal.SIGTERM, scope)),
@@ -1490,7 +1479,7 @@ async def test_background_process_kill_group_after_exit_is_independent_of_log_fi
             background_log=policy,
         )
         assert result.handle is not None
-        record = registry.records_view[result.handle]
+        record = registry._records[result.handle]
         assert record.kill_group_after_exit is kill_group_after_exit
         assert record.monitor_task is not None
         await asyncio.wait_for(record.monitor_task, timeout=5.0)
@@ -1507,8 +1496,8 @@ async def test_background_process_kill_group_after_exit_is_independent_of_log_fi
             os.kill(nohup_pid, 0)
 
         if with_log_file:
-            assert record.log_path is not None
-            assert "[MindRoom: exited with code 0]" in Path(record.log_path).read_text(encoding="utf-8")
+            assert record._log_path is not None
+            assert "[MindRoom: exited with code 0]" in Path(record._log_path).read_text(encoding="utf-8")
     finally:
         if nohup_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
@@ -1543,9 +1532,9 @@ async def test_process_registry_close_namespace_and_shared_scope_isolation(
     )
     assert res_a.handle is not None
     assert res_b.handle is not None
-    rec_a = registry.records_view[res_a.handle]
-    rec_b = registry.records_view[res_b.handle]
-    assert rec_a.log_path is not None
+    rec_a = registry._records[res_a.handle]
+    rec_b = registry._records[res_b.handle]
+    assert rec_a._log_path is not None
     assert rec_b.log_file is not None
 
     # Closing a non-owning ShellBackgroundScope for ns-a only closes shell-scope:ns-a.
@@ -1554,10 +1543,10 @@ async def test_process_registry_close_namespace_and_shared_scope_isolation(
 
     assert scope_a.closed is True
     assert registry.closed is False
-    assert res_a.handle not in registry.records_view
-    assert res_b.handle in registry.records_view
+    assert res_a.handle not in registry._records
+    assert res_b.handle in registry._records
     assert await _wait_until_gone(rec_a.pid)
-    log_a = Path(rec_a.log_path).read_text(encoding="utf-8")
+    log_a = Path(rec_a._log_path).read_text(encoding="utf-8")
     assert "graceful-ns-a-done" in log_a
     assert "[MindRoom: stopped when turn ended]" in log_a
 
@@ -1566,7 +1555,7 @@ async def test_process_registry_close_namespace_and_shared_scope_isolation(
     assert rec_b.log_file.closed is False
     assert await registry.close_namespace("shell-scope:ns-b") == 1
     assert await _wait_until_gone(rec_b.pid)
-    assert registry.record_count == 0
+    assert len(registry._records) == 0
 
 
 @pytest.mark.asyncio
@@ -1600,7 +1589,7 @@ async def test_spawn_background_and_spool_capture_primitives(
 
     sig = registry.signal("bg-direct", started.handle, force=True)
     assert sig.outcome == "signalled"
-    record = registry.records_view[started.handle]
+    record = registry._records[started.handle]
     assert record.monitor_task is not None
     await asyncio.wait_for(record.monitor_task, timeout=5.0)
     finished = registry.status("bg-direct", started.handle)

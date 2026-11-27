@@ -215,28 +215,30 @@ async def _shell_result(
         "handle": result.handle,
         "exit_code": result.exit_code,
         "output": "",
-        "output_bytes": output.size,
-        "output_truncated": output.truncated,
+        "output_bytes": output.stdout.size,
+        "output_truncated": output.stdout.truncated,
         "output_attachment": None,
         "output_start": offset or 0,
-        "next_offset": output.size,
+        "next_offset": output.stdout.size,
         "stderr": "",
-        "stderr_bytes": output.stderr_size,
-        "stderr_truncated": output.stderr_truncated,
+        "stderr_bytes": output.stderr.size,
+        "stderr_truncated": output.stderr.truncated,
         "stderr_attachment": None,
         "stderr_start": stderr_offset or 0,
-        "stderr_next_offset": output.stderr_size,
+        "stderr_next_offset": output.stderr.size,
     }
     if result.timed_out:
         payload["timed_out"] = True
     if result.state == "running":
         stdout_raw = (
-            output.tail(MAX_INLINE_RESPONSE_BYTES) if offset is None else output.read(offset, MAX_INLINE_RESPONSE_BYTES)
+            output.stdout.tail(MAX_INLINE_RESPONSE_BYTES)
+            if offset is None
+            else output.stdout.pread(offset, MAX_INLINE_RESPONSE_BYTES)
         )
         stderr_raw = (
-            output.tail_stderr(MAX_INLINE_RESPONSE_BYTES)
+            output.stderr.tail(MAX_INLINE_RESPONSE_BYTES)
             if stderr_offset is None
-            else output.read_stderr(stderr_offset, MAX_INLINE_RESPONSE_BYTES)
+            else output.stderr.pread(stderr_offset, MAX_INLINE_RESPONSE_BYTES)
         )
         return _fit_output(command, payload, stdout_raw, stderr_raw, offset=offset, stderr_offset=stderr_offset)
     try:
@@ -298,8 +300,8 @@ async def _finished_shell_result(
     stderr_start: int,
 ) -> dict[str, object]:
     """Deliver a finished command's stdout/stderr from their offsets; its handle stays until the rest arrives."""
-    stdout_content = result.output.read(start)
-    stderr_content = result.output.read_stderr(stderr_start)
+    stdout_content = result.output.stdout.pread(start)
+    stderr_content = result.output.stderr.pread(stderr_start)
     # A run_shell reply names its handle only while that handle stays to page from.
     delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
     # JSON escaping only grows text, so larger output cannot fit and is never decoded here.

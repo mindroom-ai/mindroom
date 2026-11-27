@@ -30,7 +30,8 @@ from mindroom.desktop.protocol import (
 )
 from mindroom.desktop.provider import DesktopProviderError, ScreenCapture
 from mindroom.desktop.session import DesktopMatrixSession
-from mindroom.desktop.shell import DesktopShell, DesktopShellOutput
+from mindroom.desktop.shell import DesktopShell
+from mindroom.shell.output import SpoolCapture
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -461,25 +462,25 @@ def _longest_request_id(prefix: str) -> str:
     return prefix + "x" * (_MAX_PROTOCOL_IDENTIFIER_LENGTH - len(prefix))
 
 
-def _stall_output_uploads(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, list[DesktopShellOutput]]:
+def _stall_output_uploads(monkeypatch: pytest.MonkeyPatch) -> tuple[asyncio.Event, list[SpoolCapture]]:
     """Use the real encrypted upload against a homeserver that never answers, with a short bound."""
     started = asyncio.Event()
-    released: list[DesktopShellOutput] = []
-    release = DesktopShellOutput.release
+    released: list[SpoolCapture] = []
+    close = SpoolCapture.close
 
     async def stalled(*_args: object, **_kwargs: object) -> nio.UploadResponse:
         started.set()
         await asyncio.Event().wait()
         pytest.fail("stalled upload returned")
 
-    def record_release(output: DesktopShellOutput) -> None:
+    def record_release(output: SpoolCapture) -> None:
         released.append(output)
-        release(output)
+        close(output)
 
     monkeypatch.setattr("mindroom.desktop.shell_actions.MEDIA_UPLOAD_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", upload_encrypted_media)
     monkeypatch.setattr("mindroom.desktop.media.upload_media_bytes", stalled)
-    monkeypatch.setattr(DesktopShellOutput, "release", record_release)
+    monkeypatch.setattr(SpoolCapture, "close", record_release)
     return started, released
 
 

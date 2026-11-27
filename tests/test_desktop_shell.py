@@ -94,9 +94,9 @@ def completed_output(result: DesktopShellResult) -> str:
     """Read and release a completed command's spool."""
     assert result.state == "completed"
     try:
-        return result.output.read().decode()
+        return result.output.stdout.pread().decode()
     finally:
-        result.output.release()
+        result.output.close()
 
 
 async def check_until_finished(shell: DesktopShell, handle: str) -> DesktopShellResult:
@@ -152,8 +152,8 @@ async def test_commands_use_the_captured_environment_and_split_streams(tmp_path:
     result = await shell.execute(request(command, tmp_path, request_id="r-split"))
     assert result.state == "completed"
     assert result.exit_code == 0
-    assert result.output.read().decode() == "from-login\nlast"
-    assert result.output.read_stderr().decode() == "warning\n"
+    assert result.output.stdout.pread().decode() == "from-login\nlast"
+    assert result.output.stderr.pread().decode() == "warning\n"
     await shell.close()
 
 
@@ -182,8 +182,8 @@ async def test_invalid_stderr_offset_is_rejected_without_dropping_handle(tmp_pat
         with pytest.raises(DesktopShellError, match="stderr offset"):
             shell.check(REQUESTER, AGENT, result.handle, stderr_offset=bad)
     checked = shell.check(REQUESTER, AGENT, result.handle, offset=0, stderr_offset=0)
-    assert checked.output.read().decode() == "ok"
-    assert checked.output.read_stderr().decode() == "é"
+    assert checked.output.stdout.pread().decode() == "ok"
+    assert checked.output.stderr.pread().decode() == "é"
     await shell.close()
 
 
@@ -402,7 +402,7 @@ async def test_command_past_inline_wait_becomes_a_handle_with_full_output(tmp_pa
     running = await asyncio.wait_for(shell.execute(request(command, tmp_path, timeout=1)), timeout=4)
     assert (running.state, running.exit_code) == ("running", None)
     assert running.handle is not None
-    assert running.output.tail(1024) == b"early\n"
+    assert running.output.stdout.tail(1024) == b"early\n"
     [entry] = shell.status()["handles"]
     assert entry["handle"] == running.handle
     assert (entry["requester_id"], entry["agent_name"], entry["state"]) == (REQUESTER, AGENT, "running")
@@ -411,7 +411,7 @@ async def test_command_past_inline_wait_becomes_a_handle_with_full_output(tmp_pa
     assert shell.check(REQUESTER, AGENT, running.handle).state == "running"
     (tmp_path / "release").touch()
     completed = await check_until_finished(shell, running.handle)
-    assert (completed.state, completed.exit_code, completed.output.read()) == ("completed", 7, b"early\nlate")
+    assert (completed.state, completed.exit_code, completed.output.stdout.pread()) == ("completed", 7, b"early\nlate")
     # A finished handle stays until its caller confirms the output arrived.
     assert shell.check(REQUESTER, AGENT, running.handle).state == "completed"
     shell.hand_over(completed)
@@ -453,7 +453,7 @@ async def test_handles_belong_to_the_exact_requester_and_agent(tmp_path: Path) -
     assert shell.kill(REQUESTER, AGENT, running.handle, force=True) == "killed"
     killed = await check_until_finished(shell, running.handle)
     assert (killed.state, killed.exit_code) == ("killed", -signal.SIGKILL)
-    killed.output.release()
+    killed.output.close()
     await shell.close()
 
 
@@ -471,11 +471,11 @@ async def test_only_kill_shell_reports_killed_and_a_self_signalled_command_compl
     (tmp_path / "release").touch()
     assert await wait_until_handles_finish(shell) == {stopped.handle: "killed", ended.handle: "completed"}
     killed = shell.check(REQUESTER, AGENT, stopped.handle)
-    assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGTERM, b"before")
-    killed.output.release()
+    assert (killed.state, killed.exit_code, killed.output.stdout.pread()) == ("killed", -signal.SIGTERM, b"before")
+    killed.output.close()
     completed = shell.check(REQUESTER, AGENT, ended.handle)
     assert (completed.state, completed.exit_code) == ("completed", -signal.SIGTERM)
-    completed.output.release()
+    completed.output.close()
     await shell.close()
 
 
@@ -519,7 +519,7 @@ async def test_invalid_output_offset_is_rejected_before_a_completed_handle_is_ha
             shell.check(REQUESTER, AGENT, running.handle, offset=offset)
     completed = shell.check(REQUESTER, AGENT, running.handle, offset=4)
     assert (completed.state, completed.exit_code) == ("completed", 0)
-    assert completed.output.read(2) == b"ab"
+    assert completed.output.stdout.pread(2) == b"ab"
     assert completed_output(completed) == "éab"
     await shell.close()
 
@@ -558,7 +558,7 @@ async def test_local_kill_keeps_the_handle_so_its_owner_sees_it_killed(tmp_path:
     await wait_until_gone(leader)
     assert await wait_until_handles_finish(shell) == {running.handle: "killed"}
     killed = shell.check(REQUESTER, AGENT, running.handle)
-    assert (killed.state, killed.exit_code, killed.output.read()) == ("killed", -signal.SIGKILL, b"before")
+    assert (killed.state, killed.exit_code, killed.output.stdout.pread()) == ("killed", -signal.SIGKILL, b"before")
     shell.hand_over(killed)
     with pytest.raises(DesktopShellError, match="Unknown shell handle"):
         shell.kill_handle(running.handle)
@@ -587,7 +587,7 @@ async def test_kill_marks_a_handle_killed_only_when_its_signal_was_delivered(
     assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
     killed = await check_until_finished(shell, running.handle)
     assert (killed.state, killed.exit_code) == ("killed", -signal.SIGTERM)
-    killed.output.release()
+    killed.output.close()
     await shell.close()
 
 
@@ -603,7 +603,7 @@ async def test_killed_handle_keeps_the_exit_code_its_process_returned(tmp_path: 
     assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
     killed = await check_until_finished(shell, running.handle)
     assert (killed.state, killed.exit_code) == ("killed", 0)
-    killed.output.release()
+    killed.output.close()
     await shell.close()
 
 
@@ -623,7 +623,7 @@ async def test_kill_shell_after_an_earlier_kill_still_replies_killed(tmp_path: P
     assert shell.kill(REQUESTER, AGENT, running.handle) == "killed"
     killed = shell.check(REQUESTER, AGENT, running.handle)
     assert killed.state == "killed"
-    killed.output.release()
+    killed.output.close()
     await shell.close()
 
 
@@ -658,14 +658,14 @@ async def test_output_is_captured_up_to_the_cap_and_reports_truncation(tmp_path:
     shell = local_shell()
     shell.grant(60)
     small = await shell.execute(request(f"{shlex.quote(sys.executable)} -c 'print(\"x\" * 100_000)'", tmp_path))
-    assert (small.output.size, small.output.truncated) == (100_001, False)
+    assert (small.output.stdout.size, small.output.stdout.truncated) == (100_001, False)
     assert completed_output(small) == "x" * 100_000 + "\n"
     command = (
         f"{shlex.quote(sys.executable)} -c 'import sys; sys.stdout.write(\"y\" * {MAX_SHELL_OUTPUT_BYTES + 65_536})'"
     )
     large = await shell.execute(request(command, tmp_path, request_id="r2"))
-    assert large.output.truncated is True
-    assert MAX_SHELL_OUTPUT_BYTES - 65_536 < large.output.size <= MAX_SHELL_OUTPUT_BYTES
+    assert large.output.stdout.truncated is True
+    assert MAX_SHELL_OUTPUT_BYTES - 65_536 < large.output.stdout.size <= MAX_SHELL_OUTPUT_BYTES
     assert set(completed_output(large)) == {"y"}
     await shell.close()
 
@@ -679,7 +679,7 @@ async def test_spool_lives_in_a_private_directory_removed_on_close(tmp_path: Pat
     directory = Path(shell._spool_directory())
     assert directory.stat().st_mode & 0o077 == 0
     assert list(tmp_path.iterdir()) == []
-    assert running.output.tail(1024) == b"secret"
+    assert running.output.stdout.tail(1024) == b"secret"
     await shell.close()
     assert not directory.exists()
 
@@ -1106,7 +1106,7 @@ async def test_unapproved_or_invalid_shell_request_does_not_evict_finished_handl
 
     # The finished handle's unread output is still intact.
     checked = shell.check(REQUESTER, AGENT, finished.handle)
-    assert checked.output.read() == b"keep-me\n"
+    assert checked.output.stdout.pread() == b"keep-me\n"
     shell.hand_over(checked)
     await shell.close()
 
@@ -1163,7 +1163,7 @@ async def test_max_runtime_seconds_enforced_locally_and_kills_process_group(tmp_
     )
     assert fast.state == "completed"
     assert fast.timed_out is False
-    assert fast.output.read() == b"fast"
+    assert fast.output.stdout.pread() == b"fast"
     shell.hand_over(fast)
 
     child_pid_file = pids / "child.pid"
@@ -1177,7 +1177,7 @@ async def test_max_runtime_seconds_enforced_locally_and_kills_process_group(tmp_
     finished = result if result.state != "running" else await check_until_finished(shell, result.handle)
     assert finished.state == "killed"
     assert finished.timed_out is True
-    assert finished.output.read() == b"before\n"
+    assert finished.output.stdout.pread() == b"before\n"
     shell.hand_over(finished)
 
     # Child process in the same process group must be gone.
@@ -1191,4 +1191,23 @@ async def test_max_runtime_seconds_enforced_locally_and_kills_process_group(tmp_
         await asyncio.sleep(0.05)
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_inline_completion_pages_spool_without_registering_in_process_registry(tmp_path: Path) -> None:
+    """Inline-finished commands stay pageable via SpoolCapture in DesktopShell without touching ProcessRegistry."""
+    shell = local_shell()
+    shell.grant(60)
+    result = await shell.execute(request("printf 'alpha-beta'; printf 'err1' >&2", tmp_path, request_id="r-inline"))
+    assert (result.state, result.exit_code) == ("completed", 0)
+    assert result.handle is not None
+    assert shell._registry._records == {}
+    checked = shell.check(REQUESTER, AGENT, result.handle, offset=6, stderr_offset=0)
+    assert checked.output.stdout.pread(6) == b"beta"
+    assert checked.output.stderr.pread() == b"err1"
+    assert not checked.output.closed
+    shell.hand_over(checked)
+    assert checked.output.closed
+    assert shell.handles() == []
     await shell.close()

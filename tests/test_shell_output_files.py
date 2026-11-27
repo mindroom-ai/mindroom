@@ -416,7 +416,7 @@ async def test_spool_failure_settles_background_handle(tmp_path: Path, monkeypat
         output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
     )
     assert result.handle is not None
-    record = registry.records_view[result.handle]
+    record = registry._records[result.handle]
     assert record.monitor_task is not None
     try:
         await record.monitor_task
@@ -587,7 +587,7 @@ async def test_reader_failure_never_publishes_partial_output(
             output_destination=ShellOutputDestination(str(tmp_path), "partial.txt", 10000),
         )
         if result.handle is not None:
-            record = registry.records_view[result.handle]
+            record = registry._records[result.handle]
             assert record.monitor_task is not None
             await record.monitor_task
             assert record.finished
@@ -668,7 +668,7 @@ async def test_publication_io_failure_settles_capture(
             output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 10000),
         )
         if result.handle is not None:
-            record = registry.records_view[result.handle]
+            record = registry._records[result.handle]
             assert record.monitor_task is not None
             await record.monitor_task
             assert record.finished
@@ -761,7 +761,7 @@ async def test_closed_pipe_failure_settles_large_producer(tmp_path: Path, monkey
         output_destination=ShellOutputDestination(str(tmp_path), "missing.txt", 3000000),
     )
     assert result.handle is not None
-    record = registry.records_view[result.handle]
+    record = registry._records[result.handle]
     assert record.monitor_task is not None
     try:
         await asyncio.wait_for(asyncio.shield(record.monitor_task), timeout=10)

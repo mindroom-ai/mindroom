@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
-from mindroom.shell.output import SpoolCapture, SpoolStream, format_shell_completion
+from mindroom.shell.output import SpoolCapture, format_shell_completion
 
 
 @dataclass(frozen=True)
@@ -51,16 +51,10 @@ class ShellOutputCapture:
     def __init__(self, destination: ShellOutputDestination) -> None:
         self.destination = destination
         self.spool = SpoolCapture(max_bytes=destination.max_bytes, directory=destination.workspace_root)
-
-    @property
-    def stdout(self) -> SpoolStream:
-        """Return the spooled stdout stream."""
-        return self.spool.stdout
-
-    @property
-    def stderr(self) -> SpoolStream:
-        """Return the spooled stderr stream."""
-        return self.spool.stderr
+        self.stdout = self.spool.stdout
+        self.stderr = self.spool.stderr
+        # Why incomplete output went unsaved, when its owner knows better than "interrupted".
+        self.interruption: str | None = None
 
     @property
     def incomplete(self) -> bool:
@@ -70,15 +64,6 @@ class ShellOutputCapture:
     @incomplete.setter
     def incomplete(self, value: bool) -> None:
         self.spool.incomplete = value
-
-    @property
-    def interruption(self) -> str | None:
-        """Return the owner-provided explanation when incomplete output went unsaved."""
-        return self.spool.interruption
-
-    @interruption.setter
-    def interruption(self, value: str | None) -> None:
-        self.spool.interruption = value
 
     @property
     def closed(self) -> bool:
