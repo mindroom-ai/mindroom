@@ -19501,6 +19501,7 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [error-notifier-plugin](https://github.com/mindroom-ai/error-notifier-plugin) | Hooks | Posts a short, redacted alert to one Matrix room when MindRoom logs an error, with a suggested fix when it knows one. |
 | [injection-guard-plugin](https://github.com/mindroom-ai/injection-guard-plugin) | Hooks | Checks tool results with outside text for prompt injection with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) before the model reads them. |
 | [deep-research-plugin](https://github.com/mindroom-ai/deep-research-plugin) | Tools | Bounded, multi-round web research on the agent's own model that returns cited reports. |
+| [compaction-export-plugin](https://github.com/mindroom-ai/compaction-export-plugin) | Hooks | Automatically archives conversation compaction summaries to redacted per-compaction YAML snapshots in each agent's workspace (and plugin state for teams). |
 
 The archived `workloop-plugin` is replaced by MindRoom's built-in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo) toolkit for per-thread plans.
 MindRoom now has a built-in [`thread_snooze`](https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
