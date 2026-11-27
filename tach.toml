@@ -3517,7 +3517,6 @@ depends_on = [
 visibility = [
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.native_compaction",
-    "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
     "mindroom.history.native_compaction_hook",
