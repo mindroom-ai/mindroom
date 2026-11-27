@@ -37,7 +37,7 @@ from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.toolkits import adapt_toolkit, offered_refusal
+from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit, toolkit_offers
 from tests.conftest import test_runtime_paths
@@ -1052,56 +1052,24 @@ def test_native_tool_search_keeps_deferred_toolkit_instructions_in_the_prompt(
     assert instruction_marker not in (function.description or "")
 
 
-def test_portable_deferral_omits_function_instructions() -> None:
-    """A toolkit deferred behind portable search should not leak instructions attached to its functions."""
-
-    def deferred_tool() -> str:
-        return "deferred"
-
-    toolkit = Toolkit(name="deferred", tools=[deferred_tool])
-    adapted = replace(adapt_toolkit(toolkit), function_instructions={"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"})
-    deferral, deferred = defer_toolkit("deferred", "", adapted, portable_search=True)
-
-    assert deferral.function_instructions == {"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"}
-    # An agent offers the deferred toolkit, whose function instructions travel with tool search, and refuses it eager.
-    assert offered_refusal(deferred) is None
-    assert offered_refusal(adapted) == (
-        "Tool function 'deferred_tool' sets per-function prompt instructions, which MindRoom adds only per toolkit;"
-        " set them on the toolkit instead"
-    )
-
-
-def test_native_deferral_keeps_toolkit_instructions_and_describes_function_instructions() -> None:
-    """Native search keeps the toolkit's instructions for the prompt and puts a function's own in its description."""
+def test_defer_toolkit_splits_instructions_between_portable_and_native_search() -> None:
+    """Portable search moves toolkit instructions to tool_search; native search keeps them for the prompt."""
 
     def deferred_tool() -> str:
         """Do the deferred thing."""
         return "deferred"
 
-    def plain_tool() -> str:
-        return "deferred"
-
-    toolkit = Toolkit(name="deferred", tools=[deferred_tool, plain_tool], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
+    toolkit = Toolkit(name="deferred", tools=[deferred_tool], instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
     adapted = adapt_toolkit(toolkit)
-    adapted = replace(
-        adapted,
-        functions=tuple(
-            replace(fn, description="Lists items.\n") if fn.name == "plain_tool" else fn for fn in adapted.functions
-        ),
-        function_instructions={"deferred_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"},
-    )
-    deferral, deferred = defer_toolkit("deferred", "", adapted, portable_search=False)
 
-    assert deferred.instructions is not None
-    assert "DEFERRED_TOOLKIT_INSTRUCTIONS" in deferred.instructions
-    descriptions = {function.name: function.description for function in deferred.functions}
-    assert descriptions["deferred_tool"] == "Do the deferred thing.\n\nDEFERRED_FUNCTION_INSTRUCTIONS"
-    # A function without instructions of its own goes out exactly as an eager toolkit sends it.
-    assert descriptions["plain_tool"] == "Lists items.\n"
-    assert offered_refusal(deferred) is None
-    # Only portable search reads the deferral's instructions, and native search shows them already.
-    assert deferral.instructions is None
-    assert deferral.function_instructions == {}
+    portable_deferral, portable_deferred = defer_toolkit("deferred", "", adapted, portable_search=True)
+    assert portable_deferral.instructions == "DEFERRED_TOOLKIT_INSTRUCTIONS"
+    assert portable_deferred.instructions is None
+
+    native_deferral, native_deferred = defer_toolkit("deferred", "", adapted, portable_search=False)
+    assert native_deferral.instructions is None
+    assert native_deferred.instructions == "DEFERRED_TOOLKIT_INSTRUCTIONS"
+    assert [function.description for function in native_deferred.functions] == ["Do the deferred thing."]
 
 
 def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
@@ -1118,11 +1086,7 @@ def test_instruction_suppression_uses_deferred_toolkit_identity() -> None:
     active_toolkit.functions["shared_tool"] = active_tool
     deferred_toolkit = Toolkit(name="deferred", instructions="DEFERRED_TOOLKIT_INSTRUCTIONS")
     deferred_toolkit.functions["shared_tool"] = deferred_tool
-    adapted_deferred = replace(
-        adapt_toolkit(deferred_toolkit),
-        function_instructions={"shared_tool": "DEFERRED_FUNCTION_INSTRUCTIONS"},
-    )
-    _deferral, deferred = defer_toolkit("deferred", "", adapted_deferred, portable_search=True)
+    _deferral, deferred = defer_toolkit("deferred", "", adapt_toolkit(deferred_toolkit), portable_search=True)
 
     assert toolkit_instructions((adapt_toolkit(active_toolkit), deferred)) == (active_toolkit_marker,)
 
@@ -1773,26 +1737,6 @@ def test_call_tool_schema_reaches_gemini_as_authored() -> None:
         "function_declarations": [{"name": "call_tool", "parameters_json_schema": dict(parameters)}],
     }
     assert "example_key" not in str(declarations)
-
-
-class _PingTools(Toolkit):
-    def __init__(self) -> None:
-        super().__init__(name="ping", tools=[self.ping])
-
-    def ping(self, host: str) -> str:
-        """Ping a host."""
-        return host
-
-
-def test_tool_search_returns_function_instructions_kept_out_of_the_prompt() -> None:
-    """Per-function guidance a deferred function would render arrives with its search result instead."""
-    adapted = replace(adapt_toolkit(_PingTools()), function_instructions={"ping": "Only ping hosts the user named."})
-    deferral, deferred = defer_toolkit("ping", "Network checks", adapted, portable_search=True)
-    toolkit = _search_toolkit(DeferredToolkit(deferral, deferred.functions))
-
-    match = _tool_payload(toolkit.tool_search("ping"))["matches"][0]
-
-    assert match["instructions"] == "Only ping hosts the user named."
 
 
 class _GithubTools(Toolkit):

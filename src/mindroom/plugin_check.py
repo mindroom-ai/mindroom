@@ -61,30 +61,9 @@ class _PluginCheckResult:
     skill_directories: tuple[str, ...]
 
 
-def _agno_migration_error(error: BaseException, *, tool_name: str | None = None) -> ValueError | None:
-    """Return an actionable migration error when ``error`` or its cause is a missing ``agno`` import."""
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if (
-            isinstance(current, ModuleNotFoundError)
-            and current.name is not None
-            and (current.name == "agno" or current.name.startswith("agno."))
-        ):
-            subject = f"Tool {tool_name!r}" if tool_name is not None else "Plugin"
-            msg = (
-                f"{subject} imports removed dependency {current.name!r}; "
-                "MindRoom removed Agno support — migrate this plugin to mindroom.plugin_api.Toolkit"
-            )
-            return ValueError(msg)
-        current = current.__cause__ if current.__cause__ is not None else current.__context__
-    return None
-
-
 def _raise_plugin_error(error: BaseException, *, tool_name: str | None = None) -> NoReturn:
     """Re-raise ``error``, replacing missing ``agno`` imports with an actionable migration message."""
-    if (migration_error := _agno_migration_error(error, tool_name=tool_name)) is not None:
+    if (migration_error := plugin_imports.agno_migration_error(error, tool_name=tool_name)) is not None:
         raise migration_error from error
     raise error
 
@@ -122,7 +101,7 @@ def _check_plugin_tools(tools: Mapping[str, ToolMetadata]) -> tuple[str, ...]:
         try:
             tool_class = load_toolkit_class(factory)
         except ImportError as error:
-            if (migration_error := _agno_migration_error(error, tool_name=tool_name)) is not None:
+            if (migration_error := plugin_imports.agno_migration_error(error, tool_name=tool_name)) is not None:
                 raise migration_error from error
             # A factory may import a package the user installs after the plugin; its build checks it then.
             continue

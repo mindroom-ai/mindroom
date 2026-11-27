@@ -35,9 +35,6 @@ logger = get_logger(__name__)
 _RESERVED_FRAMEWORK_NAMES = frozenset(
     {"agent", "team", "run_context", "_agno_agent", "_agno_team", "_agno_run_context"},
 )
-_FUNCTION_INSTRUCTIONS_ERROR = (
-    "sets per-function prompt instructions, which MindRoom adds only per toolkit; set them on the toolkit instead"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,20 +172,6 @@ def with_offered_instructions(
     return adapted
 
 
-def offered_refusal(toolkit: AdaptedToolkit) -> str | None:
-    """Return why an agent cannot offer ``toolkit``: the first function it offers that cannot run as configured.
-
-    A function's prompt instructions count only while ``function_instructions`` holds them, which a deferred toolkit
-    moves to tool search or the function's description instead.
-    """
-    for function in toolkit.functions:
-        if (refusal := toolkit.refused.get(function.name)) is not None:
-            return refusal
-        if function.name in toolkit.function_instructions:
-            return f"Tool function {function.name!r} {_FUNCTION_INSTRUCTIONS_ERROR}"
-    return None
-
-
 def _adapt_function(toolkit: Toolkit, name: str, finishing: _Finishing) -> ToolFunction:
     """Derive one function of a toolkit: its description, schema, and entrypoint.
 
@@ -286,7 +269,6 @@ __all__ = [
     "adapt_toolkit",
     "configure_toolkit_functions",
     "model_arguments",
-    "offered_refusal",
     "read_tool_value",
     "rename_toolkit_functions",
     "requires_connect",

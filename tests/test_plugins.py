@@ -3023,6 +3023,37 @@ def test_plugin_loading_skips_later_broken_plugin_and_keeps_earlier_tools(
     )
 
 
+def test_plugin_loading_logs_agno_migration_message_when_skipping_legacy_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping a plugin that imports removed Agno logs the actionable migration error."""
+    bad_root = tmp_path / "plugins" / "legacy_agno"
+    bad_root.mkdir(parents=True)
+    (bad_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "legacy_agno", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (bad_root / "tools.py").write_text("from agno.tools import Toolkit\n", encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = _runtime_paths(config_path)
+    config = Config(plugins=["./plugins/legacy_agno"])
+
+    mock_logger = MagicMock()
+    monkeypatch.setattr(plugin_module, "logger", mock_logger)
+
+    assert _loaded(config, runtime_paths) == []
+    assert any(
+        call.args == ("Failed to load plugin, skipping",)
+        and call.kwargs["path"] == str(bad_root.resolve())
+        and "MindRoom removed Agno support" in call.kwargs["error"]
+        and "mindroom.plugin_api.Toolkit" in call.kwargs["error"]
+        for call in mock_logger.warning.call_args_list
+    )
+
+
 def test_plugin_loading_skips_system_exit_during_plugin_module_execution(tmp_path: Path) -> None:
     """A plugin module raising SystemExit at import time should be treated as a broken plugin."""
     good_root = tmp_path / "plugins" / "good"

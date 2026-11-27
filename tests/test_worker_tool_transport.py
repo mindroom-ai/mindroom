@@ -645,48 +645,24 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         )
 
 
-@pytest.mark.parametrize(
-    "output_path",
-    [{}, {OUTPUT_PATH_ARGUMENT: "saved.wav"}],
-    ids=["no-output-path", "output-path"],
-)
-@pytest.mark.parametrize("positional", [True, False])
-def test_declared_unused_agent_keeps_call_arguments(
-    positional: bool,
-    output_path: dict[str, object],
-    tmp_path: Path,
-) -> None:
-    """Discard only the declared runtime slot while retaining normal call data and the call's output path."""
-
-    def entrypoint(agent: object, path: Path, *, options: object) -> None:
-        del agent, path, options
-
-    owner = SimpleNamespace(session_state={"secret": _MODEL_KEY})
+def test_worker_call_arguments_serializes_paths_and_tuples(tmp_path: Path) -> None:
+    """Worker argument serialization preserves call shape while converting paths and tuples."""
     path = tmp_path / "output.wav"
     options = {"values": (1, True, None, 2.5)}
-    args = (owner, path) if positional else ()
-    kwargs = {"options": options} if positional else {"agent": owner, "path": path, "options": options}
 
     encoded_args, encoded_kwargs = sandbox_proxy._worker_call_arguments(
-        args,
-        {**kwargs, **output_path},
-        entrypoint=entrypoint,
-        inert_agent=True,
+        (path,),
+        {"options": options, OUTPUT_PATH_ARGUMENT: "saved.wav"},
     )
 
-    expected_options = {"values": [1, True, None, 2.5]}
-    assert encoded_args == ([None, str(path)] if positional else [])
-    assert encoded_kwargs == (
-        {"options": expected_options, **output_path}
-        if positional
-        else {"agent": None, "path": str(path), "options": expected_options, **output_path}
-    )
+    assert encoded_args == [str(path)]
+    assert encoded_kwargs == {"options": {"values": [1, True, None, 2.5]}, OUTPUT_PATH_ARGUMENT: "saved.wav"}
 
 
 def test_worker_keyword_names_must_be_strings() -> None:
     """The boundary rejects non-JSON keys instead of silently coercing them."""
     with pytest.raises(TypeError, match="worker argument"):
-        sandbox_proxy._worker_call_arguments((), {1: "value"}, entrypoint=lambda: None, inert_agent=False)  # type: ignore[invalid-argument-type]
+        sandbox_proxy._worker_call_arguments((), {1: "value"})  # type: ignore[invalid-argument-type]
 
 
 def _context_agent(

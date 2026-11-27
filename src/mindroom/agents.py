@@ -80,7 +80,6 @@ from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
-    offered_refusal,
     with_offered_instructions,
 )
 from mindroom.tool_system.worker_routing import (
@@ -1369,9 +1368,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 adapted,
                 portable_search=portable_deferred_tools,
             )
-        # Refused only now, so a function the filters and the approval policy left out costs its toolkit nothing.
-        if (refusal := offered_refusal(adapted)) is not None:
-            raise ValueError(refusal)
         announcement = computer_announcement_middleware(
             toolkit,
             tool_name,

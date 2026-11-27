@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -113,11 +113,6 @@ class AdaptedToolkit:
     The prompt shows them whenever the toolkit offers a function, unless the toolkit is deferred behind portable tool
     search, which shows them instead. ``guidance`` is the toolkit's instructions whether or not the prompt shows them,
     which the agent CLI shows when it describes the toolkit's functions and minimal mode offers as a context document.
-    ``function_instructions`` holds, by function name, the instructions a function asks the prompt to show, which a
-    deferred toolkit hands to tool search or the function's description; an agent refuses an eager toolkit that
-    offers such a function.
-    ``refused`` holds, by function name, why MindRoom refuses a function that sets a field the agent loop cannot
-    honor; an agent refuses a toolkit that still offers such a function.
     ``connect`` is set for a toolkit that holds a connection for one run, which whoever offers its functions to a
     run connects before the run and closes after it; it returns how to close the connection, or None when the run
     owns none because the toolkit was connected before it or connecting failed.
@@ -127,8 +122,6 @@ class AdaptedToolkit:
     functions: tuple[ToolFunction, ...]
     instructions: str | None
     guidance: str | None = None
-    function_instructions: Mapping[str, str] = field(default_factory=dict)
-    refused: Mapping[str, str] = field(default_factory=dict)
     connect: ToolkitConnect | None = None
 
 

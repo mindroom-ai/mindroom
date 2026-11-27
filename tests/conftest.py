@@ -647,8 +647,8 @@ def call_proxy_sync_for_test(
 ) -> object:
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the stand-in options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
-    execution env, extra passthrough, or resolved worker target, and the built-in tools.
+    The others take a plain call's values: no overrides, execution env, extra passthrough, or resolved worker target,
+    and the built-in tools.
     """
     return sandbox_proxy_module._call_proxy_sync(
         stand_ins=sandbox_proxy_module.WorkerStandIns(
@@ -657,7 +657,6 @@ def call_proxy_sync_for_test(
         function_name=function_name,
         args=args,
         kwargs=kwargs,
-        function_entrypoint=lambda *_args, **_kwargs: None,
     )
 
 
