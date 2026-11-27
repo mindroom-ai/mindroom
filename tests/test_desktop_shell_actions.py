@@ -238,6 +238,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 0,
         "next_offset": 6,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     assert (await _execute(shell, _handle_command("check_shell", handle, sequence=2)))["state"] == "running"
 
@@ -253,6 +259,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 6,
         "next_offset": 10,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
         await _execute(shell, _handle_command("check_shell", handle, sequence=sequence + 1))
@@ -502,6 +514,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output_truncated": False,
         "output_start": 0,
         "next_offset": len(expected),
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
@@ -686,7 +704,7 @@ async def test_split_stderr_streams_inline_and_pages_independently(tmp_path: Pat
         "while [ ! -f release ]; do sleep 0.05; done; "
         "printf 'out2'; printf 'err2' >&2"
     )
-    running = await _execute(shell, _run_shell(command, tmp_path, separate_stderr=True))
+    running = await _execute(shell, _run_shell(command, tmp_path))
     handle = running["handle"]
     assert isinstance(handle, str)
     assert (running["output"], running["next_offset"]) == ("out1", 4)
@@ -742,7 +760,6 @@ async def test_large_split_stdout_and_stderr_attach_separately_and_fallback_on_f
             f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
             tmp_path,
             timeout_seconds=5,
-            separate_stderr=True,
         ),
     )
     # First attempt failed on stderr upload -> handle kept open and both streams make inline progress.
@@ -771,40 +788,6 @@ async def test_large_split_stdout_and_stderr_attach_separately_and_fallback_on_f
     assert (second["next_offset"], second["stderr_next_offset"]) == (60_000, 60_000)
     with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
         await _execute(shell, _handle_command("check_shell", handle, sequence=3))
-    await shell.close()
-
-
-@pytest.mark.asyncio
-async def test_legacy_controller_without_separate_stderr_merges_stderr_and_emits_only_legacy_keys(
-    tmp_path: Path,
-) -> None:
-    """An older controller omitting separate_stderr gets merged stderr in output and never sees stderr* keys."""
-    shell = _local_shell()
-    shell.grant(60)
-    inline = await _execute(shell, _run_shell("printf 'out;'; printf 'err' >&2", tmp_path, request_id="r-inline"))
-    assert inline["output"] == "out;err"
-    assert not any(key.startswith("stderr") for key in inline)
-
-    script = "import sys; sys.stdout.write('O' * 40_000); sys.stderr.write('E' * 40_000)"
-    attached = await _execute(
-        shell,
-        _run_shell(
-            f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
-            tmp_path,
-            request_id="r-att",
-            timeout_seconds=5,
-        ),
-    )
-    assert attached["output_attachment"] is not None
-    assert attached["output_bytes"] == 80_000
-    assert not any(key.startswith("stderr") for key in attached)
-
-    running = await _execute(shell, _run_shell("sleep 30", tmp_path, request_id="r-run"))
-    assert not any(key.startswith("stderr") for key in running)
-    handle = running["handle"]
-    assert isinstance(handle, str)
-    with pytest.raises(DesktopShellError, match="separate_stderr"):
-        await _execute(shell, _handle_command("check_shell", handle, sequence=2, stderr_offset=0))
     await shell.close()
 
 
@@ -844,7 +827,6 @@ async def test_dual_stream_attachments_upload_concurrently(
             f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
             tmp_path,
             timeout_seconds=5,
-            separate_stderr=True,
         ),
     )
     assert result["output_attachment"] is not None
@@ -879,7 +861,7 @@ async def test_kill_shell_accepts_handle_or_request_id_mutually_exclusively(tmp_
 
 @pytest.mark.asyncio
 async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tmp_path: Path) -> None:
-    """run_shell validates max_runtime_seconds, emits timed_out only on timeout, and preserves legacy payloads."""
+    """run_shell validates max_runtime_seconds and emits timed_out only on timeout."""
     shell = _local_shell()
     shell.grant(60)
 
@@ -909,7 +891,6 @@ async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tm
             tmp_path,
             request_id="timeout-1",
             timeout_seconds=10,
-            separate_stderr=True,
             max_runtime_seconds=0.3,
         ),
     )

@@ -1011,19 +1011,14 @@ def _inline_content_bytes(command: DesktopCommand, output: str) -> int:
         "output_attachment": None,
         "output_start": 0,
         "next_offset": len(output.encode()),
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
         "metrics": _WIDEST_METRICS,
     }
-    if command.parameters.get("separate_stderr") is True:
-        result.update(
-            {
-                "stderr": "",
-                "stderr_bytes": 0,
-                "stderr_truncated": False,
-                "stderr_attachment": None,
-                "stderr_start": 0,
-                "stderr_next_offset": 0,
-            },
-        )
     return DesktopResponse(
         request_id=command.request_id,
         session_id=command.session_id,

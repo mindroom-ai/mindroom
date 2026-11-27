@@ -63,8 +63,6 @@ def _target() -> ResolvedWorkerTarget:
 def _shell_reply(
     request_id: str = "r1",
     session_id: str = "s1",
-    *,
-    legacy: bool = False,
     **fields: object,
 ) -> DesktopResponse:
     base: dict[str, object] = {
@@ -77,30 +75,22 @@ def _shell_reply(
         "output_attachment": None,
         "output_start": 0,
         "next_offset": 0,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
-    if not legacy:
-        base.update(
-            {
-                "stderr": "",
-                "stderr_bytes": 0,
-                "stderr_truncated": False,
-                "stderr_attachment": None,
-                "stderr_start": 0,
-                "stderr_next_offset": 0,
-            },
-        )
     base.update(fields)
     if "output" in fields and "output_bytes" not in fields:
-        out_len = len(str(fields["output"]).encode())
-        base["output_bytes"] = out_len
+        base["output_bytes"] = len(str(fields["output"]).encode())
     if "next_offset" not in fields:
         base["next_offset"] = base["output_bytes"]
-    if not legacy:
-        if "stderr" in fields and "stderr_bytes" not in fields:
-            err_len = len(str(fields["stderr"]).encode())
-            base["stderr_bytes"] = err_len
-        if "stderr_next_offset" not in fields:
-            base["stderr_next_offset"] = base["stderr_bytes"]
+    if "stderr" in fields and "stderr_bytes" not in fields:
+        base["stderr_bytes"] = len(str(fields["stderr"]).encode())
+    if "stderr_next_offset" not in fields:
+        base["stderr_next_offset"] = base["stderr_bytes"]
     return DesktopResponse(request_id=request_id, session_id=session_id, ok=True, result=base)
 
 
@@ -162,7 +152,7 @@ def _fast_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(desktop_shell_mod, "_BOUNDED_KILL_GRACE_DELAY_SECONDS", 0.01)
     monkeypatch.setattr(desktop_shell_mod, "_FORCE_KILL_DRAIN_DELAY_SECONDS", 0.01)
     monkeypatch.setattr(desktop_shell_mod, "_RECOVERY_DELAYS_SECONDS", (0.01, 0.01, 0.01, 0.01))
-    monkeypatch.setattr(desktop_shell_mod, "_CANCEL_STATUS_RETRY_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr(desktop_shell_mod, "_CANCEL_RETRY_DELAYS", (0.0, 0.01, 0.01))
 
 
 def test_shell_job_wait_seconds_covers_both_shell_and_desktop_shell() -> None:
@@ -265,7 +255,6 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
         "command": "git commit -m 'hello world'",
         "cwd": "/Users/me/repo",
         "timeout_seconds": 2,
-        "separate_stderr": True,
         "max_runtime_seconds": 120,
     }
     assert recorded[0][1] == 120.0
@@ -278,7 +267,6 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[1][0].parameters == {
         "command": "make test",
         "timeout_seconds": 1,
-        "separate_stderr": True,
         "max_runtime_seconds": 1.0,
     }
 
@@ -288,7 +276,6 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[2][0].parameters == {
         "command": "echo hi && pwd",
         "timeout_seconds": 2,
-        "separate_stderr": True,
         "max_runtime_seconds": 120,
     }
 
@@ -298,7 +285,6 @@ async def test_fast_completion_argv_normalization_cwd_split_stderr_and_tail(monk
     assert recorded[3][0].parameters == {
         "command": "ls -la",
         "timeout_seconds": 2,
-        "separate_stderr": True,
         "max_runtime_seconds": 120,
     }
 
@@ -387,81 +373,50 @@ async def test_slow_command_polling_tail_reset_progress_and_finished_page_draini
 
 
 @pytest.mark.asyncio
-async def test_legacy_combined_output_bridge_never_receives_stderr_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Older helpers rejecting separate_stderr/max_runtime_seconds retry cleanly without caching stale legacy state."""
-    _fast_timers(monkeypatch)
-    upgraded = False
+async def test_outdated_helper_parameter_rejection_returns_clear_update_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An outdated helper rejecting new run_shell parameters fails cleanly without retrying and asks to update."""
 
-    def handler(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
-        if (
-            not upgraded
-            and cmd.action == "run_shell"
-            and ({"separate_stderr", "max_runtime_seconds"} & set(cmd.parameters))
-        ):
-            return DesktopResponse(
-                cmd.request_id,
-                cmd.session_id,
-                False,
-                error="Unexpected desktop parameters: max_runtime_seconds, separate_stderr.",
-            )
-        if cmd.action == "run_shell" and cmd.parameters["command"] == "legacy-cmd":
-            return _shell_reply(
-                request_id=cmd.request_id,
-                session_id=cmd.session_id,
-                legacy=True,
-                state="running",
-                handle="shell:legacy",
-                exit_code=None,
-                output="part1\n",
-                output_start=0,
-                next_offset=6,
-                output_bytes=6,
-            )
-        if cmd.action == "check_shell":
-            return _shell_reply(
-                request_id=cmd.request_id,
-                session_id=cmd.session_id,
-                legacy=True,
-                state="completed",
-                handle="shell:legacy",
-                exit_code=0,
-                output="part2\n",
-                output_start=6,
-                next_offset=12,
-                output_bytes=12,
-            )
-        return _shell_reply(
-            request_id=cmd.request_id,
-            session_id=cmd.session_id,
-            output="out\n",
-            stderr="err\n",
+    def reject_outdated(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        return DesktopResponse(
+            cmd.request_id,
+            cmd.session_id,
+            False,
+            error="Unexpected desktop parameters: max_runtime_seconds.",
         )
 
-    tool, recorded = _setup_tool(monkeypatch, handler)
-    result = await tool.run_desktop_shell("legacy-cmd")
+    tool, recorded = _setup_tool(monkeypatch, reject_outdated)
+    with structured_tool_result() as meta:
+        result = await tool.run_desktop_shell("echo hi", timeout=15)
 
-    assert result == "part1\npart2"
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+    assert "outdated" in result
+    assert "update the desktop helper" in result
+    assert meta == {"not_started": True}
+    assert len(recorded) == 1
+    assert recorded[0][0].action == "run_shell"
     assert recorded[0][0].parameters == {
-        "command": "legacy-cmd",
+        "command": "echo hi",
         "timeout_seconds": 2,
-        "separate_stderr": True,
-        "max_runtime_seconds": 120,
-    }
-    assert recorded[1][0].parameters == {"command": "legacy-cmd", "timeout_seconds": 2}
-    assert recorded[1][0].request_id != recorded[0][0].request_id
-    assert recorded[2][0].parameters == {"handle": "shell:legacy", "offset": 6}
-    assert "stderr_offset" not in recorded[2][0].parameters
-
-    # Once the helper is upgraded, the next call immediately sends separate_stderr and max_runtime_seconds again.
-    upgraded = True
-    result2 = await tool.run_desktop_shell("upgraded-cmd", timeout=15)
-    assert result2 == "out\nStderr:\nerr"
-    assert recorded[3][0].parameters == {
-        "command": "upgraded-cmd",
-        "timeout_seconds": 2,
-        "separate_stderr": True,
         "max_runtime_seconds": 15.0,
     }
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing = workspace / "keep.txt"
+    existing.write_text("keep")
+    policy = ToolOutputFilePolicy(workspace_root=workspace, max_bytes=1_000_000)
+    tool_file, _ = _setup_tool(monkeypatch, reject_outdated)
+    fn = next(fn for fn in adapt_toolkit(tool_file).functions if fn.name == "run_desktop_shell")
+    receipt = json.loads(
+        await with_output_files(fn, policy).entrypoint(args="echo hi", timeout=15, mindroom_output_path="keep.txt"),
+    )["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    assert "update the desktop helper" in receipt["error"]
+    assert existing.read_text() == "keep"
 
 
 @pytest.mark.asyncio
@@ -627,10 +582,10 @@ async def test_timeout_escalates_from_sigterm_to_sigkill_and_drains_final_output
 
 
 @pytest.mark.asyncio
-async def test_cancel_kills_running_handle_and_recovers_handle_before_start_reply(
+async def test_cancel_kills_running_handle_and_retries_request_id_dismissal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation kills a known handle, or queries request_status(start_request_id) to kill a newly created one."""
+    """Cancellation kills a known handle, or retries kill_shell(request_id) until the in-flight start arrives."""
     _fast_timers(monkeypatch)
 
     # Case 1: Cancelled while polling a known handle.
@@ -653,41 +608,25 @@ async def test_cancel_kills_running_handle_and_recovers_handle_before_start_repl
         await task1
     assert any(cmd.action == "kill_shell" and cmd.parameters.get("handle") == "shell:c1" for cmd, _ in recorded1)
 
-    # Case 2: Cancelled before run_shell returned its handle -> recovers handle via request_status and force-kills.
+    # Case 2: Cancelled before run_shell arrived on the bridge -> retries kill_shell(request_id) after not_found.
     run_sent = asyncio.Event()
     start_req_id: list[str] = []
+    cancel_attempts = 0
 
     async def handler_early(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
+        nonlocal cancel_attempts
         if cmd.action == "run_shell":
             start_req_id.append(cmd.request_id)
             run_sent.set()
             await asyncio.Event().wait()
-        if cmd.action == "kill_shell" and "request_id" in cmd.parameters:
-            return DesktopResponse(
-                cmd.request_id,
-                cmd.session_id,
-                False,
-                error="Unexpected desktop parameters: request_id.",
-            )
-        if cmd.action == "request_status":
-            recorded_resp = _shell_reply(
-                request_id=start_req_id[0],
-                session_id=cmd.session_id,
-                state="running",
-                handle="shell:early",
-                exit_code=None,
-            )
-            return DesktopResponse(
-                cmd.request_id,
-                cmd.session_id,
-                True,
-                result={"request_id": start_req_id[0], "state": "completed", "response": recorded_resp.to_content()},
-            )
+        assert cmd.action == "kill_shell"
+        cancel_attempts += 1
+        state = "not_found" if cancel_attempts == 1 else "cancelled"
         return DesktopResponse(
             cmd.request_id,
             cmd.session_id,
             True,
-            result={"state": "killed", "handle": "shell:early"},
+            result={"state": state, "request_id": start_req_id[0]},
         )
 
     tool2, recorded2 = _setup_tool(monkeypatch, handler_early)
@@ -696,13 +635,9 @@ async def test_cancel_kills_running_handle_and_recovers_handle_before_start_repl
     task2.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task2
-    assert any(
-        cmd.action == "request_status" and cmd.parameters == {"request_id": start_req_id[0]} for cmd, _ in recorded2
-    )
-    assert any(
-        cmd.action == "kill_shell" and cmd.parameters == {"handle": "shell:early", "force": True}
-        for cmd, _ in recorded2
-    )
+    kill_calls = [cmd.parameters for cmd, _ in recorded2 if cmd.action == "kill_shell"]
+    assert kill_calls == [{"request_id": start_req_id[0]}, {"request_id": start_req_id[0]}]
+    assert not any(cmd.action == "request_status" for cmd, _ in recorded2)
 
 
 @pytest.mark.asyncio
@@ -903,18 +838,24 @@ async def test_cancel_while_approval_prompt_is_open_dismisses_prompt_and_never_r
     )
     marker = tmp_path / "should-not-exist"
     pending_visible = asyncio.Event()
+    remote_tasks: list[asyncio.Task[dict[str, object]]] = []
+    kill_results: list[dict[str, object]] = []
 
     async def bridge_handler(_target: object, command: DesktopCommand, _timeout: float) -> DesktopResponse:
         if command.action == "run_shell":
+            # Keep the simulated remote helper execution running when the cloud caller cancels its await.
             task = asyncio.create_task(execute_shell(AsyncMock(), shell, command))
+            remote_tasks.append(task)
             for _ in range(100):
                 if shell.status()["pending"] is not None:
                     pending_visible.set()
                     break
                 await asyncio.sleep(0.01)
-            result = await task
+            result = await asyncio.shield(task)
             return DesktopResponse(command.request_id, command.session_id, True, result=result)
         result = await execute_shell(AsyncMock(), shell, command)
+        if command.action == "kill_shell":
+            kill_results.append(result)
         return DesktopResponse(command.request_id, command.session_id, True, result=result)
 
     tool, recorded = _setup_tool(monkeypatch, bridge_handler)
@@ -930,7 +871,10 @@ async def test_cancel_while_approval_prompt_is_open_dismisses_prompt_and_never_r
         assert shell.status()["pending"] is None
         assert not marker.exists()
         start_req_id = recorded[0][0].request_id
-        assert any(cmd.action == "kill_shell" and cmd.parameters == {"request_id": start_req_id} for cmd, _ in recorded)
+        assert kill_results == [{"state": "cancelled", "request_id": start_req_id}]
+        for remote_task in remote_tasks:
+            with pytest.raises(Exception, match="cancelled before approval"):
+                await asyncio.wait_for(remote_task, timeout=2)
     finally:
         await shell.close()
 
@@ -1229,7 +1173,6 @@ async def test_helper_enforced_timeout_formats_like_native_and_saves_no_output_f
     assert recorded_job[0][0].parameters == {
         "command": "long-job",
         "timeout_seconds": 2,
-        "separate_stderr": True,
     }
 
     # Helper returns state="killed", timed_out=True across a paged drain -> matches native timeout formatting.
@@ -1312,28 +1255,6 @@ async def test_helper_enforced_timeout_formats_like_native_and_saves_no_output_f
     assert receipt["status"] == "error"
     assert receipt["error"] == "Stopped after 5s. No output file was saved.\nOutput:\npart"
     assert existing.read_text() == "keep-me"
-
-    # Legacy helper that accepts separate_stderr but rejects max_runtime_seconds retries cleanly omitting both.
-    def reject_max_runtime(_t: object, cmd: DesktopCommand, _to: float) -> DesktopResponse:
-        if cmd.action == "run_shell" and "max_runtime_seconds" in cmd.parameters:
-            return DesktopResponse(
-                cmd.request_id,
-                cmd.session_id,
-                False,
-                error="Unexpected desktop parameters: max_runtime_seconds.",
-            )
-        return _shell_reply(request_id=cmd.request_id, session_id=cmd.session_id, legacy=True, output="ok\n")
-
-    tool_legacy, recorded_legacy = _setup_tool(monkeypatch, reject_max_runtime)
-    assert await tool_legacy.run_desktop_shell("echo ok", timeout=5) == "ok"
-    assert recorded_legacy[0][0].parameters == {
-        "command": "echo ok",
-        "timeout_seconds": 2,
-        "separate_stderr": True,
-        "max_runtime_seconds": 5.0,
-    }
-    assert recorded_legacy[1][0].parameters == {"command": "echo ok", "timeout_seconds": 2}
-    assert recorded_legacy[1][0].request_id != recorded_legacy[0][0].request_id
 
 
 @pytest.mark.asyncio

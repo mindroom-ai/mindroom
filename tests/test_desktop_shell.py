@@ -29,7 +29,6 @@ def request(
     requester_id: str = REQUESTER,
     agent_name: str = AGENT,
     lifetime_ms: int = 60_000,
-    separate_stderr: bool = False,
     max_runtime_seconds: float | None = None,
 ) -> DesktopShellRequest:
     """Build one short-lived request for real subprocess tests."""
@@ -41,7 +40,6 @@ def request(
         str(cwd),
         int(time.time() * 1000) + lifetime_ms,
         timeout,
-        separate_stderr=separate_stderr,
         max_runtime_seconds=max_runtime_seconds,
     )
 
@@ -146,28 +144,14 @@ async def test_command_starts_only_after_matching_approval(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_commands_use_the_captured_environment_and_split_streams(tmp_path: Path) -> None:
-    """Default requests merge stderr into stdout; separate_stderr=True captures stdout and stderr separately."""
+    """Commands run with the captured environment and always capture stdout and stderr separately."""
     shell = local_shell()
     shell.grant(60)
     command = 'printf "$MINDROOM_TEST_LOGIN_VALUE\\n"; printf "warning\\n" >&2; cat; printf "last"'
 
-    # Legacy default (separate_stderr=False) merges stderr into stdout and rejects stderr_offset.
-    merged = await shell.execute(request(command, tmp_path, request_id="r-merged"))
-    assert merged.state == "completed"
-    assert merged.exit_code == 0
-    assert merged.separate_stderr is False
-    assert merged.output.read().decode() == "from-login\nwarning\nlast"
-    assert merged.output.read_stderr() == b""
-    assert merged.handle is not None
-    with pytest.raises(DesktopShellError, match="separate_stderr"):
-        shell.check(REQUESTER, AGENT, merged.handle, stderr_offset=0)
-    shell.hand_over(merged)
-
-    # Opt-in separate_stderr=True splits stdout and stderr cleanly.
-    result = await shell.execute(request(command, tmp_path, request_id="r-split", separate_stderr=True))
+    result = await shell.execute(request(command, tmp_path, request_id="r-split"))
     assert result.state == "completed"
     assert result.exit_code == 0
-    assert result.separate_stderr is True
     assert result.output.read().decode() == "from-login\nlast"
     assert result.output.read_stderr().decode() == "warning\n"
     await shell.close()
@@ -192,7 +176,7 @@ async def test_invalid_stderr_offset_is_rejected_without_dropping_handle(tmp_pat
     """An invalid stderr_offset fails without modifying or handing over a completed handle."""
     shell = local_shell()
     shell.grant(60)
-    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path, separate_stderr=True))
+    result = await shell.execute(request("printf 'ok'; printf 'é' >&2", tmp_path))
     assert result.handle is not None
     for bad in (-1, 99, 1):
         with pytest.raises(DesktopShellError, match="stderr offset"):

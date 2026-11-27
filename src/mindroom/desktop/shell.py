@@ -76,7 +76,6 @@ class DesktopShellRequest:
     expires_at_ms: int
     timeout_seconds: int = 30
     controller_key: str = ""
-    separate_stderr: bool = False
     max_runtime_seconds: float | None = None
 
 
@@ -187,7 +186,6 @@ class DesktopShellResult:
     handle: str | None
     exit_code: int | None
     output: DesktopShellOutput
-    separate_stderr: bool = False
     timed_out: bool = False
 
 
@@ -201,7 +199,6 @@ class _ShellHandle:
     killed: bool = False
     controller_key: str = ""
     request_id: str = ""
-    separate_stderr: bool = False
 
     def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
         if not record.finished:
@@ -305,9 +302,6 @@ class DesktopShell:
             or not 1 <= request.timeout_seconds <= 60
         ):
             message = "Shell timeout must be an integer from 1 to 60 seconds."
-            raise DesktopShellError(message)
-        if not isinstance(request.separate_stderr, bool):
-            message = "Shell separate_stderr flag must be boolean."
             raise DesktopShellError(message)
         _validate_max_runtime_seconds(request.max_runtime_seconds)
         if not isinstance(request.expires_at_ms, int) or isinstance(request.expires_at_ms, bool):
@@ -612,7 +606,7 @@ class DesktopShell:
                 timeout=inline_wait,
                 output_capture=output,
                 stdin=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE if request.separate_stderr else asyncio.subprocess.STDOUT,
+                stderr=asyncio.subprocess.PIPE,
                 kill_group_after_exit=True,
                 # A finished command is a handle too, so output that cannot be delivered at once stays pageable.
                 register_finished=True,
@@ -642,13 +636,7 @@ class DesktopShell:
             if not output.completed:
                 output.release()
                 raise DesktopShellError(_STOPPED)
-            return DesktopShellResult(
-                "completed",
-                None,
-                output.exit_code,
-                output,
-                separate_stderr=request.separate_stderr,
-            )
+            return DesktopShellResult("completed", None, output.exit_code, output)
         entry = _ShellHandle(
             request.requester_id,
             request.agent_name,
@@ -657,7 +645,6 @@ class DesktopShell:
             output,
             controller_key=request.controller_key,
             request_id=request.request_id,
-            separate_stderr=request.separate_stderr,
         )
         self._handles[result.handle] = entry
         record = self._records[result.handle]
@@ -666,7 +653,6 @@ class DesktopShell:
             result.handle,
             record.return_code,
             output,
-            separate_stderr=entry.separate_stderr,
             timed_out=record.finished and record.timed_out,
         )
 
@@ -690,18 +676,14 @@ class DesktopShell:
         if offset is not None:
             entry.output.check_offset(offset)
         if stderr_offset is not None:
-            if not entry.separate_stderr:
-                message = "Shell stderr_offset is only supported for commands started with separate_stderr."
-                raise DesktopShellError(message)
             entry.output.check_stderr_offset(stderr_offset)
         if not record.finished:
-            return DesktopShellResult("running", handle, None, entry.output, separate_stderr=entry.separate_stderr)
+            return DesktopShellResult("running", handle, None, entry.output)
         return DesktopShellResult(
             entry.state(record),
             handle,
             record.return_code,
             entry.output,
-            separate_stderr=entry.separate_stderr,
             timed_out=record.timed_out,
         )
 

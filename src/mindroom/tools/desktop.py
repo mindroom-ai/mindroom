@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from mindroom.custom_tools.desktop import DesktopTools
 
 
+# LEGACY_COMPAT: Tool approval rules and scripts matching desktop(action="run_shell").
+# Legacy format: tool_approval rules/scripts targeting tool_name == "desktop" (including action == "run_shell", command, cwd, and mindroom_output_path).
+# Last legacy release: v2026.11.651 (last release where agents called desktop(action="run_shell"); replaced by run_desktop_shell in the next release).
+# Handling: Maps run_desktop_shell calls through ApprovalAlias to desktop(action="run_shell", ...) and fails closed when arguments are invalid.
+# Coverage: tests/test_tool_approval_aliases.py::test_desktop_approval_rules_gate_run_desktop_shell_and_fail_closed_on_invalid_args, tests/test_tool_approval_aliases.py::test_desktop_shell_approval_alias_preserves_mindroom_output_path.
 def _judge_desktop_shell_approval(arguments: Mapping[str, object]) -> list[dict[str, object]] | None:
     """Map ``run_desktop_shell`` calls to existing ``desktop(action="run_shell", ...)`` approval rules."""
     try:

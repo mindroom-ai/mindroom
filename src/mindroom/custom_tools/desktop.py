@@ -13,7 +13,7 @@ from mindroom.custom_tools.desktop_attachment import (
     register_runtime_screenshot_attachment,
     screenshot_attachment_result_fields,
 )
-from mindroom.custom_tools.desktop_shell import run_desktop_shell_command
+from mindroom.custom_tools.desktop_shell import desktop_setup_error, run_desktop_shell_command
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.desktop.client import DesktopRequestError, desktop_response_router
 from mindroom.desktop.configuration import (
@@ -881,20 +881,12 @@ def _error_result(action: str, message: str) -> ToolValue:
 
 
 def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool) -> ToolValue:
-    if chat_pairing:
-        message = "Desktop setup is required for this requester and agent. Run `/desktop setup` in this Matrix chat."
-        if error is not None:
-            message = f"Desktop configuration is invalid: {error} Run `/desktop setup` to replace it."
-    else:
-        message = "Desktop setup requires a live Matrix agent chat."
-        if error is not None:
-            message = f"Desktop configuration is invalid: {error}"
     return ToolValue(
         content=custom_tool_payload(
             "desktop",
             "setup_required",
             action=action,
-            message=message,
+            message=desktop_setup_error(error, chat=chat_pairing),
         ),
     )
 
