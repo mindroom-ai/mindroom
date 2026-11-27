@@ -148,7 +148,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import structlog
-    from nio.durable import DurableSync
+    from nio.durable import DurableSync, SyncRecord
 
     from mindroom.config.main import Config
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
@@ -1512,6 +1512,16 @@ class AgentBot:
             self._orchestrator_ready_handled = True
         self.steward_duties.publish_joined_room_state(every_room=opened)
 
+    def _observe_timeline_record(self, record: SyncRecord) -> None:
+        """Forward one newly admitted non-history cleartext timeline event for thread auto-reopen."""
+        if record.room_id is None:
+            return
+        source = record.clear if record.clear is not None else record.source
+        try:
+            self.orchestrator.thread_auto_reopen.observe_timeline_event(record.room_id, source)
+        except Exception:
+            self.logger.exception("thread_auto_reopen_observe_failed", room_id=record.room_id)
+
     def _before_ingestion_admission(
         self,
         admission: IngestionRecordAdmission,
@@ -2206,6 +2216,7 @@ class AgentBot:
                 after_sync=self._on_ingestion_frame_completion,
                 after_ack=self._ingestion_admission_progress.set,
                 on_decryption_failure=self._decryption_diagnostics.schedule,
+                on_timeline_record=self._observe_timeline_record,
                 sender_is_managed=self._ingress_validator.sender_is_trusted_for_ingress_metadata,
             ),
             name=f"matrix_ingestion_pump_{self.agent_name}",

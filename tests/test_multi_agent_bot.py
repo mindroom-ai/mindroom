@@ -320,6 +320,7 @@ class TestAgentBot(AgentBotTestBase):
             before_admission: object,
             after_admission: object,
             on_decryption_failure: object,
+            on_timeline_record: object,
             sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
@@ -328,6 +329,7 @@ class TestAgentBot(AgentBotTestBase):
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
             assert on_decryption_failure == bot._decryption_diagnostics.schedule
+            assert on_timeline_record == bot._observe_timeline_record
             assert sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
             pump_calls.append(
                 (

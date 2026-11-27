@@ -17,6 +17,7 @@ from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
     INLINE_MEDIA_CONTENT_KEY,
     REASONING_CONTENT_KEY,
+    RESOLVED_IN_TURN_KEY,
     STREAM_VISIBLE_BODY_KEY,
     TOOL_TRACE_CONTENT_KEY,
 )
@@ -215,6 +216,8 @@ def _continuation_content(
     content = _rich_text_content(source, body, relation=relation, enable_footnotes=enable_footnotes)
     # The reply's compactions are shown once, on its first segment.
     content.pop(COMPACTIONS_CONTENT_KEY, None)
+    # Continuations belong to an already-created reply and must not auto-reopen a resolved thread.
+    content[RESOLVED_IN_TURN_KEY] = True
     return content
 
 

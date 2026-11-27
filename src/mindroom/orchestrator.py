@@ -145,6 +145,7 @@ from .orchestration.runtime import (
 from .orchestration.script_checks import build_script_check_tick_runner
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.storage_preparation import prepare_runtime_storage
+from .orchestration.thread_auto_reopen_runtime import ThreadAutoReopenCoordinator
 from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
@@ -286,6 +287,7 @@ class _MultiAgentOrchestrator:
     fleet: EntityFleet = field(init=False)
     scheduled_tasks: ScheduledTaskRuntime = field(init=False)
     thread_snooze: ThreadSnoozeRuntimeCoordinator = field(init=False)
+    thread_auto_reopen: ThreadAutoReopenCoordinator = field(init=False)
     reactive_triggers: ReactiveTriggerService = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
@@ -363,6 +365,11 @@ class _MultiAgentOrchestrator:
             hooks=self.hook_registry_state.lifetime(),
         )
         self.thread_snooze = ThreadSnoozeRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+        )
+        self.thread_auto_reopen = ThreadAutoReopenCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bots=lambda: self.agent_bots,
@@ -463,6 +470,7 @@ class _MultiAgentOrchestrator:
             self._knowledge_graph,
             self._todo_poke_runtime,
             self.thread_snooze,
+            self.thread_auto_reopen,
             self.reactive_triggers,
             self._automations,
             self._budgets,

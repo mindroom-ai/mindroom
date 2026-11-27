@@ -577,6 +577,7 @@ visibility = [
     "mindroom.thread_export.projected_history",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.follow_ups",
+    "mindroom.thread_auto_reopen",
     "mindroom.tool_jobs.runtime",
     "mindroom.turn_store",
     "mindroom.turns.ingress",
@@ -3909,6 +3910,14 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.orchestration.thread_auto_reopen_runtime"
+depends_on = [
+    "mindroom.room_steward",
+    "mindroom.thread_auto_reopen",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.orchestration.thread_snooze_runtime"
 depends_on = [
     "mindroom.room_settings",
@@ -4018,6 +4027,7 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.orchestration.storage_preparation",
+    "mindroom.orchestration.thread_auto_reopen_runtime",
     "mindroom.orchestration.thread_snooze_runtime",
     "mindroom.orchestration.todo_poke_runtime",
     "mindroom.orchestration.tool_job_runtime",
@@ -5558,6 +5568,14 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.scheduling.tasks",
     "mindroom.thread_tags",
+]
+
+[[modules]]
+path = "mindroom.thread_auto_reopen"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.event_journal",
+    "mindroom.thread_snooze",
 ]
 
 [[modules]]

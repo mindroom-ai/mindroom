@@ -343,6 +343,8 @@ async def _mark_source_moved(
         )
     except ThreadTagsError as exc:
         warnings.append(f"Could not mark the original thread resolved: {exc}")
+    else:
+        context.resolved_thread_ids.add(prepared.root_id)
 
 
 def _lost_content(content: dict[str, Any], content_sent: dict[str, Any]) -> bool:
