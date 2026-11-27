@@ -268,16 +268,17 @@ class PreparedAgentToolCatalog:
 
     async def bind(
         self,
-        key: ToolKey,
+        key: ToolKey | str,
         *,
         check_current: Callable[[], None] | None = None,
     ) -> PreparedAgentToolBinding:
         """Materialize one deferred toolkit once, under the owning turn's context."""
+        toolkit_name = key if isinstance(key, str) else key.toolkit
         async with self._lock:
             self._check_open()
             if check_current is not None:
                 check_current()
-            deferred = self._deferred.get(key.toolkit)
+            deferred = self._deferred.get(toolkit_name)
             if deferred is not None:
                 with tool_runtime_context(self.runtime_context):
                     toolkit = await deferred.materialize()
@@ -285,7 +286,20 @@ class PreparedAgentToolCatalog:
                 # A deferred toolkit's functions are reached under the name it was listed under, which an agent's
                 # build gives as the registered tool they come from.
                 self._prepare(toolkit, toolkit.functions, deferred.name)
-                del self._deferred[key.toolkit]
+                del self._deferred[toolkit_name]
+            if isinstance(key, str):
+                matches = [binding for known, binding in self._bindings.items() if known.toolkit == toolkit_name]
+                if len(matches) == 1:
+                    return matches[0]
+                if matches:
+                    functions = sorted(binding.key.function for binding in matches)
+                    msg = (
+                        f"Toolkit {toolkit_name!r} has multiple functions: {', '.join(functions)}; "
+                        "specify TOOLKIT.FUNCTION"
+                    )
+                else:
+                    msg = f"No toolkit {toolkit_name!r}"
+                raise UnknownToolError(msg)
             binding = self._bindings.get(key)
             if binding is None:
                 functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)

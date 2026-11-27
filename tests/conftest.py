@@ -683,7 +683,7 @@ def live_turn_tools_for_test(
     owner: "CliTurnOwner",
     *,
     catalog: "PreparedAgentToolCatalog",
-    authorize: "Callable[[ToolKey, dict[str, object]], Awaitable[None]]",
+    authorize: "Callable[[ToolKey | str, dict[str, object]], Awaitable[None]]",
     **options: Any,  # noqa: ANN401
 ) -> LiveTurnTools:
     """Build one CLI turn's live tools with the options a test names, which include its output-file policy.
@@ -696,7 +696,7 @@ def live_turn_tools_for_test(
         "refresh_scheduler": None,
     }
 
-    async def authorize_call(_owner: LiveTurnTools, key: "ToolKey", arguments: dict[str, object]) -> None:
+    async def authorize_call(_owner: LiveTurnTools, key: "ToolKey | str", arguments: dict[str, object]) -> None:
         await authorize(key, arguments)
 
     return LiveTurnTools(owner, catalog=catalog, authorize=authorize_call, **(turn_options | options))
