@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mindroom.config.legacy_fields import RETIRED_CONSOLIDATED_FUNCTIONS
 from mindroom.oauth.google import google_oauth_providers, with_google_account_picker
 from mindroom.oauth.providers import OAuthConsentGroup
 from mindroom.tool_system.registry import builtin_tool_registry, plugin_load_active, register_tool
@@ -149,6 +150,10 @@ def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
                 auth_provider=provider.id,
                 function_names=tuple(f"{workspace.name}_{name}" for name in base.function_names),
                 action_scoped_grants=tuple(f"{workspace.name}_{name}" for name in base.action_scoped_grants),
+                retired_functions={
+                    f"{workspace.name}_{old}": f"{workspace.name}_{new}"
+                    for old, new in RETIRED_CONSOLIDATED_FUNCTIONS.get(service, {}).items()
+                },
                 factory=_workspace_tool_factory(base, provider, workspace.name),
             ),
         )

@@ -3269,6 +3269,62 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
         "work_google_docs_write",
         "work_google_docs_*",
     ]
+    # Non-strict Google services (gmail) must not be forced into strict wildcard script rejection.
+    gmail_only = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "plugins": [str(plugin_root)],
+            "agents": {"a": {"display_name": "A", "tools": ["work_gmail"], "include_default_tools": False}},
+            "tool_approval": {"rules": [{"match": "work_*", "script": "check.py"}]},
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in gmail_only.tool_approval.rules] == ["work_*"]
+
+    # Secondary Google Workspace include_tools/exclude_tools filters fail closed with accurate guidance.
+    for filter_key in ("include_tools", "exclude_tools"):
+        with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+            Config.validate_with_runtime(
+                {
+                    "models": {"default": {"provider": "openai", "id": "x"}},
+                    "plugins": [str(plugin_root)],
+                    "agents": {
+                        "a": {
+                            "display_name": "A",
+                            "tools": [{"work_google_docs": {filter_key: ["work_google_docs_get_document"]}}],
+                            "include_default_tools": False,
+                        },
+                    },
+                },
+                runtime_paths,
+            )
+        msg = str(exc_info.value)
+        assert (
+            f"replace `work_google_docs_get_document` with `work_google_docs_read` in `work_google_docs.{filter_key}` "
+            "while preserving any other entries in the list"
+        ) in msg
+        guidance = msg.split("was removed; ", 1)[1]
+        assert "action" not in guidance
+        assert "remove" not in guidance
+
+    with pytest.raises(ConfigRuntimeValidationError) as batch_exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "plugins": [str(plugin_root)],
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "tools": [{"work_google_docs": {"exclude_tools": ["work_google_docs_batch_update"]}}],
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            runtime_paths,
+        )
+    batch_msg = str(batch_exc_info.value)
+    assert "replace `work_google_docs_batch_update` with `work_google_docs_write`" in batch_msg
+    assert "removes all sibling actions in `work_google_docs_write`" in batch_msg
 
     loaded = Config.validate_with_runtime(
         {**base_data, "tool_approval": {"rules": [{"match": "work_gmail_send", "action": "require_approval"}]}},
@@ -3298,6 +3354,31 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     assert star_op is not None
     assert del_op is not None
     assert star_op != del_op
+
+    # Stored dashboard settings naming retired prefixed Google Docs functions also fail closed.
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials(
+        "work_google_docs",
+        {"_source": "ui", "exclude_tools": ["work_google_docs_get_document"]},
+    )
+    with pytest.raises(
+        ToolConfigOverrideError,
+        match=(
+            r"work_google_docs: stored setting exclude_tools: work_google_docs_get_document was removed; "
+            r"replace `work_google_docs_get_document` with `work_google_docs_read` in `work_google_docs\.exclude_tools`"
+        ),
+    ):
+        get_tool_by_name(
+            "work_google_docs",
+            runtime_paths,
+            tools=registry,
+            credentials_manager=manager,
+            worker_target=None,
+        )
 
 
 def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_openclaw_compat() -> None:
@@ -3740,13 +3821,11 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         loaded = Config.validate_with_runtime(explicit, runtime_paths)
         assert [rule.match for rule in loaded.tool_approval.rules] == ["skill", *explicit_matches, "*"]
 
-    # Retired include_tools/exclude_tools filters fail closed on the 4 filterable toolkits.
+    # Retired include_tools/exclude_tools filters fail closed on multi-action consolidated targets.
     retired_filter_cases = (
         ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
         ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
         ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
-        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_read"),
-        ("claude_agent", {"include_tools": ["claude_agent_status"]}, "claude_agent_read"),
         ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
     )
@@ -3764,13 +3843,13 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ):
             Config.validate_with_runtime(bad, runtime_paths)
 
-    # Twilio preserves its enable_* toggle migration hint; google_docs also fails closed.
+    # Multi-action twilio/google_docs targets keep their consolidated/enable_* guidance.
     for toolkit_name, overrides, expected_pattern in (
-        ("twilio", {"include_tools": ["send_sms"]}, r"twilio\.include_tools:.*twilio_send.*enable_\*"),
+        ("twilio", {"include_tools": ["list_messages"]}, r"twilio\.include_tools:.*twilio_read.*enable_\*"),
         (
             "google_docs",
-            {"exclude_tools": ["google_docs_get_document"]},
-            r"google_docs\.exclude_tools:.*google_docs_read",
+            {"include_tools": ["google_docs_create_document"]},
+            r"google_docs\.include_tools:.*google_docs_write.*`action` parameter",
         ),
     ):
         bad = {
@@ -4704,7 +4783,11 @@ def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_
         (
             ["matrix_user"],
             [{"match": "matrix_user_read", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
-            r"mark_read moved from matrix_user_read to matrix_user_write",
+            (
+                r"mark_read moved from matrix_user_read to matrix_user_write; "
+                r"move 'mark_read' to matrix_user_write \(preserving conditions and approval decision\) "
+                r"and keep any remaining read actions on matrix_user_read\."
+            ),
         ),
         (
             ["matrix_user"],
@@ -4715,7 +4798,11 @@ def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_
                     "action": "require_approval",
                 },
             ],
-            r"mark_read moved from matrix_user_read to matrix_user_write",
+            (
+                r"mark_read moved from matrix_user_read to matrix_user_write; "
+                r"move 'mark_read' to matrix_user_write \(preserving conditions and approval decision\) "
+                r"and keep any remaining read actions on matrix_user_read\."
+            ),
         ),
         (
             ["matrix_user"],
@@ -4792,3 +4879,51 @@ def test_retired_action_argument_approval_rules_fail_closed(
     else:
         loaded = Config.validate_with_runtime(data, runtime_paths)
         assert len(loaded.tool_approval.rules) == len(rules)
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "filter_key", "old_name", "new_name"),
+    [
+        ("google_docs", "include_tools", "google_docs_get_document", "google_docs_read"),
+        ("google_docs", "exclude_tools", "google_docs_get_document", "google_docs_read"),
+        ("twilio", "include_tools", "send_sms", "twilio_send"),
+        ("twilio", "exclude_tools", "send_sms", "twilio_send"),
+        ("contacts", "include_tools", "list_contacts", "contacts_read"),
+        ("email_invite", "exclude_tools", "list_email_invites", "email_invite_read"),
+        ("shared_directories", "include_tools", "list_shared_directories", "shared_directories_read"),
+        ("claude_agent", "include_tools", "claude_agent_status", "claude_agent_read"),
+        ("claude_agent", "exclude_tools", "claude_session_status", "claude_agent_read"),
+    ],
+)
+def test_single_verb_renamed_filter_guidance_replaces_in_place(
+    tmp_path: Path,
+    toolkit_name: str,
+    filter_key: str,
+    old_name: str,
+    new_name: str,
+) -> None:
+    """Single-verb 1-to-1 renames guide in-place filter replacement without claiming an action parameter or removal."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{toolkit_name: {filter_key: [old_name]}}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, runtime_paths)
+    message = str(exc_info.value)
+    assert (
+        f"replace `{old_name}` with `{new_name}` in `{toolkit_name}.{filter_key}` "
+        "while preserving any other entries in the list"
+    ) in message
+    guidance = message.split("was removed; ", 1)[1]
+    assert "action" not in guidance
+    assert "remove" not in guidance

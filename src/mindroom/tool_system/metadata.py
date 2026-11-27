@@ -812,6 +812,7 @@ def resolve_tool_settings(
         retired := retired_stored_tool_setting(
             tool_name,
             stored_credentials or {},
+            retired_functions=metadata.retired_functions,
             has_enable_toggles=_has_enable_toggles(metadata),
         )
     ) is not None:
