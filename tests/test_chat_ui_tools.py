@@ -1126,6 +1126,30 @@ async def test_canvas_needs_exactly_one_page_source(tmp_path: Path, html: str | 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("html", "path"), [(None, None), ("", "")])
+async def test_canvas_update_without_page_source_explains_cannot_reopen_unchanged(
+    tmp_path: Path,
+    html: str | None,
+    path: str | None,
+) -> None:
+    """Passing canvas_event_id alone tells the model it cannot reopen an unchanged canvas."""
+    context = _context(tmp_path)
+
+    with tool_runtime_context(context):
+        missing = json.loads(await ChatUITools().show_canvas(canvas_event_id="$canvas", html=html, path=path))
+        both = json.loads(
+            await ChatUITools().show_canvas(canvas_event_id="$canvas", html="<p>1</p>", path="deck.html"),
+        )
+
+    assert missing["message"] == (
+        "Give exactly one of html or path. canvas_event_id replaces content in place and cannot reopen an "
+        "unchanged canvas; pass html or path to update it, or tell the user to select it in the room header."
+    )
+    assert both["message"] == "Give exactly one of html or path."
+    context.client.room_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_canvas_update_edits_the_agents_own_canvas_in_place(tmp_path: Path) -> None:
     """A multi-step flow keeps one timeline card; only the replacement carries the new page."""
     context = _context(tmp_path)

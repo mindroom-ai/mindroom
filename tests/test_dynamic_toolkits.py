@@ -1254,12 +1254,36 @@ def test_chat_ui_names_remote_assets_only_for_an_agent_with_canvases(
     prompt = _build_prompt(agent)
 
     hint = (
-        "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
-        "so a preview can use the real assets of the site it shows. "
-        "Fetching data, workers and nested frames stay blocked."
+        "Canvas pages may load images, styles, fonts, media, and scripts from any https: address "
+        "(e.g. real site assets); data fetches, workers, and nested frames stay blocked."
     )
     assert (hint in prompt) is named
     assert ("from any https: address" in prompt) is named
+
+
+@pytest.mark.asyncio
+async def test_tool_search_avoids_chat_ui_browser_false_positives_and_finds_screenshot(tmp_path: Path) -> None:
+    """tool_search('browser') skips non-browser chat_ui tools and tool_search('screenshot') finds browser_read."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [  # type: ignore[index]
+        {"chat_ui": {"enable_show_canvas": True, "defer": True}},
+        {"browser": {"defer": True}},
+    ]
+    config = _validated_config(tmp_path, raw)
+    agent = _code_agent(config, tmp_path)
+
+    browser_matches = [m["name"] for m in cast("list[dict[str, str]]", (await _search(agent, "browser"))["matches"])]
+    assert set(browser_matches[:2]) == {"browser_read", "browser_control"}
+    assert {"open_settings", "show_canvas", "read_canvas_state"}.isdisjoint(browser_matches)
+
+    screenshot_matches = [
+        m["name"] for m in cast("list[dict[str, str]]", (await _search(agent, "screenshot"))["matches"])
+    ]
+    assert screenshot_matches[0] == "browser_read"
+
+    for noisy_word in ("jobs", "messages", "copy", "account"):
+        names = [m["name"] for m in cast("list[dict[str, str]]", (await _search(agent, noisy_word))["matches"])]
+        assert "show_canvas" not in names
 
 
 def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
