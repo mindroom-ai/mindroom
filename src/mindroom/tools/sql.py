@@ -7,15 +7,22 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -176,7 +183,7 @@ class _SQLTools(Toolkit):
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``sql_inspect`` actions to the ones enabled on this instance."""
         if function.name == "sql_inspect":
-            return narrow_action_enum(function, self._inspect_actions)
+            return restrict_actions(function, self._inspect_actions)
         return function
 
     def sql_inspect(
@@ -310,34 +317,10 @@ class _SQLTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_list_tables",
-            label="Enable List Tables",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_describe_table",
-            label="Enable Describe Table",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_run_sql_query",
-            label="Enable Run Sql Query",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_list_tables", "Enable List Tables"),
+        bool_config_field("enable_describe_table", "Enable Describe Table"),
+        bool_config_field("enable_run_sql_query", "Enable Run Sql Query"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["sqlalchemy"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#sql",

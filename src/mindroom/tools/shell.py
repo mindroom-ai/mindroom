@@ -46,6 +46,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -55,6 +56,7 @@ from mindroom.tool_system.output_files import (
 from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
@@ -144,10 +146,10 @@ _NO_WORKER_ERROR = (
 _SHELL_NAMESPACE = "shell"
 
 
-def _not_started(refusal: str) -> str:
+def _not_started(refusal: str) -> ToolOutcome:
     """Answer a call refused before any command ran, and report that, so a caller that stores results can tell."""
     report_tool_metadata(not_started=True)
-    return refusal
+    return ToolOutcome(content=refusal, is_error=True)
 
 
 def shell_refuses_commands(runtime_paths: RuntimePaths, *, allow_without_worker: bool) -> bool:
@@ -186,6 +188,7 @@ def _shell_subprocess_env(
     base_process_env: dict[str, str] | None = None,
     shell_path_prepend: str | None = None,
     workspace_dir: Path | None = None,
+    resolved_workspace_dir: Path | None = None,
     process_environ: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the env passed to shell subprocesses.
@@ -206,10 +209,13 @@ def _shell_subprocess_env(
         _workspace_home_contract_env_from_process_env(base_process_env) if base_process_env is not None else {}
     )
     env.update(workspace_home_contract)
-    if workspace_dir is not None and not workspace_home_contract:
-        # Local (non-worker) execution keeps the host HOME, but the workspace
-        # env var is still promised to agents, so export it from workspace_dir.
-        env["MINDROOM_AGENT_WORKSPACE"] = str(workspace_dir.expanduser().resolve())
+    if not workspace_home_contract:
+        if resolved_workspace_dir is not None:
+            env["MINDROOM_AGENT_WORKSPACE"] = str(resolved_workspace_dir)
+        elif workspace_dir is not None:
+            # Local (non-worker) execution keeps the host HOME, but the workspace
+            # env var is still promised to agents, so export it from workspace_dir.
+            env["MINDROOM_AGENT_WORKSPACE"] = str(workspace_dir.expanduser().resolve())
 
     path_value = subprocess_path_with_prepends(
         env.get("PATH"),
@@ -313,20 +319,8 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
             default=None,
             authored_override=False,
         ),
-        ConfigField(
-            name="enable_run_shell_command",
-            label="Enable Run Shell Command",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_run_shell_command", "Enable Run Shell Command"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="extra_env_passthrough",
             label="Extra Env Passthrough",
@@ -396,7 +390,13 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             self.base_dir: Path | None = Path(base_dir) if isinstance(base_dir, str) else base_dir
             # Beside a workdir, ``base_dir`` is the workdir; ``$MINDROOM_AGENT_WORKSPACE`` stays the workspace.
             self._beside_workdir = current_tool_workdir() is not None
-            self._workspace_dir = tool_output_workspace_root if self._beside_workdir else self.base_dir
+            workspace_dir = tool_output_workspace_root if self._beside_workdir else self.base_dir
+            self._resolved_base_dir = self.base_dir.expanduser().resolve() if self.base_dir is not None else None
+            self._resolved_workspace_dir = (
+                self._resolved_base_dir
+                if workspace_dir is self.base_dir
+                else (workspace_dir.expanduser().resolve() if workspace_dir is not None else None)
+            )
             self._refuse_commands = shell_refuses_commands(runtime_paths, allow_without_worker=allow_without_worker)
             # Whether calls may name a worker of their own, which the primary then routes them to.
             self._named_workers = named_workers
@@ -452,7 +452,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 call_environment=current_tool_environment(),
                 base_process_env=self._base_process_env,
                 shell_path_prepend=self._shell_path_prepend,
-                workspace_dir=self._workspace_dir,
+                resolved_workspace_dir=self._resolved_workspace_dir,
                 process_environ=process_environ,
             )
 
@@ -510,7 +510,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             return None
 
         def _background_log_policy(self) -> BackgroundLogPolicy:
-            log_root = self._workspace_dir or self.base_dir
+            log_root = self._resolved_workspace_dir or self._resolved_base_dir
             if log_root is None:
                 temp_root = (
                     self._process_environ.get("TMPDIR") if self._process_environ else None
@@ -519,12 +519,14 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     log_dir=str(Path(temp_root) / f"mindroom-shell-logs-{os.getuid()}"),
                 )
             display_root = (
-                str(self.base_dir.resolve())
-                if self.base_dir is not None and not self._beside_workdir and log_root == self.base_dir
+                str(self._resolved_base_dir)
+                if self._resolved_base_dir is not None
+                and not self._beside_workdir
+                and log_root == self._resolved_base_dir
                 else None
             )
             return BackgroundLogPolicy(
-                log_dir=str(log_root.resolve() / ".mindroom" / "shell"),
+                log_dir=str(log_root / ".mindroom" / "shell"),
                 display_root=display_root,
             )
 
@@ -538,7 +540,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             sandbox: bool | None = None,
             mount_dir: str | None = None,
             mount_read_only: bool | None = None,
-        ) -> str | ToolOutputFileHandled:
+        ) -> str | ToolOutcome | ToolOutputFileHandled:
             """Run a command via non-login Bash (prepared env; pass ``["bash", "-lc", cmd]`` only if login startup is needed).
 
             Returns last ``tail`` lines of stdout then stderr (all stderr on non-zero exit). Waits up to 120s in foreground:
@@ -584,10 +586,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 return refused
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                msg = _not_started("timeout must be a positive number of seconds; omit it for the default limit.")
+                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                refused = _not_started(f"Error: {msg}")
                 if worker is not None:
                     raise ValueError(msg)
-                return f"Error: {msg}"
+                return refused
             subprocess_env = self._command_env(self._process_environ)
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
@@ -636,6 +639,15 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 report_tool_metadata(exit_code=result.return_code)
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
-            return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
+            value: str | ToolOutcome = (
+                ToolOutcome(
+                    content=result.message,
+                    is_error=True,
+                    counts_as_tool_failure=result.execution_error or result.background_rejected,
+                )
+                if result.failed
+                else result.message
+            )
+            return ToolOutputFileHandled(value) if result.output_file_handled else value
 
     return MindRoomShellTools

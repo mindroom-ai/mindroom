@@ -66,7 +66,7 @@ from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError, config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from mindroom.api.client_sessions import ClientSession
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
+    from mindroom.event_sources import EventSourceEmitter
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -96,6 +97,7 @@ __all__ = [
     "client_rooms",
     "client_stream",
     "client_user_oauth_access_token",
+    "event_source_emitter",
     "plugin_context",
     "plugin_origin_url",
     "require_client_user",
@@ -667,6 +669,29 @@ async def require_platform_administrator(request: Request) -> ClientUser:
     if not is_administrator(user.user_id, bind_current_request_snapshot(request)):
         raise HTTPException(403, "Not a platform administrator.")
     return user
+
+
+def event_source_emitter(request: Request, source_id: str) -> EventSourceEmitter:
+    """Return the active ``EventSourceEmitter`` for ``source_id`` owned by the plugin serving ``request``.
+
+    Raises ``RuntimeError`` outside a plugin route, ``PluginInactiveError`` (answered with 503 by plugin routes)
+    when the config no longer loads the plugin, and HTTP 503 while the primary runtime is unavailable or ``source_id``
+    is not currently registered by this plugin.
+    """
+    plugin_name = _route_plugin_name(request, "event_source_emitter")
+    snapshot = require_api_state(request.app).snapshot
+    if (
+        snapshot.runtime_config is None
+        or config_plugins(snapshot.runtime_config, snapshot.runtime_paths).plugin_entry(plugin_name) is None
+    ):
+        raise PluginInactiveError(plugin_name)
+    embedded = ensure_app_state(request.app).embedded
+    if embedded is None:
+        raise HTTPException(503, "Event sources are unavailable.")
+    emitter = embedded.reactive_triggers.event_sources.emitter_for_plugin(plugin_name, source_id)
+    if emitter is None:
+        raise HTTPException(503, f"Event source {source_id!r} is not available for plugin {plugin_name!r}.")
+    return emitter
 
 
 def plugin_context(connection: HTTPConnection) -> PluginContext:

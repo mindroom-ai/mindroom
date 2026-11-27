@@ -23,6 +23,7 @@ from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DE
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.progress import structured_result_requested
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -231,14 +232,6 @@ def saved_output_envelope(result: object) -> dict[str, object] | None:
     return None
 
 
-def is_tool_output_error(result: object) -> bool:
-    """Return whether ``result`` is a ``mindroom_tool_output`` error receipt."""
-    if not isinstance(result, dict) or result.keys() != {"mindroom_tool_output"}:
-        return False
-    inner = cast("dict[str, object]", result)["mindroom_tool_output"]
-    return isinstance(inner, dict) and inner.get("status") == "error"
-
-
 def _error_receipt(error: str) -> dict[str, object]:
     return {
         "mindroom_tool_output": {
@@ -391,6 +384,8 @@ def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
     # Deferred because mindroom.tool_system.toolkits imports this module.
     from mindroom.tool_system.toolkits import read_tool_value  # noqa: PLC0415
 
+    if isinstance(result, ToolOutcome) and result.saved_output is not None and not any(result.media()):
+        result = result.saved_output
     if (value := read_tool_value(result)) is not None:
         if any(value.media()):
             return "Tool media results cannot be redirected to workspace files."
@@ -608,13 +603,29 @@ def prepare_tool_output_file(
     return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
 
 
+def _wrap_finalized_outcome(result: object, finalized: object) -> object:
+    if isinstance(result, ToolOutcome) and result.is_error and finalized is not result:
+        return ToolOutcome(
+            content=str(finalized),
+            is_error=True,
+            stop_after_call=result.stop_after_call,
+            refused_by=result.refused_by,
+            counts_as_tool_failure=result.counts_as_tool_failure,
+            saved_output=saved_output_envelope(finalized),
+        )
+    return finalized
+
+
 def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
     """Apply the shared explicit redirect or large-result policy after execution."""
     if isinstance(result, ToolOutputFileHandled):
         return result.result
-    if request.path is None:
-        return _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
-    return _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    finalized = (
+        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+        if request.path is None
+        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    )
+    return _wrap_finalized_outcome(result, finalized)
 
 
 async def _finalize_tool_output_file_async(request: ToolOutputFileRequest, result: object) -> object:
@@ -622,17 +633,18 @@ async def _finalize_tool_output_file_async(request: ToolOutputFileRequest, resul
     if isinstance(result, ToolOutputFileHandled):
         return result.result
     if request.path is not None:
-        return await asyncio.to_thread(
+        finalized = await asyncio.to_thread(
             _redirect_result_to_file,
             result,
             policy=request.policy,
             validated_path=request.path,
         )
+        return _wrap_finalized_outcome(result, finalized)
     serialized = _serialized_auto_save_payload(result, policy=request.policy)
     if serialized is None:
         return result
     try:
-        return await asyncio.to_thread(
+        finalized = await asyncio.to_thread(
             _write_auto_saved_result,
             serialized,
             policy=request.policy,
@@ -641,6 +653,7 @@ async def _finalize_tool_output_file_async(request: ToolOutputFileRequest, resul
     except Exception as exc:
         logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
         return result
+    return _wrap_finalized_outcome(result, finalized)
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:

@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -32,70 +32,18 @@ if TYPE_CHECKING:
     icon="SiGmail",
     icon_color="text-red-500",
     config_fields=[
-        ConfigField(
-            name="get_latest_emails",
-            label="Get Latest Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow retrieving the latest emails",
-        ),
-        ConfigField(
-            name="get_emails_from_user",
-            label="Get Emails From User",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field("get_latest_emails", "Get Latest Emails", description="Allow retrieving the latest emails"),
+        bool_config_field(
+            "get_emails_from_user",
+            "Get Emails From User",
             description="Allow retrieving emails from specific users",
         ),
-        ConfigField(
-            name="get_unread_emails",
-            label="Get Unread Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow retrieving unread emails",
-        ),
-        ConfigField(
-            name="get_starred_emails",
-            label="Get Starred Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow retrieving starred emails",
-        ),
-        ConfigField(
-            name="search_emails",
-            label="Search Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow searching through emails",
-        ),
-        ConfigField(
-            name="create_draft_email",
-            label="Create Draft Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow creating draft emails",
-        ),
-        ConfigField(
-            name="send_email",
-            label="Send Emails",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow sending emails",
-        ),
-        ConfigField(
-            name="send_email_reply",
-            label="Send Email Replies",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow sending replies to emails",
-        ),
+        bool_config_field("get_unread_emails", "Get Unread Emails", description="Allow retrieving unread emails"),
+        bool_config_field("get_starred_emails", "Get Starred Emails", description="Allow retrieving starred emails"),
+        bool_config_field("search_emails", "Search Emails", description="Allow searching through emails"),
+        bool_config_field("create_draft_email", "Create Draft Emails", description="Allow creating draft emails"),
+        bool_config_field("send_email", "Send Emails", description="Allow sending emails"),
+        bool_config_field("send_email_reply", "Send Email Replies", description="Allow sending replies to emails"),
     ],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,

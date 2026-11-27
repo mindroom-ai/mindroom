@@ -22,7 +22,7 @@ import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -333,6 +333,8 @@ def client_tool_result(result: object) -> object:
         return result
     attachments = [media_reference(kind, item) for kind, item in result.media()]
     if not attachments:
+        if isinstance(result, ToolOutcome) and result.saved_output is not None:
+            return result.saved_output
         return result.content
     return {"content": result.content, "attachments": attachments}
 
@@ -355,11 +357,13 @@ async def execute_tool_call(
     result = await run_tool_call(function, arguments, context, middleware=middleware)
     if result.error is not None:
         return ToolOutcome(content=result.failure_text, stop_after_call=function.stop_after_call, is_error=True)
+    if isinstance(result.value, ToolOutcome):
+        return replace(result.value, stop_after_call=function.stop_after_call or result.value.stop_after_call)
     value = result.value if isinstance(result.value, ToolValue) else ToolValue(content=str(result.value))
     return tool_outcome(
         value,
-        stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
-        is_error=isinstance(value, ToolOutcome) and value.is_error,
+        stop_after_call=function.stop_after_call,
+        is_error=False,
         saved_output=saved_output_envelope(result.value),
     )
 
@@ -367,8 +371,9 @@ async def execute_tool_call(
 def tool_outcome(
     value: ToolValue,
     *,
-    stop_after_call: bool,
+    stop_after_call: bool = False,
     is_error: bool,
+    counts_as_tool_failure: bool = True,
     saved_output: dict[str, object] | None = None,
 ) -> ToolOutcome:
     """Return ``value``'s text and media as one call's outcome, which stops the run after it or fails as given."""
@@ -380,6 +385,7 @@ def tool_outcome(
         files=value.files,
         stop_after_call=stop_after_call,
         is_error=is_error,
+        counts_as_tool_failure=counts_as_tool_failure,
         saved_output=saved_output,
     )
 

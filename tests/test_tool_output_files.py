@@ -1336,3 +1336,74 @@ async def test_async_tool_explicit_output_path_prepares_and_redirects_off_event_
     assert calls == []
     assert len(prepare_threads) == 3
     assert prepare_threads[2] != loop_thread_id
+
+
+@pytest.mark.asyncio
+async def test_async_tool_error_outcome_saves_off_loop_and_preserves_tool_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = "e" * 200
+    error_outcome = ToolOutcome(
+        content=payload,
+        is_error=True,
+        stop_after_call=True,
+        refused_by="policy",
+        counts_as_tool_failure=False,
+    )
+
+    async def fail_loudly() -> ToolOutcome:
+        return error_outcome
+
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=50)
+    function = _with_output_files(fail_loudly, policy)
+
+    write_threads: list[int] = []
+    redirect_threads: list[int] = []
+    atomic_threads: list[int] = []
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_auto_saved_result",
+        _track_thread(output_files_module._write_auto_saved_result, write_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_redirect_result_to_file",
+        _track_thread(output_files_module._redirect_result_to_file, redirect_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_atomic",
+        _track_thread(output_files_module._write_atomic, atomic_threads),
+    )
+
+    loop_thread_id = threading.get_ident()
+    auto_saved = await function.entrypoint()
+    assert isinstance(auto_saved, ToolOutcome)
+    assert auto_saved.is_error is True
+    assert auto_saved.stop_after_call is True
+    assert auto_saved.refused_by == "policy"
+    assert auto_saved.counts_as_tool_failure is False
+    assert auto_saved.saved_output is not None
+    auto_receipt = _receipt(auto_saved.saved_output)
+    assert auto_receipt["status"] == "saved_to_file"
+    assert auto_receipt["auto_saved"] is True
+    assert (tmp_path / cast("str", auto_receipt["path"])).read_text(encoding="utf-8") == payload
+    assert write_threads
+    assert atomic_threads
+    assert all(thread_id != loop_thread_id for thread_id in write_threads)
+    assert all(thread_id != loop_thread_id for thread_id in atomic_threads)
+
+    redirected = await function.entrypoint(mindroom_output_path="err.txt")
+    assert isinstance(redirected, ToolOutcome)
+    assert redirected.is_error is True
+    assert redirected.stop_after_call is True
+    assert redirected.refused_by == "policy"
+    assert redirected.counts_as_tool_failure is False
+    assert redirected.saved_output is not None
+    assert _receipt(redirected.saved_output)["path"] == "err.txt"
+    assert (tmp_path / "err.txt").read_text(encoding="utf-8") == payload
+    assert redirect_threads
+    assert all(thread_id != loop_thread_id for thread_id in redirect_threads)
+    assert len(atomic_threads) == 2
+    assert all(thread_id != loop_thread_id for thread_id in atomic_threads)

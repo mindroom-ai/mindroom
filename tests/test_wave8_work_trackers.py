@@ -4,17 +4,28 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.toolkits import adapt_toolkit
+from mindroom.tools.brandfetch import brandfetch_tools
+from mindroom.tools.cal_com import cal_com_tools
 from mindroom.tools.clickup import clickup_tools
+from mindroom.tools.google_maps import google_maps_tools
 from mindroom.tools.linear import linear_tools
-from mindroom.tools.native_helpers import UNSET, resolve_toggle
+from mindroom.tools.mem0 import mem0_tools
+from mindroom.tools.native_helpers import UNSET, resolve_toggle, restrict_actions
 from mindroom.tools.notion import notion_tools
 from mindroom.tools.trello import trello_tools
+from mindroom.tools.zep import zep_tools
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.authoring import Toolkit
 
 
 def test_batch1_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,9 +274,9 @@ def test_resolve_toggle_all_precedence_and_explicit_none_fail_closed() -> None:
     assert resolve_toggle(None, default=True, enable_all=False) is False
 
     override_false = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=False, all=True)
-    assert override_false._allow_update is True
+    assert "update_page" in override_false._write_actions
     explicit_none = notion_tools()(api_key="ntn_key", database_id="db-123", enable_update_page=None, all=True)
-    assert explicit_none._allow_update is False
+    assert "update_page" not in explicit_none._write_actions
 
 
 def test_trello_key_only_public_read_and_gated_write() -> None:
@@ -301,3 +312,101 @@ def test_trello_key_only_public_read_and_gated_write() -> None:
     two_field.client = two_field_mock
     created_board = json.loads(two_field.trello_write(action="create_board", name="Ops"))
     assert created_board["id"] == "b2"
+
+
+def test_restrict_actions_fast_path_ordering_and_pruning() -> None:
+    """Unified restrict_actions preserves enum order, fast-paths full sets, and prunes bullets/fields/required."""
+    fn = ToolFunction(
+        name="demo_action",
+        description="Demo tool.\nActions:\n- `first`: uses `alpha`.\n- `second`: uses `beta`.\n- `third`: uses `gamma`.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["first", "second", "third"]},
+                "shared": {"type": "string"},
+                "alpha": {"type": "string"},
+                "beta": {"type": "string"},
+                "gamma": {"type": "string"},
+            },
+            "required": ["action", "shared", "beta"],
+        },
+        entrypoint=lambda **_: "",
+    )
+
+    # Full-schema fast path returns the original ToolFunction unchanged even if input order differs.
+    assert restrict_actions(fn, ("third", "first", "second")) is fn
+
+    # Enum-only narrowing preserves declared enum order and prunes disabled bullets without dropping properties.
+    enum_only = restrict_actions(fn, ("third", "first"))
+    assert enum_only.parameters["properties"]["action"]["enum"] == ["first", "third"]
+    assert set(enum_only.parameters["properties"]) == {"action", "shared", "alpha", "beta", "gamma"}
+    assert "`first`" in (enum_only.description or "")
+    assert "`third`" in (enum_only.description or "")
+    assert "`second`" not in (enum_only.description or "")
+
+    # Action-field narrowing prunes properties and required alongside bullets.
+    pruned = restrict_actions(
+        fn,
+        ("third", "first"),
+        action_fields={"first": "alpha", "second": "beta", "third": "gamma"},
+        common_fields=("shared",),
+    )
+    assert pruned.parameters["properties"]["action"]["enum"] == ["first", "third"]
+    assert set(pruned.parameters["properties"]) == {"action", "shared", "alpha", "gamma"}
+    assert pruned.parameters["required"] == ["action", "shared"]
+    assert "`second`" not in (pruned.description or "")
+
+
+def test_wave8_per_action_toggles_narrow_offered_schemas() -> None:
+    """Wave 8 action-dispatched toolkits omit disabled actions, bullets, and unused parameters from schemas."""
+
+    def _offered(toolkit: Toolkit, name: str) -> ToolFunction:
+        adapted = adapt_toolkit(toolkit)
+        return next(fn for fn in adapted.functions if fn.name == name)
+
+    bf_default = _offered(brandfetch_tools()(api_key="k", client_id="c"), "brandfetch_lookup")
+    assert bf_default.parameters["properties"]["action"]["enum"] == ["by_identifier"]
+    assert "`by_brand`" not in (bf_default.description or "")
+
+    cal_tk = cal_com_tools()(api_key="k", enable_get_upcoming_bookings=False, enable_cancel_booking=False)
+    cal_read = _offered(cal_tk, "cal_com_read")
+    assert cal_read.parameters["properties"]["action"]["enum"] == ["available_slots"]
+    assert "email" not in cal_read.parameters["properties"]
+    assert "`upcoming_bookings`" not in (cal_read.description or "")
+    cal_write = _offered(cal_tk, "cal_com_write")
+    assert cal_write.parameters["properties"]["action"]["enum"] == ["create_booking", "reschedule_booking"]
+    assert "`cancel_booking`" not in (cal_write.description or "")
+
+    notion_write = _offered(notion_tools()(api_key="k", database_id="db-1", enable_update_page=False), "notion_write")
+    assert notion_write.parameters["properties"]["action"]["enum"] == ["create_page"]
+    assert "page_id" not in notion_write.parameters["properties"]
+    assert "`update_page`" not in (notion_write.description or "")
+
+    mem0_read = _offered(mem0_tools()(enable_search_memory=False), "mem0_read")
+    assert mem0_read.parameters["properties"]["action"]["enum"] == ["get_all"]
+    assert "query" not in mem0_read.parameters["properties"]
+    assert "`search`" not in (mem0_read.description or "")
+
+    zep_read = _offered(zep_tools()(api_key="k", enable_search_zep_memory=False), "zep_read")
+    assert zep_read.parameters["properties"]["action"]["enum"] == ["context", "messages"]
+    assert "query" not in zep_read.parameters["properties"]
+    assert "search_scope" not in zep_read.parameters["properties"]
+    assert "`search`" not in (zep_read.description or "")
+
+    maps_tk = google_maps_tools()(
+        key="AIzaSyTestKey",
+        search_places=False,
+        validate_address=False,
+        reverse_geocode=False,
+        get_elevation=False,
+        get_timezone=False,
+        get_distance_matrix=False,
+    )
+    places = _offered(maps_tk, "google_maps_places")
+    assert places.parameters["properties"]["action"]["enum"] == ["geocode"]
+    assert set(places.parameters["properties"]) - {"mindroom_output_path"} == {"action", "address", "region"}
+    assert "`search_places`" not in (places.description or "")
+    routes = _offered(maps_tk, "google_maps_routes")
+    assert routes.parameters["properties"]["action"]["enum"] == ["directions"]
+    assert "origins" not in routes.parameters["properties"]
+    assert "`distance_matrix`" not in (routes.description or "")

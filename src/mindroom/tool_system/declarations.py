@@ -113,6 +113,24 @@ class ConfigField:
             self.authored_override = False
 
 
+def bool_config_field(
+    name: str,
+    label: str,
+    default: bool | None = True,
+    *,
+    description: str | None = None,
+) -> ConfigField:
+    """Return an optional boolean configuration field."""
+    return ConfigField(
+        name=name,
+        label=label,
+        type="boolean",
+        required=False,
+        default=default,
+        description=description,
+    )
+
+
 @dataclass(frozen=True)
 class ApprovalAlias:
     """Calls of a toolkit's function that do what calls of ``judged_as`` do, so ``judged_as``'s rules judge them too.

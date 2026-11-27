@@ -12,6 +12,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -52,12 +53,9 @@ if TYPE_CHECKING:
             default=None,
             description="Atlassian cloud ID of the site; when the site URL is also set, both must name the same site.",
         ),
-        ConfigField(
-            name="write",
-            label="Allow Write Operations",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "write",
+            "Allow Write Operations",
             description="Allow creating, updating, commenting on, and transitioning Jira issues and Confluence pages.",
         ),
     ],

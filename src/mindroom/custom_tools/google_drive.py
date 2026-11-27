@@ -27,7 +27,6 @@ from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
     matches_google_function,
-    restrict_google_actions,
 )
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import named_mime_type
@@ -41,6 +40,7 @@ from mindroom.path_confinement import (
 )
 from mindroom.tool_system.metadata import coerce_optional_finite_number
 from mindroom.tool_system.toolkits import toolkit_function_names
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Sequence
@@ -63,7 +63,6 @@ _FOLDER_MIME_TYPE = f"{_WORKSPACE_PREFIX}folder"
 
 _ReadAction = Literal["list", "search", "read", "download"]
 _WriteAction = Literal["upload", "update", "create_folder", "move", "trash"]
-_ALL_READ_ACTIONS: tuple[str, ...] = ("list", "search", "read", "download")
 _READ_ACTION_FIELDS: dict[str, str] = {
     "list": "query max_results page_token",
     "search": "query max_results page_token",
@@ -367,10 +366,8 @@ class GoogleDriveTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict ``google_drive_read``'s action enum and parameters to enabled read actions."""
-        if matches_google_function(function.name, "google_drive_read") and len(self._read_actions) < len(
-            _ALL_READ_ACTIONS,
-        ):
-            return restrict_google_actions(function, self._read_actions, _READ_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_drive_read"):
+            return restrict_actions(function, self._read_actions, action_fields=_READ_ACTION_FIELDS)
         return function
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
@@ -550,11 +547,15 @@ class GoogleDriveTools(GoogleApiToolkit):
                     "incompleteSearch": incomplete,
                 },
             )
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_search_failed", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_search_failed", exc)
+
+    @staticmethod
+    def _drive_error(event: str, exc: Exception, **log_fields: object) -> str:
+        if isinstance(exc, HttpError):
+            return json.dumps({"error": f"Google Drive API error: {exc}"})
+        logger.warning(event, error_type=type(exc).__name__, **log_fields)
+        return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     def _read_file(self, file_id: str) -> str:
         try:
@@ -599,11 +600,8 @@ class GoogleDriveTools(GoogleApiToolkit):
                     "exportMimeType": export_mime,
                 },
             )
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_read_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_read_failed", exc, file_id=file_id)
 
     def _download_file(self, file_id: str, export_format: str | None = None) -> str:
         try:
@@ -648,14 +646,10 @@ class GoogleDriveTools(GoogleApiToolkit):
             if target_mime:
                 result["originalMimeType"] = mime_type
             return json.dumps(result)
-        except HttpError as exc:
-            error = f"Google Drive API error: {exc}"
         except ByteLimitExceededError as exc:
-            error = str(exc)
+            return json.dumps({"error": str(exc)})
         except Exception as exc:
-            logger.warning("google_drive_download_failed", file_id=file_id, error_type=type(exc).__name__)
-            error = f"Unexpected error: {type(exc).__name__}: {exc}"
-        return json.dumps({"error": error})
+            return self._drive_error("google_drive_download_failed", exc, file_id=file_id)
 
     def _upload_file(
         self,
@@ -693,11 +687,8 @@ class GoogleDriveTools(GoogleApiToolkit):
                     .execute()
                 )
             return json.dumps(uploaded_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_upload_failed", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_upload_failed", exc)
 
     def _update_file(
         self,
@@ -729,11 +720,8 @@ class GoogleDriveTools(GoogleApiToolkit):
                     .execute()
                 )
             return json.dumps(updated_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_update_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_update_failed", exc, file_id=file_id)
 
     def _create_folder(self, name: str | None, parent_id: str | None = None) -> str:
         if not (name and name.strip()):
@@ -745,11 +733,8 @@ class GoogleDriveTools(GoogleApiToolkit):
             service = self._google_api_service()
             folder = service.files().create(body=body, fields=_WRITE_RESULT_FIELDS, supportsAllDrives=True).execute()
             return json.dumps(folder)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_create_folder_failed", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_create_folder_failed", exc)
 
     def _move_file(self, file_id: str | None, parent_id: str | None, name: str | None = None) -> str:
         if not (file_id and file_id.strip()):
@@ -775,11 +760,8 @@ class GoogleDriveTools(GoogleApiToolkit):
                 update_kwargs["removeParents"] = ",".join(removed_parents)
             moved_file = service.files().update(**update_kwargs).execute()
             return json.dumps(moved_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_move_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_move_failed", exc, file_id=file_id)
 
     def _trash_file(self, file_id: str | None) -> str:
         if not (file_id and file_id.strip()):
@@ -797,11 +779,8 @@ class GoogleDriveTools(GoogleApiToolkit):
                 .execute()
             )
             return json.dumps(trashed_file)
-        except HttpError as exc:
-            return json.dumps({"error": f"Google Drive API error: {exc}"})
         except Exception as exc:
-            logger.warning("google_drive_trash_failed", file_id=file_id, error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._drive_error("google_drive_trash_failed", exc, file_id=file_id)
 
     def google_drive_read(
         self,

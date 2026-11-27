@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
@@ -80,20 +87,8 @@ class _ResendTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_send_email",
-            label="Enable Send Email",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_send_email", "Enable Send Email"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["resend"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#resend",

@@ -14,7 +14,8 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from functools import reduce
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
@@ -441,17 +442,16 @@ def _checked_results(
     arguments: dict[str, Any],
     tool_name: str,
 ) -> Callable[..., Awaitable[_ToolHookResult]]:
-    """Return ``func`` with each successful result as the result-transform hooks leave its text, or withheld.
+    """Return ``func`` with each returned result (including failed tool outcomes) checked by result-transform hooks.
 
     The call's record then gets only the checked result. A value with media keeps its media and flags; any other
-    value stays itself unless a hook replaced its text. A control result, an OAuth connection prompt or an outcome
-    that stops the run, is read after the call, so a hook can keep or withhold it but not rewrite it.
+    value stays itself unless a hook replaced its text (clearing any stale ``saved_output`` on ``ToolOutcome``).
+    A control result, an OAuth connection prompt or an outcome that stops the run, is read after the call, so a hook
+    can keep or withhold it but not rewrite it.
     """
 
     async def checked(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
         result = await func(**kwargs)
-        if _answered_failure(result):
-            return result
         text = result.content if isinstance(result, ToolValue) else str(result)
         stops = isinstance(result, ToolOutcome) and result.stop_after_call
         control = stops or is_oauth_connection_required_result(text if isinstance(result, ToolValue) else result)
@@ -463,6 +463,8 @@ def _checked_results(
             return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
         if transformed == text:
             return result
+        if isinstance(result, ToolOutcome):
+            return replace(result, content=transformed, saved_output=None)
         return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
 
     return checked
@@ -833,20 +835,21 @@ def _without_given_secrets(
     values = sorted(given.values(), key=lambda value: -len(value))
 
     def masked_text(text: str) -> str:
-        for value in values:
-            text = text.replace(value, REDACTED)
-        return text
+        return reduce(lambda current, value: current.replace(value, REDACTED), values, text)
 
     def masked(result: object) -> object:
         if isinstance(result, str):
             return masked_text(result)
+        if isinstance(result, ToolOutcome) and result.saved_output is not None:
+            masked_saved = cast("dict[str, object]", masked(result.saved_output))
+            return replace(result, content=masked_text(str(masked_saved)), saved_output=masked_saved)
         if isinstance(result, ToolValue):
             # A result with media beside its text, as a shell command that used the agent CLI returns.
             return replace(result, content=masked_text(result.content))
         if isinstance(result, dict):
             return {key: masked(item) for key, item in result.items()}
         if isinstance(result, list):
-            return [masked(item) for item in result]
+            return list(map(masked, result))
         return result
 
     async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments

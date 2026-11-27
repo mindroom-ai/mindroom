@@ -22,7 +22,10 @@ from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
+from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
+from mindroom.tool_system.output_files import saved_output_envelope
 from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress, structured_result_requested
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.workers.in_flight import acquire_worker_in_flight
 from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
@@ -570,6 +573,22 @@ def _stream_execute_response(
         )
 
 
+def _worker_error_outcome(result: object, *, counts_as_tool_failure: bool = True) -> ToolOutcome:
+    """Reconstruct a failed ``ToolOutcome`` from a worker's ``ExecuteResponse(is_error=True)`` payload."""
+    decoded = decode_media_result(result) if is_media_result_envelope(result) else result
+    value = decoded if isinstance(decoded, ToolValue) else ToolValue(content=str(decoded))
+    return ToolOutcome(
+        content=value.content,
+        images=value.images,
+        audios=value.audios,
+        videos=value.videos,
+        files=value.files,
+        is_error=True,
+        counts_as_tool_failure=counts_as_tool_failure,
+        saved_output=saved_output_envelope(decoded),
+    )
+
+
 def execute_worker_proxy_request(
     *,
     config: WorkerProxyClientConfig,
@@ -713,7 +732,11 @@ def execute_worker_proxy_request(
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
     report_tool_metadata(**(answer.metadata or {}))
-    return answer.result
+    return (
+        _worker_error_outcome(answer.result, counts_as_tool_failure=answer.counts_as_tool_failure)
+        if answer.is_error
+        else answer.result
+    )
 
 
 def _create_credential_lease(

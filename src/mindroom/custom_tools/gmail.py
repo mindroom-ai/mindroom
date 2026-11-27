@@ -24,12 +24,12 @@ from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
     matches_google_function,
-    restrict_google_actions,
     visible_google_function_map,
 )
 from mindroom.file_access import resolve_agent_file
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tools.native_helpers import restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -116,37 +116,6 @@ _ManageAction = Literal[
     "delete_custom_label",
 ]
 
-_ALL_READ_ACTIONS: tuple[str, ...] = (
-    "latest",
-    "from_user",
-    "unread",
-    "starred",
-    "by_context",
-    "by_date",
-    "by_thread",
-    "search_emails",
-    "get_message",
-    "get_thread",
-    "search_threads",
-    "get_draft",
-    "list_drafts",
-    "list_custom_labels",
-)
-_ALL_DRAFT_ACTIONS: tuple[str, ...] = ("create", "update")
-_ALL_SEND_ACTIONS: tuple[str, ...] = ("send", "reply")
-_ALL_MANAGE_ACTIONS: tuple[str, ...] = (
-    "mark_read",
-    "mark_unread",
-    "star",
-    "unstar",
-    "apply_label",
-    "remove_label",
-    "delete_custom_label",
-)
-
-_GMAIL_DRAFT_READ_ACTIONS = frozenset({"get_draft", "list_drafts"})
-_GMAIL_MAILBOX_READ_ACTIONS = frozenset(_ALL_READ_ACTIONS) - _GMAIL_DRAFT_READ_ACTIONS
-
 _READ_ACTION_FIELDS: dict[str, str] = {
     "latest": "count page_token",
     "from_user": "user count page_token",
@@ -163,6 +132,8 @@ _READ_ACTION_FIELDS: dict[str, str] = {
     "list_drafts": "count page_token",
     "list_custom_labels": "",
 }
+_GMAIL_DRAFT_READ_ACTIONS = frozenset({"get_draft", "list_drafts"})
+_GMAIL_MAILBOX_READ_ACTIONS = frozenset(_READ_ACTION_FIELDS) - _GMAIL_DRAFT_READ_ACTIONS
 _DRAFT_ACTION_FIELDS: dict[str, str] = {
     "create": "to subject body cc bcc attachments thread_id message_id",
     "update": "draft_id to subject body cc bcc attachments thread_id message_id",
@@ -549,15 +520,15 @@ class GmailTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict Gmail action enums and parameters to enabled actions."""
-        restrictions: tuple[tuple[str, tuple[str, ...], tuple[str, ...], dict[str, str]], ...] = (
-            ("gmail_read", self._read_actions, _ALL_READ_ACTIONS, _READ_ACTION_FIELDS),
-            ("gmail_draft", self._draft_actions, _ALL_DRAFT_ACTIONS, _DRAFT_ACTION_FIELDS),
-            ("gmail_send", self._send_actions, _ALL_SEND_ACTIONS, _SEND_ACTION_FIELDS),
-            ("gmail_manage", self._manage_actions, _ALL_MANAGE_ACTIONS, _MANAGE_ACTION_FIELDS),
+        restrictions: tuple[tuple[str, tuple[str, ...], dict[str, str]], ...] = (
+            ("gmail_read", self._read_actions, _READ_ACTION_FIELDS),
+            ("gmail_draft", self._draft_actions, _DRAFT_ACTION_FIELDS),
+            ("gmail_send", self._send_actions, _SEND_ACTION_FIELDS),
+            ("gmail_manage", self._manage_actions, _MANAGE_ACTION_FIELDS),
         )
-        for base_name, enabled, all_actions, fields in restrictions:
-            if matches_google_function(function.name, base_name) and len(enabled) < len(all_actions):
-                return restrict_google_actions(function, enabled, fields)
+        for base_name, enabled, fields in restrictions:
+            if matches_google_function(function.name, base_name):
+                return restrict_actions(function, enabled, action_fields=fields)
         return function
 
     @property
@@ -893,25 +864,29 @@ class GmailTools(GoogleApiToolkit):
                             att["attachmentId"],
                             att["filename"],
                         )
-        except HttpError as exc:
-            logger.warning("gmail_get_message_failed", status=exc.resp.status)
-            return json.dumps({"error": f"Gmail API error: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_get_message_unexpected_error", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._json_read_error("gmail_get_message", exc)
         return json.dumps(result)
+
+    @staticmethod
+    def _text_error(operation: str, http_prefix: str, exc: Exception) -> str:
+        if isinstance(exc, HttpError):
+            logger.warning(f"{operation}_failed", status=exc.resp.status)
+            return f"{http_prefix}: {exc}"
+        logger.warning(f"{operation}_unexpected_error", error_type=type(exc).__name__)
+        return f"Unexpected error: {type(exc).__name__}: {exc}"
+
+    @classmethod
+    def _json_read_error(cls, operation: str, exc: Exception) -> str:
+        return json.dumps({"error": cls._text_error(operation, "Gmail API error", exc)})
 
     def _get_thread(self, thread_id: str) -> str:
         try:
             service = self._google_api_service()
             thread = service.users().threads().get(userId="me", id=thread_id).execute()
             messages = [self._format_message(msg) for msg in thread.get("messages", [])]
-        except HttpError as exc:
-            logger.warning("gmail_get_thread_failed", status=exc.resp.status)
-            return json.dumps({"error": f"Gmail API error: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_get_thread_unexpected_error", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._json_read_error("gmail_get_thread", exc)
         return json.dumps({"threadId": thread_id, "messages": messages, "messageCount": len(messages)})
 
     def _search_threads(self, query: str, count: int, page_token: str | None) -> str:
@@ -922,12 +897,8 @@ class GmailTools(GoogleApiToolkit):
             if page_token:
                 list_kwargs["pageToken"] = page_token
             results = service.users().threads().list(**list_kwargs).execute()
-        except HttpError as exc:
-            logger.warning("gmail_search_threads_failed", status=exc.resp.status)
-            return json.dumps({"error": f"Gmail API error: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_search_threads_unexpected_error", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._json_read_error("gmail_search_threads", exc)
 
         threads = results.get("threads", [])
         response: dict[str, Any] = {
@@ -945,12 +916,8 @@ class GmailTools(GoogleApiToolkit):
             service = self._google_api_service()
             draft = service.users().drafts().get(userId="me", id=draft_id, format="full").execute()
             msg_data = draft.get("message", {})
-        except HttpError as exc:
-            logger.warning("gmail_get_draft_failed", status=exc.resp.status)
-            return json.dumps({"error": f"Gmail API error: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_get_draft_unexpected_error", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._json_read_error("gmail_get_draft", exc)
         return json.dumps({"draftId": draft["id"], "message": self._format_message(msg_data) if msg_data else {}})
 
     def _list_drafts(self, count: int, page_token: str | None) -> str:
@@ -961,12 +928,8 @@ class GmailTools(GoogleApiToolkit):
             if page_token:
                 list_kwargs["pageToken"] = page_token
             results = service.users().drafts().list(**list_kwargs).execute()
-        except HttpError as exc:
-            logger.warning("gmail_list_drafts_failed", status=exc.resp.status)
-            return json.dumps({"error": f"Gmail API error: {exc}"})
         except Exception as exc:
-            logger.warning("gmail_list_drafts_unexpected_error", error_type=type(exc).__name__)
-            return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
+            return self._json_read_error("gmail_list_drafts", exc)
 
         drafts = results.get("drafts", [])
         response: dict[str, Any] = {
@@ -983,12 +946,8 @@ class GmailTools(GoogleApiToolkit):
         try:
             service = self._google_api_service()
             labels = service.users().labels().list(userId="me").execute().get("labels", [])
-        except HttpError as exc:
-            logger.warning("gmail_list_labels_failed", status=exc.resp.status)
-            return f"Error fetching labels: {exc}"
         except Exception as exc:
-            logger.warning("gmail_list_labels_unexpected_error", error_type=type(exc).__name__)
-            return f"Unexpected error: {type(exc).__name__}: {exc}"
+            return self._text_error("gmail_list_labels", "Error fetching labels", exc)
 
         custom_labels = [label["name"] for label in labels if label.get("type") == "user"]
         if not custom_labels:
@@ -1023,12 +982,8 @@ class GmailTools(GoogleApiToolkit):
 
             for msg in messages:
                 service.users().messages().modify(userId="me", id=msg["id"], body={"addLabelIds": [label_id]}).execute()
-        except HttpError as exc:
-            logger.warning("gmail_apply_label_failed", status=exc.resp.status)
-            return f"Error applying label '{label_name}': {exc}"
         except Exception as exc:
-            logger.warning("gmail_apply_label_unexpected_error", error_type=type(exc).__name__)
-            return f"Unexpected error: {type(exc).__name__}: {exc}"
+            return self._text_error("gmail_apply_label", f"Error applying label '{label_name}'", exc)
         return f"Applied label '{label_name}' to {len(messages)} emails matching '{query}'."
 
     def _remove_label(self, query: str, label_name: str, count: int) -> str:
@@ -1056,12 +1011,8 @@ class GmailTools(GoogleApiToolkit):
                     id=msg["id"],
                     body={"removeLabelIds": [label_id]},
                 ).execute()
-        except HttpError as exc:
-            logger.warning("gmail_remove_label_failed", status=exc.resp.status)
-            return f"Error removing label '{label_name}': {exc}"
         except Exception as exc:
-            logger.warning("gmail_remove_label_unexpected_error", error_type=type(exc).__name__)
-            return f"Unexpected error: {type(exc).__name__}: {exc}"
+            return self._text_error("gmail_remove_label", f"Error removing label '{label_name}'", exc)
         return f"Removed label '{label_name}' from {len(messages)} emails matching '{query}'."
 
     def _delete_custom_label(self, label_name: str, confirm: bool) -> str:
@@ -1080,12 +1031,8 @@ class GmailTools(GoogleApiToolkit):
                 return f"Cannot delete system label '{label_name}'. Only user-created labels can be deleted."
             service.users().labels().delete(userId="me", id=target["id"]).execute()
             self._label_cache = None
-        except HttpError as exc:
-            logger.warning("gmail_delete_label_failed", status=exc.resp.status)
-            return f"Error deleting label '{label_name}': {exc}"
         except Exception as exc:
-            logger.warning("gmail_delete_label_unexpected_error", error_type=type(exc).__name__)
-            return f"Unexpected error: {type(exc).__name__}: {exc}"
+            return self._text_error("gmail_delete_label", f"Error deleting label '{label_name}'", exc)
         return f"Successfully deleted label '{label_name}'. This label has been removed from all emails."
 
     def _dispatch_list_read(

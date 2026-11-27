@@ -27,12 +27,12 @@ from mindroom.egress.policy import (
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -416,16 +416,12 @@ class _ApprovedEgressTools(Toolkit):
     icon="FiShield",
     icon_color="text-emerald-600",
     config_fields=[
-        ConfigField(
-            name="allow_full_access",
-            label="Allow Full Network Access",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "allow_full_access",
+            "Allow Full Network Access",
             default=False,
-            description=(
-                'Allow temporary approval requests for all public hostnames using hostnames=["*"]. '
-                "Private-network and port restrictions still apply."
-            ),
+            description='Allow temporary approval requests for all public hostnames using hostnames=["*"]. '
+            "Private-network and port restrictions still apply.",
         ),
     ],
     function_names=("request_network_access",),

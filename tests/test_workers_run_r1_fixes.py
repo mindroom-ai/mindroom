@@ -226,7 +226,10 @@ async def test_r3_bare_name_missing_from_a_path_with_a_file_entry_is_command_not
     entry = tmp_path / "not-a-directory"
     entry.write_text("")
     result = await _launch(["missing-program-xyz"], path=f"{tmp_path}{os.pathsep}{entry}", cwd=tmp_path)
-    assert result == ShellRunResult(message="Exit code 127\nStderr:\nmissing-program-xyz: command not found")
+    assert result == ShellRunResult(
+        message="Exit code 127\nStderr:\nmissing-program-xyz: command not found",
+        return_code=127,
+    )
 
 
 @pytest.mark.asyncio
@@ -258,7 +261,10 @@ async def test_r3_program_that_is_found_but_cannot_run_is_reported_by_its_spawn_
     script.write_text(f"{first_line}echo hi\n")
     script.chmod(mode)
     result = await _launch(["script-xyz" if bare else str(script)], path=tmp_path, cwd=tmp_path)
-    assert result == ShellRunResult(message=f"Exit code {exit_code}\nStderr:\n{script}: {reason}")
+    assert result == ShellRunResult(
+        message=f"Exit code {exit_code}\nStderr:\n{script}: {reason}",
+        return_code=exit_code,
+    )
 
 
 @pytest.mark.asyncio
@@ -294,7 +300,10 @@ async def test_r4_program_with_a_trailing_slash_keeps_it_and_is_never_opened(
         program.chmod(0o755)
     try:
         result = await _launch(["./script-xyz/"], path=tmp_path, cwd=tmp_path)
-        assert result == ShellRunResult(message="Exit code 126\nStderr:\n./script-xyz/: Not a directory")
+        assert result == ShellRunResult(
+            message="Exit code 126\nStderr:\n./script-xyz/: Not a directory",
+            return_code=126,
+        )
         if fifo:
             assert os.read(writer, 64) == line
     finally:

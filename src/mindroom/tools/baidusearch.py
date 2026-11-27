@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -57,27 +64,9 @@ if TYPE_CHECKING:
             required=False,
             default=10,
         ),
-        ConfigField(
-            name="debug",
-            label="Debug",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_baidu_search",
-            label="Enable Baidu Search",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("debug", "Debug", default=False),
+        bool_config_field("enable_baidu_search", "Enable Baidu Search"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["baidusearch", "pycountry"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#baidusearch",

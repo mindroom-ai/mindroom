@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     ToolCategory,
     ToolExecutionTarget,
     ToolFileAccess,
     ToolManagedInitArg,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
@@ -35,11 +35,9 @@ if TYPE_CHECKING:
     dependencies=[],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     config_fields=[
-        ConfigField(
-            name="allow_private_networks",
-            label="Allow Private Networks",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "allow_private_networks",
+            "Allow Private Networks",
             default=False,
             description="Allow trusted private networks. Metadata and link-local addresses remain blocked.",
         ),

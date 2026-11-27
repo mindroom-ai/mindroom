@@ -8,7 +8,14 @@ from typing import Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -294,13 +301,7 @@ class _DuckDbTools(Toolkit):
             default=None,
             description="SQL statements run, in order, when the tool opens its database connection.",
         ),
-        ConfigField(
-            name="read_only",
-            label="Read Only",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("read_only", "Read Only", default=False),
     ],
     dependencies=["duckdb"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#duckdb",

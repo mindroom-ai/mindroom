@@ -1301,7 +1301,7 @@
     "functions": [
       {
         "name": "brandfetch_lookup",
-        "description": "Retrieve Brandfetch brand assets or search brands by name.\nActions:\n- `by_identifier`: Fetch brand assets for domain, brand ID, ISIN, or ticker `query` (requires `api_key`).\n- `by_brand`: Search brands by name `query` (requires `client_id` and `enable_search_by_brand`).",
+        "description": "Retrieve Brandfetch brand assets or search brands by name.\nActions:\n- `by_identifier`: Fetch brand assets for domain, brand ID, ISIN, or ticker `query` (requires `api_key`).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1311,8 +1311,7 @@
             "action": {
               "type": "string",
               "enum": [
-                "by_identifier",
-                "by_brand"
+                "by_identifier"
               ]
             },
             "mindroom_output_path": {
@@ -14820,7 +14819,7 @@
     "functions": [
       {
         "name": "openbb_get",
-        "description": "Fetch equity data from the configured OpenBB provider.\n\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).",
+        "description": "Fetch equity data from the configured OpenBB provider.\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20986,6 +20985,12 @@
                       },
                       {
                         "type": "integer"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     ]
                   }
@@ -21064,7 +21069,14 @@
               ]
             },
             "new_thread": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "thread_key": {
               "anyOf": [
@@ -22409,7 +22421,7 @@
     "functions": [
       {
         "name": "yfinance_get",
-        "description": "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n- `stock_price`: current/regular market stock price.",
+        "description": "Fetch financial data for `symbol` from Yahoo Finance.\nActions:\n- `stock_price`: current/regular market stock price.",
         "parameters": {
           "type": "object",
           "properties": {

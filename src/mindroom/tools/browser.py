@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -54,16 +55,12 @@ if TYPE_CHECKING:
                 "The desktop target instead uses its local storage path's desktop-browser/ directory."
             ),
         ),
-        ConfigField(
-            name="allow_private_networks",
-            label="Allow Private Networks",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "allow_private_networks",
+            "Allow Private Networks",
             default=False,
-            description=(
-                "Allow browser navigation and page subresources to reach trusted private, local, or loopback "
-                "network addresses. Cloud metadata and link-local addresses stay blocked."
-            ),
+            description="Allow browser navigation and page subresources to reach trusted private, local, or loopback "
+            "network addresses. Cloud metadata and link-local addresses stay blocked.",
         ),
         ConfigField(
             name="default_target",

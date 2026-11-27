@@ -7,22 +7,36 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import sys
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.agent import AgentConfig
+from mindroom.config.models import DefaultsConfig
+from mindroom.hooks import EVENT_TOOL_RESULT_TRANSFORM, HookBindings, HookRegistry, ToolResultTransformContext, hook
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
-from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptToolCallRequest
+from mindroom.script_runs.broker import ScriptBrokerAuthenticationError, ScriptToolCallRequest, _shell_exit_completes
 from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.manager import ScriptRunLimits
-from mindroom.script_runs.models import ScriptCallState, ScriptRunState, ScriptToolGrant
+from mindroom.script_runs.models import (
+    ScriptCallRecord,
+    ScriptCallState,
+    ScriptRunRecord,
+    ScriptRunState,
+    ScriptToolGrant,
+)
 from mindroom.script_runs.reasons import RUNTIME_RESTARTED
+from mindroom.script_runs.store import mint_script_capability
+from mindroom.tool_system.invocation import CallResult
+from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import (
@@ -35,13 +49,13 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.replay import node_digest
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
+from tests.test_tool_hooks import _plugin
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import WorkflowRun
 
@@ -997,3 +1011,88 @@ async def test_cancel_revokes_attempt_and_keeps_completed_nodes(stack: WorkflowS
     await asyncio.sleep(0)
     assert stack.counting_tool.lines == ["a"]
     assert await stack.engine.cancel(stack.run_id, reason="Again.") == run
+
+
+def _withhold_hooks() -> HookBindings:
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def withhold(_ctx: ToolResultTransformContext) -> None:
+        raise RuntimeError("withheld")  # noqa: EM101
+
+    return HookBindings(registry=HookRegistry.from_plugins([_plugin("guard", [withhold])]))
+
+
+def test_shell_exit_completes_distinguishes_plain_and_workflow_contracts() -> None:
+    """_shell_exit_completes settles only non-counting shell outcomes (with int exit_code for workflows)."""
+    sh, other = ScriptToolGrant("shell", "run_shell_command"), ScriptToolGrant("counter", "append")
+    cases: list[tuple[str | None, ScriptToolGrant, str, bool, dict[str, object] | None, bool]] = [
+        (None, sh, "failed", False, None, True),
+        ("wf-1", sh, "failed", False, {"exit_code": 2}, True),
+        ("wf-1", sh, "failed", False, None, False),
+        ("wf-1", sh, "failed", False, {"exit_code": True}, False),
+        (None, sh, "failed", True, {"exit_code": 2}, False),
+        ("wf-1", sh, "declined", True, {"exit_code": 2}, False),
+        (None, other, "failed", False, {"exit_code": 2}, False),
+    ]
+    for wf, grant, status, counts, meta, expected in cases:
+        run = ScriptRunRecord("r", "a", "@u:t", "!r:t", "d", (grant,), "h", workflow_run_id=wf)
+        call = ScriptCallRecord("r", "c", grant, "d", ScriptCallState.PENDING, "2026-01-01T00:00:00Z")
+        ref = "plugin_hook" if status == "declined" else None
+        out = ToolOutcome(content="e", is_error=True, counts_as_tool_failure=counts, refused_by=ref)
+        assert _shell_exit_completes(run, call, CallResult(status, out), meta) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("real_shell_refusal")
+async def test_workflow_and_plain_script_shell_exit_contracts(stack: WorkflowStack) -> None:
+    """Workflow shell launch failures get exit_code=127, plain scripts keep >3000-char exit output, and withheld/refused fail."""
+    ctx = stack.context
+    env = {**ctx.runtime_paths.process_env, "MINDROOM_SANDBOX_RUNNER_MODE": "true"}
+    stack.resolver.context = replace(ctx, runtime_paths=replace(ctx.runtime_paths, process_env=env))
+    missing = "/nonexistent-workflow-binary-xyz"
+    launch = await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args=[missing], worker="build"))
+    assert isinstance(launch, dict)
+    assert (launch["exit_code"], missing in str(launch["output"])) == (127, True)
+
+    stack.resolver.context = replace(stack.resolver.context, hooks=_withhold_hooks())
+    with pytest.raises(NodeFailed) as exc_info:
+        await stack.result("@1", "tool", tool_args("shell", "run_shell_command", args="echo evil; exit 2"))
+    assert (exc_info.value.kind, stack.status(stack.run_id)[1][-1].state) == (
+        "indeterminate",
+        WorkflowNodeState.INDETERMINATE,
+    )
+
+    # Plain script (workflow_run_id=None) keeps >3000-char exit output; invalid, withheld, and refused settle FAILED.
+    stack.resolver.context = ctx
+    token, token_hash = mint_script_capability()
+    grant = ScriptToolGrant("shell", "run_shell_command")
+    rec = ScriptRunRecord(
+        f"script-{uuid4().hex}",
+        ctx.agent_name,
+        ctx.requester_id,
+        ctx.room_id,
+        "plain",
+        (grant,),
+        token_hash,
+        thread_root_event_id=ctx.resolved_thread_id,
+        execution_identity=serialize_tool_execution_identity(ctx.execution_identity),
+        local_unsafe=True,
+    )
+    run_id = stack.script_store.create_run(rec).run_id
+    stack.script_store.transition_run(run_id, state=ScriptRunState.RUNNING)
+
+    async def call_plain(cid: str, args: dict[str, object]) -> ScriptCallRecord:
+        await stack.broker.accept_authenticated(ScriptToolCallRequest(run_id, cid, grant, args), f"Bearer {token}")
+        return await stack.broker._tasks[(run_id, cid)]
+
+    marker = "A" * 3500 + "-TAIL"
+    cmd = [sys.executable, "-c", f"import sys; print({marker!r}); sys.exit(3)"]
+    done = await call_plain("exit-3", {"args": cmd})
+    assert done.state is ScriptCallState.COMPLETED
+    assert isinstance(done.result, str)
+    assert (done.result.startswith("Exit code 3\nOutput:\n"), marker in done.result) == (True, True)
+    assert (await call_plain("bad-timeout", {"args": "echo hi", "timeout": 0})).state is ScriptCallState.FAILED
+    stack.resolver.context = replace(ctx, hooks=_withhold_hooks())
+    assert (await call_plain("withheld", {"args": "echo evil; exit 2"})).state is ScriptCallState.FAILED
+    refused = ctx.config.model_copy(update={"defaults": DefaultsConfig(allow_shell_without_worker=False)})
+    stack.resolver.context = replace(ctx, config=refused)
+    assert (await call_plain("refused", {"args": "echo nope"})).state is ScriptCallState.FAILED

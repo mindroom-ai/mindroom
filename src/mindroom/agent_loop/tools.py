@@ -172,14 +172,15 @@ def count_tool_failures(failing_tools: dict[str, FailingTool], executions: Itera
     Pass only calls that ran: a call the loop answered without running it (an unknown tool, undecodable arguments, the
     call limit, a cut-off response, a denied approval, a refusal for failing) says nothing about whether the tool works.
     A call its tool middleware answered with an error, such as a policy declining it, counts as failed, as the model
-    reads it.
+    reads it. A failed call whose ``counts_as_tool_failure`` is False (such as a shell command's own non-zero exit or
+    timeout) shows the tool itself worked and clears its failure streak instead.
     """
     errors: dict[str, str | None] = {}
     succeeded: set[str] = set()
     for execution in executions:
-        if execution.is_error:
+        if execution.is_error and execution.counts_as_tool_failure:
             errors[execution.tool_name] = execution.result
-        elif execution.is_error is False:
+        elif execution.is_error is not None:
             succeeded.add(execution.tool_name)
     for name in succeeded:
         failing_tools.pop(name, None)
@@ -401,6 +402,7 @@ async def _run_call(
         flush()  # The latest report lands before the result.
     execution.result = outcome.content
     execution.is_error = outcome.is_error
+    execution.counts_as_tool_failure = outcome.counts_as_tool_failure
     execution.stop_after_call = outcome.stop_after_call
     emit((call, tool_result_message(execution, media=outcome)))
 
@@ -413,11 +415,11 @@ def tool_result_content(result: str | None, *, is_error: bool | None) -> str | N
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
     """Return the tool message that answers ``execution`` with its recorded result.
 
-    ``media`` is the tool value whose media the message carries when the call succeeded; a failed call carries none.
-    A success without text says so (``tool_result_content``).
+    ``media`` is the tool value whose media the message carries, including checked media on a failed outcome
+    (exceptions and withheld results carry empty media). A success without text says so (``tool_result_content``).
     """
     images = audio = videos = files = None
-    if media is not None and not execution.is_error:
+    if media is not None:
         images = list(media.images) or None
         audio = list(media.audios) or None
         videos = list(media.videos) or None

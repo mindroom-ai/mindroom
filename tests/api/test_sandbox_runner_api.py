@@ -2798,6 +2798,8 @@ def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
+        "counts_as_tool_failure": True,
         "shell_backgrounded": False,
     }
     assert retried.json()["ok"] is True
@@ -2857,6 +2859,8 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
+        "counts_as_tool_failure": True,
         "shell_backgrounded": False,
     }
     assert not failures
@@ -2899,6 +2903,8 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
         "result": None,
         "error": "Tool call was cancelled.",
         "failure_kind": "tool",
+        "is_error": False,
+        "counts_as_tool_failure": True,
         "shell_backgrounded": False,
     }
     assert spawned == []
@@ -3341,6 +3347,8 @@ def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
         "result": "from the snapshot",
         "error": None,
         "failure_kind": None,
+        "is_error": False,
+        "counts_as_tool_failure": True,
         "shell_backgrounded": False,
     }
 
@@ -3876,6 +3884,8 @@ def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mod
         "result": "Stopped after 1s.\nOutput:\nstarted",
         "error": None,
         "failure_kind": None,
+        "is_error": True,
+        "counts_as_tool_failure": False,
         "shell_backgrounded": False,
     }
 
@@ -4685,6 +4695,8 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
         "result": "ok",
         "error": None,
         "failure_kind": None,
+        "is_error": False,
+        "counts_as_tool_failure": True,
         "shell_backgrounded": False,
     }
     assert prepare_calls == 1
@@ -8513,8 +8525,16 @@ def test_shell_direct_supervised_dispatch_preserves_env_sandbox_output_and_start
             structured_result=True,
         )
         assert saved["ok"] is True
+        assert saved["is_error"] is True
+        assert saved["counts_as_tool_failure"] is False
         assert saved["metadata"] == {"exit_code": 7}
         assert (workspace / "saved.txt").read_text(encoding="utf-8") == "Exit code 7\nOutput:\nfrom-request"
+
+        nonzero = post_shell('echo "bad" >&2; exit 3', base_dir=str(workspace))
+        assert nonzero["ok"] is True
+        assert nonzero["is_error"] is True
+        assert nonzero["counts_as_tool_failure"] is False
+        assert "Exit code 3" in str(nonzero["result"])
 
         sandboxed = post_shell(
             'printf "%s" "${HTTP_PROXY:-stripped}"',
@@ -8523,6 +8543,7 @@ def test_shell_direct_supervised_dispatch_preserves_env_sandbox_output_and_start
             sandbox=True,
         )
         assert sandboxed["ok"] is True
+        assert sandboxed["is_error"] is False
         assert sandboxed["result"] == "stripped"
 
         blocked = post_shell("echo no", kwargs={"mindroom_output_path": "x.txt"}, base_dir=str(workspace), sandbox=True)

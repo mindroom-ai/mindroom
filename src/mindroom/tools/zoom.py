@@ -12,6 +12,7 @@ import httpx
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import error_json, format_http_error
 
 _ZOOM_OAUTH_URL = "https://zoom.us/oauth/token"
 _ZOOM_API_BASE = "https://api.zoom.us/v2"
@@ -37,12 +38,6 @@ class _ZoomTools(Toolkit):
         self.__access_token: str | None = None
         self.__token_expiry: datetime | None = None
         super().__init__(name="zoom")
-
-    def _scrub(self, text: str) -> str:
-        for secret in (self.__access_token, self.__client_secret):
-            if secret:
-                text = text.replace(secret, "[REDACTED]")
-        return text
 
     def _get_access_token(self) -> str | None:
         """Mint or reuse the private S2S OAuth bearer token (never exposed to the model)."""
@@ -106,20 +101,8 @@ class _ZoomTools(Toolkit):
 
     def _safe_error(self, exc: Exception) -> str:
         if isinstance(exc, RuntimeError):
-            return json.dumps({"error": str(exc)})
-        if isinstance(exc, httpx.HTTPStatusError):
-            status = exc.response.status_code
-            detail = ""
-            try:
-                body = exc.response.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict) and isinstance(body.get("message"), str):
-                detail = self._scrub(body["message"].strip())
-            return json.dumps(
-                {"error": f"Zoom API error ({status}): {detail}" if detail else f"Zoom API error ({status})"},
-            )
-        return json.dumps({"error": f"Zoom request failed: {type(exc).__name__}"})
+            return error_json(str(exc))
+        return error_json(format_http_error("Zoom", exc, secrets=(self.__access_token, self.__client_secret)))
 
     @tool
     def zoom_read(

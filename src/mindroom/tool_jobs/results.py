@@ -34,6 +34,7 @@ class ToolResultPayload:
     value: Any
     state_delta: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    counts_as_tool_failure: bool = True
 
 
 def _size_error() -> ValueError:

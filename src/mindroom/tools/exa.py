@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -396,55 +403,13 @@ class _ExaTools(Toolkit):
     icon="FaSearch",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="enable_search",
-            label="Enable Search",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_contents",
-            label="Enable Get Contents",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_find_similar",
-            label="Enable Find Similar",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_answer",
-            label="Enable Answer",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_research",
-            label="Enable Research",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="text",
-            label="Text",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("enable_search", "Enable Search"),
+        bool_config_field("enable_get_contents", "Enable Get Contents"),
+        bool_config_field("enable_find_similar", "Enable Find Similar"),
+        bool_config_field("enable_answer", "Enable Answer"),
+        bool_config_field("enable_research", "Enable Research", default=False),
+        bool_config_field("all", "All", default=False),
+        bool_config_field("text", "Text"),
         ConfigField(
             name="text_length_limit",
             label="Text Length Limit",
@@ -452,13 +417,7 @@ class _ExaTools(Toolkit):
             required=False,
             default=1000,
         ),
-        ConfigField(
-            name="summary",
-            label="Summary",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("summary", "Summary", default=False),
         ConfigField(
             name="api_key",
             env=("EXA_API_KEY",),
@@ -558,27 +517,9 @@ class _ExaTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="moderation",
-            label="Moderation",
-            type="boolean",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="highlights",
-            label="Highlights",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="show_results",
-            label="Show Results",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("moderation", "Moderation", default=None),
+        bool_config_field("highlights", "Highlights", default=False),
+        bool_config_field("show_results", "Show Results", default=False),
         ConfigField(
             name="model",
             label="Model",

@@ -7,23 +7,20 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = get_logger(__name__)
-
-
-def _require_spider() -> type[Any]:
-    """Import and return ``spider.Spider``, raising a helpful ImportError when absent."""
-    try:
-        from spider import Spider
-    except ImportError as exc:
-        msg = "`spider-client` not installed. Please install using `pip install spider-client`"
-        raise ImportError(msg) from exc
-    return Spider
 
 
 class _SpiderTools(Toolkit):
@@ -39,7 +36,6 @@ class _SpiderTools(Toolkit):
         enable_crawl: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_spider()
         self.max_results = max_results
         self.url = url
         self.optional_params = optional_params or {}
@@ -65,8 +61,9 @@ class _SpiderTools(Toolkit):
             The results of the search.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         try:
             num_results = self.max_results if self.max_results is not None else 5
             options = {"fetch_page_content": False, "num": num_results, **self.optional_params}
@@ -90,8 +87,9 @@ class _SpiderTools(Toolkit):
             Markdown of the webpage.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         logger.info("spider_scrape", url=url)
         try:
             options = {"return_format": "markdown", **self.optional_params}
@@ -112,8 +110,9 @@ class _SpiderTools(Toolkit):
             The results of the crawl.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         logger.info("spider_crawl", url=url)
         try:
             options = {"return_format": "markdown", "limit": 10, **self.optional_params}
@@ -152,34 +151,10 @@ class _SpiderTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_search",
-            label="Enable Search",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_scrape",
-            label="Enable Scrape",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_search", "Enable Search"),
+        bool_config_field("enable_scrape", "Enable Scrape"),
+        bool_config_field("enable_crawl", "Enable Crawl"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["spider-client"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#spider",
@@ -188,5 +163,4 @@ class _SpiderTools(Toolkit):
 )
 def spider_tools() -> type[Toolkit]:
     """Return Spider tools for web scraping and crawling."""
-    _require_spider()
     return _SpiderTools

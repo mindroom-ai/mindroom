@@ -305,7 +305,7 @@ async def _handle_connection(
             await close_background_records(matching)
             result = ShellRunResult(message=f"Killed {killed}.")
         else:
-            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
+            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -497,6 +497,8 @@ def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: boo
         message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
         execution_error = payload.get("execution_error", False)
         return_code = payload.get("return_code")
+        timed_out = payload.get("timed_out", False)
+        background_rejected = payload.get("background_rejected", False)
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
         return error(f"Error: Invalid shell supervisor response: {exc}")
     if (
@@ -505,6 +507,8 @@ def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: boo
         or not isinstance(output_file_handled, bool)
         or not isinstance(execution_error, bool)
         or (return_code is not None and not isinstance(return_code, int))
+        or not isinstance(timed_out, bool)
+        or not isinstance(background_rejected, bool)
     ):
         return error("Error: Invalid shell supervisor response: invalid result fields.")
     return ShellRunResult(
@@ -513,6 +517,8 @@ def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: boo
         output_file_handled=output_file_handled,
         execution_error=execution_error,
         return_code=return_code,
+        timed_out=timed_out,
+        background_rejected=background_rejected,
     )
 
 

@@ -9,33 +9,20 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = get_logger(__name__)
-
-
-def _require_browserbase() -> type[Any]:
-    """Import and return ``browserbase.Browserbase``, raising a helpful ImportError when absent."""
-    try:
-        from browserbase import Browserbase
-    except ImportError as exc:
-        msg = "`browserbase` not installed. Please install using `pip install browserbase`"
-        raise ImportError(msg) from exc
-    return Browserbase
-
-
-def _require_async_playwright() -> Any:  # noqa: ANN401
-    """Import and return ``playwright.async_api.async_playwright``, raising a helpful ImportError when absent."""
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        msg = "`playwright` not installed. Please install using `pip install playwright` and run `playwright install`"
-        raise ImportError(msg) from exc
-    return async_playwright
 
 
 class _BrowserbaseTools(Toolkit):
@@ -54,7 +41,8 @@ class _BrowserbaseTools(Toolkit):
         parse_html: bool = True,
         max_content_length: int | None = 100000,
     ) -> None:
-        browserbase_cls = _require_browserbase()
+        from browserbase import Browserbase
+
         self.parse_html = parse_html
         self.max_content_length = max_content_length
 
@@ -63,17 +51,17 @@ class _BrowserbaseTools(Toolkit):
             msg = "BROWSERBASE_API_KEY is required. Please set the BROWSERBASE_API_KEY environment variable."
             raise ValueError(msg)
 
-        self.project_id = project_id
-        if not self.project_id:
+        if not project_id:
             msg = "BROWSERBASE_PROJECT_ID is required. Please set the BROWSERBASE_PROJECT_ID environment variable."
             raise ValueError(msg)
+        self.project_id: str = project_id
 
         self.base_url = base_url
         if self.base_url:
-            self.app = browserbase_cls(api_key=self.api_key, base_url=self.base_url)
+            self.app = Browserbase(api_key=self.api_key, base_url=self.base_url)
             logger.debug("browserbase_custom_endpoint", base_url=self.base_url)
         else:
-            self.app = browserbase_cls(api_key=self.api_key)
+            self.app = Browserbase(api_key=self.api_key)
 
         self._async_playwright: Any = None
         self._async_browser: Any = None
@@ -105,7 +93,8 @@ class _BrowserbaseTools(Toolkit):
                 raise
 
     async def _initialize_browser(self, connect_url: str | None = None) -> None:
-        async_playwright = _require_async_playwright()
+        from playwright.async_api import async_playwright
+
         if connect_url:
             self._connect_url = connect_url
         elif not self._connect_url:
@@ -113,7 +102,7 @@ class _BrowserbaseTools(Toolkit):
 
         if not self._async_playwright:
             self._async_playwright = await async_playwright().start()
-            if self._async_playwright:
+            if self._async_playwright and self._connect_url:
                 self._async_browser = await self._async_playwright.chromium.connect_over_cdp(self._connect_url)
             context = self._async_browser.contexts[0] if self._async_browser else None
             if context:
@@ -272,48 +261,12 @@ class _BrowserbaseTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_navigate_to",
-            label="Enable Navigate To",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_screenshot",
-            label="Enable Screenshot",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_page_content",
-            label="Enable Get Page Content",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_close_session",
-            label="Enable Close Session",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="parse_html",
-            label="Parse Html",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("enable_navigate_to", "Enable Navigate To"),
+        bool_config_field("enable_screenshot", "Enable Screenshot"),
+        bool_config_field("enable_get_page_content", "Enable Get Page Content"),
+        bool_config_field("enable_close_session", "Enable Close Session"),
+        bool_config_field("all", "All", default=False),
+        bool_config_field("parse_html", "Parse Html"),
         ConfigField(
             name="max_content_length",
             label="Max Content Length",
@@ -328,5 +281,4 @@ class _BrowserbaseTools(Toolkit):
 )
 def browserbase_tools() -> type[Toolkit]:
     """Return Browserbase tools for browser automation and web scraping."""
-    _require_browserbase()
     return _BrowserbaseTools

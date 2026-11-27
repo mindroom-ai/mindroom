@@ -106,6 +106,7 @@ class AgentToolCallStep:
     key: ToolKey
     call: ReportedCall
     saved_output: dict[str, object] | None = None
+    counts_as_tool_failure: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +492,7 @@ async def _execute_agent_tool_call(
             binding.key,
             replace(call, result=outcome.content, is_error=outcome.is_error),
             outcome.saved_output,
+            outcome.counts_as_tool_failure,
         )
 
 

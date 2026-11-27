@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import json_dumps, require_non_empty
 from mindroom.vendor_telemetry import disable_vendor_telemetry
@@ -134,30 +141,19 @@ def _wrap_composio_action(
             placeholder="1",
             description="Logging verbosity level (0-3, higher = more verbose)",
         ),
-        ConfigField(
-            name="output_in_file",
-            label="Output in File",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "output_in_file",
+            "Output in File",
             default=False,
             description="Enable file-based output for operations",
         ),
-        ConfigField(
-            name="allow_tracing",
-            label="Allow Tracing",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "allow_tracing",
+            "Allow Tracing",
             default=False,
             description="Enable operation tracing for debugging",
         ),
-        ConfigField(
-            name="lock",
-            label="Enable Locking",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Enable file locking for concurrent operations",
-        ),
+        bool_config_field("lock", "Enable Locking", description="Enable file locking for concurrent operations"),
     ],
     dependencies=["composio-core"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#composio",

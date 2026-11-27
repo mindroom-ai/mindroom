@@ -16,6 +16,8 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.execution_authority import current_job_call
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import AcknowledgeWait
+from mindroom.tool_system.invocation import tool_outcome
+from mindroom.tool_system.output_files import saved_output_envelope
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
@@ -47,22 +49,22 @@ _JOB_FAILED_TEXT = "Background tool job failed."
 # tests/test_job_tools.py::test_job_wait_reads_a_job_saved_failed_without_error_text_as_failed;
 # tests/test_job_tools.py::test_collect_reads_a_job_saved_failed_without_error_text_as_failed
 def job_failure_text(value: Any, payload: ToolResultPayload) -> str:  # noqa: ANN401 - A consumed job's value.
-    """Return the text a consumed job reports for its failure: the payload's error, else the value's text.
-
-    ``value`` and ``payload`` are what ``consume_tool_job`` returned. Which outcomes fail a read of one job is
-    ``job_failure``'s rule.
-    """
-    text = value.content if isinstance(value, ToolValue) else value
-    return str(payload.error or text or _JOB_FAILED_TEXT)
+    """Return a consumed job's failure text: the payload's error, else the value's text."""
+    return str(payload.error or (value.content if isinstance(value, ToolValue) else value) or _JOB_FAILED_TEXT)
 
 
-def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> str | None:  # noqa: ANN401 - A consumed job's value.
-    """Return why a read of one consumed job fails, or None when the job completed.
-
-    Every other outcome fails with its reason, such as why an approval was denied, for the call that started the job
-    and for a later wait on it.
-    """
-    return None if job.status == "completed" else job_failure_text(value, payload)
+def job_outcome(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> Any:  # noqa: ANN401 - A consumed job's value.
+    """Return a completed job's value, or a failed ``ToolOutcome`` with its media, saved output, and breaker flags."""
+    if job.status == "completed":
+        return value
+    failure = job_failure_text(value, payload)
+    base = replace(value, content=failure) if isinstance(value, ToolValue) and any(value.media()) else None
+    return tool_outcome(
+        base or ToolValue(content=failure),
+        is_error=True,
+        counts_as_tool_failure=payload.counts_as_tool_failure,
+        saved_output=saved_output_envelope(value),
+    )
 
 
 @dataclass(frozen=True, slots=True)
