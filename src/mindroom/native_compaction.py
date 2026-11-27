@@ -112,12 +112,34 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     return items if _is_checkpoint(items[0]) else []
 
 
+@dataclass(frozen=True, slots=True)
+class NativeCheckpoint:
+    """A provider-native compaction checkpoint produced on one assistant message."""
+
+    message_id: str
+    route: str
+    summary: str | None
+    encrypted: bool
+
+
+def extract_native_checkpoint(message: Message) -> NativeCheckpoint | None:
+    """Return the native checkpoint produced on ``message``, or None when ``message`` produced none."""
+    state = message.meta.native_compaction
+    if not isinstance(state, dict) or not isinstance(route := state.get("route"), str) or not route:
+        return None
+    items = checkpoint_items(message, route)
+    if not items:
+        return None
+    content = items[0].get("content")
+    if isinstance(content, str):
+        return NativeCheckpoint(message_id=message.id, route=route, summary=content, encrypted=False)
+    return NativeCheckpoint(message_id=message.id, route=route, summary=None, encrypted=True)
+
+
 def native_checkpoint_id(message: Message) -> str | None:
     """Return the message's id when the provider compacted on it, whatever its route, else None."""
-    state = message.meta.native_compaction
-    if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
-        return None
-    return message.id
+    checkpoint = extract_native_checkpoint(message)
+    return checkpoint.message_id if checkpoint is not None else None
 
 
 def replay_basis(summary: str | None, runs: Sequence[AnyRunRecord]) -> str:

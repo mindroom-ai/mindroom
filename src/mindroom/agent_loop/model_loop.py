@@ -112,6 +112,7 @@ class EndRun:
 
 type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
+type AfterTurnHook = Callable[[LoopState, ModelRequest, Message], Awaitable[None]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
 type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
@@ -126,6 +127,9 @@ class LoopHooks:
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
+    - ``after_turn``: awaited in order with the loop state (whose messages end with the accepted assistant message),
+      the request that produced it, and that message, immediately after each completed model turn is accepted and
+      before tool calls or loop exit (native compaction observer hooks).
     - ``answer_tool_calls``: sees the live messages, which end with an assistant message that requests tools,
       together with the turn's stop reason; when it returns result messages, one per call in call order, they answer
       the batch in place of running it, and each call is recorded and announced as a failed call (the output-limit
@@ -149,6 +153,7 @@ class LoopHooks:
     """
 
     before_request: tuple[BeforeRequestHook, ...] = ()
+    after_turn: tuple[AfterTurnHook, ...] = ()
     answer_tool_calls: AnswerToolCalls | None = None
     rewrite_tool_calls: RewriteToolCalls | None = None
     before_dispatch: BeforeDispatchHook | None = None
@@ -244,6 +249,7 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, tracker)
+        await _after_turn(hooks, state, request, message)
         if not message.tool_calls:
             break
         batch_events = _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn)
@@ -291,6 +297,12 @@ async def _before_request(
         if isinstance(await hook(state), EndRun):
             return False
     return True
+
+
+async def _after_turn(hooks: LoopHooks, state: LoopState, request: ModelRequest, message: Message) -> None:
+    """Run the post-turn hooks in order after one completed model turn has been accepted."""
+    for hook in hooks.after_turn:
+        await hook(state, request, message)
 
 
 def _accept_turn(
@@ -690,6 +702,7 @@ __all__ = [
     "EMPTY_REQUEST",
     "NO_HOOKS",
     "AfterToolBatchHook",
+    "AfterTurnHook",
     "AnswerToolCalls",
     "BeforeDispatchHook",
     "BeforeRequestHook",

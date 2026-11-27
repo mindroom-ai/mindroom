@@ -43,6 +43,7 @@ from mindroom.history.session_context import create_scope_session_storage, scope
 from mindroom.history.storage import has_queued_force_compaction, new_scope_session
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
+    EVENT_COMPACTION_AFTER,
     EVENT_COMPACTION_BEFORE,
     EVENT_MESSAGE_RECEIVED,
     CompactionHookContext,
@@ -74,6 +75,7 @@ from tests.conftest import (
     install_model_providers,
     make_conversation_reader_mock,
     make_matrix_client_mock,
+    publish_hook_plugin,
     seed_session,
     seed_session_row,
     serve_conversation_reader,
@@ -1756,3 +1758,44 @@ async def test_active_runs_contact_room_fold_skips_publication(
     assert puts == []
     assert target.client is not None
     target.client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_emits_hook_metadata_and_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    await _hydrate(target)
+    observed: list[CompactionHookContext] = []
+
+    @hook(EVENT_COMPACTION_BEFORE)
+    async def on_before(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    @hook(EVENT_COMPACTION_AFTER)
+    async def on_after(ctx: CompactionHookContext) -> None:
+        observed.append(ctx)
+
+    publish_hook_plugin(config, paths, "manual-compact-hooks", [on_before, on_after])
+    install_model_providers(
+        monkeypatch,
+        {"default": summary_model("manual summary", model_id="test-model", provider="openai")},
+    )
+    await _dispatch_message(target, room, command)
+    await asyncio.wait_for(await _start_fold(target), 30)
+
+    assert [ctx.event_name for ctx in observed] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
+    before_ctx, after_ctx = observed
+    assert before_ctx.kind == after_ctx.kind == "pre_reply"
+    assert before_ctx.mode == after_ctx.mode == "manual"
+    assert before_ctx.requester_id == after_ctx.requester_id == ALICE
+    assert before_ctx.workspace_root == after_ctx.workspace_root
+    assert before_ctx.workspace_root is not None
+    assert before_ctx.workspace_root.is_dir()
+    assert after_ctx.summary_model == "default"
+    assert after_ctx.compacted_at is not None
+    assert after_ctx.compacted_at.endswith("Z")
+    assert after_ctx.compacted_run_count == 1
+    assert after_ctx.compaction_summary == "manual summary"

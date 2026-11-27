@@ -649,6 +649,13 @@ class CompactionHookContext(HookContext):
     token_count_before: int
     token_count_after: int | None
     compaction_summary: str | None
+    workspace_root: Path | None = field(default=None, kw_only=True)
+    kind: Literal["pre_reply", "mid_turn", "run_local", "native"] | None = field(default=None, kw_only=True)
+    mode: Literal["auto", "manual"] | None = field(default=None, kw_only=True)
+    summary_model: str | None = field(default=None, kw_only=True)
+    compacted_at: str | None = field(default=None, kw_only=True)
+    compacted_run_count: int | None = field(default=None, kw_only=True)
+    requester_id: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True)
