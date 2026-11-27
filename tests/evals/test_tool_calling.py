@@ -541,6 +541,47 @@ async def test_other_failure_kinds_plural_validation_raw_preview_and_turn_cap() 
 
 
 @pytest.mark.asyncio
+async def test_attachment_semantic_validation_get_and_inline_image() -> None:
+    """attachment(action='get') requires attachment_id and inline_image requires exactly one of attachment_id/path."""
+    res = await evaluate_case(
+        CASES_BY_ID["view_image_and_notify"],
+        _ScriptedProvider(
+            [
+                [_tc("c1", "attachment", {"action": "get", "path": "assets/sample.png", "view": True})],
+                [
+                    _tc("c2", "attachment", {"action": "inline_image"}),
+                    _tc(
+                        "c3",
+                        "attachment",
+                        {"action": "inline_image", "attachment_id": "att_1", "path": "assets/sample.png"},
+                    ),
+                ],
+                [
+                    _tc("c4", "attachment", {"action": "inline_image", "path": "assets/sample.png"}),
+                    _tc("c5", "attachment", {"action": "get", "attachment_id": "att_1"}),
+                ],
+                [
+                    _tc("c6", "view_file", {"path": "assets/sample.png"}),
+                    _tc("c7", "matrix_message", {"action": "send", "message": "Inspected."}),
+                ],
+                "Done.",
+            ],
+        ),
+        max_turns=6,
+    )
+    assert res.passed
+    assert not res.first_try_passed
+    assert res.calls[0].is_error
+    assert res.calls[0].failure_kind == "missing_required_param"
+    assert "attachment_id" in res.calls[0].result_preview
+    assert res.calls[1].failure_kind == "missing_required_param"
+    assert res.calls[2].failure_kind == "invalid_param_value"
+    assert not res.calls[3].is_error
+    assert not res.calls[4].is_error
+    assert res.failure_counts == {"invalid_param_value": 1, "missing_required_param": 2}
+
+
+@pytest.mark.asyncio
 async def test_run_cli_end_to_end_markdown_and_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """run_cli executes multiple models, prints Markdown summary, writes JSON, and rejects bad case IDs."""
     out_file = tmp_path / "results.json"
