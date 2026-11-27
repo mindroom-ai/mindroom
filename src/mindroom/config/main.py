@@ -1668,7 +1668,13 @@ class Config(BaseModel):
                 if name != "filesystem" and (metadata := tools.get(name)) is not None
                 for function in metadata.function_names or ()
             }
-            if (escaped := approval_rule_a_file_rename_escapes(self.tool_approval.rules, elsewhere)) is not None:
+            if (
+                escaped := approval_rule_a_file_rename_escapes(
+                    self.tool_approval.rules,
+                    elsewhere,
+                    agent_names=self.agents.keys(),
+                )
+            ) is not None:
                 msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
                 raise ToolConfigOverrideError(msg)
         if (
@@ -1678,6 +1684,7 @@ class Config(BaseModel):
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
+                    agent_names=self.agents.keys(),
                 )
             )
             is not None
@@ -1690,6 +1697,7 @@ class Config(BaseModel):
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
+                    agent_names=self.agents.keys(),
                 )
             )
             is not None
@@ -1731,6 +1739,7 @@ class Config(BaseModel):
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
+                    agent_names=self.agents.keys(),
                 )
             )
             is not None
@@ -1762,6 +1771,7 @@ class Config(BaseModel):
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
                     renames=renames,
+                    agent_names=self.agents.keys(),
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)

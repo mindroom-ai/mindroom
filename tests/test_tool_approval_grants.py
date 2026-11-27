@@ -3355,6 +3355,25 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
     }
     assert len(Config.validate_with_runtime(agent_scoped_explicit_and_retired, runtime_paths).tool_approval.rules) == 2
 
+    agent_scoped_explicit_action_and_retired_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "require_approval"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert (
+        len(
+            Config.validate_with_runtime(
+                agent_scoped_explicit_action_and_retired_script,
+                runtime_paths,
+            ).tool_approval.rules,
+        )
+        == 2
+    )
+
     agent_scoped_explicit_before_unconditional_wildcard = {
         **base,
         "tool_approval": {
