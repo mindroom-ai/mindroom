@@ -254,7 +254,8 @@ def _default_wait(function: ToolFunction, *, job_kind: str | None = None) -> flo
     if function.registered_toolkit == "workflow" and function.name == "workflow":
         # Workflow runs take as long as their agents do, so start/resume jobs return their handle at once,
         # while synchronous control actions (get/cancel/list/save) run as regular tool jobs and wait to finish.
-        return 0.0 if job_kind in (None, "workflow") else None
+        # Schema projection (job_kind=None) omits an unconditional 0s default since it depends on action.
+        return 0.0 if job_kind == "workflow" else None
     return shell_job_wait_seconds(function.registered_toolkit, function.name)
 
 

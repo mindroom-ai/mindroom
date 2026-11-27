@@ -90,15 +90,15 @@ Define `def main(args):` returning the final report (str or JSON); MindRoom call
         phase("Research")
         try: notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
         except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run
-        draft = agent("Write report:\n\n" + "\n\n".join(notes))
+        draft = agent("Write report:\\n\\n" + "\\n\\n".join(notes))
         for _ in range(3):
-            chk = agent("List factual issues:\n\n" + draft, schema={"type": "object", "required": ["problems"],
+            chk = agent("List factual issues:\\n\\n" + draft, schema={"type": "object", "required": ["problems"],
                         "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
             if not chk["problems"]: break
-            draft = agent(f"Fix: {chk['problems']}\n\n{draft}")
+            draft = agent(f"Fix: {chk['problems']}\\n\\n{draft}")
         return draft
     # Multi-turn loop: dev, rev = spawn("dev"), spawn("rev", system="Review diffs. Reply APPROVE or list issues.")
-    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\n{tests.output}\n{r}")
+    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\\n{tests.output}\\n{r}")
     # Peers: parallel([lambda: agent("Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.", name="be"),
     #                  lambda: agent("Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.", name="fe")]); return state.get("contract")
 

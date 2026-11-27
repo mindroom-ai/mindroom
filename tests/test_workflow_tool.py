@@ -5,10 +5,12 @@ Level: engine harness (`WorkflowStack`): the real stores, broker, engine and job
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
 import sqlite3
+import textwrap
 import threading
 from dataclasses import asdict, replace
 from functools import partial
@@ -1603,15 +1605,15 @@ Define `def main(args):` returning the final report (str or JSON); MindRoom call
         phase("Research")
         try: notes = foreach(args["topics"], lambda t: agent(f"Research {t}. Cite sources."))
         except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run
-        draft = agent("Write report:\n\n" + "\n\n".join(notes))
+        draft = agent("Write report:\\n\\n" + "\\n\\n".join(notes))
         for _ in range(3):
-            chk = agent("List factual issues:\n\n" + draft, schema={"type": "object", "required": ["problems"],
+            chk = agent("List factual issues:\\n\\n" + draft, schema={"type": "object", "required": ["problems"],
                         "properties": {"problems": {"type": "array", "items": {"type": "string"}}}})
             if not chk["problems"]: break
-            draft = agent(f"Fix: {chk['problems']}\n\n{draft}")
+            draft = agent(f"Fix: {chk['problems']}\\n\\n{draft}")
         return draft
     # Multi-turn loop: dev, rev = spawn("dev"), spawn("rev", system="Review diffs. Reply APPROVE or list issues.")
-    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\n{tests.output}\n{r}")
+    #   tests, r = shell(cmd), rev.ask("Review `git diff main`."); dev.ask(f"Fix:\\n{tests.output}\\n{r}")
     # Peers: parallel([lambda: agent("Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.", name="be"),
     #                  lambda: agent("Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.", name="fe")]); return state.get("contract")
 
@@ -1675,6 +1677,18 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
     assert functions["workflow"].parameters["required"] == ["action"]
 
 
+def test_offered_workflow_description_example_is_valid_python(stack: WorkflowStack) -> None:
+    """The rendered Python example block in the offered `workflow` tool description parses cleanly."""
+    toolkit = WorkflowTools(stack.context.config, "watcher", stack.context.room_id, stack.context.runtime_paths)
+    description = adapt_toolkit(toolkit, key="workflow").functions[0].description or ""
+    start = description.index("    from mindroom.workflow import ")
+    end = description.index("\n\nSDK:", start)
+    example = textwrap.dedent(description[start:end])
+
+    tree = ast.parse(example)
+    assert any(isinstance(node, ast.FunctionDef) and node.name == "main" for node in tree.body)
+
+
 def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:
     """An agent's `workflow` entry sets the limits, and `workflow` can write its answer to a workspace file."""
     context = stack.context
@@ -1733,11 +1747,13 @@ async def test_workflow_validates_action_specific_parameters(
 
 
 def test_workflow_default_wait_only_backgrounds_workflow_jobs_immediately(stack: WorkflowStack) -> None:
-    """Schema projection and workflow start/resume jobs use 0s wait; synchronous control actions wait to finish."""
+    """Workflow start/resume jobs use 0s wait; synchronous control actions and schema projection omit 0s."""
+    from mindroom.tool_jobs.background_after import background_after_schema  # noqa: PLC0415
     from mindroom.tool_jobs.execution import _default_wait  # noqa: PLC0415
 
     toolkit = WorkflowTools(stack.context.config)
     fn = replace(adapt_toolkit(toolkit, key="workflow").functions[0], registered_toolkit="workflow")
-    assert _default_wait(fn) == 0.0
+    assert _default_wait(fn) is None
+    assert "description" not in background_after_schema(_default_wait(fn))
     assert _default_wait(fn, job_kind="workflow") == 0.0
     assert _default_wait(fn, job_kind="tool") is None
