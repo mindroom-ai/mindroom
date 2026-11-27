@@ -73,12 +73,9 @@ _SKILL_TOOL_LINES = {
     "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
     '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
     '(file_path and file_content), or "remove_file" (file_path).',
-    "get_skill_instructions": "get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its "
-    "support files.",
-    "get_skill_reference": "get_skill_reference(skill_name, reference_path): load one support file under references/, "
-    "named as get_skill_instructions lists it or by its file name.",
-    "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/, named the "
-    "same way; scripts never run in a review.",
+    "skill": 'skill(action, name, path=None): action "instructions" loads a skill\'s full SKILL.md, its owner, '
+    'and its support files (omit path); "reference" or "script" loads one support file under references/ or '
+    "scripts/ (scripts never run in a review).",
 }
 
 
@@ -164,9 +161,7 @@ def _review_tools(
     # would, such as refusing an action outside the enum.
     entrypoints: dict[str, Callable[..., Any]] = {
         "skill_manage": validated_entrypoint(tools.skill_manage),
-        "get_skill_instructions": validated_entrypoint(tools.get_skill_instructions),
-        "get_skill_reference": validated_entrypoint(tools.get_skill_reference),
-        "get_skill_script": validated_entrypoint(tools.get_skill_script),
+        "skill": validated_entrypoint(tools.skill),
     }
     answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]

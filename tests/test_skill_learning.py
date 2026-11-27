@@ -876,7 +876,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     model = _model(
         ("skill_manage", {**patch_step, "name": "older-lesson", "new_string": "0. Guess."}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
-        ("get_skill_instructions", {"skill_name": "older-lesson"}),
+        ("skill", {"action": "instructions", "name": "older-lesson"}),
         (
             "skill_manage",
             {**patch_step, "name": "older-lesson", "new_string": "1. Run the smoke test.\n2. Check logs."},
@@ -898,10 +898,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     assert progress.changes == {"deploy-checks": "created", "older-lesson": "updated"}
     assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
-    assert all(
-        tools == {"get_skill_instructions", "get_skill_reference", "get_skill_script", "skill_manage"}
-        for tools in model.offered_tools
-    )
+    assert all(tools == {"skill", "skill_manage"} for tools in model.offered_tools)
     # Provider adapters must leave tool selection on, or the reviewer can never call skill_manage.
     assert not any(model.provider_tools_blocked)
     evidence = model.requests[0][-1]
@@ -910,7 +907,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     assert "- older-lesson (learner): Use when deploying the web service" in evidence
     refused = json.loads(model.requests[1][-1])
     assert refused["success"] is False
-    assert "with get_skill_instructions before patching" in refused["error"]
+    assert 'with skill(action="instructions", ...) before patching' in refused["error"]
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
@@ -930,7 +927,7 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     leaked_line = 'password: "Zq8vN3pL7wX2kR9mT4yB6c"'
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         (
             "skill_manage",
             {
@@ -1022,7 +1019,7 @@ def _gemini_reply(part: dict[str, object]) -> dict[str, object]:
     }
 
 
-_VIEW = json.dumps({"skill_name": "older-lesson"})
+_VIEW = json.dumps({"action": "instructions", "name": "older-lesson"})
 
 
 @dataclass(frozen=True)
@@ -1045,7 +1042,7 @@ _PROVIDER_WIRES = {
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "get_skill_instructions", "arguments": _VIEW},
+                            "function": {"name": "skill", "arguments": _VIEW},
                         },
                     ],
                 },
@@ -1063,7 +1060,7 @@ _PROVIDER_WIRES = {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "get_skill_instructions",
+                    "name": "skill",
                     "arguments": _VIEW,
                     "status": "completed",
                 },
@@ -1084,7 +1081,7 @@ _PROVIDER_WIRES = {
         ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="test-key"),
         (
             _claude_reply(
-                {"type": "tool_use", "id": "toolu_1", "name": "get_skill_instructions", "input": json.loads(_VIEW)},
+                {"type": "tool_use", "id": "toolu_1", "name": "skill", "input": json.loads(_VIEW)},
                 "tool_use",
             ),
             _claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"),
@@ -1094,7 +1091,7 @@ _PROVIDER_WIRES = {
     "google": _ProviderWire(
         ModelConfig(provider="google", id="gemini-3.8-flash", api_key="test-key"),
         (
-            _gemini_reply({"functionCall": {"name": "get_skill_instructions", "args": json.loads(_VIEW)}}),
+            _gemini_reply({"functionCall": {"name": "skill", "args": json.loads(_VIEW)}}),
             _gemini_reply({"text": "Nothing to save."}),
         ),
         lambda request: request.get("toolConfig", {}).get("functionCallingConfig", {}).get("mode") == "NONE",
@@ -1115,12 +1112,12 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
     _write_skill(root, "handwritten", HANDWRITTEN)
     model = _model(
         ("skill_manage", {"action": "patch", "name": "mindroom-docs", "old_string": "a", "new_string": "b"}),
-        ("get_skill_instructions", {"skill_name": "handwritten"}),
+        ("skill", {"action": "instructions", "name": "handwritten"}),
         (
             "skill_manage",
             {"action": "edit", "name": "handwritten", "content": LEARNED.replace("deploy-checks", "handwritten")},
         ),
-        *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
+        *[("skill", {"action": "instructions", "name": "handwritten"})] * 12,
     )
     install_model_providers(monkeypatch, {"default": model})
     with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
@@ -1170,7 +1167,7 @@ async def test_the_budget_counts_what_each_request_sends(tmp_path: Path, monkeyp
     _seed(config, paths, _run("r1", *[Message(role="user", content="x" * 3_600) for _ in range(8)]))
     root = _skills_root(config, paths)
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    view = ("get_skill_instructions", {"skill_name": "deploy-checks"})
+    view = ("skill", {"action": "instructions", "name": "deploy-checks"})
     patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
     model = _model(
         [view, view, view],
@@ -1361,7 +1358,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(
     _seed(config, paths, _tool_turn("r1"))
     patch_step = {"action": "patch", "name": "Deploy Checklist", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "Deploy Checklist"}),
+        ("skill", {"action": "instructions", "name": "Deploy Checklist"}),
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
     )
     progress = ReviewProgress()
@@ -1470,7 +1467,7 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path, monkeypat
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     patch_step = {"action": "patch", "name": "deploy-checks"}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         [
             ("skill_manage", {**patch_step, "old_string": "1. Run the smoke test.", "new_string": "1. Run smoke."}),
             ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
@@ -1712,10 +1709,7 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     assert (sent.prompt_hold_pin, forked.prompt_hold_pin) == (None, [])
     assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=(), prompt_hold_pin=[])
     assert shell_calls == deploy_calls == []
-    assert denied[-1] == (
-        "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "
-        "get_skill_reference, and get_skill_script run here."
-    )
+    assert denied[-1] == ("This tool is not available during a skill review; only skill_manage and skill run here.")
     # A call that would wait for a person is answered as unavailable instead of pausing the review.
     assert missing[-1] == MISSING_TOOL_ERROR_TEXT
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
@@ -2115,7 +2109,7 @@ async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
     patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         # Hermes' delete is not an action here, and a string "false" is no licence to replace every match.
         ("skill_manage", {"action": "delete", "name": "deploy-checks", "file_path": "references/notes.md"}),
         ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
@@ -2153,11 +2147,14 @@ async def test_the_review_reads_support_files_by_the_paths_it_lists(tmp_path: Pa
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
     catalog = load_skill_catalog(config, paths, "mind", root)
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    (listed,) = json.loads(await tools.get_skill_instructions("deploy-checks"))["support_files"]
+    (listed,) = json.loads(await tools.skill("instructions", "deploy-checks"))["support_files"]
     assert listed == "references/notes.md"
     for reference_path in (listed, "notes.md"):
-        loaded = json.loads(await tools.get_skill_reference("deploy-checks", reference_path))
+        loaded = json.loads(await tools.skill("reference", "deploy-checks", reference_path))
         assert loaded["content"] == "Notes."
+    assert not json.loads(await tools.skill("instructions", "deploy-checks", "notes.md"))["success"]
+    assert not json.loads(await tools.skill("reference", "deploy-checks"))["success"]
+    assert not json.loads(await tools.skill("instructions", "deploy-checks", mindroom_output_path="out.txt"))["success"]
 
 
 @pytest.mark.asyncio
@@ -2168,7 +2165,7 @@ async def test_a_refused_removal_keeps_the_reviews_read(tmp_path: Path) -> None:
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     catalog = load_skill_catalog(config, paths, "mind", root)
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    await tools.get_skill_instructions("deploy-checks")
+    await tools.skill("instructions", "deploy-checks")
     refused = json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="SKILL.md"))
     assert not refused["success"]
     patched = json.loads(
@@ -2231,7 +2228,7 @@ async def test_a_review_records_each_files_content_before_its_first_and_after_it
     catalog = load_skill_catalog(config, paths, "mind", root)
     progress = ReviewProgress()
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=progress)
-    await tools.get_skill_instructions("deploy-checks")
+    await tools.skill("instructions", "deploy-checks")
     for old, new in (("1. Run the smoke test.", "1. Run smoke."), ("1. Run smoke.", "1. Run smoke.\n2. Retry.")):
         assert json.loads(await tools.skill_manage("patch", "deploy-checks", old_string=old, new_string=new))["success"]
     for file_path in ("references/new.md", "references/temp.md"):
@@ -2240,7 +2237,7 @@ async def test_a_review_records_each_files_content_before_its_first_and_after_it
     assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/temp.md"))[
         "success"
     ]
-    await tools.get_skill_reference("deploy-checks", "references/old.md")
+    await tools.skill("reference", "deploy-checks", "references/old.md")
     assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/old.md"))[
         "success"
     ]

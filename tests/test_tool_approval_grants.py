@@ -1227,6 +1227,28 @@ def test_retired_consolidated_approval_rules_fail_closed(
     assert loaded.tool_approval.rules[0].match == new_name
 
 
+@pytest.mark.parametrize("old_name", ["get_skill_instructions", "get_skill_reference", "get_skill_script"])
+def test_retired_skill_approval_rules_fail_closed_unconditionally(tmp_path: Path, old_name: str) -> None:
+    """Retired skill approval rules fail closed even when no skills or tools are configured."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    stale_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="skill"):
+        Config.validate_with_runtime(stale_data, runtime_paths)
+
+    updated_data = {
+        **stale_data,
+        "tool_approval": {"rules": [{"match": "skill", "action": "require_approval"}]},
+    }
+    loaded = Config.validate_with_runtime(updated_data, runtime_paths)
+    assert loaded.tool_approval.rules[0].match == "skill"
+
+
 def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name(tmp_path: Path) -> None:
     """Shared names like `search_web` (serper) or `add_memory` (mem0/memory) still fail closed until each replacement has a rule."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415

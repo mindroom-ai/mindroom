@@ -179,33 +179,31 @@ class SkillTools:
         """Return whether these tools act for the learner's review."""
         return self.progress is not None
 
-    async def get_skill_instructions(self, skill_name: str, mindroom_output_path: str | None = None) -> str:
-        """Load a skill's full SKILL.md, its owner, and its support files."""
-        return await self._view(skill_name, SKILL_FILENAME, mindroom_output_path)
-
-    async def get_skill_reference(
+    async def skill(
         self,
-        skill_name: str,
-        reference_path: str | None = None,
+        action: Literal["instructions", "reference", "script"],
+        name: str,
+        path: str | None = None,
         mindroom_output_path: str | None = None,
     ) -> str:
-        """Load one file under a skill's references/."""
-        return await self._view(skill_name, _support_path("references", reference_path), mindroom_output_path)
-
-    async def get_skill_script(
-        self,
-        skill_name: str,
-        script_path: str | None = None,
-        mindroom_output_path: str | None = None,
-    ) -> str:
-        """Load one file under a skill's scripts/."""
-        return await self._view(skill_name, _support_path("scripts", script_path), mindroom_output_path)
-
-    async def _view(self, skill_name: str, relative_path: str | None, output_path: str | None) -> str:
-        if output_path is not None:
+        """Load a skill's SKILL.md instructions or one listed reference/script file."""
+        if mindroom_output_path is not None:
             return _refusal("mindroom_output_path is not available during a skill review.")
+        if action == "instructions":
+            if path:
+                return _refusal("path must be omitted when action='instructions'.")
+            relative_path: str | None = SKILL_FILENAME
+        elif action == "reference":
+            relative_path = _support_path("references", path)
+        elif action == "script":
+            relative_path = _support_path("scripts", path)
+        else:
+            assert_never(action)
+        return await self._view(name, relative_path)
+
+    async def _view(self, skill_name: str, relative_path: str | None) -> str:
         if relative_path is None:
-            return _refusal("Name the support file; get_skill_instructions lists a skill's support files.")
+            return _refusal('Name the support file; skill(action="instructions", ...) lists a skill\'s support files.')
         async with self._turn:
             entry = self.catalog.get(skill_name)
             if entry is None:
@@ -442,13 +440,14 @@ def _patched(
 
 def _support_path(directory: str, filename: str | None) -> str | None:
     """Return a support file's path; a review lists support files with their directory, and readers accept both."""
-    return f"{directory}/{filename.removeprefix(f'{directory}/')}" if filename is not None else None
+    return f"{directory}/{filename.removeprefix(f'{directory}/')}" if filename else None
 
 
 def _loader(relative_path: str) -> str:
     if relative_path == SKILL_FILENAME:
-        return "get_skill_instructions"
-    return "get_skill_reference" if relative_path.startswith("references/") else "get_skill_script"
+        return 'skill(action="instructions", ...)'
+    action = "reference" if relative_path.startswith("references/") else "script"
+    return f'skill(action="{action}", ...)'
 
 
 def _reply(payload: dict[str, object]) -> str:

@@ -1723,7 +1723,8 @@ class Config(BaseModel):
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
-        for toolkit_name in sorted(enabled_toolkits):
+        # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
+        for toolkit_name in sorted(enabled_toolkits | {"skills"}):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             metadata = tools.entries.get(toolkit_name)
             if (

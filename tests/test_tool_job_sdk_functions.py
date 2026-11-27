@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
-_SDK_FUNCTIONS = ("search_knowledge_base", "get_skill_instructions")
+_SDK_FUNCTIONS = ("search_knowledge_base", "skill")
 
 
 class _KnowledgeIndex:
@@ -84,7 +84,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         [
             calls(
                 tool_call("search_knowledge_base", "knowledge", query="tea"),
-                tool_call("get_skill_instructions", "skill", skill_name="demo"),
+                tool_call("skill", "skill", action="instructions", name="demo"),
             ),
             answer("done"),
         ],
@@ -123,7 +123,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         assert set(results) == set(_SDK_FUNCTIONS)
         assert all(not tool.is_error for tool in results.values())
         assert "Knowledge about tea" in str(results["search_knowledge_base"].result)
-        assert "# Body" in str(results["get_skill_instructions"].result)
+        assert "# Body" in str(results["skill"].result)
         schemas = {definition.name: definition.parameters for definition in model.requests[0].tools}
         assert set(schemas["search_knowledge_base"]["properties"]) == {"query"}
         assert all("background_after" not in schemas[name]["properties"] for name in _SDK_FUNCTIONS)

@@ -527,7 +527,7 @@ async def test_generated_tools_actual_minimal_response(response_harness, generat
         ),
     )
     function, arguments, expected = {
-        "skills": ("get_skill_instructions", {"skill_name": "release-guide"}, "same canonical session"),
+        "skills": ("skill", {"action": "instructions", "name": "release-guide"}, "same canonical session"),
         "knowledge": ("search_knowledge_base", {"query": "release"}, "knowledge:release"),
     }[generated]
     result = await h.respond(

@@ -961,8 +961,15 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     )
     skills = adapt_toolkit(SkillsToolkit({skill.name: skill}, workspace_roots={}))
     catalog = await _catalog(tmp_path, [skills], owners={})
-    binding = await catalog.bind(ToolKey("agent", "get_skill_instructions"))
-    events = [event async for event in execute_agent_tool_call(binding, "skill-read", {"skill_name": "local-guide"})]
+    binding = await catalog.bind(ToolKey("agent", "skill"))
+    events = [
+        event
+        async for event in execute_agent_tool_call(
+            binding,
+            "skill-read",
+            {"action": "instructions", "name": "local-guide"},
+        )
+    ]
     assert "Use the original session." in events[-1].call.result
     script = tmp_path / "server.py"
     script.write_text(

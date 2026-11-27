@@ -376,7 +376,9 @@ def _require_writable(
     current = _read_skill_file(skill_fd, name, relative_path, usage)
     if current is not None and current.digest != expected_digest:
         loader = (
-            "get_skill_instructions" if relative_path == SKILL_FILENAME else "get_skill_reference or get_skill_script"
+            'skill(action="instructions", ...)'
+            if relative_path == SKILL_FILENAME
+            else 'skill(action="reference", ...) or skill(action="script", ...)'
         )
         msg = (
             f"The current {relative_path} of {name!r} is not the version this change is based on. Load it with "

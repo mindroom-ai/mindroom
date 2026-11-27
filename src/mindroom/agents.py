@@ -1679,14 +1679,15 @@ def _build_agent_role_context(
 def _skill_usage_instructions(
     config: Config,
     skills: SkillsToolkit | None,
-    hidden_functions: frozenset[str],
+    *,
+    skill_hidden: bool,
     refused: Sequence[RefusedWorkspaceSkill],
 ) -> list[str]:
-    """Return the skill-function guidance for an agent offered skills, naming any skill function approval hides.
+    """Return the skill-function guidance for an agent offered skills.
 
     Each workspace skill in ``refused`` gets a line saying why it did not load, also when no skill loads.
     """
-    if hidden_functions == SKILL_FUNCTION_NAMES:
+    if skill_hidden:
         return []
     refusals = [
         f"Workspace skill `{skill.path}` did not load. {skill.reason}. Fix the file and it loads on your next run."
@@ -1694,10 +1695,8 @@ def _skill_usage_instructions(
     ]
     if skills is None or not skills.skills:
         return refusals
-    # Name any skill functions hidden by approval so the agent knows they are unavailable.
     usage = config.get_prompt("SKILLS_TOOL_USAGE_PROMPT")
-    hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
-    return [*((usage,) if usage.strip() else ()), *((hidden,) if hidden_functions else ()), *refusals]
+    return [*((usage,) if usage.strip() else ()), *refusals]
 
 
 def _build_agent_instructions(
@@ -1971,9 +1970,8 @@ def create_agent(
         runtime_paths,
         config.defaults.tool_output_auto_save_threshold_bytes,
     )
-    # Approval rules hide generated functions, so skill guidance names the skill functions they hide
-    # and is left out when they hide all of them.
-    hidden_skill_functions = frozenset(name for name in SKILL_FUNCTION_NAMES if tool_may_require_approval(config, name))
+    # Approval rules hide generated functions, so skill guidance and the catalog are omitted when approval hides `skill`.
+    skill_hidden = any(tool_may_require_approval(config, name) for name in SKILL_FUNCTION_NAMES)
     refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
@@ -1989,7 +1987,7 @@ def create_agent(
             refused=refused_skills,
         )
     )
-    prompt_skills = None if hidden_skill_functions == SKILL_FUNCTION_NAMES else skills
+    prompt_skills = None if skill_hidden else skills
     # The graph is one more source of the knowledge search, which agents call far more than search_graph.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
     if agent.knowledge_graph and kept_knowledge is None:
@@ -2067,8 +2065,8 @@ def create_agent(
         skill_instructions=_skill_usage_instructions(
             config,
             prompt_skills,
-            hidden_skill_functions,
-            refused_skills if persona is None else (),
+            skill_hidden=skill_hidden,
+            refused=refused_skills if persona is None else (),
         ),
         include_interactive_questions=include_interactive_questions,
         disable_runtime_capabilities=disable_runtime_capabilities,

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from itertools import islice
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 
 import json5
 
@@ -36,10 +36,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SKILL_FILENAME = "SKILL.md"
-# The functions of an agent's skills toolkit; none has an owning toolkit.
-# All three only read a skill; callers grant get_skill_script alongside the other skill tools when configured.
-SKILL_READ_FUNCTION_NAMES = frozenset({"get_skill_instructions", "get_skill_reference"})
-SKILL_FUNCTION_NAMES = SKILL_READ_FUNCTION_NAMES | {"get_skill_script"}
+# The function of an agent's skills toolkit; it has no owning toolkit and only reads skills.
+SKILL_FUNCTION_NAMES = frozenset({"skill"})
 _WORKSPACE_SKILLS_DIRNAME = "skills"
 _MAX_WORKSPACE_SKILLS = 256
 MAX_WORKSPACE_SKILL_FILE_BYTES = 1 << 20
@@ -50,19 +48,9 @@ MAX_WORKSPACE_SKILL_DESCRIPTION_CHARS = 1024
 _MAX_WORKSPACE_SKILL_LISTING_ENTRIES = 256
 # Worker code can plant any number of entries, so a workspace skill listing examines only this many.
 _MAX_WORKSPACE_SKILL_SCANNED_ENTRIES = 1024
-_GET_SKILL_INSTRUCTIONS_DESCRIPTION = (
-    "Load the full instructions for a skill. Use this when you need to follow a skill's guidance."
-)
-_GET_SKILL_REFERENCE_DESCRIPTION = (
-    "Load a reference document from a skill (list available references with get_skill_instructions if available)."
-)
-_GET_SKILL_SCRIPT_DESCRIPTION = (
-    "Read a script from a skill without running it; run it with shell if available "
-    "(list available scripts with get_skill_instructions if available)."
-)
 _PROMPT_HEADER = (
     "<skills_system>",
-    "Available skills (load via skill tools, not callable directly):",
+    "Available skills (load via skill tool, not callable directly):",
 )
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
@@ -158,7 +146,7 @@ class _WorkspaceSkillsLoader(_SkillsLoader):
 
 
 class SkillsToolkit(Toolkit):
-    """One agent's skills: three functions that only read them, and the skills section of the system prompt.
+    """One agent's skills: a single read-only ``skill`` tool, and the skills section of the system prompt.
 
     Workspace skills, which worker code can write, are read through no-follow descriptors, and loading one records
     its use for the skill learner's inactivity clock; configured skills are read by path and record nothing.
@@ -185,7 +173,7 @@ class SkillsToolkit(Toolkit):
     def prompt_block(self) -> str:
         """Return the skills section of the system prompt, or ``""`` when no skill loaded.
 
-        It names no reference or script file, which ``get_skill_instructions`` lists, so a new file in a skill
+        It names no reference or script file, which ``skill(action="instructions", ...)`` lists, so a new file in a skill
         leaves the system prompt, and with it every open conversation's prompt cache, unchanged.
         """
         if not self._skills:
@@ -199,58 +187,54 @@ class SkillsToolkit(Toolkit):
         lines.append("</skills_system>")
         return "\n".join(lines)
 
-    @tool(description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION)
-    def get_skill_instructions(self, skill_name: str) -> str:
-        """Load the full instructions for a skill.
+    @tool
+    def skill(
+        self,
+        action: Literal["instructions", "reference", "script"],
+        name: str,
+        path: str | None = None,
+    ) -> str:
+        """Load a skill's instructions, reference document, or script without running it.
+
+        - `instructions`: load a skill's `SKILL.md` instructions and list its available `references/` and `scripts/` files (`path` must be omitted).
+        - `reference`: load one listed reference document (`path` required).
+        - `script`: read one listed script without running it; run scripts with shell if available (`path` required).
 
         Args:
-            skill_name: The name of the skill to get instructions for.
+            action: What to load (`instructions`, `reference`, or `script`).
+            name: The skill name.
+            path: Listed filename under `references/` or `scripts/` (required for `reference` and `script`; omit for `instructions`).
 
         Returns:
-            A JSON string with the skill's instructions and metadata.
+            A JSON string with the requested skill content or an error listing valid choices.
 
         """
-        self._record_use(skill_name)
-        skill = self._skills.get(skill_name)
-        if skill is None:
-            return self._not_found(skill_name)
-        return json.dumps(
-            {
-                "skill_name": skill.name,
-                "description": skill.description,
-                "instructions": skill.instructions,
-                "available_scripts": skill.scripts,
-                "available_references": skill.references,
-            },
-        )
-
-    @tool(description=_GET_SKILL_REFERENCE_DESCRIPTION)
-    def get_skill_reference(self, skill_name: str, reference_path: str | None = None) -> str:
-        """Load a reference document from a skill.
-
-        Args:
-            skill_name: The name of the skill.
-            reference_path: The filename of the reference document.
-
-        Returns:
-            A JSON string with the reference content.
-
-        """
-        return self._read_skill_file(skill_name, _REFERENCES, reference_path)
-
-    @tool(description=_GET_SKILL_SCRIPT_DESCRIPTION)
-    def get_skill_script(self, skill_name: str, script_path: str | None = None) -> str:
-        """Read a script from a skill without running it.
-
-        Args:
-            skill_name: The name of the skill.
-            script_path: The filename of the script.
-
-        Returns:
-            A JSON string with the script content.
-
-        """
-        return self._read_skill_file(skill_name, _SCRIPTS, script_path)
+        if action == "instructions":
+            if path:
+                return json.dumps(
+                    {
+                        "error": "Parameter 'path' must be omitted when action is 'instructions'",
+                        "skill_name": name,
+                    },
+                )
+            self._record_use(name)
+            skill = self._skills.get(name)
+            if skill is None:
+                return self._not_found(name)
+            return json.dumps(
+                {
+                    "skill_name": skill.name,
+                    "description": skill.description,
+                    "instructions": skill.instructions,
+                    "available_scripts": skill.scripts,
+                    "available_references": skill.references,
+                },
+            )
+        if action == "reference":
+            return self._read_skill_file(name, _REFERENCES, path)
+        if action == "script":
+            return self._read_skill_file(name, _SCRIPTS, path)
+        assert_never(action)
 
     def _not_found(self, skill_name: str) -> str:
         return json.dumps({"error": f"Skill '{skill_name}' not found", "available_skills": ", ".join(self._skills)})
@@ -350,7 +334,7 @@ def _unlisted_file_error(
     """Return the error a skill function answers when ``filename`` is missing or not a listed file of the skill."""
     if not filename:
         return {
-            "error": f"A {kind.path_key} is required to read a {kind.noun} from skill '{skill_name}'",
+            "error": f"A path is required to read a {kind.noun} from skill '{skill_name}'",
             "skill_name": skill_name,
             kind.listing_key: listed,
         }
