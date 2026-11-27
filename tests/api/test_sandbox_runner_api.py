@@ -8550,7 +8550,6 @@ def test_shell_direct_supervised_dispatch_handles_scope_cancel_and_concurrent_en
     """Direct supervised shell dispatch isolates concurrent env, scopes backgrounding, and honors /execute/cancel."""
     custom_tmp = tmp_path / "custom-tmp"
     custom_tmp.mkdir()
-    monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
     with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
         with ThreadPoolExecutor(max_workers=2) as pool:
             f1 = pool.submit(
@@ -8570,6 +8569,7 @@ def test_shell_direct_supervised_dispatch_handles_scope_cancel_and_concurrent_en
         assert r2["result"] == "beta"
         assert "ISO_TOKEN" not in os.environ
 
+        monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
         scope_id = f"direct-{execution_mode}"
         bg = post_shell(
             "echo bg-ready; sleep 60",
@@ -8621,3 +8621,49 @@ def test_shell_direct_supervised_dispatch_handles_scope_cancel_and_concurrent_en
         assert cancelled["ok"] is False
         assert cancelled["error"] == "Tool call was cancelled."
         assert cancelled["failure_kind"] == "tool"
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_resolves_off_loop_and_expands_worker_home(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch resolves the toolkit off the event loop and expands ~/ against worker HOME."""
+    runner_home = tmp_path / "runner-home"
+    workspace = tmp_path / "ws"
+    runner_home.mkdir()
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(runner_home))
+
+    resolve_threads: list[int] = []
+    invoke_threads: list[int] = []
+    orig_resolve = sandbox_runner_module._resolve_entrypoint
+    orig_invoke = sandbox_runner_module._invoke_resolved_entrypoint
+
+    def tracking_resolve(*args: object, **kwargs: object) -> object:
+        resolve_threads.append(threading.get_ident())
+        return orig_resolve(*args, **kwargs)
+
+    async def tracking_invoke(*args: object, **kwargs: object) -> object:
+        invoke_threads.append(threading.get_ident())
+        return await orig_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", tracking_resolve)
+    monkeypatch.setattr(sandbox_runner_module, "_invoke_resolved_entrypoint", tracking_invoke)
+
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        res = post_shell(
+            'printf "%s" "$REPORT_FILE"',
+            base_dir=str(workspace),
+            execution_env={"PATH": os.environ["PATH"], "REPORT_FILE": "~/reports/latest"},
+            extra_env_passthrough="REPORT_FILE",
+        )
+
+    assert res["ok"] is True, res
+    assert res["result"] == str((workspace / "reports" / "latest").resolve())
+    assert str(runner_home) not in str(res["result"])
+    assert resolve_threads
+    assert invoke_threads
+    assert set(resolve_threads).isdisjoint(invoke_threads)

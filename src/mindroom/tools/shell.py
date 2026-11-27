@@ -408,22 +408,23 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
 
             super().__init__(name="shell_tools", tools=tools)
 
-            self._runtime_env = dict(
-                shell_execution_runtime_env_values(
-                    runtime_paths,
-                    extra_env_passthrough=extra_env_passthrough,
-                    process_env=runtime_paths.process_env,
-                ),
-            )
-            self._base_process_env = dict(runtime_paths.process_env)
-            self._shell_path_prepend = shell_path_prepend
-            # Sandbox tool subprocesses delegate execution to the runner's long-lived shell supervisor,
-            # which stops the command when the per-request process dies.
+            # Sandbox tool subprocesses (and direct runner-supervised shell calls) delegate execution
+            # to the runner's long-lived shell supervisor, which stops the command on client disconnect.
             dispatch = current_shell_dispatch_context()
             self._supervisor_socket = (
                 dispatch.socket_path if dispatch is not None else os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV)
             ) or None
             self._process_environ = dispatch.process_environ if dispatch is not None else None
+            self._runtime_env = dict(
+                shell_execution_runtime_env_values(
+                    runtime_paths,
+                    extra_env_passthrough=extra_env_passthrough,
+                    process_env=runtime_paths.process_env,
+                    home_dir=self._process_environ.get("HOME") if self._process_environ else None,
+                ),
+            )
+            self._base_process_env = dict(runtime_paths.process_env)
+            self._shell_path_prepend = shell_path_prepend
 
         def offered_function(self, function: ToolFunction) -> ToolFunction:
             """Describe ``run_shell_command`` with where and how it runs, offering named workers only where it may."""

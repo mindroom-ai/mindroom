@@ -1321,14 +1321,14 @@ def _oauth_connection_required_response(
     return ExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
 
 
-async def _execute_prepared_request_inprocess(
+def _resolve_prepared_entrypoint(
     prepared: PreparedSandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     config: Config,
     tools: ToolRegistry,
     *,
     credentials_manager: CredentialsManager | None = None,
-) -> ExecuteResponse:
+) -> tuple[ToolExecutionIdentity | None, Toolkit, Callable[..., object]]:
     execution_identity = (
         parse_tool_execution_identity_payload(prepared.execution_identity)
         if prepared.execution_identity is not None
@@ -1338,30 +1338,35 @@ async def _execute_prepared_request_inprocess(
     tool_output_workspace_root = (
         Path(prepared.tool_output_workspace_root) if prepared.tool_output_workspace_root is not None else None
     )
-
     with bind_detached_execution_identity(execution_identity):
-        try:
-            toolkit, entrypoint = _resolve_entrypoint(
-                runtime_paths=runtime_paths,
-                config=config,
-                tools=tools,
-                tool_name=prepared.tool_name,
-                function_name=prepared.function_name,
-                execution_identity=execution_identity,
-                credential_overrides=prepared.credential_overrides or None,
-                tool_config_overrides=prepared.tool_config_overrides or None,
-                tool_init_overrides=prepared.tool_init_overrides or None,
-                runtime_overrides=prepared.runtime_overrides or None,
-                credentials_manager=credentials_manager,
-                worker_scope=prepared.worker_scope,
-                routing_agent_name=prepared.routing_agent_name,
-                private_agent_names=private_agent_names,
-                tool_output_workspace_root=tool_output_workspace_root,
-                sandbox=prepared.sandbox,
-            )
-        except OAuthConnectionRequired as exc:
-            return _oauth_connection_required_response(prepared, exc)
+        toolkit, entrypoint = _resolve_entrypoint(
+            runtime_paths=runtime_paths,
+            config=config,
+            tools=tools,
+            tool_name=prepared.tool_name,
+            function_name=prepared.function_name,
+            execution_identity=execution_identity,
+            credential_overrides=prepared.credential_overrides or None,
+            tool_config_overrides=prepared.tool_config_overrides or None,
+            tool_init_overrides=prepared.tool_init_overrides or None,
+            runtime_overrides=prepared.runtime_overrides or None,
+            credentials_manager=credentials_manager,
+            worker_scope=prepared.worker_scope,
+            routing_agent_name=prepared.routing_agent_name,
+            private_agent_names=private_agent_names,
+            tool_output_workspace_root=tool_output_workspace_root,
+            sandbox=prepared.sandbox,
+        )
+    return execution_identity, toolkit, entrypoint
 
+
+async def _invoke_resolved_entrypoint(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    execution_identity: ToolExecutionIdentity | None,
+    toolkit: Toolkit,
+    entrypoint: Callable[..., object],
+) -> ExecuteResponse:
+    with bind_detached_execution_identity(execution_identity):
         try:
             call_environment = ToolEnvironment(
                 values=prepared.call_environment,
@@ -1387,6 +1392,27 @@ async def _execute_prepared_request_inprocess(
             )
 
     return ExecuteResponse(ok=True, result=result, metadata=metadata or None)
+
+
+async def _execute_prepared_request_inprocess(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    tools: ToolRegistry,
+    *,
+    credentials_manager: CredentialsManager | None = None,
+) -> ExecuteResponse:
+    try:
+        execution_identity, toolkit, entrypoint = _resolve_prepared_entrypoint(
+            prepared,
+            runtime_paths,
+            config,
+            tools,
+            credentials_manager=credentials_manager,
+        )
+    except OAuthConnectionRequired as exc:
+        return _oauth_connection_required_response(prepared, exc)
+    return await _invoke_resolved_entrypoint(prepared, execution_identity, toolkit, entrypoint)
 
 
 _inprocess_shell_records: dict[str, ProcessRecord] = {}
@@ -1417,36 +1443,39 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
 async def _execute_request_shell_supervised(call: _ExecuteCall) -> ExecuteResponse:
     """Run ``shell.run_shell_command`` via the runner's shell supervisor without a per-request child."""
 
-    def prepare() -> tuple[_PreparedSandboxRequestContext, _PreparedSandboxSubprocessContext, str]:
+    def prepare() -> tuple[
+        PreparedSandboxRunnerExecuteRequest,
+        ToolExecutionIdentity | None,
+        Toolkit,
+        Callable[..., object],
+    ]:
         prepared_request = _prepare_execute_request(call)
         subprocess_context = _prepare_subprocess_context(prepared_request)
         socket_path = shell_supervisor.ensure_shell_supervisor()
-        return prepared_request, subprocess_context, socket_path
+        with shell_supervisor.bind_shell_dispatch_context(
+            socket_path=socket_path,
+            process_environ=subprocess_context.subprocess_env,
+        ):
+            execution_identity, toolkit, entrypoint = _resolve_prepared_entrypoint(
+                prepared_request.request,
+                prepared_request.runtime_paths,
+                call.route.config,
+                call.tools,
+                credentials_manager=None,
+            )
+        return prepared_request.request, execution_identity, toolkit, entrypoint
 
     try:
-        prepared_request, subprocess_context, socket_path = await asyncio.to_thread(prepare)
+        prepared, execution_identity, toolkit, entrypoint = await asyncio.to_thread(prepare)
     except shell_supervisor.ShellSupervisorStartupError as exc:
         return _subprocess_failure_response(call.route.worker_key, str(exc), call.route.runtime_paths)
 
     if sandbox_request_cancellation.request_cancelled():
         return _cancelled_response()
 
-    scope_id = prepared_request.request.shell_scope_id
-    scope = ShellBackgroundScope(scope_id=scope_id) if scope_id is not None else None
-    with (
-        bind_shell_background_scope(scope) if scope is not None else nullcontext(),
-        shell_supervisor.bind_shell_dispatch_context(
-            socket_path=socket_path,
-            process_environ=subprocess_context.subprocess_env,
-        ),
-    ):
-        response = await _execute_prepared_request_inprocess(
-            prepared_request.request,
-            prepared_request.runtime_paths,
-            call.route.config,
-            call.tools,
-            credentials_manager=None,
-        )
+    scope = ShellBackgroundScope(scope_id=prepared.shell_scope_id) if prepared.shell_scope_id is not None else None
+    with bind_shell_background_scope(scope) if scope is not None else nullcontext():
+        response = await _invoke_resolved_entrypoint(prepared, execution_identity, toolkit, entrypoint)
     if scope is not None and scope.had_backgrounded:
         return response.model_copy(update={"shell_backgrounded": True})
     return response

@@ -1767,7 +1767,7 @@ async def _monitor_process(
                     _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
                     capture.incomplete |= bool(pending)
             finally:
-                if not natural_exit or log_file is None:
+                if (not natural_exit or log_file is None) and record._stop_reason != "scope_ended":
                     _kill_process_group(process.pid)
             drain_timeout = _POST_EXIT_READER_GRACE_SECONDS if log_file is not None else 2.0
             await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)

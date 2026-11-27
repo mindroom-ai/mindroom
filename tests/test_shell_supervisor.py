@@ -1483,15 +1483,18 @@ async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_othe
             on_timeout="background",
             background_log=policy,
         )
+        child_script = (
+            'trap "sleep 0.15; echo child-trap-cleanup-done; exit 0" TERM; echo child-ready; sleep 30 & wait $!'
+        )
         trapped = await start(
             namespace="shell-scope:graceful",
-            argv=["bash", "-c", "trap 'echo trap-cleanup-done; exit 0' TERM; echo ready; sleep 30 & wait $!"],
-            timeout=0.3,
+            argv=["bash", "-c", f"bash -c '{child_script}' & wait"],
+            timeout=0.35,
         )
         other = await start(namespace="shell-scope:keep", argv=["bash", "-c", "sleep 30"], timeout=0.2)
         assert trapped.handle is not None
         assert other.handle is not None
-        assert "ready" in trapped.message
+        assert "child-ready" in trapped.message
         trapped_pid, trapped_log = registry[trapped.handle].pid, Path(registry[trapped.handle]._log_path or "")
         other_pid = registry[other.handle].pid
 
@@ -1501,7 +1504,7 @@ async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_othe
             assert other.handle in registry
             await _assert_pid_dead(trapped_pid)
             log_text = trapped_log.read_text(encoding="utf-8")
-            assert "trap-cleanup-done" in log_text
+            assert "child-trap-cleanup-done" in log_text
             assert "[MindRoom: stopped when turn ended]" in log_text
             os.kill(other_pid, 0)
         finally:
