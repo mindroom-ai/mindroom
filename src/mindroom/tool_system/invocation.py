@@ -176,8 +176,8 @@ def _argument_value(name: str, value: object, parameters: Mapping[str, Any]) -> 
     exactly one of its choices, or when it takes free text and the word is a boolean or the parameter is required
     and does not admit null. An optional string, and a choice parameter for words that are not its choices, read
     none and null as left out, because models send those to leave an optional parameter out. A parameter that is
-    not required is optional even when its schema omits null: tool schemas leave null out of ``Optional[X]``
-    and of a plain default, and of ``X | None`` from Python 3.14.
+    not required is optional even when its schema omits null: tool schemas leave null out of optional
+    ``Optional[X]`` and ``X | None`` parameters and of a plain default.
     """
     if not isinstance(value, str) or (word := value.strip().lower()) not in _LITERAL_WORDS:
         return value

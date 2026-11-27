@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
 
-_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
+_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
 _IDLE_LIMIT_SECONDS = 0.5
 # Each pause stays far below the idle limit while the whole stream outlasts it.
 _EVENT_PAUSE_SECONDS = 0.04

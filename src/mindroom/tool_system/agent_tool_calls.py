@@ -440,7 +440,7 @@ async def _execute_agent_tool_call(
                 yield _failure(binding, call_id, arguments, requirement.denial_note)
                 return
         try:
-            validate_tool_arguments(dict(binding.function.parameters), arguments)
+            validate_tool_arguments(binding.function, arguments)
         except ValueError:
             yield _failure(binding, call_id, arguments, _invalid_arguments_reason(binding, arguments))
             return

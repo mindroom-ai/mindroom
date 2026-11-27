@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass, replace
 from glob import has_magic
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 from weakref import WeakValueDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation, TypeAdapter, ValidationError
@@ -828,7 +828,7 @@ class FilesystemTools(Toolkit):
     def edit_file(
         self,
         path: str,
-        edits: Optional[_Edits] = _OMITTED,  # noqa: UP045 - Optional, unlike `| None`, keeps null out of the schema.
+        edits: _Edits = _OMITTED,
         **legacy: object,
     ) -> str:
         """Replace exact text in one file. Read it first.

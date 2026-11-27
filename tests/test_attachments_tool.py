@@ -523,11 +523,12 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
 
     assert schema["action"]["enum"] == ["list", "get", "register", "inline_image"]
     assert parameters["required"] == ["action"]
-    assert schema["attachment_id"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert schema["attachment_id"]["type"] == "string"
+    assert "anyOf" not in schema["attachment_id"]
     assert schema["view"]["type"] == "boolean"
     assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"] == {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "type": "string",
         "description": (
             "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
         ),

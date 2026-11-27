@@ -104,14 +104,7 @@
                 "type": "number"
               },
               "b": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "type": "number"
               }
             },
             "required": [

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Optional
+
 import pytest
 
 from mindroom.llm.provider import ToolSpec
@@ -72,3 +75,62 @@ def test_validate_tool_arguments_rejects_malformed_and_remote_schemas() -> None:
         validate_tool_arguments(schema, {"path": 42})
     with pytest.raises(ValueError, match="Invalid tool arguments"):
         validate_tool_arguments({"$ref": "https://schema.example.org/remote.json"}, {})
+
+
+def test_validate_tool_arguments_allows_explicit_null_only_for_derived_nullable_optional_parameters() -> None:
+    """Explicit JSON ``null`` is admitted for derived ``X | None = None`` params, not non-nullable or authored ones."""
+
+    def lookup(
+        query: str,
+        tag: str | None = None,
+        legacy: Optional[int] = None,  # noqa: UP045
+        count: int = 5,
+    ) -> str:
+        return f"{query}:{tag}:{legacy}:{count}"
+
+    derived = adapt_callable(lookup)
+    assert derived.parameters["properties"]["tag"] == {"type": "string"}
+    assert derived.parameters["properties"]["legacy"] == {"type": "integer"}
+    assert derived.parameters["properties"]["count"] == {"type": "integer"}
+    assert derived.nullable_optional_parameters == frozenset({"tag", "legacy"})
+
+    # Derived nullable optional parameters still admit explicit null via ToolFunction validation.
+    validate_tool_arguments(derived, {"query": "hi", "tag": None, "legacy": None})
+    validate_tool_arguments(derived, {"query": "hi"})
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(derived, {"query": "hi", "tag": 123})
+    # Non-nullable optional parameters with a concrete default still reject explicit null.
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(derived, {"query": "hi", "count": None})
+    # A property promoted to required or hidden by offered_function still rejects explicit null.
+    required_tag = replace(derived, parameters={**derived.parameters, "required": ["query", "tag"]})
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(required_tag, {"query": "hi", "tag": None})
+    hidden_tag = replace(
+        derived,
+        parameters={
+            **derived.parameters,
+            "properties": {"query": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(hidden_tag, {"query": "hi", "tag": None})
+
+    # Authored schemas and raw dicts without null still reject explicit null.
+    authored_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "tag": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    @passthrough_tool(name="authored_lookup", parameters=authored_schema)
+    def authored_lookup(query: str, tag: str | None = None) -> str:
+        return f"{query}:{tag}"
+
+    authored = adapt_callable(authored_lookup)
+    assert authored.nullable_optional_parameters == frozenset()
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(authored, {"query": "hi", "tag": None})
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(authored_schema, {"query": "hi", "tag": None})

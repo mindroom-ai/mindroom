@@ -130,14 +130,10 @@ class TestDelegateTools:
         parameters = inspect.signature(DelegateTools.run_subagent).parameters
         assert list(parameters)[1:3] == ["task", "agent_name"]
         assert parameters["title"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert function.parameters["properties"]["agent_name"]["anyOf"] == [
-            {"type": "string"},
-            {"type": "null"},
-        ]
-        assert function.parameters["properties"]["model"]["anyOf"] == [
-            {"type": "string"},
-            {"type": "null"},
-        ]
+        assert function.parameters["properties"]["agent_name"]["type"] == "string"
+        assert "anyOf" not in function.parameters["properties"]["agent_name"]
+        assert function.parameters["properties"]["model"]["type"] == "string"
+        assert "anyOf" not in function.parameters["properties"]["model"]
 
     def test_continue_subagent_schema(self, tools: DelegateTools) -> None:
         """Continuation has two required string arguments, without a conditional target."""

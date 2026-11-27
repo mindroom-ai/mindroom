@@ -161,6 +161,7 @@
             ],
             "type": "object"
           },
+          "strict": false,
           "type": "function"
         },
         {
@@ -182,6 +183,7 @@
             ],
             "type": "object"
           },
+          "strict": false,
           "type": "function"
         }
       ]

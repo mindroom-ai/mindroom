@@ -136,9 +136,9 @@ def _schema_payload(agent: str, toolkit: str, function: ToolFunction) -> ToolSch
     return payload
 
 
-def _validate_arguments(schema: dict[str, Any], arguments: dict[str, object]) -> None:
+def _validate_arguments(function: ToolFunction, arguments: dict[str, object]) -> None:
     try:
-        validate_tool_arguments(schema, arguments)
+        validate_tool_arguments(function, arguments)
     except ValueError as exc:
         raise GatewayError(code=GatewayErrorCode.INVALID_ARGUMENTS) from exc
 
@@ -339,7 +339,8 @@ async def invoke_tool(
 
     async def selected(built: Toolkit) -> InvocationResponse:
         target = replace(_function(context, toolkit, built, function), registered_toolkit=toolkit)
-        _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
+        _schema_payload(context.agent_name, toolkit, target)
+        _validate_arguments(target, arguments)
         policy = build_tool_hook_middleware(
             HookBindings(registry=context.plugins.hooks),
             context.config,

@@ -33,9 +33,16 @@ def _note(*, strict: bool = False) -> ToolFunction:
     function = adapt_callable(note)
     if not strict:
         return function
+    # Strict schemas require every property, so nullable optional fields keep an explicit null branch.
+    nullable = {"title", "scope", "count"}
+    properties = {
+        name: ({"anyOf": [schema, {"type": "null"}]} if name in nullable else schema)
+        for name, schema in function.parameters["properties"].items()
+    }
     parameters = {
         **function.parameters,
-        "required": list(function.parameters["properties"]),
+        "properties": properties,
+        "required": list(properties),
         "additionalProperties": False,
     }
     return replace(function, parameters=parameters, strict=True)

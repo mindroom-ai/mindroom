@@ -79,14 +79,7 @@
                 "description": "The Bash command to run."
               },
               "timeout": {
-                "anyOf": [
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
+                "type": "integer",
                 "description": "Seconds after which the command and every process it started are stopped. Values <= 120 stop\nthe command inline and return the output so far; null or > 120 moves it to the background after 120\nseconds and stops it after ``timeout`` (if set) or when the turn ends."
               },
               "tail": {
