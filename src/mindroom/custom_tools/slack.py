@@ -50,7 +50,7 @@ from mindroom.slack.render import (
 )
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tools.native_helpers import restrict_actions
+from mindroom.tools.native_helpers import restrict_actions, unexpected_action_args_error
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -108,11 +108,12 @@ def _refuse(message: str) -> NoReturn:
     raise _SlackRefusalError(message)
 
 
-def _reject_unexpected_args(action: str, allowed: Collection[str], provided: Mapping[str, object]) -> None:
-    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
-    if unexpected:
-        verb = "is" if len(unexpected) == 1 else "are"
-        _refuse(f"{', '.join(unexpected)} {verb} not used for action {action!r}")
+_READ_ALLOWED_ARGS: dict[str, str] = {
+    "search": "query kind limit cursor",
+    "recent": "kind days limit cursor",
+    "read": "target limit before cursor",
+    "download": "file_id",
+}
 
 
 @dataclass(frozen=True)
@@ -795,19 +796,17 @@ class SlackTools(Toolkit):
         }
 
         async def operation(session: _Session) -> Mapping[str, object]:
+            if (allowed := _READ_ALLOWED_ARGS.get(action)) is None:
+                _refuse(f"Unsupported slack_read action: {action!r}")
+            if error := unexpected_action_args_error(action, allowed, provided):
+                _refuse(error.removesuffix("."))
             if action == "search":
-                _reject_unexpected_args(action, ("query", "kind", "limit", "cursor"), provided)
                 return await self._do_search(session, query, kind, limit, cursor)
             if action == "recent":
-                _reject_unexpected_args(action, ("kind", "days", "limit", "cursor"), provided)
                 return await self._do_recent(session, kind, days, limit, cursor)
             if action == "read":
-                _reject_unexpected_args(action, ("target", "limit", "before", "cursor"), provided)
                 return await self._do_read(session, target, limit, before, cursor)
-            if action == "download":
-                _reject_unexpected_args(action, ("file_id",), provided)
-                return await self._do_download(session, file_id)
-            _refuse(f"Unsupported slack_read action: {action!r}")
+            return await self._do_download(session, file_id)
 
         return await self._run("slack_read", operation)
 

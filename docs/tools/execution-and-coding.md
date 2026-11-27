@@ -202,8 +202,8 @@ When running `shell` directly in the MindRoom process on a Linux systemd host (`
 
 To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
 MindRoom checks the active `systemd --user` manager generation (`systemctl --user show`) and caches the `systemd-run --user --scope` + `env` probe per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, manager generation)`.
-It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers.
-When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
+It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers; transient probe timeouts fail open without being cached, so the next command re-probes.
+When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, `--property=OOMPolicy=kill` (setting `memory.oom.group=1` on each transient scope so a slice-level `MemoryMax` OOM cleanly terminates the whole offending command scope instead of picking off single workers one at a time), and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
 
 Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
 
@@ -214,16 +214,15 @@ Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<u
    Delegate=cpu cpuset io memory pids
    ```
 
-2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with limits sized to the host:
+2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with a hard `MemoryMax` sized from host or container RAM minus peak non-shell usage and headroom, plus `MemorySwapMax=0` (or bounded swap):
 
    ```ini
    [Unit]
    Description=MindRoom agent shell subprocesses
 
    [Slice]
-   MemoryHigh=50%
    MemoryMax=60%
-   MemorySwapMax=4G
+   MemorySwapMax=0
    CPUWeight=1
    IOWeight=1
    ```
@@ -246,6 +245,10 @@ Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<u
    ```
 
    In cgroup v2, `MemoryMin` and `MemoryLow` are bounded by ancestor cgroups, so set matching values on `system.slice` (and on the container cgroup when running inside LXC/Incus).
+
+!!! warning "Do not set `MemoryHigh` on a shared shell slice without an active userspace OOM killer"
+    Avoid setting `MemoryHigh` on a shared shell slice unless an active userspace OOM killer (such as `systemd-oomd`) is managing it.
+    In cgroup v2, once any job holds anonymous memory above `MemoryHigh` (below `MemoryMax`), the kernel throttles *every* new scope in the slice in `__mem_cgroup_handle_over_high` without firing OOM.
 
 ### Named workers
 

@@ -62,11 +62,9 @@ from mindroom.config.legacy_fields import (
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
     retired_action_argument_approval_error,
+    retired_builtin_approval_error,
     retired_consolidated_approval_error,
-    retired_dynamic_workflow_approval_error,
-    retired_slack_watch_approval_error,
     retired_tool_message,
-    retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
     EventJournalConfig,
@@ -1682,7 +1680,8 @@ class Config(BaseModel):
         if (
             any(entry.name == "triggers" for _, entry in entries)
             and (
-                trigger_error := retired_trigger_approval_error(
+                trigger_error := retired_builtin_approval_error(
+                    "triggers",
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
@@ -1695,7 +1694,8 @@ class Config(BaseModel):
         if (
             any(entry.aliased_from_dynamic_workflow for _, entry in entries)
             and (
-                workflow_error := retired_dynamic_workflow_approval_error(
+                workflow_error := retired_builtin_approval_error(
+                    "dynamic_workflow",
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
@@ -1771,7 +1771,8 @@ class Config(BaseModel):
             "slack" in enabled_toolkits
             and "triggers" in enabled_toolkits
             and (
-                slack_watch_error := retired_slack_watch_approval_error(
+                slack_watch_error := retired_builtin_approval_error(
+                    "slack_watch",
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,

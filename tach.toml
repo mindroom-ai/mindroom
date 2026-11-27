@@ -8942,6 +8942,17 @@ path = "mindroom.config.tool_aliases"
 depends_on = []
 
 [[modules]]
+path = "mindroom.config.retired_tool_renames"
+depends_on = []
+
+[[interfaces]]
+from = ["mindroom.config.retired_tool_renames"]
+expose = [
+    "RETIRED_CONSOLIDATED_FUNCTIONS",
+    "STRICT_WILDCARD_SCRIPT_TOOLKITS",
+]
+
+[[modules]]
 path = "mindroom.api.config_reload"
 depends_on = ["mindroom.api.auth", "mindroom.api.config_lifecycle", "mindroom.config.reload_status"]
 
