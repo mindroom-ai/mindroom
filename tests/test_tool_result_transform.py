@@ -286,8 +286,8 @@ async def test_a_check_nested_too_deeply_withholds_the_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
-    """A raised call, an OAuth prompt, and a declined call skip the hook; a failed ToolOutcome is still checked."""
+async def test_raised_oauth_and_declined_calls_never_run_the_hook() -> None:
+    """A raised call, an OAuth prompt, and a declined call skip the hook."""
     seen: list[str] = []
 
     @hook(EVENT_TOOL_RESULT_TRANSFORM)
@@ -301,14 +301,10 @@ async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
             ctx.decline("not this one")
 
     bridge = tool_policy(_registry(check, decline_blocked))
-    failure = ToolOutcome(content="it failed", is_error=True, saved_output={"mindroom_tool_output": {"path": "x"}})
 
     async def raises(**_kwargs: object) -> object:
         msg = "boom"
         raise ValueError(msg)
-
-    async def answers_failure(**_kwargs: object) -> object:
-        return failure
 
     async def needs_oauth(**_kwargs: object) -> object:
         msg = "Connect"
@@ -327,8 +323,35 @@ async def test_calls_without_a_successful_result_never_run_the_hook() -> None:
     assert declined.refused_by == "plugin_hook"
     assert seen == []
 
+
+@pytest.mark.asyncio
+async def test_failed_tool_outcome_runs_the_hook_and_clears_stale_saved_output() -> None:
+    """A tool-returned failed ToolOutcome is checked by result-transform hooks, clearing stale saved_output on rewrite."""
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def check(ctx: ToolResultTransformContext) -> str:
+        seen.append(ctx.result)
+        return "replaced"
+
+    bridge = tool_policy(_registry(check))
+    failure = ToolOutcome(
+        content="it failed",
+        is_error=True,
+        counts_as_tool_failure=False,
+        saved_output={"mindroom_tool_output": {"path": "x"}},
+    )
+
+    async def answers_failure(**_kwargs: object) -> object:
+        return failure
+
     rewritten = await bridge("answers_failure", answers_failure, {})
-    assert rewritten == ToolOutcome(content="replaced", is_error=True, saved_output=None)
+    assert rewritten == ToolOutcome(
+        content="replaced",
+        is_error=True,
+        counts_as_tool_failure=False,
+        saved_output=None,
+    )
     assert seen == ["it failed"]
 
 

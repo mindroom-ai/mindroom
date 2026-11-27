@@ -371,6 +371,8 @@ async def execute_tool_call(
         value,
         stop_after_call=function.stop_after_call or (isinstance(value, ToolOutcome) and value.stop_after_call),
         is_error=isinstance(value, ToolOutcome) and value.is_error,
+        refused_by=value.refused_by if isinstance(value, ToolOutcome) else None,
+        counts_as_tool_failure=value.counts_as_tool_failure if isinstance(value, ToolOutcome) else True,
         saved_output=saved_output,
     )
 
@@ -380,6 +382,8 @@ def tool_outcome(
     *,
     stop_after_call: bool,
     is_error: bool,
+    refused_by: Literal["plugin_hook", "approval", "result_transform"] | None = None,
+    counts_as_tool_failure: bool = True,
     saved_output: dict[str, object] | None = None,
 ) -> ToolOutcome:
     """Return ``value``'s text and media as one call's outcome, which stops the run after it or fails as given."""
@@ -391,6 +395,8 @@ def tool_outcome(
         files=value.files,
         stop_after_call=stop_after_call,
         is_error=is_error,
+        refused_by=refused_by,
+        counts_as_tool_failure=counts_as_tool_failure,
         saved_output=saved_output,
     )
 

@@ -371,7 +371,7 @@ async def test_run_shell_command_returns_error_on_nonzero_exit(tmp_path: Path) -
     entrypoint = tool.functions["run_shell_command"]
 
     result = await entrypoint(["bash", "-c", "echo oops >&2; exit 1"])
-    assert result == ToolOutcome(content="Exit code 1\nStderr:\noops", is_error=True)
+    assert result == ToolOutcome(content="Exit code 1\nStderr:\noops", is_error=True, counts_as_tool_failure=False)
 
 
 @pytest.mark.asyncio
@@ -385,6 +385,7 @@ async def test_run_shell_command_preserves_stdout_receipt_on_nonzero_exit(tmp_pa
     assert result == ToolOutcome(
         content='Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}',
         is_error=True,
+        counts_as_tool_failure=False,
     )
 
 
@@ -396,7 +397,11 @@ async def test_run_shell_command_preserves_both_failure_streams(tmp_path: Path) 
 
     result = await entrypoint(["bash", "-c", "printf receipt; printf warning >&2; exit 3"])
 
-    assert result == ToolOutcome(content="Exit code 3\nOutput:\nreceipt\nStderr:\nwarning", is_error=True)
+    assert result == ToolOutcome(
+        content="Exit code 3\nOutput:\nreceipt\nStderr:\nwarning",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -462,7 +467,11 @@ async def test_run_shell_command_nonzero_foreground_exit_with_inherited_pipe_chi
 
     elapsed = time.perf_counter() - started
     assert elapsed < 2
-    assert result == ToolOutcome(content="Exit code 7\nStderr:\nforeground failed", is_error=True)
+    assert result == ToolOutcome(
+        content="Exit code 7\nStderr:\nforeground failed",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -533,7 +542,11 @@ async def test_run_shell_command_keeps_blank_stderr_and_trims_only_whole_stdout(
     notice = "[Showing the last 1 of 2 stderr lines. Pass a larger tail, or narrow the command.]"
 
     assert await entrypoint("echo out; echo >&2") == "out\nStderr:\n"
-    assert await entrypoint("echo >&2; exit 1") == ToolOutcome(content="Exit code 1\nStderr:\n", is_error=True)
+    assert await entrypoint("echo >&2; exit 1") == ToolOutcome(
+        content="Exit code 1\nStderr:\n",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
     assert await entrypoint(r"printf 'a\n\n' >&2", tail=1) == f"{notice}\nStderr:\n"
     assert await entrypoint(r"printf 'a\r\n\r\n' >&2", tail=1) == f"{notice}\nStderr:\n\r"
     assert await entrypoint(r"printf 'a\n\n\n'") == "a"
@@ -944,7 +957,11 @@ async def test_run_shell_command_stops_a_command_past_its_timeout(tmp_path: Path
 
     result = await entrypoint(["bash", "-c", "echo started; sleep 300"], timeout=1)
 
-    assert result == ToolOutcome(content="Stopped after 1s.\nOutput:\nstarted", is_error=True)
+    assert result == ToolOutcome(
+        content="Stopped after 1s.\nOutput:\nstarted",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -958,7 +975,7 @@ async def test_only_a_job_command_runs_past_the_default_time_limit(tmp_path: Pat
         with job_control_context(JobControl()):
             finished = await entrypoint(command)
 
-    assert stopped == ToolOutcome(content="Stopped after 0.2s.", is_error=True)
+    assert stopped == ToolOutcome(content="Stopped after 0.2s.", is_error=True, counts_as_tool_failure=False)
     assert finished == "done"
 
 
@@ -1165,7 +1182,11 @@ async def test_scoped_short_timeout_kills_inline_without_backgrounding(tmp_path:
     with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 2):
         async with shell_background_scope() as scope:
             result = await fn.entrypoint(["bash", "-c", "echo start; sleep 10"], timeout=1)
-            assert result == ToolOutcome(content="Stopped after 1s.\nOutput:\nstart", is_error=True)
+            assert result == ToolOutcome(
+                content="Stopped after 1s.\nOutput:\nstart",
+                is_error=True,
+                counts_as_tool_failure=False,
+            )
             assert scope.had_backgrounded is False
             assert not scope.records
             assert not (workspace / ".mindroom" / "shell").exists()

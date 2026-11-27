@@ -1372,8 +1372,10 @@ async def _execute_prepared_request_inprocess(
             with collected_tool_environment(call_environment), structured as metadata:
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             is_error = False
+            counts_as_tool_failure = True
             if isinstance(result, ToolOutcome):
                 is_error = result.is_error
+                counts_as_tool_failure = result.counts_as_tool_failure
                 if not any(result.media()):
                     result = result.saved_output if result.saved_output is not None else result.content
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
@@ -1392,7 +1394,13 @@ async def _execute_prepared_request_inprocess(
                 failure_kind="tool",
             )
 
-    return ExecuteResponse(ok=True, result=result, is_error=is_error, metadata=metadata or None)
+    return ExecuteResponse(
+        ok=True,
+        result=result,
+        is_error=is_error,
+        counts_as_tool_failure=counts_as_tool_failure,
+        metadata=metadata or None,
+    )
 
 
 _inprocess_shell_records: dict[str, ProcessRecord] = {}
@@ -1558,7 +1566,12 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
     failed = bool(sent["timed_out"] or sent["code"])
     result = f"Stopped after {stop_after:g}s." if sent["timed_out"] else f"Exit code {sent['code']}"
     streamed = f"Streamed {sent['out']} bytes of stdout and {sent['err']} bytes of stderr to the caller."
-    return ExecuteResponse(ok=True, result=f"{result}\n{streamed}" if failed else streamed, is_error=failed)
+    return ExecuteResponse(
+        ok=True,
+        result=f"{result}\n{streamed}" if failed else streamed,
+        is_error=failed,
+        counts_as_tool_failure=not failed,
+    )
 
 
 def _cancelled_response() -> ExecuteResponse:

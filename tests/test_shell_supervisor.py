@@ -1205,7 +1205,11 @@ async def test_toolkit_stops_a_supervised_command_past_its_timeout(
 
     result = await run_fn(["bash", "-c", "echo client-mode; sleep 300"], timeout=1)
 
-    assert result == ToolOutcome(content="Stopped after 1s.\nOutput:\nclient-mode", is_error=True)
+    assert result == ToolOutcome(
+        content="Stopped after 1s.\nOutput:\nclient-mode",
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
 
 @pytest.mark.asyncio

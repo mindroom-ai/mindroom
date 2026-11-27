@@ -979,7 +979,12 @@ async def _background_process(
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return ShellRunResult(message=rejection, output_file_handled=had_capture, execution_error=True)
+        return ShellRunResult(
+            message=rejection,
+            output_file_handled=had_capture,
+            execution_error=True,
+            timed_out=True,
+        )
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
@@ -1015,6 +1020,7 @@ async def _background_process(
             message="Error: Shell turn already ended.",
             output_file_handled=had_capture,
             execution_error=True,
+            timed_out=True,
         )
     message = (
         _format_auto_background_message(

@@ -646,24 +646,24 @@ class LiveTurnTools(TurnToolBridge):
             )
             media_results = []
             async with closing_async_stream(events):
-                terminal = None
-                saved_output = None
+                terminal: AgentToolCallStep | None = None
                 async for event in events:
                     if isinstance(event, AgentToolCallMedia):
                         media_results.append(event.media)
                     elif isinstance(event, AgentToolCallStep):
-                        terminal = event.call
-                        saved_output = event.saved_output
+                        terminal = event
             if terminal is None:
                 msg = "Canonical shell returned no terminal execution"
                 raise RuntimeError(msg)
             # A control tool this command ran ends the run after its batch, so the next attempt runs with it, and a
             # failed shell call answers as failed, so Claude and Gemini read it as one.
             outcome = tool_outcome(
-                _with_media(str(terminal.result or ""), media_results),
+                _with_media(str(terminal.call.result or ""), media_results),
                 stop_after_call=bool(self.control_calls),
-                is_error=bool(terminal.is_error),
-                saved_output=saved_output,
+                is_error=bool(terminal.call.is_error),
+                refused_by=terminal.refused_by,
+                counts_as_tool_failure=terminal.counts_as_tool_failure,
+                saved_output=terminal.saved_output,
             )
             self.checkpoint.complete(call_id, outcome)
             return outcome
@@ -682,8 +682,12 @@ class LiveTurnTools(TurnToolBridge):
         self._media.pop(parent, None)
 
         async def leaf(values: dict[str, object]) -> object:
-            async with self._window(parent):
-                return await self._invoke_shell(binding, values, window=parent)
+            try:
+                async with self._window(parent):
+                    return await self._invoke_shell(binding, values, window=parent)
+            except BaseException:
+                self._media.pop(parent, None)
+                raise
 
         events = self._execute(
             binding,
@@ -694,12 +698,17 @@ class LiveTurnTools(TurnToolBridge):
             shell_leaf=leaf,
             requirement=requirement,
         )
+        withheld = False
         async with closing_async_stream(events):
             async for event in events:
                 self._check_control(event)
+                if isinstance(event, AgentToolCallStep) and event.refused_by == "result_transform":
+                    withheld = True
                 yield event
-        for media in self._media.pop(parent, []):
-            yield AgentToolCallMedia(media)
+        media_list = self._media.pop(parent, [])
+        if not withheld:
+            for media in media_list:
+                yield AgentToolCallMedia(media)
 
     async def run_native_shell(self, run: Callable[[], Awaitable[object]]) -> object:
         """Run one standard-mode native shell call inside its own CLI window and environment."""

@@ -26,7 +26,7 @@ _SCHEMA_DIGESTS = {
     10: "4c9c192cd2a5ab1b39fcba118d538f96a827766174175ccbe2f7f935934819da",
     11: "b1265dfe3c60ab47d8da1c3a318ba313f519e8f8c9501b1019b1a4cfa2318d92",
     12: "25d680524f1632af22f889aa725da1d9efa512dc2cda7e6080b8563d54961e45",
-    13: "e55e2b6e321bf08ad197644d1733b1011ea6b53c3a31e06e07994ddd0925e893",
+    13: "170aae16eebaeda975f897e98c9dcf8e6ac12613d9d2e63be24194c0e79807e6",
 }
 # The opt-in fields of each wire model, with the worker protocol that was current when each one was added.
 _OPT_IN_FIELDS = {
@@ -44,8 +44,8 @@ _PLAIN_REQUEST = (
     '"request_id":null,"run_as_job":false,"stream_io":false,"sandbox":false,"shell_scope_id":null}'
 )
 _PLAIN_ANSWERS = (
-    '{"ok":true,"result":"hi","error":null,"failure_kind":null,"is_error":false,"shell_backgrounded":false}',
-    '{"ok":false,"result":null,"error":"boom","failure_kind":"tool","is_error":false,"shell_backgrounded":false}',
+    '{"ok":true,"result":"hi","error":null,"failure_kind":null,"is_error":false,"counts_as_tool_failure":true,"shell_backgrounded":false}',
+    '{"ok":false,"result":null,"error":"boom","failure_kind":"tool","is_error":false,"counts_as_tool_failure":true,"shell_backgrounded":false}',
 )
 
 

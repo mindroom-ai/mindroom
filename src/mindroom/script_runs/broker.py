@@ -738,12 +738,12 @@ class ScriptToolBroker:
         result: CallResult,
         metadata: dict[str, object] | None,
     ) -> ScriptCallRecord:
-        if (shell_output := _workflow_shell_exit_output(run, call, result, metadata)) is not None:
+        if (shell_outcome := _completed_shell_exit_result(run, call, result, metadata)) is not None:
             return await self._publish_async(
                 call,
                 state=ScriptCallState.COMPLETED,
-                result=_strict_json_result(shell_output),
-                metadata=metadata,
+                result=_strict_json_result(shell_outcome),
+                metadata=metadata or None,
             )
         if not result.succeeded:
             error = {
@@ -1004,25 +1004,32 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
     return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
 
 
-def _workflow_shell_exit_output(
+_SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
+
+
+def _completed_shell_exit_result(
     run: ScriptRunRecord,
     call: ScriptCallRecord,
     result: CallResult,
     metadata: dict[str, object] | None,
-) -> str | None:
-    """Return a failed workflow shell command's output when it exited with an integer status and was not withheld."""
+) -> ToolOutcome | None:
+    """Return a failed shell command's outcome when script contracts settle its non-zero exit as COMPLETED."""
     if (
-        run.workflow_run_id is not None
-        and call.grant == ScriptToolGrant("shell", "run_shell_command")
-        and result.status == "failed"
-        and isinstance(result.value, ToolOutcome)
-        and result.value.refused_by is None
-        and metadata is not None
-        and isinstance(metadata.get("exit_code"), int)
-        and not isinstance(metadata.get("exit_code"), bool)
+        call.grant != _SHELL_COMMAND
+        or result.status != "failed"
+        or not isinstance(result.value, ToolOutcome)
+        or result.value.refused_by is not None
     ):
-        return result.value.content
-    return None
+        return None
+    if run.workflow_run_id is not None:
+        if (
+            metadata is not None
+            and isinstance(metadata.get("exit_code"), int)
+            and not isinstance(metadata.get("exit_code"), bool)
+        ):
+            return result.value
+        return None
+    return result.value if not result.value.counts_as_tool_failure else None
 
 
 def _strict_json_result(result: object) -> object:

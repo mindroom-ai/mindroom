@@ -1182,7 +1182,7 @@ def _call_proxy_sync(
 
         if isinstance(result, ToolValue):
             if any(result.media()):
-                return finalize_tool_media(result)
+                result = finalize_tool_media(result)
         elif tool_name == "browser_mcp" or is_media_result_envelope(result):
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded

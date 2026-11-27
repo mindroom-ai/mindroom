@@ -261,10 +261,11 @@ async def test_checkpoint_retains_only_the_current_provider_batch(tmp_path: Path
     [
         (False, False, "real sibling result"),
         (True, False, "real sibling result"),
+        (False, True, "real sibling result"),
         (True, True, "real sibling result"),
         (False, False, ""),
     ],
-    ids=["text", "media", "failed", "empty"],
+    ids=["text", "media", "failed-text", "failed-media", "empty"],
 )
 async def test_approval_checkpoint_keeps_completed_sibling_result(
     tmp_path: Path,
@@ -272,7 +273,7 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(
     failed: bool,
     text: str,
 ) -> None:
-    """A finished sibling's result is saved as the loop answers it: a failed one marked failed and without media.
+    """A finished sibling's result is saved as the loop answers it: failed outcomes stay marked failed and keep checked media.
 
     An empty success's message says it had no text output, while its call keeps the raw empty result.
     """
@@ -297,7 +298,7 @@ async def test_approval_checkpoint_keeps_completed_sibling_result(
         ("done", text, failed),
         ("waiting", None, None),
     ]
-    if media and not failed:
+    if media:
         assert saved.messages[-1].images[0].content == b"sibling-image"
         assert saved.messages[-1].audio[0].url == "https://example.test/sibling.wav"
     else:

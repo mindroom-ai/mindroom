@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.active_runs import pause_current_active_run
-from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure, job_failure_text
+from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure, job_failure_outcome, job_failure_text
 from mindroom.tool_jobs.control import waiting_on_jobs
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
 from mindroom.tool_jobs.runtime import (
@@ -105,7 +105,7 @@ def _render_collected(
 
 
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
-    """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
+    """Return a completed job's outcome as this call's own result; every other outcome returns a failed ToolOutcome.
 
     The call that started the job fails the same way (``job_failure``).
     """
@@ -116,11 +116,12 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
         failure = job_failure(job, prepared.value, prepared.payload)
         if failure is None:
             return await _finish_staged_result(staging, prepared.value)
+        outcome = job_failure_outcome(failure, prepared.value, prepared.payload)
         await staging.commit()
     except BaseException:
         await staging.release()
         raise
-    raise RuntimeError(failure)
+    return ToolOutputFileHandled(outcome) if active_tool_output_file_request() is not None else outcome
 
 
 async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - Tool value.

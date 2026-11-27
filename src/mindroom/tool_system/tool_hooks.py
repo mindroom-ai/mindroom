@@ -820,8 +820,9 @@ def _mask_result_values(result: object, mask_text: Callable[[str], str]) -> obje
     if isinstance(result, str):
         return mask_text(result)
     if isinstance(result, ToolOutcome) and result.saved_output is not None:
-        masked_saved = {key: _mask_result_values(item, mask_text) for key, item in result.saved_output.items()}
-        return replace(result, content=mask_text(result.content), saved_output=masked_saved)
+        masked_saved = _mask_result_values(result.saved_output, mask_text)
+        if isinstance(masked_saved, dict):
+            return replace(result, content=mask_text(str(masked_saved)), saved_output=masked_saved)
     if isinstance(result, ToolValue):
         # A result with media beside its text, as a shell command that used the agent CLI returns.
         return replace(result, content=mask_text(result.content))

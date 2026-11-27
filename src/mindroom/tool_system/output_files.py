@@ -617,6 +617,8 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
             content=str(finalized),
             is_error=True,
             stop_after_call=result.stop_after_call,
+            refused_by=result.refused_by,
+            counts_as_tool_failure=result.counts_as_tool_failure,
             saved_output=saved_output_envelope(finalized),
         )
     return finalized

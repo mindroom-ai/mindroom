@@ -573,7 +573,7 @@ def _stream_execute_response(
         )
 
 
-def _worker_error_outcome(result: object) -> ToolOutcome:
+def _worker_error_outcome(result: object, *, counts_as_tool_failure: bool = True) -> ToolOutcome:
     """Reconstruct a failed ``ToolOutcome`` from a worker's ``ExecuteResponse(is_error=True)`` payload."""
     if is_media_result_envelope(result):
         decoded = decode_media_result(result)
@@ -585,11 +585,18 @@ def _worker_error_outcome(result: object) -> ToolOutcome:
                 videos=decoded.videos,
                 files=decoded.files,
                 is_error=True,
+                counts_as_tool_failure=counts_as_tool_failure,
             )
-        return ToolOutcome(content=str(decoded), is_error=True, saved_output=saved_output_envelope(decoded))
+        return ToolOutcome(
+            content=str(decoded),
+            is_error=True,
+            counts_as_tool_failure=counts_as_tool_failure,
+            saved_output=saved_output_envelope(decoded),
+        )
     return ToolOutcome(
         content=result if isinstance(result, str) else str(result),
         is_error=True,
+        counts_as_tool_failure=counts_as_tool_failure,
         saved_output=saved_output_envelope(result),
     )
 
@@ -737,7 +744,11 @@ def execute_worker_proxy_request(
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
     report_tool_metadata(**(answer.metadata or {}))
-    return _worker_error_outcome(answer.result) if answer.is_error else answer.result
+    return (
+        _worker_error_outcome(answer.result, counts_as_tool_failure=answer.counts_as_tool_failure)
+        if answer.is_error
+        else answer.result
+    )
 
 
 def _create_credential_lease(

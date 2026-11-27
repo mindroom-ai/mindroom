@@ -36,7 +36,7 @@ from mindroom.tool_jobs.background_after import (
     background_after_schema,
     read_background_after,
 )
-from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, session_state_delta
+from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_outcome, session_state_delta
 from mindroom.tool_jobs.control import counted_tool_call, job_checkpoint, job_owns_execution
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout
 from mindroom.tool_jobs.execution_authority import (
@@ -510,7 +510,7 @@ async def _run_managed_call(
             pause_on_human_wait=pause_current_active_run,
         )
         if waited.claim is None:
-            value, error = (job.handle or format_job_handle)(waited.job), None
+            value, outcome = (job.handle or format_job_handle)(waited.job), None
         else:
             value, payload = await consume_tool_job(
                 runtime,
@@ -521,9 +521,10 @@ async def _run_managed_call(
             )
             retained = True
             error = job_failure(waited.job, value, payload)
+            outcome = None if error is None else job_failure_outcome(error, value, payload)
         # A released wait's call returned its job handle, which names the job a restart's account points to. A
         # failed call is recorded as failed, with the text the model reads.
-        await record_return(value if error is None else ToolOutcome(content=error, is_error=True))
+        await record_return(value if outcome is None else outcome)
     except Exception as failure:
         # The call fails with what ended it, as the model reads it, such as the runtime refusing the job or this
         # caller's wait for it, which fails the call, not the reply's run. A cancelled call stays started, since its
@@ -536,8 +537,8 @@ async def _run_managed_call(
             await runtime.release_wait(job_id, claim)
         if reference is not None and job is not None and not admitted:
             await reference.release()
-    if error is not None:
-        raise _JobCallError(error)
+    if outcome is not None:
+        return outcome
     return value
 
 
@@ -598,9 +599,28 @@ def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str
     It fails when it raised, or when the policy answered it with a failed outcome, as for a call a plugin hook declined.
     """
     failure = None if result.succeeded else result.failure_text
-    value = result.value if failure is None else None
+    counts_as_tool_failure = (
+        result.value.counts_as_tool_failure if failure is not None and isinstance(result.value, ToolOutcome) else True
+    )
+    if failure is None:
+        value: Any = result.value
+    elif isinstance(result.value, ToolValue) and any(result.value.media()):
+        value = ToolValue(
+            content=failure,
+            images=result.value.images,
+            audios=result.value.audios,
+            videos=result.value.videos,
+            files=result.value.files,
+        )
+    else:
+        value = None
     try:
-        payload = ToolResultPayload(value=value, state_delta=session_state_delta(baseline, state), error=failure)
+        payload = ToolResultPayload(
+            value=value,
+            state_delta=session_state_delta(baseline, state),
+            error=failure,
+            counts_as_tool_failure=counts_as_tool_failure,
+        )
         encoded = encode_result_payload(payload)
     except Exception as error:
         # Whatever fails here fails after the call ran, so its lost result must not read as a call that did not

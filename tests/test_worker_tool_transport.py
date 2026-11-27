@@ -429,7 +429,7 @@ def test_a_plain_worker_call_whose_result_could_not_be_sent_fails_as_it_always_d
         _worker_shell(tmp_path, "true")
     assert (len(worker_requests), answers[0].keys()) == (
         1,
-        {"ok", "result", "error", "failure_kind", "shell_backgrounded"},
+        {"ok", "result", "error", "failure_kind", "is_error", "counts_as_tool_failure", "shell_backgrounded"},
     )
 
 

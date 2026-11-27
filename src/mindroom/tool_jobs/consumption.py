@@ -16,7 +16,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.execution_authority import current_job_call
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import AcknowledgeWait
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -63,6 +63,25 @@ def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> s
     and for a later wait on it.
     """
     return None if job.status == "completed" else job_failure_text(value, payload)
+
+
+def job_failure_outcome(failure: str, value: Any, payload: ToolResultPayload) -> ToolOutcome:  # noqa: ANN401 - A consumed job's value.
+    """Return the failed ``ToolOutcome`` for a consumed job that did not complete, preserving media and failure flag."""
+    if isinstance(value, ToolValue) and any(value.media()):
+        return ToolOutcome(
+            content=failure,
+            images=value.images,
+            audios=value.audios,
+            videos=value.videos,
+            files=value.files,
+            is_error=True,
+            counts_as_tool_failure=payload.counts_as_tool_failure,
+        )
+    return ToolOutcome(
+        content=failure,
+        is_error=True,
+        counts_as_tool_failure=payload.counts_as_tool_failure,
+    )
 
 
 @dataclass(frozen=True, slots=True)

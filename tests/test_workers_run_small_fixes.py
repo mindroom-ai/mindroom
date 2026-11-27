@@ -121,6 +121,7 @@ async def test_item7_program_that_cannot_start_exits_as_a_shell_reports_it(
     assert shell_result == ToolOutcome(
         content=format_shell_completion("", f"{program}: {reason}", return_code=exit_code),
         is_error=True,
+        counts_as_tool_failure=False,
     )
 
     said = f"{program}: {reason}\n"

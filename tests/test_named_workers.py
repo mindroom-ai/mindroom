@@ -1537,7 +1537,11 @@ async def test_named_shell_launch_errors_fail_the_tool_without_matching_command_
         # A program that cannot start ends as a command that printed a shell's words and exited with its code.
         said = "definitely-not-a-binary-xyz: command not found"
         failed = await call(command, worker="build")
-        assert failed == ToolOutcome(content=f"Exit code 127\nStderr:\n{said}", is_error=True)
+        assert failed == ToolOutcome(
+            content=f"Exit code 127\nStderr:\n{said}",
+            is_error=True,
+            counts_as_tool_failure=False,
+        )
         assert failed == await call(["bash", "-c", f"echo '{said}' >&2; exit 127"], worker="build")
         assert await call(["printf", "Error: ordinary output"], worker="build") == "Error: ordinary output"
 
