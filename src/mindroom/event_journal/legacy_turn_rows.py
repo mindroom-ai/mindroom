@@ -372,9 +372,9 @@ def _agent_logins(transaction: Transaction) -> dict[str, tuple[str, ...]]:
 # Handling: the schema upgrade drops both, found in this journal's own schema, before the current schema creates their
 # replacements.
 # Coverage: tests/test_turn_rows_conversion.py::test_the_upgrade_replaces_the_dense_turn_source_indexes.
-def drop_dense_turn_source_indexes(transaction: Transaction, inspector: SchemaInspector) -> None:
-    """Drop the full turn-source indexes the partial ones replace, inside the schema transaction."""
-    for name in ("turn_sources_selected_revision", "turn_sources_discovery"):
+def drop_replaced_indexes(transaction: Transaction, inspector: SchemaInspector) -> None:
+    """Drop obsolete journal indexes replaced by narrower or covering ones, inside the schema transaction."""
+    for name in ("turn_sources_selected_revision", "turn_sources_discovery", "reply_span_sources_event"):
         if inspector.dialect is SQLITE_DIALECT:
             transaction.execute(f"DROP INDEX IF EXISTS {name}")
         # A PostgreSQL name resolves through the search path, which can reach another journal's schema.
@@ -778,7 +778,7 @@ async def import_legacy_ledger_file(records: turn_rows.TurnRecordStore, *, path:
 
 
 __all__ = [
-    "drop_dense_turn_source_indexes",
+    "drop_replaced_indexes",
     "import_legacy_ledger_file",
     "legacy_responses_file_path",
     "legacy_summary_sources",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -42,6 +43,7 @@ from .views import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import datetime
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -341,6 +343,38 @@ class ToolJobStore:
         """Return every saved job."""
         return await self._backend.read(tool_jobs.load_all)
 
+    async def load_startup(self) -> tuple[SavedToolJob, ...]:
+        """Return only active, unconsumed, workflow, or workflow-node jobs."""
+        return await self._backend.read(tool_jobs.load_startup)
+
+    async def load_ended_rooms(self) -> frozenset[tuple[str, str]]:
+        """Return distinct ``(recipient, room_id)`` pairs retaining cold terminal jobs."""
+        return await self._backend.read(tool_jobs.load_ended_rooms)
+
+    async def load_by_id(self, job_id: str, *, cold_only: bool = False) -> SavedToolJob | None:
+        """Return one saved job by its exact ID, or None."""
+        return await self._backend.read(partial(tool_jobs.load_by_id, job_id=job_id, cold_only=cold_only))
+
+    async def load_by_prefix(self, prefix: str) -> tuple[SavedToolJob, ...]:
+        """Return non-inline saved jobs whose ID starts with *prefix*."""
+        return await self._backend.read(partial(tool_jobs.load_by_prefix, prefix=prefix))
+
+    async def load_listable(self, *, recipient: str, room_id: str | None) -> tuple[SavedToolJob, ...]:
+        """Return non-inline saved jobs belonging to *(recipient, room_id)*."""
+        return await self._backend.read(partial(tool_jobs.load_listable, recipient=recipient, room_id=room_id))
+
+    async def load_expirable(self, *, inline_before: datetime, ended_before: datetime) -> tuple[SavedToolJob, ...]:
+        """Return terminal saved jobs older than the inline or non-inline retention cutoff."""
+        return await self._backend.read(
+            partial(tool_jobs.load_expirable, inline_before=inline_before, ended_before=ended_before),
+        )
+
+    async def load_by_delegation_ids(self, delegation_ids: Sequence[str]) -> tuple[SavedToolJob, ...]:
+        """Return saved delegation jobs matching any ID in *delegation_ids*."""
+        if not delegation_ids:
+            return ()
+        return await self._backend.read(partial(tool_jobs.load_by_delegation_ids, delegation_ids=delegation_ids))
+
     async def accept(self, job_id: str, job_json: str) -> None:
         """Save a newly accepted job, refusing an ID that is still saved."""
         await self._backend.write(
@@ -356,15 +390,9 @@ class ToolJobStore:
         approval_end_reason: str | None,
     ) -> None:
         """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards with ``approval_end_reason``."""
+        update = tool_jobs.ToolJobSnapshotUpdate(job_id, job_json, result_payload_json, approval_end_reason)
         await self._backend.write(
-            lambda transaction: tool_jobs.save(
-                transaction,
-                self._runtime_generation,
-                job_id,
-                job_json,
-                result_payload_json,
-                approval_end_reason=approval_end_reason,
-            ),
+            lambda transaction: tool_jobs.save_many(transaction, self._runtime_generation, (update,)),
         )
 
     async def save_many(self, updates: Sequence[ToolJobSnapshotUpdate]) -> None:

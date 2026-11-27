@@ -16,8 +16,9 @@ from .legacy_approval_failures import upgrade_failure_kind
 from .legacy_approval_records import upgrade_approval_records
 from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import upgrade_hydration_walk_version, upgrade_legacy_journal, upgrade_outbox_reply_rows
-from .legacy_turn_rows import drop_dense_turn_source_indexes, upgrade_turn_records_to_rows
+from .legacy_turn_rows import drop_replaced_indexes, upgrade_turn_records_to_rows
 from .schema import schema_statements
+from .tool_jobs import upgrade_tool_jobs_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,7 +53,8 @@ _JOURNAL_UPGRADES: tuple[_JournalUpgrade, ...] = (
     upgrade_continuation_identity,
     upgrade_failure_kind,
     upgrade_approval_records,
-    drop_dense_turn_source_indexes,
+    drop_replaced_indexes,
+    upgrade_tool_jobs_metadata,
 )
 
 

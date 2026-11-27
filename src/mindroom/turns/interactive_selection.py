@@ -114,6 +114,27 @@ class InteractiveSelections:
             origin=replace(facts, source_kind=_SELECTION_RESPONSE_SOURCE_KIND).origin,
         )
 
+    def _selection_turn_record(
+        self,
+        selection: interactive.InteractiveSelection,
+        *,
+        facts: IngressFacts,
+        source_event_id: str,
+        response_target: MessageTarget,
+    ) -> TurnRecord:
+        """Build the canonical turn record for one interactive selection."""
+        return self.deps.turn_store.attach_response_context(
+            TurnRecord.create(
+                [source_event_id],
+                discovery_event_ids=(
+                    (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
+                ),
+                requester_id=facts.run_requester_id,
+            ),
+            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
+            conversation_target=response_target,
+        )
+
     async def _start_interactive_selection(
         self,
         room: nio.MatrixRoom,
@@ -124,6 +145,12 @@ class InteractiveSelections:
     ) -> None:
         """Transfer one selection response from journal dispatch to runner ownership."""
         response_target = dispatch.response_target
+        selection_turn = self._selection_turn_record(
+            dispatch.selection,
+            facts=facts,
+            source_event_id=source_event_id,
+            response_target=response_target,
+        )
         response_envelope = self._interactive_selection_response_envelope(
             target=response_target,
             facts=facts,
@@ -169,9 +196,7 @@ class InteractiveSelections:
                 owned_response,
                 name=f"interactive_selection_response:{source_event_id}",
                 room_id=response_target.room_id,
-                # No turn record proves a selection reply recoverable, so orderly
-                # shutdown waits out its budget for one still running.
-                recovery_proof_ready=lambda: False,
+                recovery_proof_ready=lambda: self.deps.turn_store.response_recovery_ready(selection_turn),
                 source_event_ids=(source_event_id,),
             )
         except BaseException:
@@ -299,16 +324,11 @@ class InteractiveSelections:
             if selection.thread_id
             else []
         )
-        selection_handled_turn = self.deps.turn_store.attach_response_context(
-            TurnRecord.create(
-                [source_event_id],
-                discovery_event_ids=(
-                    (selection.question_event_id,) if source_event_id != selection.question_event_id else ()
-                ),
-                requester_id=facts.run_requester_id,
-            ),
-            history_scope=self.deps.turn_store.response_history_scope(ResponseAction(kind="individual")),
-            conversation_target=response_target,
+        selection_handled_turn = self._selection_turn_record(
+            selection,
+            facts=facts,
+            source_event_id=source_event_id,
+            response_target=response_target,
         )
         pending_turn = await self.deps.turn_store.record_pending_turn(selection_handled_turn)
         if pending_turn is None or pending_turn.deleted_sources:

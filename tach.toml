@@ -10085,6 +10085,7 @@ expose = ["ReplicateTools"]
 [[modules]]
 path = "mindroom.delegation.background"
 depends_on = [
+    "mindroom.delegation.cost",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
     "mindroom.tool_jobs.results",

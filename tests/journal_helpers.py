@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, cast
 
 from mindroom.event_journal import EventClass, EventKind, InboundEvent, RoomMembershipPosition, journal
+from mindroom.event_journal.schema import SQLITE_DIALECT, render, schema_statements
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from pathlib import Path
+
     import nio
 
     from mindroom.event_journal import PrincipalStore, RoomHistoryRecovery
@@ -67,3 +73,44 @@ def _membership_position(transaction: Transaction, principal_id: str, room_id: s
 async def membership_position(store: PrincipalStore, room_id: str) -> RoomMembershipPosition:
     """Return the journal tenure that owns this room's events and deliveries, as the membership row records it."""
     return await store._read(_membership_position, room_id)
+
+
+class PlanRecorder:
+    """Transaction stub recording SQLite EXPLAIN QUERY PLAN output for each query executed against it."""
+
+    def __init__(
+        self,
+        database: sqlite3.Connection,
+        *,
+        fetchone_result: Mapping[str, object] | None = None,
+    ) -> None:
+        self._database = database
+        self._fetchone_result = fetchone_result
+        self.plans: list[str] = []
+
+    def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+        """Record the query plan for *sql* and return an empty result set."""
+        rows = self._database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+        self.plans.append(" | ".join(row[-1] for row in rows))
+        return ()
+
+    def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
+        """Record the query plan for *sql* and return *fetchone_result*."""
+        self.fetchall(sql, params)
+        return self._fetchone_result
+
+    def record(self, fn: Callable[[Transaction], object]) -> list[str]:
+        """Run *fn* against this recorder and return only the plans it recorded."""
+        start = len(self.plans)
+        fn(cast("Transaction", self))
+        return self.plans[start:]
+
+
+@contextmanager
+def sqlite_plan_database(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open and close an empty un-ANALYZEd SQLite journal schema for query-plan inspection."""
+    with closing(sqlite3.connect(path)) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        database.commit()
+        yield database

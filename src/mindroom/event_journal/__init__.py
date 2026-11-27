@@ -89,7 +89,15 @@ from .scheduled_approvals import (
     scheduled_call_run_id,
 )
 from .store import EventJournalStore, PrincipalStore, ToolJobStore
-from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError, ToolJobSnapshotUpdate
+from .tool_jobs import (
+    TERMINAL_STATUSES,
+    SavedToolJob,
+    ToolJobExistsError,
+    ToolJobOwnershipLostError,
+    ToolJobSnapshotUpdate,
+    is_workflow_node_payload,
+    job_delegation_id_from_payload,
+)
 from .turn_rows import TurnRecordStore
 from .views import (
     ApprovalDeliveryView,
@@ -107,6 +115,7 @@ __all__ = [
     "REPLY_STOPPED_REASON",
     "RUNTIME_SOURCE_KINDS",
     "SCHEDULED_APPROVAL_WINDOW_NS",
+    "TERMINAL_STATUSES",
     "TIMEOUT_REASON",
     "TURN_BACKED_KINDS",
     "AdmissionFacts",
@@ -185,6 +194,8 @@ __all__ = [
     "decode_thread_id",
     "delivery_transaction_id",
     "encode_thread_id",
+    "is_workflow_node_payload",
+    "job_delegation_id_from_payload",
     "matrix_delivery_payload",
     "replacement_target",
     "scheduled_call_run_id",
