@@ -22,6 +22,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    reject_unexpected_args,
     required_text,
     text_to_html,
     time_zone_name,
@@ -35,6 +36,13 @@ if TYPE_CHECKING:
 
 _ReadAction = Literal["list_lists", "list_tasks"]
 _WriteAction = Literal["create_task", "update_task", "delete_task"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "create_task": frozenset({"list_id", "title", "due_date", "notes", "importance", "time_zone"}),
+    "update_task": frozenset(
+        {"list_id", "task_id", "title", "due_date", "notes", "importance", "completed", "time_zone"},
+    ),
+    "delete_task": frozenset({"list_id", "task_id"}),
+}
 _Importance = Literal["low", "normal", "high"]
 
 # A listing returns up to 50 tasks, so each task's notes stay short.
@@ -278,7 +286,7 @@ class MicrosoftTodoTools(MicrosoftGraphToolkit):
         notes: str | None = None,
         importance: _Importance | None = None,
         completed: bool | None = None,
-        time_zone: str = "UTC",
+        time_zone: str | None = None,
     ) -> str:
         """Create, update, complete, or delete a Microsoft To Do task as the requester.
 
@@ -294,10 +302,29 @@ class MicrosoftTodoTools(MicrosoftGraphToolkit):
           `importance`, `completed` True/False, `time_zone`)
         - `delete_task`: delete `task_id` from `list_id`
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "list_id": list_id,
+                    "task_id": task_id,
+                    "title": title,
+                    "due_date": due_date,
+                    "notes": notes,
+                    "importance": importance,
+                    "completed": completed,
+                    "time_zone": time_zone,
+                },
+            )
+        ) is not None:
+            return rejected
+        effective_zone = "UTC" if time_zone is None else time_zone
         if action == "create_task":
-            return self._create_task(list_id, title, due_date, notes, importance, time_zone)
+            return self._create_task(list_id, title, due_date, notes, importance, effective_zone)
         if action == "update_task":
-            return self._update_task(list_id, task_id, title, due_date, notes, importance, completed, time_zone)
+            return self._update_task(list_id, task_id, title, due_date, notes, importance, completed, effective_zone)
         if action == "delete_task":
             return self._send(
                 lambda: _Request("DELETE", _task_path(list_id, task_id)),

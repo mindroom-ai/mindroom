@@ -3198,7 +3198,7 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     ("toolkit_name", "tool_name", "actions"),
     [
         ("outlook_mail", "outlook_mail_read", ("search", "get_message", "get_automatic_replies")),
-        ("outlook_mail", "outlook_mail_send", ("send", "reply")),
+        ("outlook_mail", "outlook_mail_send_message", ("send", "reply")),
         ("outlook_mail", "outlook_mail_manage", ("mark_read", "move", "set_automatic_replies")),
         ("outlook_calendar", "outlook_calendar_read", ("list_calendars", "list_events", "get_free_busy")),
         ("outlook_calendar", "outlook_calendar_write", ("create_event", "delete_event", "respond_to_event")),
@@ -3252,7 +3252,8 @@ def test_outlook_mail_create_draft_keeps_tool_wide_grants() -> None:
 @pytest.mark.parametrize(
     ("toolkit_name", "retired_fn", "replacement_fn"),
     [
-        ("outlook_mail", "outlook_mail_reply", "outlook_mail_send"),
+        ("outlook_mail", "outlook_mail_send", "outlook_mail_send_message"),
+        ("outlook_mail", "outlook_mail_reply", "outlook_mail_send_message"),
         ("outlook_mail", "outlook_mail_set_automatic_replies", "outlook_mail_manage"),
         ("outlook_calendar", "outlook_calendar_create_event", "outlook_calendar_write"),
         ("microsoft_teams", "microsoft_teams_send_channel_message", "microsoft_teams_send"),
@@ -3287,3 +3288,50 @@ def test_microsoft_365_retired_approval_rules_fail_closed(
         {**base_data, "tool_approval": {"rules": [{"match": replacement_fn, "action": "require_approval"}]}},
         runtime_paths,
     )
+
+
+@pytest.mark.parametrize(
+    "tool_approval",
+    [
+        {
+            "default": "require_approval",
+            "rules": [{"match": "outlook_mail_send", "action": "auto_approve"}],
+        },
+        {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "outlook_mail_send", "action": "auto_approve"},
+                {"match": "outlook_mail_reply", "action": "require_approval"},
+            ],
+        },
+        {
+            "default": "require_approval",
+            "rules": [
+                {"match": "outlook_mail_send", "action": "auto_approve"},
+                {"match": "outlook_mail_reply", "action": "require_approval"},
+            ],
+        },
+        {
+            "default": "require_approval",
+            "rules": [
+                {"match": "outlook_mail_send_message", "action": "auto_approve"},
+                {"match": "outlook_mail_reply", "action": "require_approval"},
+            ],
+        },
+    ],
+)
+def test_outlook_mail_send_and_reply_migration_rules_fail_closed(
+    tmp_path: Path,
+    tool_approval: dict[str, object],
+) -> None:
+    """Legacy outlook_mail_send / outlook_mail_reply approval combinations fail closed until migrated."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["outlook_mail"], "include_default_tools": False}},
+        "tool_approval": tool_approval,
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="outlook_mail_send_message"):
+        Config.validate_with_runtime(data, runtime_paths)

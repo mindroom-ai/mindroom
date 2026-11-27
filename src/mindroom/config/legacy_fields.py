@@ -927,7 +927,8 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "outlook_mail_get_message": "outlook_mail_read",
         "outlook_mail_download_attachment": "outlook_mail_read",
         "outlook_mail_get_automatic_replies": "outlook_mail_read",
-        "outlook_mail_reply": "outlook_mail_send",
+        "outlook_mail_send": "outlook_mail_send_message",
+        "outlook_mail_reply": "outlook_mail_send_message",
         "outlook_mail_mark_read": "outlook_mail_manage",
         "outlook_mail_move": "outlook_mail_manage",
         "outlook_mail_set_automatic_replies": "outlook_mail_manage",
@@ -973,10 +974,9 @@ def _retired_approval_pair_error(
     new: str,
     default: str,
     default_timeout_days: float,
+    active_functions: Collection[str] = (),
 ) -> str | None:
     first_new = next((index for index, rule in enumerate(rules) if fnmatchcase(new, rule.match)), None)
-    if first_new is not None and rules[first_new].match == new:
-        return None
     first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
     old_decision = _effective_approval_decision(
         rules[first_old] if first_old is not None else None,
@@ -989,6 +989,14 @@ def _retired_approval_pair_error(
         default_timeout_days=default_timeout_days,
     )
     if old_decision == new_decision:
+        return None
+    if first_new is not None and rules[first_new].match == new:
+        if first_old is not None and rules[first_old].match == old and old not in active_functions:
+            return (
+                f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+                f"{old} is now {new}, which now gets a different approval decision; "
+                f"rewrite the rules for {new}."
+            )
         return None
     if first_old is not None:
         return (
@@ -1031,6 +1039,7 @@ def retired_consolidated_approval_error(
     default: str,
     default_timeout_days: float = 7.0,
     renames: Mapping[str, str] | None = None,
+    active_functions: Collection[str] = (),
 ) -> str | None:
     """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
@@ -1044,6 +1053,7 @@ def retired_consolidated_approval_error(
                 new=new,
                 default=default,
                 default_timeout_days=default_timeout_days,
+                active_functions=active_functions,
             )
         ) is not None:
             return error

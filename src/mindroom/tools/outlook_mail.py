@@ -55,12 +55,12 @@ if TYPE_CHECKING:
     function_names=(
         "outlook_mail_read",
         "outlook_mail_create_draft",
-        "outlook_mail_send",
+        "outlook_mail_send_message",
         "outlook_mail_manage",
     ),
     action_scoped_grants=(
         "outlook_mail_read",
-        "outlook_mail_send",
+        "outlook_mail_send_message",
         "outlook_mail_manage",
     ),
 )

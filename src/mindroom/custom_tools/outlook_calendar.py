@@ -24,6 +24,7 @@ from mindroom.custom_tools.microsoft_graph import (
     mailbox_path,
     mailbox_tool_result,
     path_segment,
+    reject_unexpected_args,
     require_arg,
     required_text,
     time_zone_name,
@@ -60,6 +61,27 @@ _EVENT_SELECT = (
 _EMAIL = re.compile(r'[^@\s<>,;"]+@[^@\s<>,;"]+\.[^@\s<>,;"]+')
 _ReadAction = Literal["list_calendars", "list_events", "get_event", "get_free_busy"]
 _WriteAction = Literal["create_event", "update_event", "delete_event", "respond_to_event"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "create_event": frozenset(
+        {
+            "subject",
+            "start",
+            "end",
+            "calendar",
+            "time_zone",
+            "attendees",
+            "location",
+            "body",
+            "is_online_meeting",
+            "calendar_owner",
+        },
+    ),
+    "update_event": frozenset(
+        {"event_id", "subject", "start", "end", "time_zone", "location", "body", "calendar_owner"},
+    ),
+    "delete_event": frozenset({"event_id", "calendar_owner"}),
+    "respond_to_event": frozenset({"event_id", "expected_organizer", "response", "comment", "send_response"}),
+}
 _Response = Literal["accept", "tentative", "decline"]
 _RESPONSE_ACTIONS: dict[_Response, str] = {"accept": "accept", "tentative": "tentativelyAccept", "decline": "decline"}
 
@@ -618,10 +640,7 @@ class OutlookCalendarTools(MicrosoftGraphToolkit):
         response: _Response | None,
         comment: str | None,
         send_response: bool,
-        calendar_owner: str | None,
     ) -> str:
-        if calendar_owner is not None:
-            return graph_error_payload(_TOOL_NAME, _invalid("calendar_owner is not supported for respond_to_event."))
 
         def build() -> _GraphRequest:
             if expected_organizer is None or not expected_organizer.strip():
@@ -651,16 +670,16 @@ class OutlookCalendarTools(MicrosoftGraphToolkit):
         start: str | None = None,
         end: str | None = None,
         calendar: str | None = None,
-        time_zone: str = "UTC",
+        time_zone: str | None = None,
         attendees: list[str] | None = None,
         location: str | None = None,
         body: str | None = None,
-        is_online_meeting: bool = False,
+        is_online_meeting: bool | None = None,
         event_id: str | None = None,
         expected_organizer: str | None = None,
         response: _Response | None = None,
         comment: str | None = None,
-        send_response: bool = True,
+        send_response: bool | None = None,
         calendar_owner: str | None = None,
     ) -> str:
         """Create, update, delete, or respond to Outlook calendar events.
@@ -673,8 +692,8 @@ class OutlookCalendarTools(MicrosoftGraphToolkit):
         tell the requester so (an occurrence ID affects only that occurrence).
 
         - `create_event`: create event (`subject`, `start`, `end`; optional `calendar`, `time_zone`, `attendees` <=100
-          emails, `location`, `body`, `is_online_meeting`, `calendar_owner`); Outlook emails an invitation to every
-          attendee
+          emails, `location`, `body`, `is_online_meeting` default False, `calendar_owner`); Outlook emails an
+          invitation to every attendee
         - `update_event`: patch `event_id` (`subject`, `start`+`end`, `time_zone`, `location`, `body`, `calendar_owner`);
           omitted fields keep values; cannot replace an online meeting's `body`
         - `delete_event`: delete `event_id` (optional `calendar_owner`); if organizer, Outlook sends every attendee a
@@ -683,21 +702,47 @@ class OutlookCalendarTools(MicrosoftGraphToolkit):
           optional `comment`, `send_response` default True—required for `comment`); fails with `target_mismatch` if the
           organizer differs
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "subject": subject,
+                    "start": start,
+                    "end": end,
+                    "calendar": calendar,
+                    "time_zone": time_zone,
+                    "attendees": attendees,
+                    "location": location,
+                    "body": body,
+                    "is_online_meeting": is_online_meeting,
+                    "event_id": event_id,
+                    "expected_organizer": expected_organizer,
+                    "response": response,
+                    "comment": comment,
+                    "send_response": send_response,
+                    "calendar_owner": calendar_owner,
+                },
+            )
+        ) is not None:
+            return rejected
+        effective_zone = "UTC" if time_zone is None else time_zone
         if action == "create_event":
             return self._create_event(
                 subject,
                 start,
                 end,
                 calendar,
-                time_zone,
+                effective_zone,
                 attendees,
                 location,
                 body,
-                is_online_meeting,
+                False if is_online_meeting is None else is_online_meeting,
                 calendar_owner,
             )
         if action == "update_event":
-            return self._update_event(event_id, subject, start, end, time_zone, location, body, calendar_owner)
+            return self._update_event(event_id, subject, start, end, effective_zone, location, body, calendar_owner)
         if action == "delete_event":
             return self._send(
                 lambda: _GraphRequest("DELETE", _event_path(event_id, calendar_owner)),
@@ -710,7 +755,6 @@ class OutlookCalendarTools(MicrosoftGraphToolkit):
                 expected_organizer,
                 response,
                 comment,
-                send_response,
-                calendar_owner,
+                True if send_response is None else send_response,
             )
         return graph_error_payload(_TOOL_NAME, invalid_action(action))

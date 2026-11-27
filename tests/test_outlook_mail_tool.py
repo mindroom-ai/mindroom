@@ -45,7 +45,7 @@ SHARED_ID = "7f3c2b1a-0000-4000-8000-00000000abcd"
 READ_FUNCTIONS = ("outlook_mail_read",)
 WRITE_FUNCTIONS = (
     "outlook_mail_create_draft",
-    "outlook_mail_send",
+    "outlook_mail_send_message",
     "outlook_mail_manage",
 )
 
@@ -182,7 +182,7 @@ def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
     assert metadata.consumes_workspace_paths is True
     assert metadata.file_access == ToolFileAccess.AGENT
     assert metadata.function_names == (*READ_FUNCTIONS, *WRITE_FUNCTIONS)
-    assert metadata.action_scoped_grants == ("outlook_mail_read", "outlook_mail_send", "outlook_mail_manage")
+    assert metadata.action_scoped_grants == ("outlook_mail_read", "outlook_mail_send_message", "outlook_mail_manage")
 
 
 def test_a_connection_without_the_new_scopes_asks_to_reconnect(
@@ -223,8 +223,8 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     for name in WRITE_FUNCTIONS:
         assert "Before calling, tell the requester" in model_description(tools, name), name
     assert "untrusted" in model_description(tools, "outlook_mail_read")
-    assert "`reply_to` addresses when it has them" in model_description(tools, "outlook_mail_send")
-    for name in ("outlook_mail_send", "outlook_mail_create_draft"):
+    assert "`reply_to` addresses when it has them" in model_description(tools, "outlook_mail_send_message")
+    for name in ("outlook_mail_send_message", "outlook_mail_create_draft"):
         assert "Sam Example <sam@contoso.com>" in model_description(tools, name), name
 
 
@@ -354,11 +354,11 @@ def test_search_refuses_malformed_arguments_before_any_request(
         ("outlook_mail_manage", {"action": "mark_read", "message_id": MESSAGE_ID, "mailbox": ["a@b.co"]}),
         ("outlook_mail_manage", {"action": "mark_read", "message_id": MESSAGE_ID, "is_read": "maybe"}),
         ("outlook_mail_read", {"action": "search", "query": 5}),
-        ("outlook_mail_send", {"action": "send", "to": "sam@contoso.com", "subject": "s", "body": "b"}),
-        ("outlook_mail_send", {"action": "send", "to": [1], "subject": "s", "body": "b"}),
-        ("outlook_mail_send", {"action": "send", "to": ["sam@contoso.com"], "subject": "s", "body": 3}),
+        ("outlook_mail_send_message", {"action": "send", "to": "sam@contoso.com", "subject": "s", "body": "b"}),
+        ("outlook_mail_send_message", {"action": "send", "to": [1], "subject": "s", "body": "b"}),
+        ("outlook_mail_send_message", {"action": "send", "to": ["sam@contoso.com"], "subject": "s", "body": 3}),
         (
-            "outlook_mail_send",
+            "outlook_mail_send_message",
             {"action": "send", "to": ["sam@contoso.com"], "subject": "s", "body": "b", "attachments": "a.txt"},
         ),
         (
@@ -367,11 +367,11 @@ def test_search_refuses_malformed_arguments_before_any_request(
         ),
         ("outlook_mail_create_draft", {"to": ["sam@contoso.com"], "subject": "s", "body": "b", "attachments": [1]}),
         (
-            "outlook_mail_send",
+            "outlook_mail_send_message",
             {"action": "reply", "message_id": MESSAGE_ID, "recipients": "alex@contoso.com", "body": "ok"},
         ),
         (
-            "outlook_mail_send",
+            "outlook_mail_send_message",
             {
                 "action": "reply",
                 "message_id": MESSAGE_ID,
@@ -514,7 +514,7 @@ def test_get_message_truncates_a_long_body(tmp_path: Path, monkeypatch: pytest.M
             message_id=MESSAGE_ID,
             attachment_id=message_id,
         ),
-        lambda tools, message_id: tools.outlook_mail_send(
+        lambda tools, message_id: tools.outlook_mail_send_message(
             "reply",
             message_id=message_id,
             recipients=["alex@contoso.com"],
@@ -692,7 +692,13 @@ def test_attachments_over_the_request_limit_are_refused_before_encoding(
     monkeypatch.setattr(outlook_mail.base64, "b64encode", lambda content: encoded.append(len(content)) or b"")
 
     result = json.loads(
-        tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="s", body="b", attachments=["a.bin", "b.bin"]),
+        tools.outlook_mail_send_message(
+            "send",
+            to=["sam@contoso.com"],
+            subject="s",
+            body="b",
+            attachments=["a.bin", "b.bin"],
+        ),
     )
 
     assert result["code"] == "too_large"
@@ -706,14 +712,16 @@ def test_a_non_ascii_body_is_measured_as_the_bytes_sent(tmp_path: Path, monkeypa
     body = "é" * ((outlook_mail._MAX_REQUEST_BYTES - 1000) // 2)
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = json.loads(tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="Notes", body=body))
+    result = json.loads(tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject="Notes", body=body))
 
     assert result == {"sent": True, "status": "ok", "tool": "outlook_mail"}
     [request] = graph.requests
     assert json.loads(request.content)["message"]["body"]["content"] == body
     assert int(request.headers["content-length"]) <= outlook_mail._MAX_REQUEST_BYTES
 
-    over = json.loads(tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="Notes", body=body + "é" * 1000))
+    over = json.loads(
+        tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject="Notes", body=body + "é" * 1000),
+    )
 
     assert over["code"] == "too_large"
     assert len(graph.requests) == 1
@@ -724,7 +732,13 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     result = json.loads(
-        tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="s", body="b", attachments=["../secret.txt"]),
+        tools.outlook_mail_send_message(
+            "send",
+            to=["sam@contoso.com"],
+            subject="s",
+            body="b",
+            attachments=["../secret.txt"],
+        ),
     )
 
     assert result["code"] == "invalid_local_path"
@@ -736,7 +750,7 @@ def test_more_attachments_than_one_message_holds_are_refused(tmp_path: Path, mon
 
     attachments = [f"file{index}.txt" for index in range(outlook_mail._MAX_ATTACHMENTS + 1)]
     result = json.loads(
-        tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="s", body="b", attachments=attachments),
+        tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject="s", body="b", attachments=attachments),
     )
 
     assert (result["code"], "at most" in result["message"]) == ("invalid_argument", True)
@@ -770,7 +784,7 @@ def test_invalid_recipients_are_refused_before_any_request(
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     for result in (
-        tools.outlook_mail_send("send", to=to, subject="s", body="b", cc=cc),
+        tools.outlook_mail_send_message("send", to=to, subject="s", body="b", cc=cc),
         tools.outlook_mail_create_draft(to, "s", "b", cc=cc),
     ):
         assert json.loads(result)["code"] == "invalid_argument"
@@ -798,7 +812,9 @@ def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     assert (
-        json.loads(tools.outlook_mail_send("send", to=[recipient], subject="s", body="b", cc=[recipient]))["status"]
+        json.loads(tools.outlook_mail_send_message("send", to=[recipient], subject="s", body="b", cc=[recipient]))[
+            "status"
+        ]
         == "ok"
     )
     assert json.loads(tools.outlook_mail_create_draft([recipient], "s", "b", cc=[recipient]))["status"] == "ok"
@@ -812,7 +828,7 @@ def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
 def test_send_posts_send_mail_and_keeps_a_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = json.loads(tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="Lunch", body="Noon?"))
+    result = json.loads(tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject="Lunch", body="Noon?"))
 
     [request] = graph.requests
     assert (request.method, request.url.path) == ("POST", "/v1.0/me/sendMail")
@@ -840,7 +856,7 @@ def test_reply_sends_the_body_as_an_escaped_comment(
 
     # Case does not matter, and naming an address the draft leaves out, such as the requester's own, still sends it.
     result = json.loads(
-        tools.outlook_mail_send(
+        tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["Sam Example <sam@contoso.com>", "TEAM@contoso.com", "alex@contoso.com"],
@@ -881,7 +897,9 @@ def test_reply_to_a_recipient_not_named_is_refused(
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     named = ["alex@contoso.com", "desk@straße.example"]
-    refused = json.loads(tools.outlook_mail_send("reply", message_id=MESSAGE_ID, recipients=named, body="Thanks"))
+    refused = json.loads(
+        tools.outlook_mail_send_message("reply", message_id=MESSAGE_ID, recipients=named, body="Thanks"),
+    )
 
     assert (refused["code"], refused["recipients"]) == ("recipients_mismatch", [listed])
     assert [(request.method, unquote(request.url.path)) for request in graph.requests] == [
@@ -908,7 +926,13 @@ def test_reply_refuses_malformed_arguments(
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     result = json.loads(
-        tools.outlook_mail_send("reply", message_id=MESSAGE_ID, recipients=recipients, body=body, reply_all=reply_all),
+        tools.outlook_mail_send_message(
+            "reply",
+            message_id=MESSAGE_ID,
+            recipients=recipients,
+            body=body,
+            reply_all=reply_all,
+        ),
     )
 
     assert result["code"] == "invalid_argument"
@@ -1005,7 +1029,7 @@ def _shared_reply_graph() -> _Graph:
             [("POST", "messages")],
         ),
         (
-            lambda tools: tools.outlook_mail_send(
+            lambda tools: tools.outlook_mail_send_message(
                 "send",
                 to=["sam@contoso.com"],
                 subject="s",
@@ -1015,7 +1039,7 @@ def _shared_reply_graph() -> _Graph:
             [("POST", "sendMail")],
         ),
         (
-            lambda tools: tools.outlook_mail_send(
+            lambda tools: tools.outlook_mail_send_message(
                 "reply",
                 message_id=MESSAGE_ID,
                 recipients=["sam@contoso.com", "team@contoso.com"],
@@ -1054,7 +1078,9 @@ def test_every_mail_function_acts_in_the_mailbox_it_names(
 def test_results_name_no_mailbox_for_the_requesters_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert "mailbox" not in json.loads(tools.outlook_mail_send("send", to=["sam@contoso.com"], subject="s", body="b"))
+    assert "mailbox" not in json.loads(
+        tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject="s", body="b"),
+    )
     assert "mailbox" not in json.loads(tools.outlook_mail_read("search"))
 
 
@@ -1099,14 +1125,14 @@ def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
             mailbox=mailbox,
         ),
         lambda tools, mailbox: tools.outlook_mail_create_draft(["sam@contoso.com"], "s", "b", mailbox=mailbox),
-        lambda tools, mailbox: tools.outlook_mail_send(
+        lambda tools, mailbox: tools.outlook_mail_send_message(
             "send",
             to=["sam@contoso.com"],
             subject="s",
             body="b",
             mailbox=mailbox,
         ),
-        lambda tools, mailbox: tools.outlook_mail_send(
+        lambda tools, mailbox: tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["sam@contoso.com"],
@@ -1150,8 +1176,14 @@ def test_a_malformed_mailbox_is_refused_before_any_request(
             mailbox=SHARED,
         ),
         lambda tools: tools.outlook_mail_create_draft([], "s", "b", mailbox=SHARED),
-        lambda tools: tools.outlook_mail_send("send", to=["not-an-email"], subject="s", body="b", mailbox=SHARED),
-        lambda tools: tools.outlook_mail_send(
+        lambda tools: tools.outlook_mail_send_message(
+            "send",
+            to=["not-an-email"],
+            subject="s",
+            body="b",
+            mailbox=SHARED,
+        ),
+        lambda tools: tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["sam@contoso.com"],
@@ -1193,7 +1225,7 @@ def test_a_shared_mailbox_reply_to_a_recipient_not_named_is_refused(
     tools, graph = _tools(tmp_path, monkeypatch, mail)
 
     refused = json.loads(
-        tools.outlook_mail_send(
+        tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["alex@contoso.com"],
@@ -1480,21 +1512,21 @@ def test_set_automatic_replies_refuses_malformed_arguments_before_any_request(
     [
         lambda tools: tools.outlook_mail_read("get_automatic_replies", mailbox=SHARED),
         lambda tools: tools.outlook_mail_read("unknown"),  # type: ignore[arg-type]
-        lambda tools: tools.outlook_mail_send("send", to=["sam@contoso.com"], subject=None, body="b"),
-        lambda tools: tools.outlook_mail_send(
+        lambda tools: tools.outlook_mail_send_message("send", to=["sam@contoso.com"], subject=None, body="b"),
+        lambda tools: tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["alex@contoso.com"],
             body="ok",
             attachments=["a.txt"],
         ),
-        lambda tools: tools.outlook_mail_send(
+        lambda tools: tools.outlook_mail_send_message(
             "reply",
             message_id=MESSAGE_ID,
             recipients=["alex@contoso.com"],
             body=None,
         ),
-        lambda tools: tools.outlook_mail_send("unknown"),  # type: ignore[arg-type]
+        lambda tools: tools.outlook_mail_send_message("unknown"),  # type: ignore[arg-type]
         lambda tools: tools.outlook_mail_manage("set_automatic_replies", status="disabled", mailbox=SHARED),
         lambda tools: tools.outlook_mail_manage("set_automatic_replies"),
         lambda tools: tools.outlook_mail_manage("unknown"),  # type: ignore[arg-type]
@@ -1508,4 +1540,171 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     assert json.loads(call(tools))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs", "unexpected"),
+    [
+        (
+            "outlook_mail_send_message",
+            {
+                "action": "send",
+                "to": ["sam@contoso.com"],
+                "subject": "Hi",
+                "body": "Hello",
+                "recipients": ["sam@contoso.com"],
+            },
+            "recipients",
+        ),
+        (
+            "outlook_mail_send_message",
+            {"action": "send", "to": ["sam@contoso.com"], "subject": "Hi", "body": "Hello", "message_id": MESSAGE_ID},
+            "message_id",
+        ),
+        (
+            "outlook_mail_send_message",
+            {"action": "send", "to": ["sam@contoso.com"], "subject": "Hi", "body": "Hello", "reply_all": True},
+            "reply_all",
+        ),
+        (
+            "outlook_mail_send_message",
+            {"action": "send", "to": ["sam@contoso.com"], "subject": "Hi", "body": "Hello", "reply_all": False},
+            "reply_all",
+        ),
+        (
+            "outlook_mail_send_message",
+            {
+                "action": "reply",
+                "message_id": MESSAGE_ID,
+                "recipients": ["alex@contoso.com"],
+                "body": "Thanks",
+                "to": ["sam@contoso.com"],
+            },
+            "to",
+        ),
+        (
+            "outlook_mail_send_message",
+            {
+                "action": "reply",
+                "message_id": MESSAGE_ID,
+                "recipients": ["alex@contoso.com"],
+                "body": "Thanks",
+                "cc": ["kim@contoso.com"],
+            },
+            "cc",
+        ),
+        (
+            "outlook_mail_send_message",
+            {
+                "action": "reply",
+                "message_id": MESSAGE_ID,
+                "recipients": ["alex@contoso.com"],
+                "body": "Thanks",
+                "subject": "Re: Plan",
+            },
+            "subject",
+        ),
+        (
+            "outlook_mail_send_message",
+            {
+                "action": "reply",
+                "message_id": MESSAGE_ID,
+                "recipients": ["alex@contoso.com"],
+                "body": "Thanks",
+                "attachments": ["a.txt"],
+            },
+            "attachments",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "set_automatic_replies", "status": "disabled", "folder": "archive"},
+            "folder",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "set_automatic_replies", "status": "disabled", "message_id": MESSAGE_ID},
+            "message_id",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "set_automatic_replies", "status": "disabled", "is_read": True},
+            "is_read",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "set_automatic_replies", "status": "disabled", "mailbox": SHARED},
+            "mailbox",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "is_read": True, "folder": "archive"},
+            "folder",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "status": "disabled"},
+            "status",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "internal_message": "Away"},
+            "internal_message",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "external_message": "Away"},
+            "external_message",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "start": "2026-10-21T09:00:00"},
+            "start",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "end": "2026-10-22T09:00:00"},
+            "end",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "external_audience": "all"},
+            "external_audience",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "mark_read", "message_id": MESSAGE_ID, "time_zone": "Europe/Berlin"},
+            "time_zone",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "move", "message_id": MESSAGE_ID, "folder": "archive", "is_read": False},
+            "is_read",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "move", "message_id": MESSAGE_ID, "folder": "archive", "status": "disabled"},
+            "status",
+        ),
+        (
+            "outlook_mail_manage",
+            {"action": "move", "message_id": MESSAGE_ID, "folder": "archive", "time_zone": "UTC"},
+            "time_zone",
+        ),
+    ],
+)
+def test_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    (tmp_path / "workspace" / "a.txt").write_text("attachment", encoding="utf-8")
+
+    result = json.loads(getattr(tools, method)(**kwargs))
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
     assert graph.requests == []

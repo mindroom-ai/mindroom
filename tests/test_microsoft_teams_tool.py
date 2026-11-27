@@ -1330,3 +1330,218 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert json.loads(getattr(tools, fn_name)(**kwargs))["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "unexpected"),
+    [
+        (
+            {
+                "action": "send_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "message_id": MESSAGE,
+            },
+            "message_id",
+        ),
+        (
+            {
+                "action": "send_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "chat_id": CHAT,
+            },
+            "chat_id",
+        ),
+        (
+            {
+                "action": "send_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "recipients": RECIPIENTS,
+            },
+            "recipients",
+        ),
+        (
+            {
+                "action": "send_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "people": ["sam@contoso.com"],
+            },
+            "people",
+        ),
+        (
+            {
+                "action": "send_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "topic": "Sync",
+            },
+            "topic",
+        ),
+        (
+            {
+                "action": "reply_to_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "message_id": MESSAGE,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "chat_id": CHAT,
+            },
+            "chat_id",
+        ),
+        (
+            {
+                "action": "reply_to_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "message_id": MESSAGE,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "recipients": RECIPIENTS,
+            },
+            "recipients",
+        ),
+        (
+            {
+                "action": "reply_to_channel_message",
+                "team_id": TEAM,
+                "channel_id": CHANNEL,
+                "message_id": MESSAGE,
+                "expected_team": TEAM_NAME,
+                "expected_channel": CHANNEL_NAME,
+                "text": "hi",
+                "people": ["sam@contoso.com"],
+            },
+            "people",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "team_id": TEAM,
+            },
+            "team_id",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "channel_id": CHANNEL,
+            },
+            "channel_id",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "message_id": MESSAGE,
+            },
+            "message_id",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "expected_team": TEAM_NAME,
+            },
+            "expected_team",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "expected_channel": CHANNEL_NAME,
+            },
+            "expected_channel",
+        ),
+        (
+            {
+                "action": "send_chat_message",
+                "chat_id": CHAT,
+                "recipients": RECIPIENTS,
+                "text": "hi",
+                "topic": "Sync",
+            },
+            "topic",
+        ),
+        (
+            {
+                "action": "start_chat",
+                "people": ["sam@contoso.com"],
+                "text": "hi",
+                "team_id": TEAM,
+            },
+            "team_id",
+        ),
+        (
+            {
+                "action": "start_chat",
+                "people": ["sam@contoso.com"],
+                "text": "hi",
+                "chat_id": CHAT,
+            },
+            "chat_id",
+        ),
+        (
+            {
+                "action": "start_chat",
+                "people": ["sam@contoso.com"],
+                "text": "hi",
+                "recipients": RECIPIENTS,
+            },
+            "recipients",
+        ),
+        (
+            {
+                "action": "start_chat",
+                "people": ["sam@contoso.com"],
+                "text": "hi",
+                "expected_channel": CHANNEL_NAME,
+            },
+            "expected_channel",
+        ),
+    ],
+)
+def test_send_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
+
+    result = json.loads(tools.microsoft_teams_send(**kwargs))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
+    assert graph.requests == []

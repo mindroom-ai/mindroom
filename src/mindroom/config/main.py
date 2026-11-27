@@ -1723,6 +1723,12 @@ class Config(BaseModel):
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
+        active_functions = {
+            fn
+            for name in enabled_toolkits
+            if (entry := tools.entries.get(name)) is not None and entry.function_names
+            for fn in entry.function_names
+        }
         for toolkit_name in sorted(enabled_toolkits):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             metadata = tools.entries.get(toolkit_name)
@@ -1747,6 +1753,7 @@ class Config(BaseModel):
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
                     renames=renames,
+                    active_functions=active_functions,
                 )
             ) is not None:
                 raise ToolConfigOverrideError(consolidated_error)

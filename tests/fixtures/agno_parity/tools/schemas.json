@@ -13389,7 +13389,14 @@
               ]
             },
             "time_zone": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14133,7 +14140,7 @@
       },
       {
         "name": "outlook_calendar_write",
-        "description": "Create, update, delete, or respond to Outlook calendar events.\nBefore calling, tell the requester the event details, whose calendar it is, and who will be notified (approval\nprompts may show only IDs). Local `start`/`end` take no offset and use `time_zone` (Windows, IANA, or `UTC`,\nwhich defaults to UTC, so pass the requester's zone). `calendar_owner` (shared/delegated edit access; omit for\nown) applies to `create_event`, `update_event`, and `delete_event` (invitations/updates/cancellations go from\nthat person), not `respond_to_event`. A `series_master_id` affects or answers every occurrence of the series;\ntell the requester so (an occurrence ID affects only that occurrence).\n\n- `create_event`: create event (`subject`, `start`, `end`; optional `calendar`, `time_zone`, `attendees` <=100\n  emails, `location`, `body`, `is_online_meeting`, `calendar_owner`); Outlook emails an invitation to every\n  attendee\n- `update_event`: patch `event_id` (`subject`, `start`+`end`, `time_zone`, `location`, `body`, `calendar_owner`);\n  omitted fields keep values; cannot replace an online meeting's `body`\n- `delete_event`: delete `event_id` (optional `calendar_owner`); if organizer, Outlook sends every attendee a\n  cancellation; on own calendar as attendee, use `respond_to_event` `decline` to notify the organizer\n- `respond_to_event`: RSVP to `event_id` (`expected_organizer` email, `response`: `accept`/`tentative`/`decline`;\n  optional `comment`, `send_response` default True—required for `comment`); fails with `target_mismatch` if the\n  organizer differs",
+        "description": "Create, update, delete, or respond to Outlook calendar events.\nBefore calling, tell the requester the event details, whose calendar it is, and who will be notified (approval\nprompts may show only IDs). Local `start`/`end` take no offset and use `time_zone` (Windows, IANA, or `UTC`,\nwhich defaults to UTC, so pass the requester's zone). `calendar_owner` (shared/delegated edit access; omit for\nown) applies to `create_event`, `update_event`, and `delete_event` (invitations/updates/cancellations go from\nthat person), not `respond_to_event`. A `series_master_id` affects or answers every occurrence of the series;\ntell the requester so (an occurrence ID affects only that occurrence).\n\n- `create_event`: create event (`subject`, `start`, `end`; optional `calendar`, `time_zone`, `attendees` <=100\n  emails, `location`, `body`, `is_online_meeting` default False, `calendar_owner`); Outlook emails an\n  invitation to every attendee\n- `update_event`: patch `event_id` (`subject`, `start`+`end`, `time_zone`, `location`, `body`, `calendar_owner`);\n  omitted fields keep values; cannot replace an online meeting's `body`\n- `delete_event`: delete `event_id` (optional `calendar_owner`); if organizer, Outlook sends every attendee a\n  cancellation; on own calendar as attendee, use `respond_to_event` `decline` to notify the organizer\n- `respond_to_event`: RSVP to `event_id` (`expected_organizer` email, `response`: `accept`/`tentative`/`decline`;\n  optional `comment`, `send_response` default True—required for `comment`); fails with `target_mismatch` if the\n  organizer differs",
         "parameters": {
           "type": "object",
           "properties": {
@@ -14187,7 +14194,14 @@
               ]
             },
             "time_zone": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "attendees": {
               "anyOf": [
@@ -14223,7 +14237,14 @@
               ]
             },
             "is_online_meeting": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "event_id": {
               "anyOf": [
@@ -14264,7 +14285,14 @@
               ]
             },
             "send_response": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "calendar_owner": {
               "anyOf": [
@@ -14474,7 +14502,7 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "outlook_mail_send",
+        "name": "outlook_mail_send_message",
         "description": "Send a new plain-text Outlook email or reply immediately (saved to Sent Items).\nBefore calling, tell the requester the sending mailbox, recipients, subject/target, body, and attachments;\nuse `outlook_mail_create_draft` when the requester wants to review first. Sending from a shared `mailbox`\nrequires Exchange Full Access plus Send As or Send on Behalf. Addresses accept `sam@contoso.com` or\n`Sam Example <sam@contoso.com>`.\n\n- `send`: send new email (`to`, `subject`, `body`; optional `cc`, workspace `attachments` <=3 MB/file & ~3 MB\n  total—link OneDrive for larger files, `mailbox`)\n- `reply`: reply above quoted `message_id` (`message_id`, `recipients`, `body`; optional `reply_all` default\n  False, `mailbox`). Read with `outlook_mail_read` (`get_message`) first: reply goes to the original's\n  `reply_to` addresses when it has them (else sender), plus `to`/`cc` with `reply_all`; fails with\n  `recipients_mismatch` without sending if any recipient is omitted from `recipients`",
         "parameters": {
           "type": "object",
@@ -14569,7 +14597,14 @@
               ]
             },
             "reply_all": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mailbox": {
               "anyOf": [
@@ -14625,7 +14660,14 @@
               ]
             },
             "is_read": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "folder": {
               "anyOf": [
@@ -14696,7 +14738,14 @@
               ]
             },
             "time_zone": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "external_audience": {
               "type": "string",

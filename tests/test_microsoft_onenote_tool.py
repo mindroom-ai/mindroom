@@ -896,3 +896,54 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "unexpected"),
+    [
+        (
+            {
+                "action": "create_page",
+                "expected_web_url": WEB_URL,
+                "section_id": SECTION,
+                "title": "Agenda",
+                "content": "Notes",
+                "page_id": PAGE,
+            },
+            "page_id",
+        ),
+        (
+            {
+                "action": "append_to_page",
+                "expected_web_url": WEB_URL,
+                "page_id": PAGE,
+                "content": "More",
+                "section_id": SECTION,
+            },
+            "section_id",
+        ),
+        (
+            {
+                "action": "append_to_page",
+                "expected_web_url": WEB_URL,
+                "page_id": PAGE,
+                "content": "More",
+                "title": "Ignored",
+            },
+            "title",
+        ),
+    ],
+)
+def test_write_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({}))
+
+    result = json.loads(tools.microsoft_onenote_write(**kwargs))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
+    assert graph.requests == []

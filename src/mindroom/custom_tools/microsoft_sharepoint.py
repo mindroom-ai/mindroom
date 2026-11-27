@@ -26,6 +26,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_offset,
     page_path,
     path_segment,
+    reject_unexpected_args,
     required_text,
 )
 
@@ -75,6 +76,10 @@ _INVALID_FIELDS = (
 _TARGET_MISMATCH = "The list is not at expected_web_url; tell the requester its real web_url before trying again."
 _ReadAction = Literal["search_sites", "get_site", "list_lists", "get_list", "list_items", "list_pages", "get_page"]
 _WriteAction = Literal["create_item", "update_item"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "create_item": frozenset({"site_id", "list_id", "fields", "expected_web_url"}),
+    "update_item": frozenset({"site_id", "list_id", "item_id", "fields", "expected_web_url"}),
+}
 
 
 @dataclass(frozen=True)
@@ -455,6 +460,21 @@ class MicrosoftSharePointTools(MicrosoftGraphToolkit):
         - `update_item`: patch `item_id` in `site_id`/`list_id` with `fields` (`null` clears a column; omitted columns
           stay unchanged) and `expected_web_url`
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "site_id": site_id,
+                    "list_id": list_id,
+                    "item_id": item_id,
+                    "fields": fields,
+                    "expected_web_url": expected_web_url,
+                },
+            )
+        ) is not None:
+            return rejected
         if action == "create_item":
 
             def build_create() -> _Request:

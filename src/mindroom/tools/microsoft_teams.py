@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="microsoft_teams",
     display_name="Microsoft Teams",
-    description="Read and send Microsoft Teams channel and chat messages, start chats, and check presence as the connected user",
+    description="Read and send Teams channel and chat messages, start chats, and read presence as the connected user",
     category=ToolCategory.COMMUNICATION,
     file_access=ToolFileAccess.NONE,
     status=ToolStatus.REQUIRES_CONFIG,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     auth_provider="microsoft_teams",
     icon="TbBrandTeams",
-    icon_color="text-violet-600",
+    icon_color="text-indigo-600",
     config_fields=[
         bool_config_field(
             "write",

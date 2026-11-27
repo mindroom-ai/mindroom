@@ -571,3 +571,33 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "unexpected"),
+    [
+        ({"action": "create_task", "list_id": LIST, "title": "Buy milk", "task_id": TASK}, "task_id"),
+        ({"action": "create_task", "list_id": LIST, "title": "Buy milk", "completed": True}, "completed"),
+        ({"action": "create_task", "list_id": LIST, "title": "Buy milk", "completed": False}, "completed"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "title": "Buy milk"}, "title"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "due_date": "2026-11-01"}, "due_date"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "notes": "Details"}, "notes"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "importance": "high"}, "importance"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "completed": True}, "completed"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "time_zone": "UTC"}, "time_zone"),
+        ({"action": "delete_task", "list_id": LIST, "task_id": TASK, "time_zone": "Europe/Berlin"}, "time_zone"),
+    ],
+)
+def test_write_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({}))
+
+    result = json.loads(tools.microsoft_todo_write(**kwargs))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
+    assert graph.requests == []

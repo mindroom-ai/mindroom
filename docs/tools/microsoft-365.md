@@ -87,7 +87,7 @@ agents:
 | --- | --- | --- | --- | --- |
 | `write` | `microsoft_files` | `boolean` | `true` | Allows replacing and uploading files and writing Excel ranges (`microsoft_files_write`); with `false`, that function is not offered. |
 | `write` | `microsoft_sharepoint` | `boolean` | `true` | Allows adding list items and changing their column values (`microsoft_sharepoint_write`); with `false`, that function is not offered. |
-| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies (`outlook_mail_create_draft`, `outlook_mail_send`, `outlook_mail_manage`); with `false`, those functions are not offered. |
+| `write` | `outlook_mail` | `boolean` | `true` | Allows creating drafts, sending new mail and replies, marking messages read or unread, moving messages, and changing automatic replies (`outlook_mail_create_draft`, `outlook_mail_send_message`, `outlook_mail_manage`); with `false`, those functions are not offered. |
 | `write` | `outlook_calendar` | `boolean` | `true` | Allows creating, changing, deleting, and answering events (`outlook_calendar_write`); with `false`, that function is not offered. |
 | `write` | `microsoft_todo` | `boolean` | `true` | Allows creating, updating, completing, and deleting tasks (`microsoft_todo_write`); with `false`, that function is not offered. |
 | `write` | `microsoft_teams` | `boolean` | `true` | Allows sending channel posts, channel replies, and chat messages, and starting chats (`microsoft_teams_send`); with `false`, that function is not offered. |
@@ -152,7 +152,7 @@ Site, list, item, and page listings, and long pages, return a `next_page_token` 
 | --- | --- | --- | --- |
 | `outlook_mail_read` | `search`, `get_message`, `download_attachment`, `get_automatic_replies` | no | List/search messages newest first (up to 50), read a message as plain text (up to 20,000 chars) with recipients and attachments, download a file attachment (up to 50 MB) to `outlook-mail-attachments/`, and read automatic-reply (out-of-office) settings. |
 | `outlook_mail_create_draft` | — | yes | Save a new plain-text draft, optionally with workspace files attached, without sending it. |
-| `outlook_mail_send` | `send`, `reply` | yes, sends mail | Send a new plain-text message (optionally with workspace attachments) or reply to sender / everyone (`reply_all`) above the quoted original, honoring reply-to addresses. |
+| `outlook_mail_send_message` | `send`, `reply` | yes, sends mail | Send a new plain-text message (optionally with workspace attachments) or reply to sender / everyone (`reply_all`) above the quoted original, honoring reply-to addresses. |
 | `outlook_mail_manage` | `mark_read`, `move`, `set_automatic_replies` | yes | Mark a message read or unread, move a message to a folder, or configure the requester's automatic replies (`disabled`, `alwaysEnabled`, or `scheduled`). |
 
 Search takes Outlook search syntax, such as `from:sam@example.com subject:"quarterly plan" hasAttachments:true`.
@@ -306,7 +306,7 @@ tool_approval:
       action: require_approval
     - match: microsoft_sharepoint_write
       action: require_approval
-    - match: outlook_mail_send
+    - match: outlook_mail_send_message
       action: require_approval
     - match: outlook_mail_manage
       action: require_approval
@@ -320,8 +320,8 @@ tool_approval:
       action: require_approval
 ```
 
-Sent mail cannot be recalled, so require approval at least for `outlook_mail_send` (both `send` and `reply`), and likewise for `microsoft_teams_send`, whose messages everyone in the channel or chat sees at once.
-The approval cards of `outlook_mail_send` list every recipient, and a reply is sent only to the recipients its card lists.
+Sent mail cannot be recalled, so require approval at least for `outlook_mail_send_message` (both `send` and `reply`), and likewise for `microsoft_teams_send`, whose messages everyone in the channel or chat sees at once.
+The approval cards of `outlook_mail_send_message` list every recipient, and a reply is sent only to the recipients its card lists.
 A card without `mailbox` sends as the requester; with it, the card names the shared mailbox the mail goes out from.
 `outlook_mail_create_draft` and mailbox-organization actions on `outlook_mail_manage` (`mark_read`, `move`) change only the mailbox they name, the requester's own by default, where they can be undone; colleagues who share a mailbox see those changes too.
 Automatic replies (`outlook_mail_manage` with `action="set_automatic_replies"`) answer every sender while they are on, outside the organization too when `external_audience` allows it.

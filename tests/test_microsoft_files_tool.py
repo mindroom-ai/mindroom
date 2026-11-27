@@ -949,3 +949,133 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert json.loads(getattr(tools, fn_name)(**kwargs))["code"] == code
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "unexpected"),
+    [
+        (
+            {
+                "action": "replace_file",
+                "file": ITEM_PATH,
+                "local_path": "report.docx",
+                "expected_etag": ETAG,
+                "expected_web_url": WEB_URL,
+                "folder": ITEM_PATH,
+            },
+            "folder",
+        ),
+        (
+            {
+                "action": "replace_file",
+                "file": ITEM_PATH,
+                "local_path": "report.docx",
+                "expected_etag": ETAG,
+                "expected_web_url": WEB_URL,
+                "name": "other.docx",
+            },
+            "name",
+        ),
+        (
+            {
+                "action": "replace_file",
+                "file": ITEM_PATH,
+                "local_path": "report.docx",
+                "expected_etag": ETAG,
+                "expected_web_url": WEB_URL,
+                "worksheet": "Sheet1",
+            },
+            "worksheet",
+        ),
+        (
+            {
+                "action": "upload_file",
+                "local_path": "report.docx",
+                "file": ITEM_PATH,
+            },
+            "file",
+        ),
+        (
+            {
+                "action": "upload_file",
+                "local_path": "report.docx",
+                "expected_etag": ETAG,
+            },
+            "expected_etag",
+        ),
+        (
+            {
+                "action": "upload_file",
+                "local_path": "report.docx",
+                "expected_web_url": WEB_URL,
+            },
+            "expected_web_url",
+        ),
+        (
+            {
+                "action": "upload_file",
+                "local_path": "report.docx",
+                "address": "A1:B2",
+            },
+            "address",
+        ),
+        (
+            {
+                "action": "upload_file",
+                "local_path": "report.docx",
+                "values": [[1]],
+            },
+            "values",
+        ),
+        (
+            {
+                "action": "excel_update_range",
+                "file": ITEM_PATH,
+                "worksheet": "Sheet1",
+                "address": "A1",
+                "values": [[1]],
+                "expected_web_url": WEB_URL,
+                "expected_etag": ETAG,
+            },
+            "expected_etag",
+        ),
+        (
+            {
+                "action": "excel_update_range",
+                "file": ITEM_PATH,
+                "worksheet": "Sheet1",
+                "address": "A1",
+                "values": [[1]],
+                "expected_web_url": WEB_URL,
+                "local_path": "report.docx",
+            },
+            "local_path",
+        ),
+        (
+            {
+                "action": "excel_update_range",
+                "file": ITEM_PATH,
+                "worksheet": "Sheet1",
+                "address": "A1",
+                "values": [[1]],
+                "expected_web_url": WEB_URL,
+                "folder": ITEM_PATH,
+            },
+            "folder",
+        ),
+    ],
+)
+def test_write_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+    (tmp_path / "workspace" / "report.docx").write_bytes(b"hello")
+
+    result = json.loads(tools.microsoft_files_write(**kwargs))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
+    assert graph.requests == []

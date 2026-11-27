@@ -20,6 +20,7 @@ from mindroom.custom_tools.microsoft_graph import (
     invalid_action,
     page_offset,
     path_segment,
+    reject_unexpected_args,
     required_text,
     text_to_html,
 )
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 
 _ReadAction = Literal["list_notebooks", "list_sections", "list_pages", "get_page"]
 _WriteAction = Literal["create_page", "append_to_page"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "create_page": frozenset({"expected_web_url", "section_id", "title", "content", "container"}),
+    "append_to_page": frozenset({"expected_web_url", "page_id", "content", "container"}),
+}
 
 _TOOL_NAME = "microsoft_onenote"
 # Notebook and section listings take no limit; page listings take one from 1 to this.
@@ -387,6 +392,22 @@ class MicrosoftOneNoteTools(MicrosoftGraphToolkit):
           for title-only)
         - `append_to_page`: append non-empty plain-text `content` as a new paragraph to `page_id`
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "expected_web_url": expected_web_url,
+                    "section_id": section_id,
+                    "page_id": page_id,
+                    "title": title,
+                    "content": content,
+                    "container": container,
+                },
+            )
+        ) is not None:
+            return rejected
         if action == "create_page":
             return self._create_page(section_id, title, content, expected_web_url, container)
         if action == "append_to_page":

@@ -23,6 +23,7 @@ from mindroom.custom_tools.microsoft_graph import (
     next_page_token,
     page_path,
     path_segment,
+    reject_unexpected_args,
     require_arg,
     required_text,
     text_to_html,
@@ -65,6 +66,14 @@ _SendAction = Literal[
     "send_chat_message",
     "start_chat",
 ]
+_SEND_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "send_channel_message": frozenset({"team_id", "channel_id", "expected_team", "expected_channel", "text"}),
+    "reply_to_channel_message": frozenset(
+        {"team_id", "channel_id", "message_id", "expected_team", "expected_channel", "text"},
+    ),
+    "send_chat_message": frozenset({"chat_id", "recipients", "text"}),
+    "start_chat": frozenset({"people", "topic", "text"}),
+}
 
 
 @dataclass(frozen=True)
@@ -536,6 +545,26 @@ class MicrosoftTeamsTools(MicrosoftGraphToolkit):
           existing one-on-one chat, 2+ creates a group chat with optional `topic`) and send `text`; fails with
           `recipients_mismatch` if member addresses differ
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _SEND_ALLOWED_ARGS,
+                {
+                    "team_id": team_id,
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "expected_team": expected_team,
+                    "expected_channel": expected_channel,
+                    "chat_id": chat_id,
+                    "recipients": recipients,
+                    "people": people,
+                    "topic": topic,
+                    "text": text,
+                },
+            )
+        ) is not None:
+            return rejected
         if action == "send_channel_message":
             return self._call(
                 lambda: _Request(

@@ -41,7 +41,7 @@ from mindroom.path_confinement import open_directory_within_root, resolve_path_w
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import BinaryIO
@@ -132,6 +132,25 @@ def require_arg[T](value: T | None, field_name: str, message: str | None = None)
 def invalid_action(action: object) -> MicrosoftGraphError:
     """Return an invalid_argument error for an unsupported action."""
     return MicrosoftGraphError(code="invalid_argument", message=f"Unsupported action: {action!r}.")
+
+
+def reject_unexpected_args(
+    tool_name: str,
+    action: str,
+    allowed_by_action: Mapping[str, Collection[str]],
+    provided: Mapping[str, object],
+) -> str | None:
+    """Return an ``invalid_argument`` error payload when ``action`` receives unsupported arguments."""
+    allowed = allowed_by_action.get(action)
+    if allowed is None:
+        return None
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
+    if not unexpected:
+        return None
+    fields = ", ".join(unexpected)
+    verb = "is" if len(unexpected) == 1 else "are"
+    msg = f"{fields} {verb} not supported for action {action!r}."
+    return graph_error_payload(tool_name, MicrosoftGraphError(code="invalid_argument", message=msg))
 
 
 def time_zone_name(value: str) -> str:

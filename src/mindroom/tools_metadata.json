@@ -531,7 +531,7 @@
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
       "dependencies": null,
-      "description": "Read and send Microsoft Teams channel and chat messages, start chats, and check presence as the connected user",
+      "description": "Read and send Teams channel and chat messages, start chats, and read presence as the connected user",
       "display_name": "Microsoft Teams",
       "docs_url": "https://docs.mindroom.chat/tools/microsoft-365/",
       "executes_code": false,
@@ -542,7 +542,7 @@
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "TbBrandTeams",
-      "icon_color": "text-violet-600",
+      "icon_color": "text-indigo-600",
       "name": "microsoft_teams",
       "requires_conversation": false,
       "requires_primary_runtime": true,
@@ -6957,7 +6957,7 @@
       "function_names": [
         "outlook_mail_read",
         "outlook_mail_create_draft",
-        "outlook_mail_send",
+        "outlook_mail_send_message",
         "outlook_mail_manage"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",

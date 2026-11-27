@@ -25,6 +25,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_offset,
     page_path,
     path_segment,
+    reject_unexpected_args,
     require_arg,
     required_text,
     share_id,
@@ -71,6 +72,11 @@ _ReadAction = Literal[
     "excel_read_range",
 ]
 _WriteAction = Literal["replace_file", "upload_file", "excel_update_range"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "replace_file": frozenset({"file", "local_path", "expected_etag", "expected_web_url"}),
+    "upload_file": frozenset({"local_path", "folder", "name", "expected_web_url"}),
+    "excel_update_range": frozenset({"file", "worksheet", "address", "values", "expected_web_url"}),
+}
 
 
 @dataclass(frozen=True)
@@ -504,6 +510,11 @@ class MicrosoftFilesTools(MicrosoftGraphToolkit):
             if folder is not None:
                 _parse_file(folder, "folder")
                 _web_url(expected_web_url)
+            elif expected_web_url is not None:
+                raise MicrosoftGraphError(
+                    code="invalid_argument",
+                    message="expected_web_url is only supported when folder is set.",
+                )
             source = self._upload_source(local_path)
             return source, _upload_name(source.name if name is None else name)
 
@@ -583,6 +594,25 @@ class MicrosoftFilesTools(MicrosoftGraphToolkit):
         - `excel_update_range`: write up to 10,000 cells into `worksheet` `address` of workbook `file` (`values` rows
           matching `address` shape, `=` prefix writes formula; requires `expected_web_url`)
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "file": file,
+                    "local_path": local_path,
+                    "expected_etag": expected_etag,
+                    "expected_web_url": expected_web_url,
+                    "folder": folder,
+                    "name": name,
+                    "worksheet": worksheet,
+                    "address": address,
+                    "values": values,
+                },
+            )
+        ) is not None:
+            return rejected
         if action == "replace_file":
             return self._replace_file(file, local_path, expected_etag, expected_web_url)
         if action == "upload_file":

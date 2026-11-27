@@ -29,6 +29,7 @@ from mindroom.custom_tools.microsoft_graph import (
     mailbox_path,
     mailbox_tool_result,
     path_segment,
+    reject_unexpected_args,
     require_arg,
     required_text,
     text_to_html,
@@ -72,6 +73,17 @@ _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
 _ReadAction = Literal["search", "get_message", "download_attachment", "get_automatic_replies"]
 _SendAction = Literal["send", "reply"]
 _ManageAction = Literal["mark_read", "move", "set_automatic_replies"]
+_SEND_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "send": frozenset({"to", "subject", "body", "cc", "attachments", "mailbox"}),
+    "reply": frozenset({"message_id", "recipients", "body", "reply_all", "mailbox"}),
+}
+_MANAGE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "mark_read": frozenset({"message_id", "is_read", "mailbox"}),
+    "move": frozenset({"message_id", "folder", "mailbox"}),
+    "set_automatic_replies": frozenset(
+        {"status", "internal_message", "external_message", "start", "end", "time_zone", "external_audience"},
+    ),
+}
 _AutomaticReplyStatus = Literal["disabled", "alwaysEnabled", "scheduled"]
 # The choice that sets Graph's "none" is named internal_only, which says what it does.
 _ExternalAudience = Literal["internal_only", "contactsOnly", "all"]
@@ -324,7 +336,7 @@ class OutlookMailTools(MicrosoftGraphToolkit):
         self._file_access = file_access
         tools: list[Callable[..., str]] = [self.outlook_mail_read]
         if write:
-            tools.extend((self.outlook_mail_create_draft, self.outlook_mail_send, self.outlook_mail_manage))
+            tools.extend((self.outlook_mail_create_draft, self.outlook_mail_send_message, self.outlook_mail_manage))
         super().__init__(
             tool_name=_TOOL_NAME,
             runtime_paths=runtime_paths,
@@ -593,7 +605,70 @@ class OutlookMailTools(MicrosoftGraphToolkit):
 
         return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run)
 
-    def outlook_mail_send(
+    def _send_new_email(
+        self,
+        to: list[str] | None,
+        subject: str | None,
+        body: str | None,
+        cc: list[str] | None,
+        attachments: list[str] | None,
+        mailbox: str | None,
+    ) -> str:
+        def run_send() -> Mapping[str, object]:
+            target_to = require_arg(to, "to", "to must name at least one recipient.")
+            msg_subject = require_arg(subject, "subject")
+            msg_body = require_arg(body, "body")
+            request = {
+                "message": self._message(target_to, msg_subject, msg_body, cc, attachments),
+                "saveToSentItems": True,
+            }
+            _check_payload_size(request)
+            with self._session() as session:
+                session.request("POST", f"{_mailbox_path(mailbox)}/sendMail", json=request)
+            return {"sent": True}
+
+        return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run_send)
+
+    def _reply_to_message(
+        self,
+        message_id: str | None,
+        recipients: list[str] | None,
+        body: str | None,
+        reply_all: bool,
+        mailbox: str | None,
+    ) -> str:
+        def validate_reply() -> None:
+            path_segment(message_id, "message_id")
+            _recipients(require_arg(recipients, "recipients"), "recipients")
+            required_text(body, "body")
+
+        def operation_reply(session: GraphSession) -> Mapping[str, object]:
+            base = _mailbox_path(mailbox)
+            reply_verb = "createReplyAll" if reply_all else "createReply"
+            path = f"{base}/messages/{path_segment(message_id, 'message_id')}/{reply_verb}"
+            draft = session.json("POST", path, json={"comment": text_to_html(required_text(body, "body"))})
+            draft_path = f"{base}/messages/{path_segment(draft.get('id'), 'draft id')}"
+            fields = ("toRecipients", "ccRecipients", "bccRecipients")
+            actual = [recipient for field in fields for recipient in draft.get(field) or []]
+            expected = _recipients(require_arg(recipients, "recipients"), "recipients")
+            if not _address_set(actual) <= _address_set(expected):
+                session.request("DELETE", draft_path)
+                raise MicrosoftGraphError(
+                    code="recipients_mismatch",
+                    message="The reply would reach recipients the call did not name, all listed here; nothing was sent.",
+                    recipients=_addresses(actual),
+                )
+            session.request("POST", f"{draft_path}/send")
+            return {
+                "message_id": message_id,
+                "reply_all": reply_all,
+                "recipients": _addresses(actual),
+                "sent": True,
+            }
+
+        return self._call(operation_reply, validate=validate_reply, mailbox=mailbox)
+
+    def outlook_mail_send_message(
         self,
         action: _SendAction,
         to: list[str] | None = None,
@@ -603,7 +678,7 @@ class OutlookMailTools(MicrosoftGraphToolkit):
         attachments: list[str] | None = None,
         message_id: str | None = None,
         recipients: list[str] | None = None,
-        reply_all: bool = False,
+        reply_all: bool | None = None,
         mailbox: str | None = None,
     ) -> str:
         """Send a new plain-text Outlook email or reply immediately (saved to Sent Items).
@@ -620,66 +695,73 @@ class OutlookMailTools(MicrosoftGraphToolkit):
           `reply_to` addresses when it has them (else sender), plus `to`/`cc` with `reply_all`; fails with
           `recipients_mismatch` without sending if any recipient is omitted from `recipients`
         """
-        if action == "send":
-
-            def run_send() -> Mapping[str, object]:
-                target_to = require_arg(to, "to", "to must name at least one recipient.")
-                msg_subject = require_arg(subject, "subject")
-                msg_body = require_arg(body, "body")
-                request = {
-                    "message": self._message(target_to, msg_subject, msg_body, cc, attachments),
-                    "saveToSentItems": True,
-                }
-                _check_payload_size(request)
-                with self._session() as session:
-                    session.request("POST", f"{_mailbox_path(mailbox)}/sendMail", json=request)
-                return {"sent": True}
-
-            return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run_send)
-
-        if action == "reply":
-
-            def validate_reply() -> None:
-                if attachments:
-                    msg = "attachments are not supported for action 'reply'; use action 'send' instead."
-                    raise _invalid(msg)
-                path_segment(message_id, "message_id")
-                _recipients(require_arg(recipients, "recipients"), "recipients")
-                required_text(body, "body")
-
-            def operation_reply(session: GraphSession) -> Mapping[str, object]:
-                base = _mailbox_path(mailbox)
-                reply_verb = "createReplyAll" if reply_all else "createReply"
-                path = f"{base}/messages/{path_segment(message_id, 'message_id')}/{reply_verb}"
-                draft = session.json("POST", path, json={"comment": text_to_html(required_text(body, "body"))})
-                draft_path = f"{base}/messages/{path_segment(draft.get('id'), 'draft id')}"
-                fields = ("toRecipients", "ccRecipients", "bccRecipients")
-                actual = [recipient for field in fields for recipient in draft.get(field) or []]
-                expected = _recipients(require_arg(recipients, "recipients"), "recipients")
-                if not _address_set(actual) <= _address_set(expected):
-                    session.request("DELETE", draft_path)
-                    raise MicrosoftGraphError(
-                        code="recipients_mismatch",
-                        message="The reply would reach recipients the call did not name, all listed here; nothing was sent.",
-                        recipients=_addresses(actual),
-                    )
-                session.request("POST", f"{draft_path}/send")
-                return {
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _SEND_ALLOWED_ARGS,
+                {
+                    "to": to,
+                    "subject": subject,
+                    "body": body,
+                    "cc": cc,
+                    "attachments": attachments,
                     "message_id": message_id,
+                    "recipients": recipients,
                     "reply_all": reply_all,
-                    "recipients": _addresses(actual),
-                    "sent": True,
-                }
-
-            return self._call(operation_reply, validate=validate_reply, mailbox=mailbox)
-
+                    "mailbox": mailbox,
+                },
+            )
+        ) is not None:
+            return rejected
+        if action == "send":
+            return self._send_new_email(to, subject, body, cc, attachments, mailbox)
+        if action == "reply":
+            return self._reply_to_message(
+                message_id,
+                recipients,
+                body,
+                False if reply_all is None else reply_all,
+                mailbox,
+            )
         return graph_error_payload(_TOOL_NAME, invalid_action(action))
+
+    def _set_automatic_replies(
+        self,
+        status: _AutomaticReplyStatus | None,
+        internal_message: str | None,
+        external_message: str | None,
+        start: str | None,
+        end: str | None,
+        time_zone: str,
+        external_audience: _ExternalAudience | None,
+    ) -> str:
+        try:
+            if status not in ("disabled", "alwaysEnabled", "scheduled"):
+                msg = "status must be disabled, alwaysEnabled, or scheduled."
+                raise _invalid(msg)
+            request = {
+                "automaticRepliesSetting": {
+                    "status": status,
+                    **_reply_messages(status, internal_message, external_message, external_audience),
+                    **_schedule(status, start, end, time_zone),
+                },
+            }
+        except MicrosoftGraphError as exc:
+            return graph_error_payload(_TOOL_NAME, exc)
+        return self._call(
+            lambda session: {
+                "automatic_replies": _automatic_replies(
+                    session.json("PATCH", "/me/mailboxSettings", json=request).get("automaticRepliesSetting"),
+                ),
+            },
+        )
 
     def outlook_mail_manage(
         self,
         action: _ManageAction,
         message_id: str | None = None,
-        is_read: bool = True,
+        is_read: bool | None = None,
         folder: str | None = None,
         mailbox: str | None = None,
         status: _AutomaticReplyStatus | None = None,
@@ -687,7 +769,7 @@ class OutlookMailTools(MicrosoftGraphToolkit):
         external_message: str | None = None,
         start: str | None = None,
         end: str | None = None,
-        time_zone: str = "UTC",
+        time_zone: str | None = None,
         external_audience: _ExternalAudience | None = None,
     ) -> str:
         """Organize Outlook messages or update the requester's own automatic replies (out of office).
@@ -704,20 +786,41 @@ class OutlookMailTools(MicrosoftGraphToolkit):
           first; `scheduled` requires local `start`/`end` without offset in `time_zone`, default `UTC`; plain text
           keeps line breaks; `mailbox` not supported)
         """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _MANAGE_ALLOWED_ARGS,
+                {
+                    "message_id": message_id,
+                    "is_read": is_read,
+                    "folder": folder,
+                    "mailbox": mailbox,
+                    "status": status,
+                    "internal_message": internal_message,
+                    "external_message": external_message,
+                    "start": start,
+                    "end": end,
+                    "time_zone": time_zone,
+                    "external_audience": external_audience,
+                },
+            )
+        ) is not None:
+            return rejected
         if action == "mark_read":
+            read_flag = True if is_read is None else is_read
             return self._call(
                 lambda session: (
                     session.json(
                         "PATCH",
                         f"{_mailbox_path(mailbox)}/messages/{path_segment(message_id, 'message_id')}",
-                        json={"isRead": is_read},
+                        json={"isRead": read_flag},
                     ),
-                    {"message_id": message_id, "is_read": is_read},
+                    {"message_id": message_id, "is_read": read_flag},
                 )[1],
                 validate=lambda: path_segment(message_id, "message_id"),
                 mailbox=mailbox,
             )
-
         if action == "move":
             return self._call(
                 lambda session: {
@@ -732,29 +835,14 @@ class OutlookMailTools(MicrosoftGraphToolkit):
                 validate=lambda: (path_segment(message_id, "message_id"), path_segment(folder, "folder")),
                 mailbox=mailbox,
             )
-
         if action == "set_automatic_replies":
-            if mailbox is not None:
-                return graph_error_payload(_TOOL_NAME, _invalid("mailbox is not supported for set_automatic_replies."))
-            try:
-                if status not in ("disabled", "alwaysEnabled", "scheduled"):
-                    msg = "status must be disabled, alwaysEnabled, or scheduled."
-                    raise _invalid(msg)
-                request = {
-                    "automaticRepliesSetting": {
-                        "status": status,
-                        **_reply_messages(status, internal_message, external_message, external_audience),
-                        **_schedule(status, start, end, time_zone),
-                    },
-                }
-            except MicrosoftGraphError as exc:
-                return graph_error_payload(_TOOL_NAME, exc)
-            return self._call(
-                lambda session: {
-                    "automatic_replies": _automatic_replies(
-                        session.json("PATCH", "/me/mailboxSettings", json=request).get("automaticRepliesSetting"),
-                    ),
-                },
+            return self._set_automatic_replies(
+                status,
+                internal_message,
+                external_message,
+                start,
+                end,
+                "UTC" if time_zone is None else time_zone,
+                external_audience,
             )
-
         return graph_error_payload(_TOOL_NAME, invalid_action(action))

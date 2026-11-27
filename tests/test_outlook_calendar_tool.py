@@ -1656,3 +1656,121 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert json.loads(getattr(tools, fn_name)(**kwargs))["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "unexpected"),
+    [
+        (
+            {
+                "action": "create_event",
+                "subject": "Sync",
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T10:00:00",
+                "event_id": EVENT_ID,
+            },
+            "event_id",
+        ),
+        (
+            {
+                "action": "create_event",
+                "subject": "Sync",
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T10:00:00",
+                "response": "accept",
+            },
+            "response",
+        ),
+        (
+            {
+                "action": "create_event",
+                "subject": "Sync",
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T10:00:00",
+                "comment": "See you",
+            },
+            "comment",
+        ),
+        (
+            {"action": "update_event", "event_id": EVENT_ID, "subject": "New", "calendar": CALENDAR_ID},
+            "calendar",
+        ),
+        (
+            {"action": "update_event", "event_id": EVENT_ID, "subject": "New", "attendees": ["sam@contoso.com"]},
+            "attendees",
+        ),
+        (
+            {"action": "update_event", "event_id": EVENT_ID, "subject": "New", "is_online_meeting": True},
+            "is_online_meeting",
+        ),
+        (
+            {"action": "update_event", "event_id": EVENT_ID, "subject": "New", "response": "accept"},
+            "response",
+        ),
+        (
+            {"action": "update_event", "event_id": EVENT_ID, "subject": "New", "send_response": False},
+            "send_response",
+        ),
+        ({"action": "delete_event", "event_id": EVENT_ID, "calendar": CALENDAR_ID}, "calendar"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "attendees": ["sam@contoso.com"]}, "attendees"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "is_online_meeting": False}, "is_online_meeting"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "send_response": False}, "send_response"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "send_response": True}, "send_response"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "response": "decline"}, "response"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "comment": "Cancelling"}, "comment"),
+        ({"action": "delete_event", "event_id": EVENT_ID, "time_zone": "UTC"}, "time_zone"),
+        (
+            {
+                "action": "respond_to_event",
+                "event_id": EVENT_ID,
+                "expected_organizer": "alex@contoso.com",
+                "response": "accept",
+                "calendar": CALENDAR_ID,
+            },
+            "calendar",
+        ),
+        (
+            {
+                "action": "respond_to_event",
+                "event_id": EVENT_ID,
+                "expected_organizer": "alex@contoso.com",
+                "response": "accept",
+                "attendees": ["sam@contoso.com"],
+            },
+            "attendees",
+        ),
+        (
+            {
+                "action": "respond_to_event",
+                "event_id": EVENT_ID,
+                "expected_organizer": "alex@contoso.com",
+                "response": "accept",
+                "is_online_meeting": True,
+            },
+            "is_online_meeting",
+        ),
+        (
+            {
+                "action": "respond_to_event",
+                "event_id": EVENT_ID,
+                "expected_organizer": "alex@contoso.com",
+                "response": "accept",
+                "calendar_owner": "boss@contoso.com",
+            },
+            "calendar_owner",
+        ),
+    ],
+)
+def test_write_cross_action_parameters_are_refused_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, object],
+    unexpected: str,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    result = json.loads(tools.outlook_calendar_write(**kwargs))  # type: ignore[arg-type]
+
+    assert result["code"] == "invalid_argument"
+    assert unexpected in result["message"]
+    assert graph.requests == []

@@ -1039,3 +1039,25 @@ def test_action_dispatch_refuses_invalid_or_missing_arguments_before_any_request
 
     assert json.loads(getattr(tools, fn_name)(**kwargs))["code"] == "invalid_argument"
     assert graph.requests == []
+
+
+def test_create_item_refuses_item_id_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
+
+    result = json.loads(
+        tools.microsoft_sharepoint_write(
+            "create_item",
+            site_id=SITE,
+            list_id=LIST,
+            item_id=ITEM,
+            fields={"Title": "New"},
+            expected_web_url=LIST_URL,
+        ),
+    )
+
+    assert result["code"] == "invalid_argument"
+    assert "item_id" in result["message"]
+    assert graph.requests == []
