@@ -243,14 +243,13 @@ class MindRoomE2BTools(Toolkit):
         port: int | None = None,
         pid: int | None = None,
     ) -> str:
-        """Execute Python code, shell commands, background jobs, or web servers in the E2B sandbox.
+        """Run code, commands, or servers in the E2B sandbox (outputs capped at 64 MiB).
 
-        Actions:
-        - `python`: execute Python `code` (output capped at 64 MiB).
-        - `command` / `stream_command`: run shell `command` and capture stdout/stderr (capped at 64 MiB).
-        - `background_command`: start shell `command` in background and return its `pid`.
-        - `kill_background`: terminate background command identified by `pid`.
-        - `server`: start background server `command` on `port` and return its public URL and `pid`.
+        - `python`: `code`
+        - `command` / `stream_command`: shell `command`
+        - `background_command`: start `command`, returns `pid`
+        - `kill_background`: stop `pid`
+        - `server`: start `command` on `port`, returns public URL + `pid`
         """
         try:
             if action == "python":
@@ -294,14 +293,13 @@ class MindRoomE2BTools(Toolkit):
         duration_seconds: int = 5,
         port: int | None = None,
     ) -> str:
-        """Read-only inspection of E2B sandbox files, status, running sandboxes, and public URLs.
+        """Read-only E2B sandbox inspection.
 
-        Actions:
-        - `list_files`: list entries under `path` (default `/`).
-        - `read_file`: stream and decode sandbox file `path` using `encoding` (capped at 64 MiB).
-        - `watch_directory`: observe changes under `path` for `duration_seconds`.
-        - `status` / `list_sandboxes`: return current sandbox ID or list running sandboxes.
-        - `public_url`: return public HTTP URL for sandbox `port`.
+        - `list_files`: `path` (`/`)
+        - `read_file`: `path`, `encoding` (<=64 MiB)
+        - `watch_directory`: `path`, `duration_seconds`
+        - `status` / `list_sandboxes`
+        - `public_url`: HTTP URL for `port`
         """
         try:
             if action == "list_files":
@@ -426,14 +424,12 @@ class MindRoomE2BTools(Toolkit):
         result_index: int = 0,
         add_as_artifact: bool = True,
     ) -> str | ToolValue:
-        """Write sandbox files, transfer files with the agent workspace, or save execution PNG/chart artifacts.
+        """Write/transfer E2B sandbox files (<=64 MiB) or save PNG/chart artifacts.
 
-        Actions:
-        - `write`: write UTF-8 `content` to `sandbox_path` (or `file_path`) in the sandbox.
-        - `upload`: upload local `file_path` (confined by agent `file_access`, <=64 MiB) to `sandbox_path`.
-        - `download`: stream `sandbox_path` (<=64 MiB) to workspace-relative `local_path`.
-        - `download_png`: attach PNG result at `result_index` as image media and optionally save to `local_path`.
-        - `download_chart`: save interactive chart JSON at `result_index` to `local_path` (optionally with PNG artifact).
+        - `write`: UTF-8 `content` to `sandbox_path` (or `file_path`)
+        - `upload`: workspace `file_path` (confined by `file_access`) to `sandbox_path`
+        - `download`: `sandbox_path` to workspace `local_path`
+        - `download_png` / `download_chart`: save `result_index` artifact (optional `local_path`)
         """
         if action == "download_png":
             return self._download_png(result_index, local_path)
@@ -472,12 +468,7 @@ class MindRoomE2BTools(Toolkit):
         action: _E2BLifecycleAction,
         timeout: int | None = None,
     ) -> str:
-        """Update timeout or shut down the E2B sandbox.
-
-        Actions:
-        - `set_timeout`: update sandbox timeout to `timeout` seconds.
-        - `shutdown`: immediately kill the sandbox.
-        """
+        """Update E2B sandbox timeout (`set_timeout` with `timeout` s) or kill it (`shutdown`)."""
         try:
             if action == "set_timeout":
                 if timeout is None or timeout <= 0:
