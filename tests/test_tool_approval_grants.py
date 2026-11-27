@@ -3324,6 +3324,30 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
     }
     assert len(Config.validate_with_runtime(allowed, runtime_paths).tool_approval.rules) == 3
 
+    shared_argument_prefix = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "action": "require_approval"},
+                {"match": "skill", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(shared_argument_prefix, runtime_paths).tool_approval.rules) == 3
+
+    leading_argument_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "script": "review.py"},
+                {"match": "skill", "action": "auto_approve"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(leading_argument_script, runtime_paths)
+
     leading_script = {
         **base,
         "tool_approval": {

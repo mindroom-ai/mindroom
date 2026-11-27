@@ -1700,6 +1700,14 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
                 {"match": "*", "action": "require_approval"},
             ],
         },
+        {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "*", "arguments": {"action": "list"}, "action": "auto_approve"},
+                {"match": "triggers", "action": "auto_approve"},
+                {"match": "*", "action": "require_approval"},
+            ],
+        },
     ):
         assert Config.validate_with_runtime({**base, "tool_approval": approval}, _runtime_paths(tmp_path))
 

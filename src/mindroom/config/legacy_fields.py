@@ -320,7 +320,7 @@ _RETIRED_FILE_SETTINGS = {
 #   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
 #   tests/test_filesystem_tool_config.py::test_approval_rules_for_a_retired_file_name_offered_elsewhere_load,
 #   tests/test_filesystem_tool_config.py::test_retired_file_approval_check_skips_configs_without_filesystem_and_checks_presets.
-_UNMATCHED_AGENT_PROBE = "\x00__other__"
+_UNMATCHED_AGENT_PROBE = "\x00"
 
 
 def _probe_agents(rules: Sequence[_ApprovalRule], agent_names: Collection[str] = ()) -> tuple[str, ...]:
@@ -1002,14 +1002,22 @@ def _retired_approval_pair_error_for_agent(
 ) -> str | None:
     old_indices = _agent_rule_indices(rules, old, agent)
     new_indices = _agent_rule_indices(rules, new, agent)
-    new_explicit_unconditional = (
-        bool(new_indices)
-        and all(new in rules[index].match_patterns() for index in new_indices)
-        and rules[new_indices[-1]].arguments is None
+    shared_prefix_len = 0
+    for old_index, new_index in zip(old_indices, new_indices, strict=False):
+        if old_index != new_index:
+            break
+        shared_prefix_len += 1
+    shared_prefix = old_indices[:shared_prefix_len]
+    rem_old = old_indices[shared_prefix_len:]
+    rem_new = new_indices[shared_prefix_len:]
+    rem_new_explicit_unconditional = (
+        bool(rem_new)
+        and all(new in rules[index].match_patterns() for index in rem_new)
+        and rules[rem_new[-1]].arguments is None
     )
     if (
         reject_wildcard_scripts
-        and not new_explicit_unconditional
+        and not (rem_new_explicit_unconditional and all(rules[index].script is None for index in shared_prefix))
         and (
             script_index := next(
                 (
@@ -1041,18 +1049,18 @@ def _retired_approval_pair_error_for_agent(
     )
     if old_chain == new_chain:
         return None
-    extra_new = [index for index in new_indices if index not in old_indices]
-    explicit_new_override = new_explicit_unconditional or (
+    extra_new = [index for index in rem_new if index not in rem_old]
+    explicit_new_override = rem_new_explicit_unconditional or (
         bool(extra_new)
         and all(new in rules[index].match_patterns() for index in extra_new)
-        and set(old_indices) <= set(new_indices)
+        and set(rem_old) <= set(rem_new)
     )
     if explicit_new_override:
         conflict_index = (
             next(
                 (
                     index
-                    for index in old_indices
+                    for index in rem_old
                     if not _is_broad_glob_for_old(rules[index], old=old, broad_probe=broad_probe)
                 ),
                 None,
@@ -1066,17 +1074,17 @@ def _retired_approval_pair_error_for_agent(
             if conflict_index is not None
             else None
         )
-    if old_indices:
-        report_index = next((index for index in old_indices if index not in new_indices), old_indices[0])
+    if rem_old:
+        report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
         return (
             f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; "
             f"{old} is now {new}, which now gets a different approval decision; "
             f"rewrite the rules for {new}."
         )
-    if new_indices:
+    if rem_new:
         report_index = next(
-            (index for index in new_indices if new not in rules[index].match_patterns()),
-            new_indices[0],
+            (index for index in rem_new if new not in rules[index].match_patterns()),
+            rem_new[0],
         )
         return (
             f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
