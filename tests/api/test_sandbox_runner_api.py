@@ -8431,6 +8431,76 @@ def test_execute_shell_scope_auto_backgrounds_and_kills_process_group(
         assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
 
 
+def test_inprocess_shell_scope_kill_gracefully_stops_only_target_namespace(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In-process /execute/shell-scope/kill sends graceful SIGTERM to one turn without touching concurrent turns."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "inprocess")
+    monkeypatch.setattr(shell_policy_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def start_scoped(scope_id: str, cmd: str) -> tuple[int, Path]:
+        http_response = runner_client.post(
+            "/api/sandbox-runner/execute",
+            headers=SANDBOX_HEADERS,
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "shell",
+                "function_name": "run_shell_command",
+                "args": [["bash", "-c", cmd]],
+                "kwargs": {},
+                "base_dir": str(workspace),
+                "execution_env": {"PATH": os.environ["PATH"]},
+                "shell_scope_id": scope_id,
+            },
+        )
+        assert http_response.status_code == 200, http_response.text
+        exec_response = ExecuteResponse.model_validate(http_response.json())
+        assert exec_response.ok is True, exec_response
+        assert exec_response.shell_backgrounded is True
+        text = str(exec_response.result)
+        pid_match = re.search(r"PID (\d+)", text)
+        log_match = re.search(r"Log: (\S+)", text)
+        assert pid_match is not None, text
+        assert log_match is not None, text
+        return int(pid_match.group(1)), workspace / log_match.group(1)
+
+    trap_cmd = 'trap "sleep 0.15; echo inprocess-graceful-cleanup; exit 0" TERM; echo ready-a; sleep 60 & wait $!'
+    pid_a, log_a = start_scoped("inprocess-concurrent-a", trap_cmd)
+    pid_b, log_b = start_scoped("inprocess-concurrent-b", "echo ready-b; sleep 60")
+    try:
+        kill_a = runner_client.post(
+            "/api/sandbox-runner/execute/shell-scope/kill",
+            headers=SANDBOX_HEADERS,
+            json={"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": "inprocess-concurrent-a"},
+        )
+        assert kill_a.status_code == 200, kill_a.text
+        _wait_pid_dead(pid_a)
+        log_a_text = log_a.read_text(encoding="utf-8")
+        assert "inprocess-graceful-cleanup" in log_a_text
+        assert "[MindRoom: stopped when turn ended]" in log_a_text
+
+        # Concurrent turn B must still be alive and untouched.
+        os.kill(pid_b, 0)
+
+        kill_b = runner_client.post(
+            "/api/sandbox-runner/execute/shell-scope/kill",
+            headers=SANDBOX_HEADERS,
+            json={"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": "inprocess-concurrent-b"},
+        )
+        assert kill_b.status_code == 200, kill_b.text
+        _wait_pid_dead(pid_b)
+        assert "[MindRoom: stopped when turn ended]" in log_b.read_text(encoding="utf-8")
+    finally:
+        for pid in (pid_a, pid_b):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+
+
 @pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
 def test_builtin_subprocess_tool_does_not_import_plugins_in_child(
     runner_client: TestClient,

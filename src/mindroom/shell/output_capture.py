@@ -1,15 +1,14 @@
-"""Bounded full shell capture owned by the process until output publication."""
+"""Workspace output-file destination policy and atomic publication composing ``SpoolCapture``."""
 
 from __future__ import annotations
 
 import json
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.shell.output import SpoolCapture, SpoolStream, format_shell_completion
 
 
 @dataclass(frozen=True)
@@ -46,79 +45,45 @@ class ShellOutputDestination:
         return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, tools_use_workdir=tools_use_workdir)
 
 
-def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int) -> str:
-    """Format completed output: stdout, then any stderr under ``Stderr:``; a failure leads with its exit code.
-
-    The exit code comes first so a bounded job summary still shows that the command failed.
-    ``stderr`` is None when the command printed nothing to it, so stderr of only blank lines keeps its section.
-    """
-    lines = [f"Exit code {return_code}"] if return_code else []
-    if stdout:
-        lines += ["Output:", stdout] if return_code else [stdout]
-    if stderr is not None:
-        lines += ["Stderr:", stderr]
-    return "\n".join(lines)
-
-
-def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_output_file: bool = False) -> str:
-    """Format the output so far of a command stopped at its timeout, leading with the stop.
-
-    ``stderr`` is None when the command printed nothing to it, as for `format_shell_completion`.
-    ``no_output_file`` says the call asked for an output file, which a stopped command does not save.
-    """
-    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if no_output_file else "")]
-    if stdout:
-        lines += ["Output:", stdout]
-    if stderr is not None:
-        lines += ["Stderr:", stderr]
-    return "\n".join(lines)
-
-
-class CapturedShellStream:
-    """Spool decoded text up to the redirect cap without retaining it in memory."""
-
-    def __init__(self, destination: ShellOutputDestination) -> None:
-        self.file: BinaryIO = tempfile.TemporaryFile(dir=destination.workspace_root)  # noqa: SIM115
-        self.max_bytes = destination.max_bytes
-        self.byte_count = 0
-        self.error: str | None = None
-        self.reached_eof = False
-
-    def append(self, text: str) -> None:
-        """Count decoded output, and spool it until the cap or a storage error is reached."""
-        payload = text.encode("utf-8", errors="replace")
-        self.byte_count += len(payload)
-        if self.error is not None or self.file.closed:
-            return
-        if self.byte_count > self.max_bytes:
-            self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
-            return
-        try:
-            self.file.write(payload)
-        except OSError:
-            self.error = "Failed to capture complete shell output."
-
-    def read(self) -> str:
-        """Read the retained complete stream for atomic publication."""
-        self.file.seek(0)
-        return self.file.read().decode("utf-8")
-
-
 class ShellOutputCapture:
-    """Own both output streams and publish only a complete supported result."""
+    """Compose ``SpoolCapture`` with workspace destination validation and atomic publication."""
 
     def __init__(self, destination: ShellOutputDestination) -> None:
         self.destination = destination
-        self.stdout = CapturedShellStream(destination)
-        try:
-            self.stderr = CapturedShellStream(destination)
-        except BaseException:
-            self.stdout.file.close()
-            raise
-        self.incomplete = False
-        # Why incomplete output went unsaved, when its owner knows better than "interrupted".
-        self.interruption: str | None = None
-        self.closed = False
+        self.spool = SpoolCapture(max_bytes=destination.max_bytes, directory=destination.workspace_root)
+
+    @property
+    def stdout(self) -> SpoolStream:
+        """Return the spooled stdout stream."""
+        return self.spool.stdout
+
+    @property
+    def stderr(self) -> SpoolStream:
+        """Return the spooled stderr stream."""
+        return self.spool.stderr
+
+    @property
+    def incomplete(self) -> bool:
+        """Return whether stream capture ended before full command output was collected."""
+        return self.spool.incomplete
+
+    @incomplete.setter
+    def incomplete(self, value: bool) -> None:
+        self.spool.incomplete = value
+
+    @property
+    def interruption(self) -> str | None:
+        """Return the owner-provided explanation when incomplete output went unsaved."""
+        return self.spool.interruption
+
+    @interruption.setter
+    def interruption(self, value: str | None) -> None:
+        self.spool.interruption = value
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the underlying spool files have been closed."""
+        return self.spool.closed
 
     def publish(self, return_code: int | None) -> str:
         """Revalidate and atomically publish using the shared output-file policy."""
@@ -181,7 +146,4 @@ class ShellOutputCapture:
 
     def close(self) -> None:
         """Release unlinked capture files on completion, cancellation, or eviction."""
-        self.closed = True
-        for stream in (self.stdout, self.stderr):
-            with suppress(OSError):
-                stream.file.close()
+        self.spool.close()

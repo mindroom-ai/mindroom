@@ -46,7 +46,7 @@ from mindroom.script_runs.wire import (
     WorkerScriptStatus,
 )
 from mindroom.shell import supervisor as shell_supervisor_module
-from mindroom.shell.execution import ShellRunResult
+from mindroom.shell.runner import ShellRunResult
 from mindroom.shell.supervisor import ShellSupervisorStartupError
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot

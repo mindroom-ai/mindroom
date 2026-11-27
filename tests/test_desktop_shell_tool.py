@@ -388,7 +388,7 @@ async def test_slow_command_polling_tail_reset_progress_and_finished_page_draini
     )
     tool, recorded = _setup_tool(monkeypatch, lambda _t, _c, _to: next(replies))
     reports: list[str] = []
-    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr("mindroom.shell.output._PROGRESS_INTERVAL_SECONDS", 0)
     with tool_progress_reporter(reports.append):
         result = await tool.run_desktop_shell("long-cmd")
 

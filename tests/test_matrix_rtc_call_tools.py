@@ -2439,11 +2439,10 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
 ) -> None:
     """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
     from mindroom.shell.background_scope import (  # noqa: PLC0415
-        BackgroundLogPolicy,
         ShellBackgroundScope,
         current_shell_background_scope,
     )
-    from mindroom.shell.execution import run_command  # noqa: PLC0415
+    from mindroom.shell.output import BackgroundLogPolicy  # noqa: PLC0415
 
     log: list[str] = []
     observed: dict[str, Any] = {}
@@ -2451,22 +2450,20 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
     async def run_bg() -> str:
         scope = current_shell_background_scope()
         assert isinstance(scope, ShellBackgroundScope)
-        result = await run_command(
-            scope.records,
-            namespace=f"shell-scope:{scope.scope_id}",
+        result = await scope.registry.run_or_background(
+            namespace=scope.namespace,
             argv=["bash", "-c", "echo voice-start; sleep 30"],
             env=dict(os.environ),
             cwd=str(tmp_path),
             tail=10,
             timeout=0.15,
-            on_timeout="background",
             background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
         )
         assert result.handle is not None
-        record = scope.records[result.handle]
+        record = scope.registry.records_view[result.handle]
         observed["scope"] = scope
         observed["pid"] = record.pid
-        observed["log_path"] = record._log_path
+        observed["log_path"] = record.log_path
         return result.message
 
     build = _connected_build(log, runner=("run_bg", run_bg))
@@ -2479,13 +2476,13 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
     pid = observed["pid"]
     os.kill(pid, 0)
     assert not scope.closed
-    assert len(scope.records) == 1
+    assert scope.registry.record_count == 1
 
     assert tooling.close is not None
     await tooling.close()
 
     assert scope.closed
-    assert scope.records == {}
+    assert scope.registry.record_count == 0
     assert log == ["runner connect", "runner close"]
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:

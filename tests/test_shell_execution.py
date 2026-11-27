@@ -25,14 +25,8 @@ from mindroom.shell._process_target import (
     _scan_session_members,
     is_safe_slice_name,
 )
-from mindroom.shell.execution import (
-    ProcessRecord,
-    check_command,
-    kill_all_records,
-    kill_command,
-    run_command,
-    signal_record,
-)
+from mindroom.shell.background_scope import ShellBackgroundScope
+from mindroom.shell.output import BackgroundLogPolicy, SpoolCapture
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
 from mindroom.shell.process import (
     ManagedProcess,
@@ -44,6 +38,8 @@ from mindroom.shell.process import (
     _systemd_slice_launcher,
     _SystemdSliceLauncher,
 )
+from mindroom.shell.registry import ProcessRegistry
+from mindroom.shell.runner import run_foreground
 from mindroom.shell.streaming import CommandStdin
 from tests.process_helpers import assert_linux_pid_not_running
 
@@ -72,16 +68,15 @@ class _RecordingCapture(ShellOutputCapture):
 
 
 @pytest.fixture
-def registry() -> Iterator[dict[str, ProcessRecord]]:
+def registry() -> Iterator[ProcessRegistry]:
     """Kill anything a failing test leaves registered."""
-    records: dict[str, ProcessRecord] = {}
+    records = ProcessRegistry()
     yield records
-    kill_all_records(records)
+    records.kill_all()
 
 
-async def _run(registry: dict[str, ProcessRecord], argv: list[str], cwd: Path, **options: object) -> str:
-    result = await run_command(
-        registry,
+async def _run(registry: ProcessRegistry, argv: list[str], cwd: Path, **options: object) -> str:
+    result = await registry.run_or_background(
         namespace="test",
         argv=argv,
         env={"PATH": os.environ["PATH"]},
@@ -96,12 +91,11 @@ async def _run(registry: dict[str, ProcessRecord], argv: list[str], cwd: Path, *
 
 @pytest.mark.asyncio
 async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_long_it_ran(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """Desktop shell and script handles stay readable for ten minutes after their command ends."""
-    finished = await run_command(
-        registry,
+    finished = await registry.run_or_background(
         namespace="test",
         argv=["echo", "long-output"],
         env={"PATH": os.environ["PATH"]},
@@ -111,17 +105,17 @@ async def test_a_finished_handle_is_swept_ten_minutes_after_it_finished_however_
         register_finished=True,
     )
     assert finished.handle is not None
-    record = registry[finished.handle]
+    record = registry.records_view[finished.handle]
     # It started long ago but finished just now.
     record.started_at -= 900
 
     await _run(registry, ["true"], tmp_path)
-    assert "long-output" in check_command(registry, namespace="test", handle=finished.handle)
+    assert "long-output" in registry.status("test", finished.handle).message
 
     assert record.finished_at is not None
     record.finished_at -= 700
     await _run(registry, ["true"], tmp_path)
-    assert finished.handle not in registry
+    assert finished.handle not in registry.records_view
 
 
 async def _wait_until_gone(pid: int) -> bool:
@@ -141,7 +135,7 @@ def _identity(path: str) -> str:
 
 @pytest.mark.asyncio
 async def test_default_stdin_is_inherited_and_devnull_seam_detaches_it(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """The agent tool keeps inheriting stdin; the Desktop helper can keep its private channel away from commands."""
@@ -167,7 +161,7 @@ async def test_default_stdin_is_inherited_and_devnull_seam_detaches_it(
 
 @pytest.mark.asyncio
 async def test_default_streams_stay_separate_and_merge_seam_interleaves(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """Merged stderr keeps terminal order in one stream; by default a success's stderr follows its stdout."""
@@ -178,7 +172,7 @@ async def test_default_streams_stay_separate_and_merge_seam_interleaves(
 
 @pytest.mark.asyncio
 async def test_default_foreground_exit_keeps_background_children_and_seam_kills_them(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """The agent tool may leave `cmd &` running; the seam stops the rest of the process group."""
@@ -203,7 +197,7 @@ async def test_default_foreground_exit_keeps_background_children_and_seam_kills_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kill_group_after_exit", [False, True])
 async def test_cancelling_a_running_command_kills_its_term_resistant_group_members(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     kill_group_after_exit: bool,
 ) -> None:
@@ -233,7 +227,7 @@ async def test_cancelling_a_running_command_kills_its_term_resistant_group_membe
 
 @pytest.mark.asyncio
 async def test_caller_capture_receives_exit_code_and_full_spool(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """A caller-owned capture sees completion without any workspace output file being written."""
@@ -255,15 +249,14 @@ async def test_caller_capture_receives_exit_code_and_full_spool(
 
 @pytest.mark.asyncio
 async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Callers learn whether a signal reached the group, and kill_command says which signal it sent."""
     capture = _RecordingCapture(tmp_path)
     try:
-        started = await run_command(
-            registry,
+        started = await registry.run_or_background(
             namespace="test",
             argv=["/bin/sh", "-c", "sleep 30"],
             env={"PATH": os.environ["PATH"]},
@@ -273,21 +266,17 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
             output_capture=capture,
         )
         assert started.handle is not None
-        record = registry[started.handle]
+        record = registry.records_view[started.handle]
 
         def vanished(_pid: int, _signal: int) -> None:
             raise ProcessLookupError
 
         with monkeypatch.context() as patch:
             patch.setattr(os, "killpg", vanished)
-            assert signal_record(record) is False
-            assert kill_command(registry, namespace="test", handle=started.handle) == (
-                f"Process {record.pid} already exited"
-            )
+            assert record.signal() is False
+            assert registry.signal("test", started.handle).message == (f"Process {record.pid} already exited")
         assert capture.incomplete is False
-        assert kill_command(registry, namespace="test", handle=started.handle) == (
-            f"Terminated process {record.pid} (SIGTERM sent)."
-        )
+        assert registry.signal("test", started.handle).message == (f"Terminated process {record.pid} (SIGTERM sent).")
         assert capture.incomplete is True
         assert await _wait_until_gone(record.pid)
     finally:
@@ -296,12 +285,11 @@ async def test_signal_record_reports_delivery_and_kill_command_names_the_signal(
 
 @pytest.mark.asyncio
 async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """A finished background success shows its stderr, tailed like its stdout, after the status and output."""
-    result = await run_command(
-        registry,
+    result = await registry.run_or_background(
         namespace="test",
         argv=["/bin/sh", "-c", "echo out; echo warn >&2; echo again >&2"],
         env={"PATH": os.environ["PATH"]},
@@ -312,7 +300,7 @@ async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
     )
     assert result.handle is not None
 
-    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    status, rest = registry.status("test", result.handle).message.split("\n", 1)
     assert status.startswith("Status: FINISHED (exit code 0, ")
     assert rest == (
         "Output:\nout\nStderr:\n[Showing the last 1 of 2 lines. Pass a larger tail, or narrow the command.]\nagain"
@@ -321,12 +309,11 @@ async def test_checking_a_finished_success_shows_its_stderr_after_its_output(
 
 @pytest.mark.asyncio
 async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_does(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """The buffered line count of a running command and the notice above its tail count blank lines alike."""
-    result = await run_command(
-        registry,
+    result = await registry.run_or_background(
         namespace="test",
         argv=["/bin/sh", "-c", "echo text; yes '' | head -n 60; sleep 30"],
         env={"PATH": os.environ["PATH"]},
@@ -336,7 +323,7 @@ async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_d
     )
     assert result.handle is not None
 
-    status, rest = check_command(registry, namespace="test", handle=result.handle).split("\n", 1)
+    status, rest = registry.status("test", result.handle).message.split("\n", 1)
     assert status.startswith("Status: RUNNING (PID ")
     assert rest == (
         "Partial output (61 lines buffered):\n"
@@ -346,14 +333,13 @@ async def test_checking_a_running_command_counts_its_blank_lines_as_its_notice_d
 
 @pytest.mark.asyncio
 async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_finished_record(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """An opted-in caller gets a finished record to page later, while the default still registers nothing."""
     capture = _RecordingCapture(tmp_path)
     try:
-        result = await run_command(
-            registry,
+        result = await registry.run_or_background(
             namespace="test",
             argv=["/bin/sh", "-c", "printf kept; exit 3"],
             env={"PATH": os.environ["PATH"]},
@@ -364,15 +350,13 @@ async def test_register_finished_keeps_a_command_that_finished_in_time_as_a_fini
             register_finished=True,
         )
         assert result.handle is not None
-        record = registry[result.handle]
+        record = registry.records_view[result.handle]
         assert (record.finished, record.return_code, record.namespace) == (True, 3, "test")
         assert record.finished_at is not None
         assert (capture.return_codes, capture.stdout.read()) == ([3], "kept")
-        assert kill_command(registry, namespace="test", handle=result.handle) == (
-            "Process already finished (exit code 3)"
-        )
+        assert registry.signal("test", result.handle).message == ("Process already finished (exit code 3)")
         await _run(registry, ["/bin/sh", "-c", "true"], tmp_path)
-        assert list(registry) == [result.handle]
+        assert list(registry.records_view) == [result.handle]
     finally:
         capture.release()
 
@@ -385,44 +369,37 @@ _TERM_IGNORING_CHILD = (
 
 @pytest.mark.asyncio
 async def test_a_command_past_its_timeout_is_stopped_with_its_output_so_far(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """A stopped command returns what it printed on both streams, says it was stopped, and leaves no handle."""
-    result = await run_command(
-        registry,
-        namespace="test",
+    result = await run_foreground(
         argv=["/bin/sh", "-c", "echo started; echo warming up >&2; sleep 30"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,
         timeout=0.5,
-        on_timeout="kill",
     )
 
     assert result.handle is None
     assert result.message == "Stopped after 0.5s.\nOutput:\nstarted\nStderr:\nwarming up"
-    assert registry == {}
+    assert registry.record_count == 0
 
 
 @pytest.mark.asyncio
 async def test_stopping_a_command_kills_a_child_that_ignores_sigterm_after_its_leader_exited(
-    registry: dict[str, ProcessRecord],
     tmp_path: Path,
 ) -> None:
     """The leader dies of SIGTERM at the stop; a group member that ignores it is killed anyway."""
     child_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_TERM_IGNORING_CHILD)} >/dev/null 2>&1 &"
     pid_file = tmp_path / "child.pid"
     try:
-        result = await run_command(
-            registry,
-            namespace="test",
+        result = await run_foreground(
             argv=["/bin/sh", "-c", f"{child_command} sleep 30"],
             env={"PATH": os.environ["PATH"]},
             cwd=str(tmp_path),
             tail=100,
             timeout=1,
-            on_timeout="kill",
         )
 
         assert result.message.startswith("Stopped after 1s.")
@@ -435,19 +412,15 @@ async def test_stopping_a_command_kills_a_child_that_ignores_sigterm_after_its_l
 
 @pytest.mark.asyncio
 async def test_a_command_without_a_timeout_runs_until_it_ends(
-    registry: dict[str, ProcessRecord],
     tmp_path: Path,
 ) -> None:
     """No timeout means no limit, for a command that would be stopped at any short one."""
-    result = await run_command(
-        registry,
-        namespace="test",
+    result = await run_foreground(
         argv=["/bin/sh", "-c", "sleep 0.3; echo done"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,
         timeout=None,
-        on_timeout="kill",
     )
 
     assert result.message == "done"
@@ -455,7 +428,7 @@ async def test_a_command_without_a_timeout_runs_until_it_ends(
 
 @pytest.mark.asyncio
 async def test_a_command_and_the_children_it_starts_run_at_the_lowest_cpu_priority(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """A busy build an agent starts must not take the CPU from the process that runs MindRoom."""
@@ -477,7 +450,7 @@ def _exited(pid: int) -> bool:
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
 @pytest.mark.asyncio
 async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_set_runs_at_the_idle_policy(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -506,7 +479,7 @@ async def test_a_process_the_command_leaves_behind_before_its_policy_could_be_se
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
 @pytest.mark.asyncio
 async def test_a_missing_program_reports_the_same_error_as_a_direct_spawn(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """Starting commands behind chrt must not turn a missing program into a command that exits 127."""
@@ -541,7 +514,7 @@ def test_a_relative_path_entry_is_searched_from_the_command_directory(
 @pytest.mark.skipif(sys.platform != "linux", reason="ionice is Linux-only")
 @pytest.mark.asyncio
 async def test_a_command_and_its_children_run_with_idle_io_priority(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
     """Spawned commands and their children inherit idle disk I/O priority when ionice is available."""
@@ -950,7 +923,7 @@ def test_systemd_slice_probe_timeout_is_not_cached_while_nonzero_exit_is(
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
 @pytest.mark.asyncio
 async def test_idle_fallback_runs_when_chrt_is_absent_even_if_other_wrappers_prepend(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -975,7 +948,7 @@ async def test_idle_fallback_runs_when_chrt_is_absent_even_if_other_wrappers_pre
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
 @pytest.mark.asyncio
 async def test_systemd_slice_moves_command_and_preserves_dollar_args(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -997,8 +970,7 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
         "cg, f'oom={oom.read_text().strip()}' if oom and oom.exists() else 'oom=absent')"
     )
     argv = [sys.executable, "-c", script, "$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
-    result = await run_command(
-        registry,
+    result = await registry.run_or_background(
         namespace="test",
         argv=argv,
         env=caller_env,
@@ -1016,8 +988,7 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
     # Custom caller bus vars (pointing nowhere) must not break systemd-run and must reach the command verbatim.
     custom_xdg = str(tmp_path / "no-bus-here")
     custom_dbus = "unix:path=/nonexistent/bus"
-    custom_result = await run_command(
-        registry,
+    custom_result = await registry.run_or_background(
         namespace="test",
         argv=argv,
         env={**caller_env, "XDG_RUNTIME_DIR": custom_xdg, "DBUS_SESSION_BUS_ADDRESS": custom_dbus},
@@ -1037,7 +1008,7 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
 @pytest.mark.asyncio
 async def test_systemd_slice_live_outage_fails_open_and_recovers(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1116,23 +1087,19 @@ def test_threads_and_processes_a_command_started_before_its_policy_was_set_move_
 
 @pytest.mark.asyncio
 async def test_a_running_command_reports_its_latest_output_as_progress(
-    registry: dict[str, ProcessRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """While it runs, a command reports the tail of both streams when it changed, never the same text twice."""
-    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
+    monkeypatch.setattr("mindroom.shell.output._PROGRESS_INTERVAL_SECONDS", 0.1)
     reports: list[str] = []
 
-    result = await run_command(
-        registry,
-        namespace="test",
+    result = await run_foreground(
         argv=["/bin/sh", "-c", "echo one; sleep 0.5; echo two; echo warn >&2; sleep 0.5"],
         env={"PATH": os.environ["PATH"]},
         cwd=str(tmp_path),
         tail=100,
         timeout=10,
-        on_timeout="kill",
         on_progress=reports.append,
     )
 
@@ -1254,7 +1221,7 @@ async def _wait_for_child_info(info_file: Path) -> tuple[int, int, int, int]:
 @pytest.mark.parametrize("mode", ["timeout", "cancel", "signal_term", "signal_kill", "kill_all"])
 @pytest.mark.asyncio
 async def test_linux_session_scan_stops_new_pgid_timeout_children(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
@@ -1269,29 +1236,23 @@ async def test_linux_session_scan_stops_new_pgid_timeout_children(
     child_pgid: int | None = None
     try:
         if mode == "timeout":
-            result = await run_command(
-                registry,
-                namespace="test",
+            result = await run_foreground(
                 argv=argv,
                 env=env,
                 cwd=str(tmp_path),
                 tail=100,
                 timeout=0.6,
-                on_timeout="kill",
             )
             assert result.timed_out
             leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
         elif mode == "cancel":
             task = asyncio.create_task(
-                run_command(
-                    registry,
-                    namespace="test",
+                run_foreground(
                     argv=argv,
                     env=env,
                     cwd=str(tmp_path),
                     tail=100,
                     timeout=30,
-                    on_timeout="kill",
                 ),
             )
             leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
@@ -1299,8 +1260,7 @@ async def test_linux_session_scan_stops_new_pgid_timeout_children(
             with pytest.raises(asyncio.CancelledError):
                 await task
         else:
-            bg = await run_command(
-                registry,
+            bg = await registry.run_or_background(
                 namespace="test",
                 argv=argv,
                 env=env,
@@ -1311,11 +1271,11 @@ async def test_linux_session_scan_stops_new_pgid_timeout_children(
             assert bg.handle is not None
             leader_pid, child_pid, child_pgid, child_sid = await _wait_for_child_info(info)
             if mode == "signal_term":
-                assert signal_record(registry[bg.handle], force=False) is True
+                assert registry.records_view[bg.handle].signal(force=False) is True
             elif mode == "signal_kill":
-                assert signal_record(registry[bg.handle], force=True) is True
+                assert registry.records_view[bg.handle].signal(force=True) is True
             else:
-                kill_all_records(registry)
+                registry.kill_all()
         assert child_pgid != leader_pid
         assert child_sid == leader_pid
         await assert_linux_pid_not_running(child_pid)
@@ -1328,7 +1288,7 @@ async def test_linux_session_scan_stops_new_pgid_timeout_children(
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux session scan is Linux-only")
 @pytest.mark.asyncio
 async def test_foreground_nohup_child_survives_clean_exit_without_systemd_slice(
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1351,7 +1311,6 @@ async def test_foreground_nohup_child_survives_clean_exit_without_systemd_slice(
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd scopes are Linux-only")
 @pytest.mark.asyncio
 async def test_systemd_scope_kills_setsid_sigterm_ignoring_child_on_timeout(
-    registry: dict[str, ProcessRecord],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1382,15 +1341,12 @@ async def test_systemd_scope_kills_setsid_sigterm_ignoring_child_on_timeout(
         )
         child_pid: int | None = None
         try:
-            result = await run_command(
-                registry,
-                namespace="test",
+            result = await run_foreground(
                 argv=[sys.executable, "-c", parent, str(info_file.with_suffix(".leader")), grandchild, str(info_file)],
                 env={"PATH": os.environ["PATH"]},
                 cwd=str(tmp_path),
                 tail=100,
                 timeout=0.8,
-                on_timeout="kill",
             )
             assert result.timed_out
             leader_pid = int(info_file.with_suffix(".leader").read_text().strip())
@@ -1506,3 +1462,147 @@ async def test_command_stdin_attach_and_detach_gate_writes() -> None:
     assert await stdin.write(1, b"after", eof=True) is False
     assert written == [b"hello"]
     assert eof_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kill_group_after_exit", [False, True])
+@pytest.mark.parametrize("with_log_file", [False, True])
+async def test_background_process_kill_group_after_exit_is_independent_of_log_file(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+    kill_group_after_exit: bool,
+    with_log_file: bool,
+) -> None:
+    """BackgroundProcess.kill_group_after_exit controls nohup survival regardless of whether a log file is attached."""
+    pid_file = tmp_path / f"nohup-{kill_group_after_exit}-{with_log_file}.pid"
+    cmd = f"sleep 0.35; nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; exit 0"
+    policy = BackgroundLogPolicy(log_dir=str(tmp_path / "logs")) if with_log_file else None
+    nohup_pid: int | None = None
+    try:
+        result = await registry.run_or_background(
+            namespace="test",
+            argv=["bash", "-c", cmd],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            kill_group_after_exit=kill_group_after_exit,
+            background_log=policy,
+        )
+        assert result.handle is not None
+        record = registry.records_view[result.handle]
+        assert record.kill_group_after_exit is kill_group_after_exit
+        assert record.monitor_task is not None
+        await asyncio.wait_for(record.monitor_task, timeout=5.0)
+        assert record.finished is True
+        assert record.return_code == 0
+
+        nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        if kill_group_after_exit:
+            if sys.platform == "linux":
+                await assert_linux_pid_not_running(nohup_pid)
+            else:
+                assert await _wait_until_gone(nohup_pid)
+        else:
+            os.kill(nohup_pid, 0)
+
+        if with_log_file:
+            assert record.log_path is not None
+            assert "[MindRoom: exited with code 0]" in Path(record.log_path).read_text(encoding="utf-8")
+    finally:
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_process_registry_close_namespace_and_shared_scope_isolation(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+) -> None:
+    """close_namespace gracefully stops only the target namespace and leaves concurrent namespaces untouched."""
+    policy = BackgroundLogPolicy(log_dir=str(tmp_path / "logs"))
+    trap_script = 'trap "sleep 0.15; echo graceful-ns-a-done; exit 0" TERM; echo ns-a-ready; sleep 30 & wait $!'
+    res_a = await registry.run_or_background(
+        namespace="shell-scope:ns-a",
+        argv=["bash", "-c", trap_script],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=0.3,
+        background_log=policy,
+    )
+    res_b = await registry.run_or_background(
+        namespace="shell-scope:ns-b",
+        argv=["bash", "-c", "echo ns-b-ready; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=0.2,
+        background_log=policy,
+    )
+    assert res_a.handle is not None
+    assert res_b.handle is not None
+    rec_a = registry.records_view[res_a.handle]
+    rec_b = registry.records_view[res_b.handle]
+    assert rec_a.log_path is not None
+    assert rec_b.log_file is not None
+
+    # Closing a non-owning ShellBackgroundScope for ns-a only closes shell-scope:ns-a.
+    scope_a = ShellBackgroundScope(scope_id="ns-a", registry=registry, owns_registry=False)
+    await scope_a.close()
+
+    assert scope_a.closed is True
+    assert registry.closed is False
+    assert res_a.handle not in registry.records_view
+    assert res_b.handle in registry.records_view
+    assert await _wait_until_gone(rec_a.pid)
+    log_a = Path(rec_a.log_path).read_text(encoding="utf-8")
+    assert "graceful-ns-a-done" in log_a
+    assert "[MindRoom: stopped when turn ended]" in log_a
+
+    # Concurrent namespace ns-b remains alive and unaffected.
+    os.kill(rec_b.pid, 0)
+    assert rec_b.log_file.closed is False
+    assert await registry.close_namespace("shell-scope:ns-b") == 1
+    assert await _wait_until_gone(rec_b.pid)
+    assert registry.record_count == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_background_and_spool_capture_primitives(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+) -> None:
+    """spawn_background starts immediately with structured status/signal; SpoolCapture pages without workspace paths."""
+    spool = SpoolCapture(max_bytes=1024)
+    try:
+        spool.stdout.append("hello world")
+        assert spool.stdout.size == 11
+        assert spool.stdout.pread(6, 5) == b"world"
+        assert spool.stdout.tail(5) == b"world"
+        assert spool.stdout.read() == "hello world"
+    finally:
+        spool.close()
+    assert spool.closed is True
+
+    started = await registry.spawn_background(
+        namespace="bg-direct",
+        argv=["bash", "-c", "echo spawned; sleep 30"],
+        env={"PATH": os.environ["PATH"]},
+        cwd=str(tmp_path),
+    )
+    assert started.handle is not None
+    assert "Started background process" in started.message
+    status = registry.status("bg-direct", started.handle)
+    assert status.state == "running"
+    assert registry.status("other", started.handle).state == "unknown"
+
+    sig = registry.signal("bg-direct", started.handle, force=True)
+    assert sig.outcome == "signalled"
+    record = registry.records_view[started.handle]
+    assert record.monitor_task is not None
+    await asyncio.wait_for(record.monitor_task, timeout=5.0)
+    finished = registry.status("bg-direct", started.handle)
+    assert finished.state == "exited"
+    assert finished.exit_code == -signal.SIGKILL

@@ -12,7 +12,7 @@ from uuid import uuid4
 from mindroom.constants import subprocess_path_with_prepends
 from mindroom.desktop.shell import DesktopShellOutput
 from mindroom.logging_config import get_logger
-from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell.runner import run_foreground
 
 logger = get_logger(__name__)
 
@@ -34,14 +34,11 @@ async def capture_login_environment(
     login_shell = shell or account.pw_shell or "/bin/sh"
     base = _base_environment(account)
     sentinel = f"MINDROOM_LOGIN_ENVIRONMENT_{uuid4().hex}"
-    registry: dict[str, ProcessRecord] = {}
     environment = None
     with tempfile.TemporaryDirectory(prefix="mindroom-desktop-environment-") as directory:
         output = DesktopShellOutput(directory)
         try:
-            result = await run_command(
-                registry,
-                namespace="login-environment",
+            result = await run_foreground(
                 argv=[login_shell, "-l", "-i", "-c", f"printf '%s' {sentinel}; exec /usr/bin/env -0"],
                 env=base,
                 cwd=account.pw_dir if Path(account.pw_dir).is_dir() else "/",
@@ -52,11 +49,15 @@ async def capture_login_environment(
                 stderr=asyncio.subprocess.DEVNULL,
                 kill_group_after_exit=True,
             )
-            if result.handle is None and output.completed and output.exit_code == 0 and not output.truncated:
+            if (
+                not result.timed_out
+                and not output.incomplete
+                and output.completed
+                and output.exit_code == 0
+                and not output.truncated
+            ):
                 environment = _parse_environment(output.read(), sentinel)
         finally:
-            # A login shell still running at the bound became a handle; stop its whole process group.
-            kill_all_records(registry)
             output.release()
     if environment is None:
         logger.warning("desktop_login_environment_fallback", shell=login_shell)

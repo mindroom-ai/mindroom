@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.script_runs.models import ScriptCallRecord
-    from mindroom.shell.execution import ShellRunResult
+    from mindroom.shell.runner import ShellRunResult
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 RUN = "wf-" + "c" * 32

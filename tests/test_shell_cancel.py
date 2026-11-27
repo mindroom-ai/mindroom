@@ -13,8 +13,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
+from mindroom.shell.output import BackgroundLogPolicy
 from mindroom.shell.process import ManagedProcess
+from mindroom.shell.registry import ProcessRegistry
 from tests.test_shell_async import _get_toolkit
 
 if TYPE_CHECKING:
@@ -95,11 +96,11 @@ async def _stop_recorded_child(pid: int, stop_file: Path) -> None:
 
 
 @pytest.fixture
-def registry() -> Iterator[dict[str, ProcessRecord]]:
+def registry() -> Iterator[ProcessRegistry]:
     """Kill anything a failing background test leaves registered."""
-    records: dict[str, ProcessRecord] = {}
+    records = ProcessRegistry()
     yield records
-    kill_all_records(records)
+    records.kill_all()
 
 
 @pytest.mark.asyncio
@@ -195,7 +196,7 @@ async def test_run_shell_command_cancellation_cleans_up_reader_tasks(tmp_path: P
 @pytest.mark.asyncio
 async def test_cancellation_after_backgrounding_drops_the_undeliverable_handle(
     tmp_path: Path,
-    registry: dict[str, ProcessRecord],
+    registry: ProcessRegistry,
 ) -> None:
     """A background run cancelled while its handle is being registered kills the command and drops the handle."""
     pid_file = tmp_path / "background.pid"
@@ -221,10 +222,9 @@ async def test_cancellation_after_backgrounding_drops_the_undeliverable_handle(
             return
         await real_sleep(delay)
 
-    with patch("mindroom.shell.execution.asyncio.sleep", new=controlled_sleep):
+    with patch("mindroom.shell.registry.asyncio.sleep", new=controlled_sleep):
         task = asyncio.create_task(
-            run_command(
-                registry,
+            registry.run_or_background(
                 namespace="test",
                 argv=command,
                 env={"PATH": os.environ["PATH"]},
@@ -235,7 +235,7 @@ async def test_cancellation_after_backgrounding_drops_the_undeliverable_handle(
         )
         pid = await _wait_for_pid(pid_file)
         await background_registered.wait()
-        assert len(registry) == 1
+        assert registry.record_count == 1
 
         task.cancel()
         release_background_sleep.set()
@@ -270,7 +270,7 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
     terminate_process_group = AsyncMock()
 
     with (
-        patch("mindroom.shell.execution._await_reader_tasks_with_grace", new=blocked_reader_grace),
+        patch("mindroom.shell.runner._await_reader_tasks_with_grace", new=blocked_reader_grace),
         patch.object(ManagedProcess, "terminate_tree", new=terminate_process_group),
     ):
         task = asyncio.create_task(run_shell_command(command, timeout=120))
@@ -291,3 +291,102 @@ async def test_run_shell_command_cancellation_after_foreground_exit_does_not_ter
                     await task
 
     terminate_process_group.assert_not_awaited()
+
+
+def _sleeping_pid_writer_argv(pid_file: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-c",
+        (
+            "import os, pathlib, sys, time; "
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+            "print('started', flush=True); "
+            "time.sleep(300)"
+        ),
+        str(pid_file),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race_kind", ["cancel", "close", "close_namespace"])
+async def test_handoff_window_race_leaves_zero_leaked_processes_records_or_open_logs(
+    tmp_path: Path,
+    registry: ProcessRegistry,
+    race_kind: str,
+) -> None:
+    """Cancellation, registry.close(), or close_namespace() during handoff leaves no leaked process, record, or log."""
+    pid_file = tmp_path / f"handoff-{race_kind}.pid"
+    policy = BackgroundLogPolicy(log_dir=str(tmp_path / "logs"))
+    sibling = (
+        await registry.spawn_background(
+            namespace="ns-b",
+            argv=["sleep", "300"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            background_log=policy,
+        )
+        if race_kind == "close_namespace"
+        else None
+    )
+
+    real_sleep = asyncio.sleep
+    handoff_entered, release_handoff = asyncio.Event(), asyncio.Event()
+
+    async def controlled_sleep(delay: float) -> None:
+        if delay == 0 and not handoff_entered.is_set():
+            handoff_entered.set()
+            await release_handoff.wait()
+            return
+        await real_sleep(delay)
+
+    with patch("mindroom.shell.registry.asyncio.sleep", new=controlled_sleep):
+        task = asyncio.create_task(
+            registry.run_or_background(
+                namespace="ns-a",
+                argv=_sleeping_pid_writer_argv(pid_file),
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=100,
+                timeout=0,
+                background_log=policy,
+            ),
+        )
+        pid = await _wait_for_pid(pid_file)
+        await handoff_entered.wait()
+        log_file = next(r for r in registry.records_view.values() if r.namespace == "ns-a").log_file
+        assert log_file is not None
+        assert log_file.closed is False
+
+        if race_kind == "cancel":
+            task.cancel()
+            release_handoff.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert registry.record_count == 0
+        elif race_kind == "close":
+            close_task = asyncio.create_task(registry.close())
+            await real_sleep(0.05)
+            release_handoff.set()
+            result = await task
+            await close_task
+            assert (result.background_rejected, result.handle, registry.closed, registry.record_count) == (
+                True,
+                None,
+                True,
+                0,
+            )
+            assert "Shell turn already ended" in result.message
+        else:
+            close_task = asyncio.create_task(registry.close_namespace("ns-a"))
+            await real_sleep(0.05)
+            release_handoff.set()
+            result = await task
+            assert await close_task == 1
+            assert (result.background_rejected, result.handle) == (True, None)
+            assert sibling is not None
+            assert sibling.handle is not None
+            assert sibling.handle in registry.records_view
+            os.kill(registry.records_view[sibling.handle].pid, 0)
+
+    assert log_file.closed is True
+    await _assert_pid_dead(pid)

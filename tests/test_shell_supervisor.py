@@ -22,13 +22,14 @@ from mindroom.constants import CONTROL_STATE_PATH_ENV, resolve_runtime_paths
 from mindroom.script_runs import launch_contract, supervised
 from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
-from mindroom.shell import execution as shell_execution_module
+from mindroom.shell import registry as shell_registry_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.background_scope import BackgroundLogPolicy
-from mindroom.shell.execution import ShellRunResult, run_command
+from mindroom.shell.output import BackgroundLogPolicy
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.shell.process import ManagedProcess
+from mindroom.shell.registry import BackgroundProcess, ProcessRegistry
+from mindroom.shell.runner import ShellRunResult, run_foreground
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -52,7 +53,6 @@ from tests.test_shell_async import _get_toolkit, _make_runtime_paths
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
-    from mindroom.shell.execution import ProcessRecord
 
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
@@ -115,12 +115,11 @@ def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str
 
 
 @contextlib.asynccontextmanager
-async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
+async def _running_server(registry: ProcessRegistry) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
-    handle_reservations: set[str] = set()
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations),
+        partial(_handle_connection, registry),
         path=socket_path,
     )
     try:
@@ -204,7 +203,7 @@ async def _assert_pid_dead(pid: int, *, timeout_seconds: float = 2.0) -> None:
 @pytest.mark.asyncio
 async def test_run_returns_output() -> None:
     """Fast commands should return their output through the supervisor."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         assert await _run(socket_path, ["echo", "hello supervisor"]) == "hello supervisor"
 
@@ -212,21 +211,21 @@ async def test_run_returns_output() -> None:
 @pytest.mark.asyncio
 async def test_a_stopping_run_has_no_limit_without_a_timeout_and_stops_at_one() -> None:
     """The shell tool's runs wait however long a command takes, or stop it at its timeout with its output so far."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         finished = await _run(socket_path, ["bash", "-c", "sleep 0.3; echo done"], timeout=None, on_timeout="kill")
         stopped = await _run(socket_path, ["bash", "-c", "echo started; sleep 300"], timeout=0.5, on_timeout="kill")
 
     assert finished == "done"
     assert stopped == "Stopped after 0.5s.\nOutput:\nstarted"
-    assert registry == {}
+    assert registry.record_count == 0
 
 
 @pytest.mark.asyncio
 async def test_a_supervised_run_relays_its_progress_before_its_result(monkeypatch: pytest.MonkeyPatch) -> None:
     """A client that asks for progress gets the command's output tail while it runs, then the usual result."""
-    monkeypatch.setattr("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1)
-    registry: dict[str, ProcessRecord] = {}
+    monkeypatch.setattr("mindroom.shell.output._PROGRESS_INTERVAL_SECONDS", 0.1)
+    registry = ProcessRegistry()
     reports: list[str] = []
     async with _running_server(registry) as socket_path:
         result = await run_command_via_supervisor(
@@ -276,7 +275,7 @@ async def test_a_launch_failure_exits_as_a_shell_reports_it_only_for_a_caller_th
 @pytest.mark.asyncio
 async def test_run_nonzero_exit_returns_stderr() -> None:
     """Non-zero exits should surface their exit code and stderr."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["bash", "-c", "echo oops >&2; exit 1"])
         assert result == "Exit code 1\nStderr:\noops"
@@ -295,14 +294,16 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
     )
     await process.wait()
     handle = "shell:monitor-permission"
-    record = shell_execution_module.ProcessRecord(
+    record = BackgroundProcess(
         namespace="test",
         handle=handle,
         pid=process.pid,
         args=[sys.executable, "-c", "pass"],
         managed=ManagedProcess(process),
+        kill_group_after_exit=True,
     )
-    registry = {handle: record}
+    registry = ProcessRegistry()
+    registry._records[handle] = record
     stdout_reader = asyncio.create_task(asyncio.sleep(0))
     stderr_reader = asyncio.create_task(asyncio.sleep(0))
 
@@ -312,8 +313,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
 
     monkeypatch.setattr(os, "killpg", deny_group_cleanup)
 
-    await shell_execution_module._monitor_process(
-        registry,
+    await registry._monitor_process(
         record,
         stdout_reader,
         stderr_reader,
@@ -326,7 +326,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
 @pytest.mark.asyncio
 async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
     """The full run→check→kill handle lifecycle should work over the socket."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["bash", "-c", "echo bg-line; sleep 300"], timeout=0)
         assert "timed out" in result.lower()
@@ -351,18 +351,18 @@ async def test_run_timeout_backgrounds_then_check_and_kill() -> None:
 )
 async def test_invalid_process_deadline_returns_structured_error(runtime_seconds: float) -> None:
     """Invalid deadlines cannot spawn a process or break the supervisor response protocol."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["sleep", "300"], timeout=0, max_runtime_seconds=runtime_seconds)
 
     assert result.startswith("Error: Invalid shell supervisor request:")
-    assert registry == {}
+    assert registry.record_count == 0
 
 
 @pytest.mark.asyncio
 async def test_process_deadlines_are_independent_and_leave_ordinary_background_calls_running(tmp_path: Path) -> None:
     """Each maximum runtime kills only its original process group and drains its timer."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     resistant_handle = f"shell:{'a' * 32}"
     completed_handle = f"shell:{'b' * 32}"
     cancelled_handle = f"shell:{'c' * 32}"
@@ -419,7 +419,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert "exit code -9" in await _check(socket_path, resistant_handle)
             assert "RUNNING" in await _check(socket_path, ordinary_handle)
             for handle in (resistant_handle, completed_handle, cancelled_handle):
-                monitor = registry[handle]._monitor_task
+                monitor = registry.records_view[handle].monitor_task
                 assert monitor is None or monitor.done()
         finally:
             await _kill(socket_path, resistant_handle, force=True)
@@ -430,7 +430,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
 @pytest.mark.asyncio
 async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Path) -> None:
     """An inherited output pipe cannot keep descendants alive past the deadline."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     release_path = tmp_path / "exit-leader"
     child_path = tmp_path / "child-pid"
     script = (
@@ -459,16 +459,16 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
             child_pid = int(child_pid_text)
             release_path.touch()
             for _ in range(100):
-                if registry[handle].process.returncode is not None:
+                if registry.records_view[handle].process.returncode is not None:
                     break
                 await asyncio.sleep(0.01)
-            assert registry[handle].process.returncode == 0
+            assert registry.records_view[handle].process.returncode == 0
             # The monitor may already have killed the group when the leader exits.
             assert "FINISHED" in await _wait_for_finished(socket_path, handle)
             await _assert_pid_dead(child_pid)
         finally:
             with contextlib.suppress(ProcessLookupError):
-                os.killpg(registry[handle].pid, signal.SIGKILL)
+                os.killpg(registry.records_view[handle].pid, signal.SIGKILL)
             await _wait_for_finished(socket_path, handle)
 
 
@@ -504,9 +504,7 @@ async def _run_shim(
         launch_contract.TOKEN_PATH_ENV: str(token_path),
         **(env or {}),
     }
-    result = await run_command(
-        {},
-        namespace="script:test",
+    result = await run_foreground(
         argv=[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
         env={name: value for name, value in shim_env.items() if value is not None},
         cwd=str(workspace),
@@ -703,7 +701,7 @@ def test_script_shim_cleanup_permission_error_preserves_source_validation(
 @pytest.mark.asyncio
 async def test_handles_are_namespace_scoped() -> None:
     """Handles must not be visible to callers from another namespace."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["sleep", "300"], namespace="ns-a", timeout=0)
         handle = _extract_handle(result)
@@ -717,7 +715,7 @@ async def test_handles_are_namespace_scoped() -> None:
 @pytest.mark.asyncio
 async def test_caller_supplied_handle_is_registered_once() -> None:
     """A durable caller handle names exactly one supervised process."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     requested_handle = f"shell:{'a' * 32}"
     async with _running_server(registry) as socket_path:
         first = await _run(socket_path, ["sleep", "300"], timeout=0, handle=requested_handle)
@@ -725,7 +723,7 @@ async def test_caller_supplied_handle_is_registered_once() -> None:
         try:
             assert _extract_handle(first) == requested_handle
             assert "already registered" in duplicate
-            assert list(registry) == [requested_handle]
+            assert list(registry.records_view) == [requested_handle]
         finally:
             await _kill(socket_path, requested_handle, force=True)
 
@@ -733,7 +731,7 @@ async def test_caller_supplied_handle_is_registered_once() -> None:
 @pytest.mark.asyncio
 async def test_background_limit_discards_rejected_process(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rejecting a process at the background limit must not leave an unowned child."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     spawned_pids: list[int] = []
     original_spawn = asyncio.create_subprocess_exec
 
@@ -742,7 +740,7 @@ async def test_background_limit_discards_rejected_process(monkeypatch: pytest.Mo
         spawned_pids.append(process.pid)
         return process
 
-    monkeypatch.setattr(shell_execution_module, "MAX_BACKGROUNDED", 1)
+    monkeypatch.setattr(shell_registry_module, "MAX_BACKGROUNDED", 1)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_spawn)
     async with _running_server(registry) as socket_path:
         accepted = await _run(socket_path, ["sleep", "300"], timeout=0)
@@ -760,7 +758,7 @@ async def test_concurrent_caller_handle_is_reserved_before_process_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent use of one durable handle starts exactly one real child process."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     requested_handle = f"shell:{'b' * 32}"
     original_spawn = asyncio.create_subprocess_exec
     first_spawned = asyncio.Event()
@@ -811,18 +809,18 @@ async def test_concurrent_caller_handle_is_reserved_before_process_spawn(
 @pytest.mark.asyncio
 async def test_caller_supplied_handle_requires_full_random_identifier() -> None:
     """Short or malformed caller handles are rejected before process registration."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         result = await _run(socket_path, ["sleep", "300"], timeout=0, handle="shell:1234abcd")
 
     assert "Invalid caller-supplied shell handle" in result
-    assert registry == {}
+    assert registry.record_count == 0
 
 
 @pytest.mark.asyncio
 async def test_client_disconnect_cancels_foreground_run() -> None:
     """A client that dies mid-run must not leave the command running unsupervised."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     pid_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-pid-"))
     pid_file = pid_dir / "run.pid"
     script = (
@@ -858,7 +856,7 @@ async def test_client_disconnect_cancels_foreground_run() -> None:
                 await writer.wait_closed()
 
             await _assert_pid_dead(pid)
-            assert registry == {}
+            assert registry.record_count == 0
     finally:
         shutil.rmtree(pid_dir, ignore_errors=True)
 
@@ -872,9 +870,8 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
     When ``asyncio.wait`` reports the run and the client EOF as done together,
     the registered handle is undeliverable and the command must be killed.
     """
-    registry: dict[str, ProcessRecord] = {}
-    result = await run_command(
-        registry,
+    registry = ProcessRegistry()
+    result = await registry.run_or_background(
         namespace="ns",
         argv=["sleep", "300"],
         env=_MINIMAL_ENV,
@@ -883,13 +880,13 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         timeout=0,
     )
     assert result.handle is not None
-    assert result.handle in registry
-    pid = registry[result.handle].pid
+    assert result.handle in registry.records_view
+    pid = registry.records_view[result.handle].pid
 
     async def completed_run(*_args: object, **_kwargs: object) -> object:
         return result
 
-    monkeypatch.setattr(shell_supervisor, "run_command", completed_run)
+    monkeypatch.setattr(registry, "run_or_background", completed_run)
     eof_reader = asyncio.StreamReader()
     eof_reader.feed_eof()
     payload = {
@@ -902,10 +899,10 @@ async def test_backgrounded_handle_is_discarded_when_client_died_in_same_cycle(
         "timeout": 0,
     }
 
-    message = await shell_supervisor._handle_run(registry, set(), payload, eof_reader)
+    message = await shell_supervisor._handle_run(registry, payload, eof_reader)
 
     assert message is None
-    assert registry == {}
+    assert registry.record_count == 0
     await _assert_pid_dead(pid)
 
 
@@ -920,9 +917,10 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
         argv = kwargs["argv"]
         assert isinstance(argv, list)
         observed_argv.extend(str(item) for item in argv)
-        return shell_execution_module.ShellRunResult(message="ordinary result")
+        return ShellRunResult(message="ordinary result")
 
-    monkeypatch.setattr(shell_supervisor, "run_command", record_run)
+    registry = ProcessRegistry()
+    monkeypatch.setattr(registry, "run_or_background", record_run)
     reader = asyncio.StreamReader()
     payload = {
         "op": "run",
@@ -934,7 +932,7 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
         "timeout": 30,
     }
 
-    message = await shell_supervisor._handle_run({}, set(), payload, reader)
+    message = await shell_supervisor._handle_run(registry, payload, reader)
 
     assert message is not None
     assert message.message == "ordinary result"
@@ -944,7 +942,7 @@ async def test_ordinary_shell_run_does_not_use_script_parent_death_wrapper(
 @pytest.mark.asyncio
 async def test_unknown_operation_returns_error() -> None:
     """Unknown operations should produce an error message, not kill the server."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     async with _running_server(registry) as socket_path:
         reader, writer = await asyncio.open_unix_connection(socket_path)
         writer.write(json.dumps({"op": "nope"}).encode() + b"\n")
@@ -1374,11 +1372,11 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Supervisor supports background_log, per-namespace caps, and kill_namespace isolation."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
-    monkeypatch.setattr(shell_execution_module, "MAX_BACKGROUNDED", 1)
+    monkeypatch.setattr(shell_registry_module, "MAX_BACKGROUNDED", 1)
 
     async with _running_server(registry) as socket_path:
         first = await run_command_via_supervisor(
@@ -1419,14 +1417,14 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
         assert "Still running after 0.2s; moved to the background" in first.message
         assert "Log: .mindroom/shell/" in first.message
         assert "Too many backgrounded processes (1/1)" in rejected.message
-        first_pid = registry[first.handle].pid
-        first_log = Path(registry[first.handle]._log_path or "")
-        other_pid = registry[other.handle].pid
+        first_pid = registry.records_view[first.handle].pid
+        first_log = Path(registry.records_view[first.handle].log_path or "")
+        other_pid = registry.records_view[other.handle].pid
 
         try:
             await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
-            assert first.handle not in registry
-            assert other.handle in registry
+            assert first.handle not in registry.records_view
+            assert other.handle in registry.records_view
             await _assert_pid_dead(first_pid)
             assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
             os.kill(other_pid, 0)
@@ -1478,7 +1476,7 @@ def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
 @pytest.mark.asyncio
 async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_other_namespace(tmp_path: Path) -> None:
     """kill_namespace sends SIGTERM first so cleanup traps flush before the turn-ended trailer."""
-    registry: dict[str, ProcessRecord] = {}
+    registry = ProcessRegistry()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
@@ -1505,13 +1503,16 @@ async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_othe
         assert trapped.handle is not None
         assert other.handle is not None
         assert "child-ready" in trapped.message
-        trapped_pid, trapped_log = registry[trapped.handle].pid, Path(registry[trapped.handle]._log_path or "")
-        other_pid = registry[other.handle].pid
+        trapped_pid, trapped_log = (
+            registry.records_view[trapped.handle].pid,
+            Path(registry.records_view[trapped.handle].log_path or ""),
+        )
+        other_pid = registry.records_view[other.handle].pid
 
         try:
             await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:graceful")
-            assert trapped.handle not in registry
-            assert other.handle in registry
+            assert trapped.handle not in registry.records_view
+            assert other.handle in registry.records_view
             await _assert_pid_dead(trapped_pid)
             log_text = trapped_log.read_text(encoding="utf-8")
             assert "child-trap-cleanup-done" in log_text

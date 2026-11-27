@@ -18,7 +18,7 @@ Flow:
   execution, then sends a run request that stops the command at its timeout;
   script runs also send check and kill requests for their handles.
 - The supervisor spawns and monitors the command with the shared
-  :mod:`mindroom.shell.execution` core. A client that disconnects mid-run
+  :mod:`mindroom.shell.runner` and :mod:`mindroom.shell.registry` core. A client that disconnects mid-run
   cancels the run, mirroring local cancellation semantics.
 - The supervisor exits when its parent runner dies or terminates it, killing
   unfinished process groups, so restarting the worker invalidates handles.
@@ -47,21 +47,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.logging_config import get_logger
-from mindroom.shell.background_scope import BackgroundLogPolicy
-from mindroom.shell.execution import (
-    ProcessRecord,
-    ShellRunResult,
-    check_command,
-    close_background_records,
-    discard_background_record,
-    kill_all_records,
-    kill_command,
-    run_command,
-)
+from mindroom.shell.output import BackgroundLogPolicy
 from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.registry import ProcessRegistry
+from mindroom.shell.runner import ShellRunResult, run_foreground
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Coroutine, Iterator, Mapping
+
+    from mindroom.shell.registry import ProcessStatus, SignalResult
 
 logger = get_logger(__name__)
 
@@ -150,18 +144,9 @@ def parse_shell_supervisor_kill(message: str) -> Literal["signalled", "finished"
 # ---------------------------------------------------------------------------
 
 
-async def _handle_run(
-    registry: dict[str, ProcessRecord],
-    handle_reservations: set[str],
+def _parse_launch_payload(
     payload: dict[str, object],
-    reader: asyncio.StreamReader,
-    *,
-    write_progress: Callable[[str], None] | None = None,
-) -> ShellRunResult | None:
-    """Run one command, cancelling it if the client disconnects mid-wait.
-
-    A client that asks for progress gets it through ``write_progress`` before the result.
-    """
+) -> tuple[list[str], dict[str, str], str | None, str | None, int, bool | None]:
     argv_payload = payload["argv"]
     env_payload = payload["env"]
     if not isinstance(argv_payload, list) or not isinstance(env_payload, dict):
@@ -171,9 +156,10 @@ async def _handle_run(
     if handle_payload is not None and not isinstance(handle_payload, str):
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
-    response_timeout, max_runtime_seconds = _run_timings(payload)
-    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
-    background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
+    kill_group_payload = payload.get("kill_group_after_exit")
+    if kill_group_payload is not None and not isinstance(kill_group_payload, bool):
+        msg = "run request 'kill_group_after_exit' must be a boolean"
+        raise TypeError(msg)
     command_argv = [str(item) for item in argv_payload]
     if handle_payload is not None and background_script_supervision_supported():
         command_argv = [
@@ -185,25 +171,18 @@ async def _handle_run(
             str(os.getpid()),
             *command_argv,
         ]
-    run_task = asyncio.create_task(
-        run_command(
-            registry,
-            namespace=str(payload["namespace"]),
-            argv=command_argv,
-            env={str(key): str(value) for key, value in env_payload.items()},
-            cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
-            tail=int(payload["tail"]),  # ty: ignore[invalid-argument-type]
-            timeout=response_timeout,
-            on_timeout=_on_timeout(payload),
-            on_progress=write_progress if payload.get("progress") is True else None,
-            handle=handle_payload,
-            handle_reservations=handle_reservations,
-            output_destination=output_destination,
-            launch_failure_exits=payload.get("launch_failure_exits") is True,
-            max_runtime_seconds=max_runtime_seconds,
-            background_log=background_log,
-        ),
-    )
+    env = {str(key): str(value) for key, value in env_payload.items()}
+    cwd = str(payload["cwd"]) if payload.get("cwd") is not None else None
+    tail = int(payload["tail"])  # ty: ignore[invalid-argument-type]
+    return command_argv, env, cwd, handle_payload, tail, kill_group_payload
+
+
+async def _await_with_disconnect_cancel(
+    registry: ProcessRegistry,
+    coro: Coroutine[object, object, ShellRunResult],
+    reader: asyncio.StreamReader,
+) -> ShellRunResult | None:
+    run_task = asyncio.create_task(coro)
     # EOF before the run response means the client (a per-request tool
     # subprocess) died; cancel the run so the command is killed exactly like a
     # cancelled local run instead of lingering with an undelivered handle.
@@ -216,7 +195,7 @@ async def _handle_run(
         if run_task.done():
             result = await run_task
             if result.handle is not None:
-                discard_background_record(registry, result.handle)
+                registry.discard(result.handle)
         else:
             run_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -226,6 +205,84 @@ async def _handle_run(
     with suppress(asyncio.CancelledError):
         await eof_task
     return await run_task
+
+
+async def _handle_run(
+    registry: ProcessRegistry,
+    payload: dict[str, object],
+    reader: asyncio.StreamReader,
+    *,
+    write_progress: Callable[[str], None] | None = None,
+) -> ShellRunResult | None:
+    """Run one command, cancelling it if the client disconnects mid-wait.
+
+    A client that asks for progress gets it through ``write_progress`` before the result.
+    """
+    command_argv, env, cwd, handle_payload, tail, kill_group_payload = _parse_launch_payload(payload)
+    response_timeout, max_runtime_seconds = _run_timings(payload)
+    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
+    background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
+    on_timeout = _on_timeout(payload)
+    on_progress = write_progress if payload.get("progress") is True else None
+    launch_failure_exits = payload.get("launch_failure_exits") is True
+    if on_timeout == "kill":
+        coro = run_foreground(
+            argv=command_argv,
+            env=env,
+            cwd=cwd,
+            tail=tail,
+            timeout=response_timeout,
+            on_progress=on_progress,
+            output_destination=output_destination,
+            kill_group_after_exit=bool(kill_group_payload) if kill_group_payload is not None else False,
+            launch_failure_exits=launch_failure_exits,
+        )
+    else:
+        kill_group_after_exit = kill_group_payload if kill_group_payload is not None else background_log is None
+        coro = registry.run_or_background(
+            namespace=str(payload["namespace"]),
+            argv=command_argv,
+            env=env,
+            cwd=cwd,
+            tail=tail,
+            timeout=response_timeout,
+            on_progress=on_progress,
+            handle=handle_payload,
+            output_destination=output_destination,
+            kill_group_after_exit=kill_group_after_exit,
+            launch_failure_exits=launch_failure_exits,
+            max_runtime_seconds=max_runtime_seconds,
+            background_log=background_log,
+        )
+    return await _await_with_disconnect_cancel(registry, coro, reader)
+
+
+async def _handle_spawn_background(
+    registry: ProcessRegistry,
+    payload: dict[str, object],
+    reader: asyncio.StreamReader,
+) -> ShellRunResult | None:
+    """Spawn one command directly into *registry*, rolling it back if the client disconnects."""
+    command_argv, env, cwd, handle_payload, tail, kill_group_payload = _parse_launch_payload(payload)
+    max_runtime_payload = payload.get("max_runtime_seconds")
+    max_runtime_seconds = _parse_max_runtime_seconds(max_runtime_payload)
+    output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
+    background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
+    kill_group_after_exit = kill_group_payload if kill_group_payload is not None else background_log is None
+    coro = registry.spawn_background(
+        namespace=str(payload["namespace"]),
+        argv=command_argv,
+        env=env,
+        cwd=cwd,
+        tail=tail,
+        handle=handle_payload,
+        output_destination=output_destination,
+        kill_group_after_exit=kill_group_after_exit,
+        launch_failure_exits=payload.get("launch_failure_exits") is True,
+        max_runtime_seconds=max_runtime_seconds,
+        background_log=background_log,
+    )
+    return await _await_with_disconnect_cancel(registry, coro, reader)
 
 
 def _write_progress(writer: asyncio.StreamWriter, text: str) -> None:
@@ -243,17 +300,22 @@ def _on_timeout(payload: dict[str, object]) -> Literal["background", "kill"]:
     raise TypeError(msg)
 
 
-def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None]:
-    """Validate an optional process deadline and derive the foreground wait, which None leaves unlimited."""
-    max_runtime_payload = payload.get("max_runtime_seconds")
-    if max_runtime_payload is not None and (
+def _parse_max_runtime_seconds(max_runtime_payload: object) -> float | None:
+    if max_runtime_payload is None:
+        return None
+    if (
         isinstance(max_runtime_payload, bool)
         or not isinstance(max_runtime_payload, int | float)
         or not 0 < max_runtime_payload <= sys.float_info.max
     ):
         msg = "run request 'max_runtime_seconds' must be a positive finite number"
         raise TypeError(msg)
-    max_runtime_seconds = float(max_runtime_payload) if max_runtime_payload is not None else None
+    return float(max_runtime_payload)
+
+
+def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None]:
+    """Validate an optional process deadline and derive the foreground wait, which None leaves unlimited."""
+    max_runtime_seconds = _parse_max_runtime_seconds(payload.get("max_runtime_seconds"))
     timeout_payload = payload["timeout"]
     response_timeout = None if timeout_payload is None else float(timeout_payload)  # ty: ignore[invalid-argument-type]
     if max_runtime_seconds is not None:
@@ -263,9 +325,35 @@ def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None
     return response_timeout, max_runtime_seconds
 
 
+async def _dispatch_request(
+    registry: ProcessRegistry,
+    payload: dict[str, object],
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> ShellRunResult | None:
+    op = payload.get("op")
+    if op == "run":
+        return await _handle_run(registry, payload, reader, write_progress=partial(_write_progress, writer))
+    if op == "spawn_background":
+        return await _handle_spawn_background(registry, payload, reader)
+    if op == "check":
+        status: ProcessStatus = registry.status(namespace=str(payload["namespace"]), handle=str(payload["handle"]))
+        return ShellRunResult(message=status.message)
+    if op == "kill":
+        sig_result: SignalResult = registry.signal(
+            namespace=str(payload["namespace"]),
+            handle=str(payload["handle"]),
+            force=bool(payload.get("force", False)),
+        )
+        return ShellRunResult(message=sig_result.message)
+    if op == "kill_namespace":
+        killed = await registry.close_namespace(str(payload["namespace"]))
+        return ShellRunResult(message=f"Killed {killed}.")
+    return ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
+
+
 async def _handle_connection(
-    registry: dict[str, ProcessRecord],
-    handle_reservations: set[str],
+    registry: ProcessRegistry,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -274,38 +362,9 @@ async def _handle_connection(
         if not line.strip():
             return  # Ready-probe connections close without sending a request.
         payload = json.loads(line)
-        op = payload.get("op")
-        if op == "run":
-            result = await _handle_run(
-                registry,
-                handle_reservations,
-                payload,
-                reader,
-                write_progress=partial(_write_progress, writer),
-            )
-            if result is None:
-                return
-        elif op == "check":
-            result = ShellRunResult(
-                message=check_command(registry, namespace=str(payload["namespace"]), handle=str(payload["handle"])),
-            )
-        elif op == "kill":
-            result = ShellRunResult(
-                message=kill_command(
-                    registry,
-                    namespace=str(payload["namespace"]),
-                    handle=str(payload["handle"]),
-                    force=bool(payload.get("force", False)),
-                ),
-            )
-        elif op == "kill_namespace":
-            namespace = str(payload["namespace"])
-            matching = {h: registry.pop(h) for h, r in list(registry.items()) if r.namespace == namespace}
-            killed = len(matching)
-            await close_background_records(matching)
-            result = ShellRunResult(message=f"Killed {killed}.")
-        else:
-            result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
+        result = await _dispatch_request(registry, payload, reader, writer)
+        if result is None:
+            return
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
         await writer.drain()
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -322,14 +381,13 @@ async def _handle_connection(
 
 
 async def _serve(socket_path: str) -> int:
-    registry: dict[str, ProcessRecord] = {}
-    handle_reservations: set[str] = set()
+    registry = ProcessRegistry()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations),
+        partial(_handle_connection, registry),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -343,7 +401,7 @@ async def _serve(socket_path: str) -> int:
                 await asyncio.wait_for(stop_event.wait(), timeout=_PARENT_POLL_INTERVAL_SECONDS)
     # Handles cannot outlive the supervisor; kill their process groups so a
     # runner or worker restart invalidates handles without leaking processes.
-    kill_all_records(registry)
+    registry.kill_all()
     if orphaned:
         # The runner died without running its cleanup (e.g. SIGKILL), so
         # remove our runtime dir ourselves.

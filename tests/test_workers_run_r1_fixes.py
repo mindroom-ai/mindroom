@@ -20,8 +20,8 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.execution import ShellRunResult, _launch_failure, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
+from mindroom.shell.runner import ShellRunResult, _launch_failure, run_foreground
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 from mindroom.tool_system.worker_proxy_client import WorkerCallCancellation
@@ -190,10 +190,8 @@ async def test_r1_output_capture_eacces_stays_execution_error(
     def refuse(*_args: object, **_kwargs: object) -> None:
         raise PermissionError(errno.EACCES, "Permission denied", "/bin/sh")
 
-    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", refuse)
-    result = await run_command(
-        {},
-        namespace="test",
+    monkeypatch.setattr("mindroom.shell.output.tempfile.TemporaryFile", refuse)
+    result = await run_foreground(
         argv=["/bin/sh", "-c", "echo ok"],
         env=dict(os.environ),
         cwd=str(tmp_path),
@@ -208,9 +206,7 @@ async def test_r1_output_capture_eacces_stays_execution_error(
 
 async def _launch(argv: list[str], *, path: Path | str, cwd: Path) -> ShellRunResult:
     """Run a command whose launch failure exits as a shell reports it, with ``path`` as its whole PATH."""
-    return await run_command(
-        {},
-        namespace="test",
+    return await run_foreground(
         argv=argv,
         env={"PATH": str(path)},
         cwd=str(cwd),

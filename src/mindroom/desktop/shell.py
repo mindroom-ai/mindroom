@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import os
 import re
 import shutil
 import tempfile
@@ -17,20 +16,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES
-from mindroom.shell.execution import (
-    MAX_BACKGROUNDED,
-    ProcessRecord,
-    discard_background_record,
-    kill_all_records,
-    run_command,
-    signal_record,
-)
 from mindroom.shell.output_capture import ShellOutputCapture, ShellOutputDestination
+from mindroom.shell.registry import MAX_BACKGROUNDED, BackgroundProcess, ProcessRegistry
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from mindroom.shell.output_capture import CapturedShellStream
+    from mindroom.shell.output import SpoolStream
 
 _INLINE_WAIT_SAFETY_SECONDS = 10.0
 _MAX_COMMAND = 8_192
@@ -87,18 +79,16 @@ class DesktopShellOutput(ShellOutputCapture):
         self.exit_code: int | None = None
         self.completed = False
 
-    def _stream_size(self, stream: CapturedShellStream) -> int:
-        stream.file.flush()
-        return os.fstat(stream.file.fileno()).st_size
+    def _stream_size(self, stream: SpoolStream) -> int:
+        return stream.size
 
-    def _stream_read(self, stream: CapturedShellStream, offset: int = 0, max_bytes: int | None = None) -> bytes:
-        size = self._stream_size(stream)
-        return os.pread(stream.file.fileno(), size - offset if max_bytes is None else max_bytes, offset)
+    def _stream_read(self, stream: SpoolStream, offset: int = 0, max_bytes: int | None = None) -> bytes:
+        return stream.pread(offset, max_bytes)
 
-    def _stream_tail(self, stream: CapturedShellStream, max_bytes: int) -> bytes:
-        return self._stream_read(stream, max(0, self._stream_size(stream) - max_bytes))
+    def _stream_tail(self, stream: SpoolStream, max_bytes: int) -> bytes:
+        return stream.tail(max_bytes)
 
-    def _check_stream_offset(self, stream: CapturedShellStream, offset: int, *, label: str) -> None:
+    def _check_stream_offset(self, stream: SpoolStream, offset: int, *, label: str) -> None:
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             message = f"Shell {label} offset must be a nonnegative integer."
             raise DesktopShellError(message)
@@ -200,7 +190,7 @@ class _ShellHandle:
     controller_key: str = ""
     request_id: str = ""
 
-    def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
+    def state(self, record: BackgroundProcess) -> Literal["completed", "killed", "running"]:
         if not record.finished:
             return "running"
         return "killed" if (self.killed or record.timed_out) else "completed"
@@ -273,7 +263,7 @@ class DesktopShell:
         self._agent_input_idle.set()
         self._agent_input_ended_at = -math.inf
         self._used_ids: set[tuple[str, str]] = set()
-        self._records: dict[str, ProcessRecord] = {}
+        self._registry = ProcessRegistry()
         self._handles: dict[str, _ShellHandle] = {}
         self._directory: str | None = None
         self._busy = False
@@ -388,7 +378,7 @@ class DesktopShell:
                 continue
             if controller_key is not None and entry.controller_key != controller_key:
                 continue
-            record = self._records[handle]
+            record = self._registry.records_view[handle]
             ended_at = record.finished_at if record.finished_at is not None else time.monotonic()
             entries.append(
                 {
@@ -537,7 +527,11 @@ class DesktopShell:
         self._prune()
         if len(self._handles) < _MAX_HANDLES:
             return None
-        finished = [(record.finished_at or 0.0, handle) for handle, record in self._records.items() if record.finished]
+        finished = [
+            (record.finished_at or 0.0, handle)
+            for handle, record in self._registry.records_view.items()
+            if record.finished
+        ]
         if not finished:
             message = "Too many local shell commands are running; kill one before starting another."
             raise DesktopShellError(message)
@@ -594,10 +588,10 @@ class DesktopShell:
             inline_wait = min(inline_wait, request.max_runtime_seconds)
         output = DesktopShellOutput(self._spool_directory())
         started_at = time.monotonic()
+        namespace = json.dumps([request.controller_key, request.requester_id, request.agent_name])
         run = asyncio.create_task(
-            run_command(
-                self._records,
-                namespace=json.dumps([request.controller_key, request.requester_id, request.agent_name]),
+            self._registry.run_or_background(
+                namespace=namespace,
                 argv=["/bin/sh", "-c", request.command],
                 env=self._environment,
                 cwd=request.cwd,
@@ -632,7 +626,7 @@ class DesktopShell:
             raise DesktopShellError(result.message.removeprefix("Error: "))
         if self._cancel_event.is_set():
             # Revocation raced the new handle's registration and has already killed and forgotten it.
-            discard_background_record(self._records, result.handle)
+            self._registry.discard(result.handle)
             if not output.completed:
                 output.release()
                 raise DesktopShellError(_STOPPED)
@@ -647,7 +641,8 @@ class DesktopShell:
             request_id=request.request_id,
         )
         self._handles[result.handle] = entry
-        record = self._records[result.handle]
+        record = self._registry.get_process(namespace, result.handle)
+        assert record is not None
         return DesktopShellResult(
             entry.state(record),
             result.handle,
@@ -690,7 +685,7 @@ class DesktopShell:
     def hand_over(self, result: DesktopShellResult) -> None:
         """Forget a finished result's handle and release its output once the rest of it reached the caller."""
         if result.handle is not None and result.handle in self._handles:
-            self._records.pop(result.handle, None)
+            self._registry.discard(result.handle)
             self._handles.pop(result.handle)
         result.output.release()
 
@@ -761,7 +756,7 @@ class DesktopShell:
         self._prune()
         for handle, entry in self._handles.items():
             if _matches(entry.request_id, entry.requester_id, entry.agent_name, entry.controller_key):
-                return self._signal(self._records[handle], handle, force=True)
+                return self._signal(self._registry.records_view[handle], handle, force=True)
         return "not_found"
 
     def kill_handle(self, handle: str) -> None:
@@ -769,11 +764,14 @@ class DesktopShell:
         self._prune()
         if handle not in self._handles:
             raise DesktopShellError(_UNKNOWN_HANDLE)
-        self._signal(self._records[handle], handle, force=True)
+        self._signal(self._registry.records_view[handle], handle, force=True)
 
-    def _signal(self, record: ProcessRecord, handle: str, *, force: bool) -> Literal["killed", "completed"]:
+    def _signal(self, record: BackgroundProcess, handle: str, *, force: bool) -> Literal["killed", "completed"]:
         # Only a delivered signal makes the handle killed; a process that exited first ended on its own.
-        if record.process.returncode is None and signal_record(record, force=force):
+        if (
+            record.process.returncode is None
+            and self._registry.signal(record.namespace, handle, force=force).outcome == "signalled"
+        ):
             self._handles[handle] = replace(self._handles[handle], killed=True)
         # An earlier kill stays the reason it ended, matching what the next check reports.
         return "killed" if (self._handles[handle].killed or record.timed_out) else "completed"
@@ -785,7 +783,7 @@ class DesktopShell:
         handle: str,
         *,
         controller_key: str | None = None,
-    ) -> ProcessRecord:
+    ) -> BackgroundProcess:
         self._prune()
         entry = self._handles.get(handle)
         if (
@@ -794,15 +792,15 @@ class DesktopShell:
             or (controller_key is not None and entry.controller_key != controller_key)
         ):
             raise DesktopShellError(_UNKNOWN_HANDLE)
-        return self._records[handle]
+        return self._registry.records_view[handle]
 
     def _discard(self, handle: str) -> None:
-        discard_background_record(self._records, handle)
+        self._registry.discard(handle)
         self._handles.pop(handle).output.release()
 
     def _prune(self) -> None:
         # The engine drops finished records after ten minutes; release the output they left behind.
-        for handle in self._handles.keys() - self._records.keys():
+        for handle in self._handles.keys() - self._registry.records_view.keys():
             self._handles.pop(handle).output.release()
 
     def _spool_directory(self) -> str:
@@ -821,7 +819,7 @@ class DesktopShell:
             self._cancel_event.set()
             if self._decision is not None and not self._decision.done():
                 self._decision.set_result("cancelled")
-            kill_all_records(self._records)
+            self._registry.kill_all()
             for entry in self._handles.values():
                 entry.output.release()
             self._handles.clear()

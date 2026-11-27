@@ -37,7 +37,7 @@ from mindroom.agent_cli.session import CliAuthenticationError, CliTurnOwner, Tur
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER, AgentCliShellEnv
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.session_storage.agent_storage import create_agent_state_storage
-from mindroom.shell.output_capture import format_shell_completion
+from mindroom.shell.output import format_shell_completion
 from mindroom.tool_system import runtime_context
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.sandbox_proxy import _make_progress_sink

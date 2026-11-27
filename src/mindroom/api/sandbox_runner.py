@@ -73,8 +73,8 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
-from mindroom.shell.execution import kill_all_records, kill_namespace_records
 from mindroom.shell.policy import shell_request_budget_seconds
+from mindroom.shell.registry import ProcessRegistry
 from mindroom.shell.streaming import CommandStdin, stream_command
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.timing import elapsed_ms_between, elapsed_ms_since
@@ -155,7 +155,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.shell.execution import ProcessRecord
     from mindroom.tool_system.authoring import Toolkit
     from mindroom.worker_computer.protocol import BrowserSession
     from mindroom.workers.backends.local import LocalWorkerStatePaths
@@ -1425,18 +1424,22 @@ async def _execute_prepared_request_inprocess(
     return await _invoke_resolved_entrypoint(prepared, execution_identity, toolkit, entrypoint)
 
 
-_inprocess_shell_records: dict[str, ProcessRecord] = {}
+_inprocess_shell_registry = ProcessRegistry()
 
 
 def close_inprocess_shell_scopes() -> None:
     """Stop every in-process auto-backgrounded shell process on runner shutdown."""
-    kill_all_records(_inprocess_shell_records)
+    _inprocess_shell_registry.kill_all()
 
 
 async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
     prepared_request = _prepare_execute_request(call)
     scope_id = prepared_request.request.shell_scope_id
-    scope = ShellBackgroundScope(scope_id=scope_id, records=_inprocess_shell_records) if scope_id is not None else None
+    scope = (
+        ShellBackgroundScope(scope_id=scope_id, registry=_inprocess_shell_registry, owns_registry=False)
+        if scope_id is not None
+        else None
+    )
     with bind_shell_background_scope(scope) if scope is not None else nullcontext():
         response = await _execute_prepared_request_inprocess(
             prepared_request.request,
@@ -2407,7 +2410,7 @@ async def kill_shell_scope(payload: KillShellScopeRequest) -> KillShellScopeResp
     if (failure := _protocol_failure(payload.protocol)) is not None:
         return failure
     namespace = f"shell-scope:{payload.shell_scope_id}"
-    kill_namespace_records(_inprocess_shell_records, namespace)
+    await _inprocess_shell_registry.close_namespace(namespace)
     await asyncio.to_thread(shell_supervisor.kill_shell_supervisor_namespace, namespace)
     return KillShellScopeResponse()
 

@@ -17,7 +17,7 @@ from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main, parse_arguments, read_call_arguments
 from mindroom.script_runs.launch_contract import digest_arguments
 from mindroom.script_runs.transport import ScriptGatewayTransport
-from mindroom.shell.output_capture import format_shell_completion
+from mindroom.shell.output import format_shell_completion
 from tests.workers_run_frames import command_frames
 
 
