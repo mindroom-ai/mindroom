@@ -6415,7 +6415,8 @@ def _proxied_shell(
     [
         ("shell", "run_shell_command", {"args": "make", "timeout": 600}, 630.0),
         ("shell", "run_shell_command", {"args": "make"}, 150.0),
-        ("browser", "browser_control", {"action": "status"}, 150.0),
+        ("browser", "browser_read", {"action": "status"}, 150.0),
+        ("browser", "browser_control", {"action": "start"}, 150.0),
         ("trafilatura", "crawl_website", {"homepage_url": "https://example.com/"}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "batch", "urls": ["https://example.com/"]}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "text", "url": "https://example.com/"}, 120.0),
@@ -6450,6 +6451,7 @@ async def test_a_worker_call_waits_as_long_as_its_runner(
 
 def test_only_the_browser_tool_waits_for_its_own_time_limit() -> None:
     """Native browser MCP calls have no limit of their own, so they keep the configured timeouts."""
+    assert browser_request_budget_seconds("browser", "browser_read") == 150.0
     assert browser_request_budget_seconds("browser", "browser_control") == 150.0
     assert browser_request_budget_seconds("browser_mcp", "browser_snapshot") == 0.0
 

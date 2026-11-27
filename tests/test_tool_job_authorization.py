@@ -56,7 +56,7 @@ def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "workflow" in toolkit_function_names(toolkit)
+    assert {"workflow_read", "workflow_write"} <= set(toolkit_function_names(toolkit))
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
     def allowed() -> bool:

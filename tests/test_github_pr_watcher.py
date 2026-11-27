@@ -178,11 +178,13 @@ def _tool_ctx(config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
 
 
 async def _watch(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads(await cast("Any", tool).triggers(action="watch_pr", **kwargs)))
+    return cast("dict[str, Any]", json.loads(await cast("Any", tool).triggers_write(action="watch_pr", **kwargs)))
 
 
 async def _trig(tool: TriggersTools, **kwargs: object) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads(await cast("Any", tool).triggers(**kwargs)))
+    action = kwargs.get("action")
+    fn = cast("Any", tool).triggers_read if action in {"list", "history", "test"} else cast("Any", tool).triggers_write
+    return cast("dict[str, Any]", json.loads(await fn(**kwargs)))
 
 
 def _cp(store: ReactiveTriggerStore, tid: str) -> GitHubPRCheckpoint:
@@ -421,10 +423,12 @@ async def test_watch_pr_delivery_mode_validation_limits_and_unreadable_pat(
             ({"repo": "ext/repo", "number": -2}, "positive integer"),
             ({"repo": "ext/repo", "number": "2"}, "positive integer"),
             ({"repo": "ext/repo", "number": 2, "poll_interval_seconds": True}, "integer"),
-            ({"repo": "ext/repo", "number": 2, "room_id": _ROOM}, "Unsupported parameter(s)"),
-            ({"repo": "ext/repo", "number": 2, "triage_instructions": "only prod"}, "Unsupported parameter(s)"),
-            ({"repo": "ext/repo", "number": 2, "thread_key": "k"}, "Unsupported parameter(s)"),
-            ({"repo": "ext/repo", "number": 2, "include_disabled": False}, "Unsupported parameter(s)"),
+            ({"repo": "ext/repo", "number": 2, "room_id": _ROOM}, "cannot be used with action='watch_pr'"),
+            (
+                {"repo": "ext/repo", "number": 2, "triage_instructions": "only prod"},
+                "cannot be used with action='watch_pr'",
+            ),
+            ({"repo": "ext/repo", "number": 2, "thread_key": "k"}, "cannot be used with action='watch_pr'"),
         ):
             bad_res = await _watch(tool, **bad_kwargs)
             assert bad_res["status"] == "error", (bad_kwargs, bad_res)
@@ -915,30 +919,30 @@ async def test_disable_reenable_reseeds_silently_and_dry_run(
 
 @pytest.mark.asyncio
 async def test_watch_pr_action_governed_by_triggers_approval_rules(tmp_path: Path) -> None:
-    """`triggers(action="watch_pr", ...)` is governed natively by `triggers` rules and action-scoped grants."""
+    """`triggers_write(action="watch_pr", ...)` is governed natively by `triggers_write` rules and action-scoped grants."""
     cfg, paths = _config(tmp_path)
-    req_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="require_approval")])
-    auto_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers", action="auto_approve")])
+    req_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers_write", action="require_approval")])
+    auto_rules = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="triggers_write", action="auto_approve")])
     req_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": req_rules}), paths)
     auto_cfg = bind_runtime_paths(cfg.model_copy(update={"tool_approval": auto_rules}), paths)
 
     registry = builtin_tool_registry()
     meta = registry.entries["triggers"]
-    assert meta.function_names == ("triggers",)
-    assert set(meta.approval_aliases) == {"triggers"}
-    triggers_alias = meta.approval_aliases["triggers"]
+    assert meta.function_names == ("triggers_read", "triggers_write")
+    assert set(meta.approval_aliases) == {"triggers_write"}
+    triggers_alias = meta.approval_aliases["triggers_write"]
     assert triggers_alias.judged_as == "script_write"
     assert toolkit_approval_alias(req_cfg, registry, "triggers", "watch_pr") is None
 
     args: dict[str, object] = {"action": "watch_pr", "repo": "org/owned", "number": 40}
     assert triggers_alias.judge(args) == []
-    assert tool_may_require_approval(req_cfg, "triggers") is True
-    assert (await evaluate_tool_approval(req_cfg, paths, "triggers", args, "dev", triggers_alias))[0] is True
-    assert tool_may_require_approval(auto_cfg, "triggers") is False
-    assert (await evaluate_tool_approval(auto_cfg, paths, "triggers", args, "dev", triggers_alias))[0] is False
+    assert tool_may_require_approval(req_cfg, "triggers_write") is True
+    assert (await evaluate_tool_approval(req_cfg, paths, "triggers_write", args, "dev", triggers_alias))[0] is True
+    assert tool_may_require_approval(auto_cfg, "triggers_write") is False
+    assert (await evaluate_tool_approval(auto_cfg, paths, "triggers_write", args, "dev", triggers_alias))[0] is False
 
-    watch_pr_op = grant_operation(req_cfg, "triggers", args)
-    list_op = grant_operation(req_cfg, "triggers", {"action": "list"})
+    watch_pr_op = grant_operation(req_cfg, "triggers_write", args, tools=registry, toolkit_name="triggers")
+    list_op = grant_operation(req_cfg, "triggers_read", {"action": "list"}, tools=registry, toolkit_name="triggers")
     assert watch_pr_op is not None
     assert list_op is not None
     assert watch_pr_op.mcp_server_id == "triggers"

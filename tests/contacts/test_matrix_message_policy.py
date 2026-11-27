@@ -521,7 +521,7 @@ async def test_room_tools_refuse_a_contact_room_that_matrix_message_may_use(tmp_
 
     with tool_runtime_context(elsewhere):
         payload = json.loads(
-            await MatrixApiTools().matrix_api(
+            await MatrixApiTools().matrix_api_write(
                 action="send_event",
                 room_id=CONTACT_ROOM,
                 event_type="m.room.message",

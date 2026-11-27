@@ -20,6 +20,13 @@ from mindroom.tools.browser_mcp import browser_mcp_tools
 
 def test_action_browser_encoder_preserves_media_and_ordinary_json() -> None:
     """Action-browser images use the bounded codec while ordinary JSON keeps its wire shape."""
+    read_provider = select_browser_provider(
+        "browser",
+        "browser_read",
+        browser_tools,
+        lambda value: {"ordinary": value},
+    )
+    assert read_provider.function_names == frozenset({"browser_read", "browser_control"})
     provider = select_browser_provider(
         "browser",
         "browser_control",

@@ -836,7 +836,7 @@ async def test_browser_desktop_keeps_primary_matrix_context(
     if target is not None:
         arguments["target"] = target
     with tool_runtime_context(context):
-        response = await run_offered(agent, "browser_control", arguments)
+        response = await run_offered(agent, "browser_read", arguments)
 
     assert not response.is_error
     assert json.loads(response.content)["provider"] == "desktop"
@@ -861,17 +861,17 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         tool_config={**_DESKTOP_CONFIG, "default_target": "desktop"},
         require_approval=True,
     )
-    function = offered_function(agent, "browser_control")
+    function = offered_function(agent, "browser_read")
     toolkit = source_toolkit(function)
     assert isinstance(toolkit, BrowserTools)
-    assert inspect.unwrap(function.entrypoint) == toolkit.browser
+    assert inspect.unwrap(function.entrypoint) == toolkit.browser_read
     schema = json.loads(json.dumps(function.parameters))
     assert function.gate is ToolGate.POLICY
     assert agent_tool_middleware(agent)
     hook_calls: list[tuple[str, str]] = []
 
     async def observe(call: ToolCall, call_next: ToolNext) -> object:
-        assert call.function.name == "browser_control"
+        assert call.function.name == "browser_read"
         assert get_tool_runtime_context() is context
         target = str(call.arguments["target"])
         hook_calls.append(("before", target))
@@ -909,7 +909,7 @@ async def test_browser_primary_placement_binds_positional_arguments(
 ) -> None:
     """Placement binds positional arguments against the actual browser signature."""
     agent, context = _context_agent(tmp_path, "browser", tool_config=_DESKTOP_CONFIG)
-    function = offered_function(agent, "browser_control")
+    function = offered_function(agent, "browser_read")
     with tool_runtime_context(context):
         result = await function.entrypoint("snapshot", "desktop")
 
@@ -934,7 +934,7 @@ async def test_browser_invalid_targets_fail_before_worker_lease(
     """Target validation and desktop configuration errors remain local and allocate nothing."""
     agent, context = _context_agent(tmp_path, "browser")
     with tool_runtime_context(context):
-        result = await run_offered(agent, "browser_control", {"action": "status", **arguments})
+        result = await run_offered(agent, "browser_read", {"action": "status", **arguments})
 
     assert result.is_error
     assert error in result.content
@@ -956,7 +956,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
     with tool_runtime_context(context):
         response = await run_offered(
             agent,
-            "browser_control",
+            "browser_read",
             {"action": action, "target": "desktop", "node": "ignored"},
         )
 

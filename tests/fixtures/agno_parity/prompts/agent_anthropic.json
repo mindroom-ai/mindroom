@@ -185,7 +185,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -557,7 +557,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
+          "description": "Show a MindRoom Chat side panel: 'computer' or 'members'.\n'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {

@@ -125,8 +125,18 @@ async def headless_client(
     assert all(not process.live_resources for process in browser_processes)
 
 
+_READ_ACTIONS = frozenset({"status", "profiles", "tabs", "snapshot", "screenshot", "console", "help", "actions"})
+
+
+def _function_name_for(kwargs: dict[str, object]) -> str:
+    return "browser_read" if kwargs.get("action") in _READ_ACTIONS else "browser_control"
+
+
 async def _call(client: httpx.AsyncClient, payload: dict[str, object], **kwargs: object) -> dict[str, object]:
-    response = await client.post("/api/sandbox-runner/execute", json={**payload, "kwargs": kwargs})
+    response = await client.post(
+        "/api/sandbox-runner/execute",
+        json={**payload, "function_name": _function_name_for(kwargs), "kwargs": kwargs},
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["ok"], body
@@ -172,6 +182,7 @@ async def test_stopped_browser_action_finishes_and_keeps_the_shared_browser(
     request_id = uuid4().hex
     request = {
         **payload,
+        "function_name": "browser_read",
         "request_id": request_id,
         "kwargs": {"action": "screenshot", "targetId": opened["targetId"]},
     }
@@ -218,6 +229,7 @@ async def test_headless_screenshot_preserves_inline_media_and_save_only(
         json={
             "protocol": WORKER_PROTOCOL_VERSION,
             **payload,
+            "function_name": "browser_read",
             "kwargs": {"action": "screenshot", "targetId": opened["targetId"], "saveOnly": save_only},
         },
     )
@@ -284,7 +296,7 @@ async def test_current_request_output_policy_keeps_existing_tabs(
     config.defaults.tool_output_auto_save_threshold_bytes = 1
     response = await client.post(
         "/api/sandbox-runner/execute",
-        json={**payload, "kwargs": {"action": "tabs"}},
+        json={**payload, "function_name": "browser_read", "kwargs": {"action": "tabs"}},
     )
     assert response.status_code == 200, response.text
     assert response.json()["ok"], response.json()
@@ -396,7 +408,7 @@ async def test_headless_worker_rejects_configured_desktop_target(
     }
     response = await client.post(
         "/api/sandbox-runner/execute",
-        json={**payload, "kwargs": {"action": "tabs"}},
+        json={**payload, "function_name": "browser_read", "kwargs": {"action": "tabs"}},
     )
     assert response.status_code == 200, response.text
     body = response.json()

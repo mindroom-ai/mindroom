@@ -62,8 +62,10 @@ def _cfg(
         "agents": {"planner": planner},
         **extra,
     }
+    defaults: dict[str, object] = {"desktop_pairing": "explicit_only"}
     if default_tools is not None:
-        data["defaults"] = {"tools": default_tools}
+        defaults["tools"] = default_tools
+    data["defaults"] = defaults
     return data
 
 
@@ -346,7 +348,8 @@ def test_retired_dynamic_workflow_approval_rules_fail(
             ["dynamic_workflow"],
             [
                 {"match": "run_workflow", "action": "require_approval"},
-                {"match": "workflow", "action": "require_approval"},
+                {"match": "workflow_read", "action": "require_approval"},
+                {"match": "workflow_write", "action": "require_approval"},
             ],
             id="explicit-exact-replacements",
         ),
@@ -370,14 +373,14 @@ def test_retired_dynamic_workflow_approval_rules_allowed(
 @pytest.mark.parametrize(
     ("agent_tools", "matches", "error_pattern"),
     [
-        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["*workflow*", "workflow"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow"),
-        (["dynamic_workflow"], ["workflow", "*_workflow*"], None),
-        (["dynamic_workflow"], ["workflow", "*workflow*"], None),
-        (["dynamic_workflow"], ["workflow", "skill", "*"], None),
+        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["*workflow*", "workflow_write"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow_write"),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "*_workflow*"], None),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "*workflow*"], None),
+        (["dynamic_workflow"], ["workflow_read", "workflow_write", "skill", "*"], None),
         (["calculator"], ["*_workflow*"], None),
     ],
 )

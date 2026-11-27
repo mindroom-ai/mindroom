@@ -33,7 +33,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_SOURCE_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
-from mindroom.custom_tools.triggers import _ACTION_ALLOWED_PARAMS, _WATCH_TURN_READ_ONLY_ACTIONS, TriggersTools
+from mindroom.custom_tools.triggers import _READ_ALLOWED_PARAMS, _WRITE_ALLOWED_PARAMS, TriggersTools
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.event_sources import (
     EventSource,
@@ -1201,7 +1201,8 @@ class _SeamEnv:
         **kwargs: Any,  # noqa: ANN401
     ) -> dict[str, Any]:
         with tool_runtime_context(self.ctx(requester_id=requester_id, room_id=room_id, hook_source=hook_source)):
-            return json.loads(await self.tool.triggers(action=action, **kwargs))
+            fn = self.tool.triggers_read if action in _READ_ALLOWED_PARAMS else self.tool.triggers_write
+            return json.loads(await fn(action=action, **kwargs))
 
     async def admin_call(self, action: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         return await self.call(action, requester_id=_ADMIN, room_id=_SHARED_ROOM, **kwargs)
@@ -1442,7 +1443,7 @@ async def test_triggers_tool_registered_event_source_paused_test_history_and_wat
     assert "acquisition" not in json.dumps(admin_hist_unscoped)
 
     # Every mutating triggers action is refused during watch turns; read-only actions and fresh turns remain allowed.
-    mutating_actions = sorted(set(_ACTION_ALLOWED_PARAMS) - _WATCH_TURN_READ_ONLY_ACTIONS)
+    mutating_actions = sorted(_WRITE_ALLOWED_PARAMS)
     for watch_hook in ("event_source:slack_private", "slack-watch/w1"):
         for action in mutating_actions:
             res = await env.call(action, hook_source=watch_hook)

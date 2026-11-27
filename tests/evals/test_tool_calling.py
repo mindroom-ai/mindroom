@@ -130,7 +130,7 @@ _SCRIPTS: dict[str, list[_Step]] = {
         [_call("tool_search", query="show_canvas")],
         [_ct("show_canvas", title="Deploy", html="<div>staging=green prod=amber</div>", path="")],
     ],
-    "workflow_runs_check": [[_call("tool_search", query="workflow runs")], [_ct("workflow", action="list")]],
+    "workflow_runs_check": [[_call("tool_search", query="workflow runs")], [_ct("workflow_read", action="list")]],
     "thread_tags_audit": [
         [_call("tool_search", query="thread tags")],
         [_ct("thread_tags", action="list"), _ct("thread_tags", action="tag", tag="triage")],
@@ -173,7 +173,16 @@ async def test_portable_surface_and_provider_resolution(tmp_path: Path, monkeypa
     offered = {tool.name for tool in provider.requests[0].tools}
     assert {"run_shell_command", "read_file", "edit_file", "grep", "attachment"} <= offered
     assert {"view_file", "matrix_message", "skill", "tool_search", "call_tool"} <= offered
-    deferred = {"show_canvas", "workflow", "thread_tags", "scheduler", "memory", "browser_control"}
+    deferred = {
+        "show_canvas",
+        "workflow_read",
+        "workflow_write",
+        "thread_tags",
+        "scheduler",
+        "memory",
+        "browser_read",
+        "browser_control",
+    }
     assert offered.isdisjoint(deferred)
     sys_text = "\n".join(m.get_content_string() for m in provider.requests[0].messages if m.role == "system")
     assert "deploy-check" in sys_text
@@ -261,7 +270,8 @@ async def test_alternative_paths_and_stripped_env_isolation(tmp_path: Path, monk
 @pytest.mark.asyncio
 async def test_stateful_stubs_and_attachment_validation() -> None:
     """Tags, memories, attachments, and matrix_room stubs validate semantics and persist state per case."""
-    tt, wf = partial(_ct, "thread_tags"), partial(_ct, "workflow")
+    tt = partial(_ct, "thread_tags")
+    wfr, wfw = partial(_ct, "workflow_read"), partial(_ct, "workflow_write")
     tags_res = await _run(
         "thread_tags_audit",
         [tt(action="tag", tag="triage"), tt(action="list", tag=None)],
@@ -271,9 +281,9 @@ async def test_stateful_stubs_and_attachment_validation() -> None:
     assert "triage" in json.loads(tags_res.calls[1].result_preview)["tags"]
     assert "triage" not in json.loads(tags_res.calls[3].result_preview)["tags"]
 
-    wf_err = [wf(action="get"), wf(action="save", run_id="wf_01"), wf(action="start"), tt(action="tag")]
-    wf_bad = [wf(action="list", run_id="wf-1"), tt(action="list", note="extra")]
-    wf_res = await _run("workflow_runs_check", [*wf_err, *wf_bad], [wf(action="list", run_id=None)])
+    wf_err = [wfr(action="get"), wfw(action="save", run_id="wf_01"), wfw(action="start"), tt(action="tag")]
+    wf_bad = [wfr(action="list", run_id="wf-1"), tt(action="list", note="extra")]
+    wf_res = await _run("workflow_runs_check", [*wf_err, *wf_bad], [wfr(action="list", run_id=None)])
     assert (wf_res.passed, wf_res.failure_counts) == (True, {"missing_required_param": 4, "unexpected_param": 2})
 
     mem_res = await _run(
@@ -332,7 +342,7 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
         [
             [
                 _ct("show_canvas", action="show", title="Deploy", html="<p>ok</p>"),
-                _ct("workflow", action="list", mindroom_output_path=123),
+                _ct("workflow_read", action="list", mindroom_output_path=123),
             ],
             [_ct("show_canvas", title="Deploy", html="<p>ok</p>", path=None)],
         ],

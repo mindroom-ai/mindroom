@@ -116,6 +116,7 @@ def _real_browser(runtime_paths: RuntimePaths, events: list[str], *, default_tar
         events.append(f"{arguments['action']} on {arguments.get('target') or 'default'}")
         return "browsed"
 
+    toolkit.functions["browser_read"] = body
     toolkit.functions["browser_control"] = body
     return toolkit
 
@@ -198,7 +199,7 @@ async def test_reference_actions_do_not_announce(
     toolkit = _real_browser(runtime_paths, events, default_target="host")
     middleware = _middleware(toolkit, "browser", config, runtime_paths)
 
-    assert await _call(toolkit, "browser_control", [middleware], action=action) == "browsed"
+    assert await _call(toolkit, "browser_read", [middleware], action=action) == "browsed"
     announce.assert_not_awaited()
 
     assert await _call(toolkit, "browser_control", [middleware], action="open") == "browsed"
@@ -369,8 +370,9 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
         for toolkit in build.spec.toolkits
         for function in toolkit.functions
     }
+    assert carried["browser_read"] == (["announce_computer"] if announces else [])
     assert carried["browser_control"] == (["announce_computer"] if announces else [])
-    assert sum(names.count("announce_computer") for names in carried.values()) == int(announces)
+    assert sum(names.count("announce_computer") for names in carried.values()) == 2 * int(announces)
 
 
 @pytest.mark.asyncio
@@ -400,7 +402,7 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
     [deferred] = build.surface.deferred
     assert deferred.name == "browser"
 
-    [function] = (await deferred.materialize()).functions
+    function = next(fn for fn in (await deferred.materialize()).functions if fn.name == "browser_control")
 
     async def body(**arguments: object) -> str:
         events.append(f"{arguments['action']} on {arguments.get('target') or 'default'}")

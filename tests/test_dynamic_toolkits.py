@@ -547,9 +547,9 @@ async def test_deferred_desktop_uses_only_requester_agent_credentials(tmp_path: 
     )
 
     assert "calculator" in _toolkit_names(alice_agent)
-    assert "desktop" in _portable_deferred_names(alice_agent)
-    alice_desktop = cast("Any", source_toolkit(offered_function(alice_agent, "desktop")))
-    result = await alice_desktop.desktop("status")
+    assert {"desktop_read", "desktop_control"} <= _portable_deferred_names(alice_agent)
+    alice_desktop = cast("Any", source_toolkit(offered_function(alice_agent, "desktop_read")))
+    result = await alice_desktop.desktop_read("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
 
     save_desktop_credentials(
@@ -614,10 +614,10 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
     )
-    unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop")))
-    result = await unpaired_desktop.desktop("status")
+    unpaired_desktop = cast("Any", source_toolkit(offered_function(unpaired, "desktop_read")))
+    result = await unpaired_desktop.desktop_read("status")
     assert _tool_payload(result.content)["status"] == "setup_required"
-    assert "desktop" in _native_deferred_names(unpaired)
+    assert {"desktop_read", "desktop_control"} <= _native_deferred_names(unpaired)
 
     save_desktop_credentials(
         get_runtime_credentials_manager(runtime_paths),
@@ -638,11 +638,11 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
     )
-    paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop")))
+    paired_desktop = cast("Any", source_toolkit(offered_function(paired, "desktop_read")))
     paired_configuration = paired_desktop._current_configuration()
     assert paired_configuration.target is not None
     assert paired_configuration.target.user_id == "@alice-desktop:example.org"
-    assert "desktop" in _native_deferred_names(paired)
+    assert {"desktop_read", "desktop_control"} <= _native_deferred_names(paired)
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
@@ -1412,9 +1412,10 @@ def test_codex_deferred_browser_uses_non_reserved_function_name(tmp_path: Path) 
     agent = _code_agent(config, tmp_path)
 
     function_names = _function_names(agent)
+    assert "browser_read" in function_names
     assert "browser_control" in function_names
     assert "browser" not in function_names
-    assert _native_deferred_names(agent) == frozenset({"browser_control"})
+    assert _native_deferred_names(agent) == frozenset({"browser_read", "browser_control"})
 
 
 def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path: Path) -> None:

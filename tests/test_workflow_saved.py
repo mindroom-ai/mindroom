@@ -411,7 +411,9 @@ async def test_start_by_name_snapshots_the_file(tool_stack: WorkflowStack) -> No
     original = "def main(args):\n    return 'original'\n"
     save_source(workspace, "daily-brief", original, description="Daily brief.")
 
-    handle = json.loads(await tool_stack.call("workflow", action="start", name="daily-brief", args={"day": "mon"}))
+    handle = json.loads(
+        await tool_stack.call("workflow_write", action="start", name="daily-brief", args={"day": "mon"}),
+    )
     run_id = handle["run_id"]
     await tool_stack.until(lambda: tool_stack.store.get_run(run_id).state is WorkflowRunState.RUNNING)
 
@@ -422,23 +424,23 @@ async def test_start_by_name_snapshots_the_file(tool_stack: WorkflowStack) -> No
     assert "edited" not in stored.source
 
     with pytest.raises(CallFailed, match=r"Give exactly one of source, path, or name\."):
-        await tool_stack.call("workflow", action="start", source=original, name="daily-brief")
+        await tool_stack.call("workflow_write", action="start", source=original, name="daily-brief")
 
 
 @pytest.mark.asyncio
 async def test_save_workflow_refuses_another_owners_run(tool_stack: WorkflowStack) -> None:
     """Another requester cannot save a run they do not own, while the owner can save it once."""
     source = "def main(args):\n    return 'ok'\n"
-    handle = json.loads(await tool_stack.call("workflow", action="start", source=source))
+    handle = json.loads(await tool_stack.call("workflow_write", action="start", source=source))
     run_id = handle["run_id"]
     await tool_stack.until(lambda: tool_stack.store.get_run(run_id).state is WorkflowRunState.RUNNING)
 
     other = replace(tool_stack.context, requester_id="@bob:example.test")
     with pytest.raises(CallFailed, match=rf"No workflow run {run_id} in your runs\."):
-        await tool_stack.call("workflow", action="save", context=other, run_id=run_id, name="stolen")
+        await tool_stack.call("workflow_write", action="save", context=other, run_id=run_id, name="stolen")
 
     saved = json.loads(
-        await tool_stack.call("workflow", action="save", run_id=run_id, name="my-flow", description="My flow."),
+        await tool_stack.call("workflow_write", action="save", run_id=run_id, name="my-flow", description="My flow."),
     )
     assert saved == {"name": "my-flow", "path": "workflows/my-flow.py"}
     workspace = tool_stack.context.agent_workspace_root(create=False)
@@ -453,7 +455,7 @@ async def test_a_finished_run_writes_nothing_into_a_shared_workspace(tool_stack:
     before = {path.relative_to(workspace) for path in workspace.rglob("*")}
 
     handle = json.loads(
-        await tool_stack.call("workflow", action="start", source="def main(args):\n    return 'secret'\n"),
+        await tool_stack.call("workflow_write", action="start", source="def main(args):\n    return 'secret'\n"),
     )
     tool_stack.run_id = handle["run_id"]
     await tool_stack.until(lambda: tool_stack.store.get_run(tool_stack.run_id).state is WorkflowRunState.RUNNING)
@@ -479,7 +481,7 @@ def main(args):
 """,
     )
     own = json.loads(
-        await tool_stack.call("workflow", action="start", source="def main(args):\n    return 1\n", title="Mine"),
+        await tool_stack.call("workflow_write", action="start", source="def main(args):\n    return 1\n", title="Mine"),
     )
     await tool_stack.until(lambda: tool_stack.store.get_run(own["run_id"]).state is WorkflowRunState.RUNNING)
 
@@ -493,7 +495,7 @@ def main(args):
     )
     other_thread_run = json.loads(
         await tool_stack.call(
-            "workflow",
+            "workflow_write",
             action="start",
             context=other_thread,
             source="def main(args):\n    return 2\n",
@@ -505,12 +507,17 @@ def main(args):
 
     other_user = replace(tool_stack.context, requester_id="@bob:example.test")
     other_user_run = json.loads(
-        await tool_stack.call("workflow", action="start", context=other_user, source="def main(args):\n    return 3\n"),
+        await tool_stack.call(
+            "workflow_write",
+            action="start",
+            context=other_user,
+            source="def main(args):\n    return 3\n",
+        ),
     )
     await tool_stack.until(lambda: tool_stack.store.get_run(other_user_run["run_id"]).state is WorkflowRunState.RUNNING)
 
     assert len(tool_stack.store.list_runs(limit=2)) == 2
-    listing = json.loads(await tool_stack.call("workflow", action="list"))
+    listing = json.loads(await tool_stack.call("workflow_read", action="list"))
     assert [run["run_id"] for run in listing["runs"]] == [own["run_id"]]
     assert listing["runs"][0]["title"] == "Mine"
     assert listing["saved"] == [
@@ -563,13 +570,18 @@ def main(args):
     )
     secret_title = "Deploy password=example-only " + "a" * 100
     own = json.loads(
-        await tool_stack.call("workflow", action="start", source="def main(args):\n    return 1\n", title=secret_title),
+        await tool_stack.call(
+            "workflow_write",
+            action="start",
+            source="def main(args):\n    return 1\n",
+            title=secret_title,
+        ),
     )
     await tool_stack.until(lambda: tool_stack.store.get_run(own["run_id"]).state is WorkflowRunState.RUNNING)
     other_user = replace(tool_stack.context, requester_id="@bob:example.test")
     other = json.loads(
         await tool_stack.call(
-            "workflow",
+            "workflow_write",
             action="start",
             context=other_user,
             source="def main(args):\n    return 2\n",
@@ -644,7 +656,7 @@ async def test_workflow_listings_and_source_reads_preserve_workspace_symlinks(to
     assert shortcut.is_symlink()
     assert str(shortcut.readlink()) == "../notes"
 
-    listed = json.loads(await tool_stack.call("workflow", action="list"))
+    listed = json.loads(await tool_stack.call("workflow_read", action="list"))
     assert [item["name"] for item in listed["saved"]] == ["triage"]
     assert shortcut.is_symlink()
     assert str(shortcut.readlink()) == "../notes"

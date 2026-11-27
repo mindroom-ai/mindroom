@@ -243,7 +243,7 @@ async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp
 
     with tool_runtime_context(_context(tmp_path, conversation_reader=reader, orchestrator=orchestrator)):
         payload = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_room",
                 prompt="Alert me on urgent deploys.",
                 pattern=r"\bdeploy\b",
@@ -304,7 +304,7 @@ async def test_watch_room_cross_room_target_defaults_to_room_timeline(tmp_path: 
 
     with tool_runtime_context(_context(tmp_path, client=client)):
         payload = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_room",
                 prompt="Forward alert to other room.",
                 target_agent="other",
@@ -338,11 +338,11 @@ async def test_watch_room_rejects_unauthorized_or_unjoined_other_room(tmp_path: 
 
     with tool_runtime_context(_context(tmp_path, client=client_not_joined)):
         not_joined = _payload(
-            await tool.triggers(action="watch_room", prompt="Spy on other room", room_id="other-room"),
+            await tool.triggers_write(action="watch_room", prompt="Spy on other room", room_id="other-room"),
         )
     with tool_runtime_context(_context(tmp_path, client=client_no_access)):
         no_access = _payload(
-            await tool.triggers(action="watch_room", prompt="Spy on secret room", room_id="secret-room"),
+            await tool.triggers_write(action="watch_room", prompt="Spy on secret room", room_id="secret-room"),
         )
 
     assert not_joined["status"] == "error"
@@ -360,19 +360,19 @@ async def test_watch_room_validation_triage_caps_expiry_and_quota(tmp_path: Path
 
     with tool_runtime_context(_context(tmp_path, config=config)):
         unknown_model = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_room",
                 prompt="Watch",
                 triage_instructions="Check urgency",
                 triage_model="nonexistent",
             ),
         )
-        over_cap = _payload(await tool.triggers(action="watch_room", prompt="Watch", max_fires_per_hour=11))
-        bad_expiry = _payload(await tool.triggers(action="watch_room", prompt="Watch", expires_in_hours=0))
-        huge_expiry = _payload(await tool.triggers(action="watch_room", prompt="Watch", expires_in_hours=9000))
-        nan_expiry = _payload(await tool.triggers(action="watch_room", prompt="Watch", expires_in_hours=math.nan))
+        over_cap = _payload(await tool.triggers_write(action="watch_room", prompt="Watch", max_fires_per_hour=11))
+        bad_expiry = _payload(await tool.triggers_write(action="watch_room", prompt="Watch", expires_in_hours=0))
+        huge_expiry = _payload(await tool.triggers_write(action="watch_room", prompt="Watch", expires_in_hours=9000))
+        nan_expiry = _payload(await tool.triggers_write(action="watch_room", prompt="Watch", expires_in_hours=math.nan))
         conflict = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_room",
                 prompt="Watch",
                 target_thread_id="$t1:example.org",
@@ -380,9 +380,9 @@ async def test_watch_room_validation_triage_caps_expiry_and_quota(tmp_path: Path
             ),
         )
         ok = _payload(
-            await tool.triggers(action="watch_room", prompt="Watch", expires_in_hours=24, max_fires_per_hour=10),
+            await tool.triggers_write(action="watch_room", prompt="Watch", expires_in_hours=24, max_fires_per_hour=10),
         )
-        over_quota = _payload(await tool.triggers(action="watch_room", prompt="Watch second"))
+        over_quota = _payload(await tool.triggers_write(action="watch_room", prompt="Watch second"))
 
     assert unknown_model["status"] == "error"
     assert "fast" in unknown_model["message"]
@@ -406,20 +406,22 @@ async def test_watch_room_rejects_disabled_policy_and_cross_store_id_collision(t
     tool = TriggersTools()
 
     with tool_runtime_context(_context(tmp_path, config=_config(reactive_enabled=False))):
-        disabled = _payload(await tool.triggers(action="watch_room", prompt="Watch"))
+        disabled = _payload(await tool.triggers_write(action="watch_room", prompt="Watch"))
     assert disabled["status"] == "error"
     assert "disabled" in disabled["message"].lower()
 
     with tool_runtime_context(_context(tmp_path)):
-        direct = _payload(await tool.triggers(action="create", trigger_id="shared-id", public_key=_PUBLIC_KEY))
+        direct = _payload(await tool.triggers_write(action="create", trigger_id="shared-id", public_key=_PUBLIC_KEY))
         assert direct["status"] == "ok", direct
-        reactive_collision = _payload(await tool.triggers(action="watch_room", prompt="Watch", trigger_id="shared-id"))
+        reactive_collision = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Watch", trigger_id="shared-id"),
+        )
         assert reactive_collision["status"] == "error"
 
-        reactive_ok = _payload(await tool.triggers(action="watch_room", prompt="Watch", trigger_id="reactive-id"))
+        reactive_ok = _payload(await tool.triggers_write(action="watch_room", prompt="Watch", trigger_id="reactive-id"))
         assert reactive_ok["status"] == "ok", reactive_ok
         direct_collision = _payload(
-            await tool.triggers(action="create", trigger_id="reactive-id", public_key=_PUBLIC_KEY),
+            await tool.triggers_write(action="create", trigger_id="reactive-id", public_key=_PUBLIC_KEY),
         )
         assert direct_collision["status"] == "error"
 
@@ -445,7 +447,7 @@ async def test_watch_thread_initializes_checkpoint_and_reports_already_in_state(
         _context(tmp_path, relations=make_thread_reply_lookup("$reply:example.org", "$thread_root:example.org")),
     ):
         not_tagged = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Follow up once resolved.",
                 thread_id="$reply:example.org",
@@ -453,14 +455,14 @@ async def test_watch_thread_initializes_checkpoint_and_reports_already_in_state(
             ),
         )
         already_tagged = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Follow up once resolved again.",
                 trigger_id="watch-resolved",
             ),
         )
         tag_error = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Will fail reading state.",
                 trigger_id="watch-error",
@@ -497,7 +499,7 @@ async def test_watch_thread_requires_thread_id_outside_thread(tmp_path: Path) ->
     _record_rooms(tmp_path)
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path, thread_id=None)):
-        payload = _payload(await tool.triggers(action="watch_thread", prompt="Wake me"))
+        payload = _payload(await tool.triggers_write(action="watch_thread", prompt="Wake me"))
     assert payload["status"] == "error"
     assert "thread_id" in payload["message"]
 
@@ -526,7 +528,7 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
         missing = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 source_id="nope",
                 kind="pull_request.merged",
@@ -534,7 +536,7 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
             ),
         )
         unauthorized = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 source_id="secret_ops",
                 kind="deploy.done",
@@ -542,7 +544,7 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
             ),
         )
         bad_repo = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 source_id="github",
                 kind="pull_request.merged",
@@ -551,10 +553,10 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
             ),
         )
         bad_event = _payload(
-            await tool.triggers(action="subscribe_event", source_id="github", kind="push", prompt="Notify me"),
+            await tool.triggers_write(action="subscribe_event", source_id="github", kind="push", prompt="Notify me"),
         )
         ok = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 source_id="github",
                 kind="pull_request.merged",
@@ -587,7 +589,7 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
     # Admin can subscribe to sources where they are not explicitly listed in subscribers
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         admin_ok = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 source_id="github",
                 kind="release.published",
@@ -609,15 +611,17 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         _context(tmp_path, requester_id="@owner:example.org", config=config, orchestrator=orchestrator),
     ):
         assert (
-            _payload(await tool.triggers(action="create", trigger_id="direct-1", public_key=_PUBLIC_KEY))["status"]
+            _payload(await tool.triggers_write(action="create", trigger_id="direct-1", public_key=_PUBLIC_KEY))[
+                "status"
+            ]
             == "ok"
         )
         assert (
-            _payload(await tool.triggers(action="watch_room", prompt="Watch", trigger_id="reactive-1"))["status"]
+            _payload(await tool.triggers_write(action="watch_room", prompt="Watch", trigger_id="reactive-1"))["status"]
             == "ok"
         )
 
-        listed = _payload(await tool.triggers(action="list"))
+        listed = _payload(await tool.triggers_read(action="list"))
         assert listed["status"] == "ok"
         assert {item["trigger_id"] for item in listed["triggers"]} == {"direct-1", "reactive-1"}
         assert [item["trigger_id"] for item in listed["external_triggers"]] == ["direct-1"]
@@ -626,50 +630,56 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         assert listed["reactive_triggers"][0]["trigger_kind"] == "reactive"
 
         rotate_reactive = _payload(
-            await tool.triggers(action="rotate_key", trigger_id="reactive-1", public_key=_PUBLIC_KEY),
+            await tool.triggers_write(action="rotate_key", trigger_id="reactive-1", public_key=_PUBLIC_KEY),
         )
         assert rotate_reactive["status"] == "error"
         assert rotate_reactive["message"] == "Key rotation applies only to direct signed external triggers."
 
-        disabled_reactive = _payload(await tool.triggers(action="set_enabled", trigger_id="reactive-1", enabled=False))
+        disabled_reactive = _payload(
+            await tool.triggers_write(action="set_enabled", trigger_id="reactive-1", enabled=False),
+        )
         assert disabled_reactive["status"] == "ok"
         assert disabled_reactive["trigger"]["enabled"] is False
 
-        disabled_direct = _payload(await tool.triggers(action="set_enabled", trigger_id="direct-1", enabled=False))
+        disabled_direct = _payload(
+            await tool.triggers_write(action="set_enabled", trigger_id="direct-1", enabled=False),
+        )
         assert disabled_direct["status"] == "ok"
         assert disabled_direct["trigger"]["enabled"] is False
 
-        active_only = _payload(await tool.triggers(action="list", include_disabled=False))
+        active_only = _payload(await tool.triggers_read(action="list", include_disabled=False))
         assert active_only["status"] == "ok"
         assert active_only["triggers"] == []
 
         orchestrator.reactive_triggers.notify_work.reset_mock()
-        reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="reactive-1", enabled=True))
+        reenabled = _payload(await tool.triggers_write(action="set_enabled", trigger_id="reactive-1", enabled=True))
         assert reenabled["status"] == "ok"
         assert reenabled["trigger"]["enabled"] is True
         orchestrator.reactive_triggers.notify_work.assert_called_once()
 
-        reenabled_direct = _payload(await tool.triggers(action="set_enabled", trigger_id="direct-1", enabled=True))
+        reenabled_direct = _payload(
+            await tool.triggers_write(action="set_enabled", trigger_id="direct-1", enabled=True),
+        )
         assert reenabled_direct["tool"] == "triggers"
         assert reenabled_direct["trigger"]["enabled"] is True
 
     # Non-owner non-admin cannot disable or delete another owner's reactive trigger
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
-        other_list = _payload(await tool.triggers(action="list"))
+        other_list = _payload(await tool.triggers_read(action="list"))
         assert other_list["triggers"] == []
         assert (
-            _payload(await tool.triggers(action="set_enabled", trigger_id="reactive-1", enabled=False))["status"]
+            _payload(await tool.triggers_write(action="set_enabled", trigger_id="reactive-1", enabled=False))["status"]
             == "error"
         )
-        assert _payload(await tool.triggers(action="delete", trigger_id="reactive-1"))["status"] == "error"
+        assert _payload(await tool.triggers_write(action="delete", trigger_id="reactive-1"))["status"] == "error"
 
     # Admin can inspect and delete both direct and reactive triggers
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
-        admin_list = _payload(await tool.triggers(action="list"))
+        admin_list = _payload(await tool.triggers_read(action="list"))
         assert {item["trigger_id"] for item in admin_list["triggers"]} == {"direct-1", "reactive-1"}
-        assert _payload(await tool.triggers(action="delete", trigger_id="reactive-1"))["status"] == "ok"
-        assert _payload(await tool.triggers(action="delete", trigger_id="direct-1"))["status"] == "ok"
-        assert _payload(await tool.triggers(action="list"))["triggers"] == []
+        assert _payload(await tool.triggers_write(action="delete", trigger_id="reactive-1"))["status"] == "ok"
+        assert _payload(await tool.triggers_write(action="delete", trigger_id="direct-1"))["status"] == "ok"
+        assert _payload(await tool.triggers_read(action="list"))["triggers"] == []
 
 
 def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None:
@@ -685,9 +695,10 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
     meta = registry.entries["triggers"]
     assert meta.requires_primary_runtime is True
     assert meta.requires_room_context is True
-    assert meta.function_names == ("triggers",)
-    assert set(meta.approval_aliases) == {"triggers"}
-    assert meta.approval_aliases["triggers"].judged_as == "script_write"
+    assert meta.function_names == ("triggers_read", "triggers_write")
+    assert meta.action_scoped_grants == ("triggers_read", "triggers_write")
+    assert set(meta.approval_aliases) == {"triggers_write"}
+    assert meta.approval_aliases["triggers_write"].judged_as == "script_write"
     assert "GitHub PRs" in meta.description
 
     runtime_paths = _runtime_paths(tmp_path)
@@ -712,9 +723,11 @@ async def test_watch_room_new_thread_with_thread_key_and_non_human_rejection(tmp
 
     with tool_runtime_context(_context(tmp_path, config=config)):
         bad_key = _payload(
-            await tool.triggers(action="watch_room", prompt="Watch", new_thread=False, thread_key="grp-1"),
+            await tool.triggers_write(action="watch_room", prompt="Watch", new_thread=False, thread_key="grp-1"),
         )
-        ok_key = _payload(await tool.triggers(action="watch_room", prompt="Watch", new_thread=True, thread_key="grp-1"))
+        ok_key = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Watch", new_thread=True, thread_key="grp-1"),
+        )
 
     assert bad_key["status"] == "error"
     assert "thread_key" in bad_key["message"]
@@ -724,10 +737,10 @@ async def test_watch_room_new_thread_with_thread_key_and_non_human_rejection(tmp
     assert ok_key["trigger"]["target"]["thread_key"] == "grp-1"
 
     with tool_runtime_context(_context(tmp_path, requester_id="@bridgebot:example.org", config=config)):
-        bot_watch_room = _payload(await tool.triggers(action="watch_room", prompt="Bot watch"))
-        bot_watch_thread = _payload(await tool.triggers(action="watch_thread", prompt="Bot thread"))
+        bot_watch_room = _payload(await tool.triggers_write(action="watch_room", prompt="Bot watch"))
+        bot_watch_thread = _payload(await tool.triggers_write(action="watch_thread", prompt="Bot thread"))
         bot_subscribe = _payload(
-            await tool.triggers(action="subscribe_event", source_id="github", kind="push", prompt="Bot sub"),
+            await tool.triggers_write(action="subscribe_event", source_id="github", kind="push", prompt="Bot sub"),
         )
 
     for res in (bot_watch_room, bot_watch_thread, bot_subscribe):
@@ -756,7 +769,7 @@ async def test_watch_thread_removed_transition_and_origin_rejected(
 
     with tool_runtime_context(_context(tmp_path)):
         already_absent = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Alert when unblocked.",
                 tag="blocked",
@@ -765,7 +778,7 @@ async def test_watch_thread_removed_transition_and_origin_rejected(
             ),
         )
         currently_present = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Alert when unblocked.",
                 tag="blocked",
@@ -774,7 +787,7 @@ async def test_watch_thread_removed_transition_and_origin_rejected(
             ),
         )
         origin_rejected = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Invalid origin",
                 target_thread_id="origin",
@@ -844,7 +857,9 @@ async def test_watch_room_initial_cursor_clamps_older_journal_head_and_logs_read
     )
     before_older_ms = int(time.time() * 1000)
     with tool_runtime_context(_context(tmp_path, conversation_reader=older_reader)):
-        older_res = _payload(await tool.triggers(action="watch_room", prompt="Watch older", trigger_id="cursor-older"))
+        older_res = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Watch older", trigger_id="cursor-older"),
+        )
     assert older_res["status"] == "ok", older_res
 
     # Newer journal head ahead of now_ms -> preserved
@@ -853,7 +868,9 @@ async def test_watch_room_initial_cursor_clamps_older_journal_head_and_logs_read
         return_value=ConversationCursor(created_ts=ahead_ts, logical_event_id="$ahead:example.org"),
     )
     with tool_runtime_context(_context(tmp_path, conversation_reader=ahead_reader)):
-        ahead_res = _payload(await tool.triggers(action="watch_room", prompt="Watch ahead", trigger_id="cursor-ahead"))
+        ahead_res = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Watch ahead", trigger_id="cursor-ahead"),
+        )
     assert ahead_res["status"] == "ok", ahead_res
 
     # Failing latest_room_cursor -> warning logged and falls back to now_ms
@@ -863,7 +880,9 @@ async def test_watch_room_initial_cursor_clamps_older_journal_head_and_logs_read
     monkeypatch.setattr("mindroom.custom_tools.triggers.logger.warning", warning_mock)
     before_fail_ms = int(time.time() * 1000)
     with tool_runtime_context(_context(tmp_path, conversation_reader=failing_reader)):
-        fail_res = _payload(await tool.triggers(action="watch_room", prompt="Watch fail", trigger_id="cursor-fail"))
+        fail_res = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Watch fail", trigger_id="cursor-fail"),
+        )
     assert fail_res["status"] == "ok", fail_res
     warning_mock.assert_called_once()
 
@@ -894,18 +913,20 @@ async def test_list_triggers_includes_equivalent_requester_aliases(tmp_path: Pat
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
         assert (
-            _payload(await tool.triggers(action="create", trigger_id="alias-direct", public_key=_PUBLIC_KEY))["status"]
+            _payload(await tool.triggers_write(action="create", trigger_id="alias-direct", public_key=_PUBLIC_KEY))[
+                "status"
+            ]
             == "ok"
         )
         assert (
-            _payload(await tool.triggers(action="watch_room", prompt="Alias watch", trigger_id="alias-reactive"))[
+            _payload(await tool.triggers_write(action="watch_room", prompt="Alias watch", trigger_id="alias-reactive"))[
                 "status"
             ]
             == "ok"
         )
 
     with tool_runtime_context(_context(tmp_path, requester_id="@bridge-owner:example.org", config=config)):
-        listed = _payload(await tool.triggers(action="list"))
+        listed = _payload(await tool.triggers_read(action="list"))
 
     assert listed["status"] == "ok", listed
     assert {item["trigger_id"] for item in listed["triggers"]} == {"alias-direct", "alias-reactive"}
@@ -921,10 +942,14 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
     store = ReactiveTriggerStore(_runtime_paths(tmp_path))
 
     with tool_runtime_context(_context(tmp_path)):
-        created = _payload(await tool.triggers(action="watch_room", prompt="Pause test", trigger_id="paused-watch"))
+        created = _payload(
+            await tool.triggers_write(action="watch_room", prompt="Pause test", trigger_id="paused-watch"),
+        )
         assert created["status"] == "ok", created
         assert (
-            _payload(await tool.triggers(action="set_enabled", trigger_id="paused-watch", enabled=False))["status"]
+            _payload(await tool.triggers_write(action="set_enabled", trigger_id="paused-watch", enabled=False))[
+                "status"
+            ]
             == "ok"
         )
 
@@ -940,7 +965,7 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
 
     before_reenable_ms = int(time.time() * 1000)
     with tool_runtime_context(_context(tmp_path)):
-        reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="paused-watch", enabled=True))
+        reenabled = _payload(await tool.triggers_write(action="set_enabled", trigger_id="paused-watch", enabled=True))
     assert reenabled["status"] == "ok", reenabled
     assert reenabled["trigger"]["enabled"] is True
 
@@ -953,7 +978,9 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
     ahead_ts = int(time.time() * 1000) + 60_000
     with tool_runtime_context(_context(tmp_path)):
         assert (
-            _payload(await tool.triggers(action="set_enabled", trigger_id="paused-watch", enabled=False))["status"]
+            _payload(await tool.triggers_write(action="set_enabled", trigger_id="paused-watch", enabled=False))[
+                "status"
+            ]
             == "ok"
         )
     with store._write_transaction() as conn:
@@ -963,7 +990,7 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
         )
     with tool_runtime_context(_context(tmp_path)):
         assert (
-            _payload(await tool.triggers(action="set_enabled", trigger_id="paused-watch", enabled=True))["status"]
+            _payload(await tool.triggers_write(action="set_enabled", trigger_id="paused-watch", enabled=True))["status"]
             == "ok"
         )
     kept_cursor = store.get_room_cursor("paused-watch")
@@ -989,7 +1016,7 @@ async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_pa
         patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=existing_state)),
     ):
         created = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Follow up on review",
                 tag="needs_review",
@@ -1002,7 +1029,7 @@ async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_pa
         assert created["already_in_state"] is True
 
         for bad_tag in ("", "   ", "bad!tag", "!!!"):
-            bad = _payload(await tool.triggers(action="watch_thread", prompt="Bad", tag=bad_tag))
+            bad = _payload(await tool.triggers_write(action="watch_thread", prompt="Bad", tag=bad_tag))
             assert bad["status"] == "error", (bad_tag, bad)
 
 
@@ -1027,7 +1054,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
         patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         res = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="On resolve",
                 tag="resolved",
@@ -1064,7 +1091,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
         tool_runtime_context(_context(tmp_path, config=config)),
         patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
-        reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
+        reenabled = _payload(await tool.triggers_write(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled["status"] == "ok", reenabled
     cp = store.get_thread_checkpoint("rearm-tag")
     assert cp is not None
@@ -1074,13 +1101,14 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
     # Scenario B: disabled again -> tag added while disabled -> re-enable refreshes checkpoint to True WITHOUT firing
     with tool_runtime_context(_context(tmp_path, config=config)):
         assert (
-            _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=False))["status"] == "ok"
+            _payload(await tool.triggers_write(action="set_enabled", trigger_id="rearm-tag", enabled=False))["status"]
+            == "ok"
         )
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
         patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=present_state)),
     ):
-        reenabled2 = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
+        reenabled2 = _payload(await tool.triggers_write(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled2["status"] == "ok", reenabled2
     cp2 = store.get_thread_checkpoint("rearm-tag")
     assert cp2 is not None
@@ -1098,11 +1126,11 @@ async def test_concurrent_cross_store_trigger_id_creation_is_serialized(tmp_path
 
     async def _create_direct() -> dict[str, Any]:
         with tool_runtime_context(ctx):
-            return _payload(await tool.triggers(action="create", trigger_id="race-id", public_key=_PUBLIC_KEY))
+            return _payload(await tool.triggers_write(action="create", trigger_id="race-id", public_key=_PUBLIC_KEY))
 
     async def _create_reactive() -> dict[str, Any]:
         with tool_runtime_context(ctx):
-            return _payload(await tool.triggers(action="watch_room", prompt="Watch", trigger_id="race-id"))
+            return _payload(await tool.triggers_write(action="watch_room", prompt="Watch", trigger_id="race-id"))
 
     res_direct, res_reactive = await asyncio.gather(_create_direct(), _create_reactive())
     statuses = sorted([res_direct["status"], res_reactive["status"]])
@@ -1111,22 +1139,29 @@ async def test_concurrent_cross_store_trigger_id_creation_is_serialized(tmp_path
 
 @pytest.mark.asyncio
 async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path: Path) -> None:
-    """TriggersTools exposes one compact unified `triggers` tool and validates required arguments per action."""
+    """TriggersTools exposes split `triggers_read` + `triggers_write` tools with strict boundary enforcement."""
     _record_rooms(tmp_path)
     tool = TriggersTools()
     adapted = adapt_toolkit(tool)
-    assert [fn.name for fn in adapted.functions] == ["triggers"]
-    serialized_schema = json.dumps(
-        {
-            "name": adapted.functions[0].name,
-            "description": adapted.functions[0].description,
-            "parameters": adapted.functions[0].parameters,
-        },
+    by_name = {fn.name: fn for fn in adapted.functions}
+    assert list(by_name) == ["triggers_read", "triggers_write"]
+    assert (by_name["triggers_read"].offer_background_after, by_name["triggers_read"].offer_output_path) == (
+        False,
+        True,
     )
-    assert len(serialized_schema) < 7500
+    assert (by_name["triggers_write"].offer_background_after, by_name["triggers_write"].offer_output_path) == (
+        False,
+        False,
+    )
+    assert len(by_name["triggers_read"].parameters["properties"]) == 8
+    assert len(by_name["triggers_write"].parameters["properties"]) == 42
+    serialized_schema = json.dumps(
+        [{"name": fn.name, "description": fn.description, "parameters": fn.parameters} for fn in adapted.functions],
+    )
+    assert len(serialized_schema) < 9000
 
     with tool_runtime_context(_context(tmp_path)):
-        cases: list[tuple[dict[str, Any], str]] = [
+        write_cases: list[tuple[dict[str, Any], str]] = [
             ({"action": "watch_room"}, "prompt is required"),
             ({"action": "watch_thread"}, "prompt is required"),
             ({"action": "watch_pr"}, "repo is required"),
@@ -1143,11 +1178,22 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
             ({"action": "delete"}, "trigger_id is required"),
             ({"action": "rotate_key", "public_key": _PUBLIC_KEY}, "trigger_id is required"),
             ({"action": "rotate_key", "trigger_id": "x"}, "public_key is required"),
-            ({"action": "test"}, "trigger_id is required"),
-            ({"action": "bogus"}, "Unsupported triggers action"),
+            ({"action": "list"}, "Unsupported triggers_write action"),
+            ({"action": "bogus"}, "Unsupported triggers_write action"),
         ]
-        for kwargs, expected_msg in cases:
-            res = _payload(await tool.triggers(**kwargs))
+        for kwargs, expected_msg in write_cases:
+            res = _payload(await tool.triggers_write(**kwargs))
+            assert res["status"] == "error", (kwargs, res)
+            assert expected_msg in res["message"], (kwargs, res)
+
+        read_cases: list[tuple[dict[str, Any], str]] = [
+            ({"action": "test"}, "trigger_id is required"),
+            ({"action": "watch_room"}, "Unsupported triggers_read action"),
+            ({"action": "delete"}, "Unsupported triggers_read action"),
+            ({"action": "bogus"}, "Unsupported triggers_read action"),
+        ]
+        for kwargs, expected_msg in read_cases:
+            res = _payload(await tool.triggers_read(**kwargs))
             assert res["status"] == "error", (kwargs, res)
             assert expected_msg in res["message"], (kwargs, res)
 
@@ -1159,7 +1205,7 @@ async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path)):
         watch_thread_res = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_thread",
                 prompt="Notify me",
                 triage_provider="typesafe",
@@ -1167,29 +1213,31 @@ async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path
             ),
         )
         assert watch_thread_res["status"] == "error"
-        assert watch_thread_res["message"] == (
-            "Unsupported parameter(s) for triggers(action='watch_thread'): triage_instructions, triage_provider"
-        )
+        assert "triage_instructions" in watch_thread_res["message"]
+        assert "triage_provider" in watch_thread_res["message"]
         assert ReactiveTriggerStore(_runtime_paths(tmp_path)).list_triggers() == []
 
-        list_res = _payload(await tool.triggers(action="list", prompt="unexpected"))
+        list_res = _payload(await tool.triggers_read(action="list", trigger_id="x", limit=5))
         assert list_res["status"] == "error"
-        assert list_res["message"] == "Unsupported parameter(s) for triggers(action='list'): prompt"
+        assert "trigger_id" in list_res["message"]
+        assert "limit" in list_res["message"]
 
-        delete_res = _payload(await tool.triggers(action="delete", trigger_id="x", enabled=False))
+        history_res = _payload(await tool.triggers_read(action="history", include_disabled=True))
+        assert history_res["status"] == "error"
+        assert "include_disabled" in history_res["message"]
+
+        delete_res = _payload(await tool.triggers_write(action="delete", trigger_id="x", enabled=False))
         assert delete_res["status"] == "error"
-        assert delete_res["message"] == "Unsupported parameter(s) for triggers(action='delete'): enabled"
+        assert "enabled" in delete_res["message"]
 
         bool_defaults_res = _payload(
-            await tool.triggers(action="delete", trigger_id="x", new_thread=True, include_disabled=False),
+            await tool.triggers_write(action="delete", trigger_id="x", new_thread=True),
         )
         assert bool_defaults_res["status"] == "error"
-        assert bool_defaults_res["message"] == (
-            "Unsupported parameter(s) for triggers(action='delete'): include_disabled, new_thread"
-        )
+        assert "new_thread" in bool_defaults_res["message"]
 
         watch_pr_unsup = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_pr",
                 repo="org/repo",
                 number=1,
@@ -1198,26 +1246,8 @@ async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path
             ),
         )
         assert watch_pr_unsup["status"] == "error"
-        assert watch_pr_unsup["message"] == (
-            "Unsupported parameter(s) for triggers(action='watch_pr'): room_id, triage_instructions"
-        )
-
-        list_pr_unsup = _payload(
-            await tool.triggers(
-                action="list",
-                repo="org/repo",
-                number=1,
-                events=["ci"],
-                ignore_actors=["bot"],
-                auto_disable_on_close=False,
-                poll_interval_seconds=60,
-            ),
-        )
-        assert list_pr_unsup["status"] == "error"
-        assert list_pr_unsup["message"] == (
-            "Unsupported parameter(s) for triggers(action='list'): "
-            "auto_disable_on_close, events, ignore_actors, number, poll_interval_seconds, repo"
-        )
+        assert "room_id" in watch_pr_unsup["message"]
+        assert "triage_instructions" in watch_pr_unsup["message"]
 
 
 @pytest.mark.asyncio
@@ -1248,7 +1278,7 @@ async def test_list_returns_safe_authorized_event_sources_metadata(tmp_path: Pat
     tool = TriggersTools()
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
-        owner_list = _payload(await tool.triggers(action="list"))
+        owner_list = _payload(await tool.triggers_read(action="list"))
     assert owner_list["status"] == "ok"
     assert owner_list["event_sources"] == [
         {
@@ -1270,14 +1300,14 @@ async def test_list_returns_safe_authorized_event_sources_metadata(tmp_path: Pat
     assert "secret_ed25519" not in serialized
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
-        admin_list = _payload(await tool.triggers(action="list"))
+        admin_list = _payload(await tool.triggers_read(action="list"))
     assert [src["source_id"] for src in admin_list["event_sources"]] == ["alpha_gh", "secret_ed25519", "zeta_hmac"]
     assert "public_key" not in json.dumps(admin_list["event_sources"])
     assert "secret_env" not in json.dumps(admin_list["event_sources"])
 
     disabled_config = _config(reactive_enabled=False, event_sources=config.external_trigger_policy.event_sources)
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=disabled_config)):
-        disabled_list = _payload(await tool.triggers(action="list"))
+        disabled_list = _payload(await tool.triggers_read(action="list"))
     assert disabled_list["event_sources"] == []
 
 
@@ -1291,7 +1321,7 @@ async def test_update_modifies_reactive_rule_in_place_preserving_state_and_clear
 
     with tool_runtime_context(_context(tmp_path, orchestrator=orchestrator)):
         created = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="watch_room",
                 trigger_id="edit-room",
                 prompt="Initial prompt",
@@ -1337,7 +1367,7 @@ async def test_update_modifies_reactive_rule_in_place_preserving_state_and_clear
     orchestrator.reactive_triggers.notify_work.reset_mock()
     with tool_runtime_context(_context(tmp_path, orchestrator=orchestrator)):
         updated = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="update",
                 trigger_id="edit-room",
                 prompt="Updated prompt",
@@ -1368,7 +1398,7 @@ async def test_update_modifies_reactive_rule_in_place_preserving_state_and_clear
         assert (tr["once"], tr["fire_count"], tr["last_fired_at"]) == (True, 1, after_fire.last_fired_at)
         orchestrator.reactive_triggers.notify_work.assert_called_once()
 
-        tweak = _payload(await tool.triggers(action="update", trigger_id="edit-room", description="Tweaked"))
+        tweak = _payload(await tool.triggers_write(action="update", trigger_id="edit-room", description="Tweaked"))
         assert tweak["status"] == "ok"
         assert (tweak["trigger"]["target"]["prompt"], tweak["trigger"]["cooldown_seconds"]) == ("Updated prompt", 30)
 
@@ -1395,11 +1425,16 @@ async def test_update_validates_external_match_and_rejects_invalid_updates(tmp_p
     )
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path, config=config)):
-        assert _payload(await tool.triggers(action="watch_room", trigger_id="r1", prompt="Watch"))["status"] == "ok"
-        assert _payload(await tool.triggers(action="create", trigger_id="d1", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert (
+            _payload(await tool.triggers_write(action="watch_room", trigger_id="r1", prompt="Watch"))["status"] == "ok"
+        )
+        assert (
+            _payload(await tool.triggers_write(action="create", trigger_id="d1", public_key=_PUBLIC_KEY))["status"]
+            == "ok"
+        )
         assert (
             _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="subscribe_event",
                     trigger_id="e1",
                     source_id="github",
@@ -1411,10 +1446,10 @@ async def test_update_validates_external_match_and_rejects_invalid_updates(tmp_p
             == "ok"
         )
         assert (
-            _payload(await tool.triggers(action="update", trigger_id="e1", match={"repo": "evil/repo"}))["status"]
+            _payload(await tool.triggers_write(action="update", trigger_id="e1", match={"repo": "evil/repo"}))["status"]
             == "error"
         )
-        good_match = _payload(await tool.triggers(action="update", trigger_id="e1", match={"repo": "org/other"}))
+        good_match = _payload(await tool.triggers_write(action="update", trigger_id="e1", match={"repo": "org/other"}))
         assert good_match["status"] == "ok"
         assert good_match["trigger"]["source"]["match"] == {"repo": "org/other"}
 
@@ -1426,10 +1461,12 @@ async def test_update_validates_external_match_and_rejects_invalid_updates(tmp_p
             {"trigger_id": "e1", "pattern": "abc"},
             {"trigger_id": "e1", "include_bots": True},
         ):
-            assert _payload(await tool.triggers(action="update", **bad_kwargs))["status"] == "error", bad_kwargs
+            assert _payload(await tool.triggers_write(action="update", **bad_kwargs))["status"] == "error", bad_kwargs
 
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
-        assert _payload(await tool.triggers(action="update", trigger_id="r1", prompt="Hijack"))["status"] == "error"
+        assert (
+            _payload(await tool.triggers_write(action="update", trigger_id="r1", prompt="Hijack"))["status"] == "error"
+        )
 
 
 @pytest.mark.asyncio
@@ -1442,15 +1479,19 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
         assert (
-            _payload(await tool.triggers(action="watch_room", prompt="Owner", trigger_id="owner-r"))["status"] == "ok"
+            _payload(await tool.triggers_write(action="watch_room", prompt="Owner", trigger_id="owner-r"))["status"]
+            == "ok"
         )
         assert (
-            _payload(await tool.triggers(action="create", trigger_id="direct-r", public_key=_PUBLIC_KEY))["status"]
+            _payload(await tool.triggers_write(action="create", trigger_id="direct-r", public_key=_PUBLIC_KEY))[
+                "status"
+            ]
             == "ok"
         )
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
         assert (
-            _payload(await tool.triggers(action="watch_room", prompt="Other", trigger_id="other-r"))["status"] == "ok"
+            _payload(await tool.triggers_write(action="watch_room", prompt="Other", trigger_id="other-r"))["status"]
+            == "ok"
         )
 
     long_text = "x" * 400
@@ -1471,7 +1512,7 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
         )
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
-        owner_hist = _payload(await tool.triggers(action="history"))
+        owner_hist = _payload(await tool.triggers_read(action="history"))
         assert owner_hist["status"] == "ok"
         assert owner_hist["count"] == 2
         assert [row["dedupe_key"] for row in owner_hist["firings"]] == ["$ev3", "$ev1"]
@@ -1479,18 +1520,18 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
         assert len(preview) == 240
         assert preview.endswith("...")
 
-        clamped = _payload(await tool.triggers(action="history", trigger_id="owner-r", limit=0))
+        clamped = _payload(await tool.triggers_read(action="history", trigger_id="owner-r", limit=0))
         assert clamped["status"] == "ok"
         assert clamped["count"] == 1
         assert clamped["firings"][0]["dedupe_key"] == "$ev3"
 
         # Cannot inspect another owner's trigger or direct trigger
-        assert _payload(await tool.triggers(action="history", trigger_id="other-r"))["status"] == "error"
-        assert _payload(await tool.triggers(action="history", trigger_id="direct-r"))["status"] == "error"
-        assert _payload(await tool.triggers(action="history", trigger_id="missing-r"))["status"] == "error"
+        assert _payload(await tool.triggers_read(action="history", trigger_id="other-r"))["status"] == "error"
+        assert _payload(await tool.triggers_read(action="history", trigger_id="direct-r"))["status"] == "error"
+        assert _payload(await tool.triggers_read(action="history", trigger_id="missing-r"))["status"] == "error"
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
-        admin_hist = _payload(await tool.triggers(action="history", limit=500))
+        admin_hist = _payload(await tool.triggers_read(action="history", limit=500))
     assert admin_hist["status"] == "ok"
     assert [row["trigger_id"] for row in admin_hist["firings"]] == ["owner-r", "other-r", "owner-r"]
     for row in admin_hist["firings"]:
@@ -1515,7 +1556,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
     store = ReactiveTriggerStore(_runtime_paths(tmp_path))
 
     with tool_runtime_context(_context(tmp_path, config=config)):
-        await tool.triggers(
+        await tool.triggers_write(
             action="watch_room",
             trigger_id="test-room",
             prompt="Wake on deploy",
@@ -1524,7 +1565,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
             triage_model="fast",
             once=True,
         )
-        await tool.triggers(
+        await tool.triggers_write(
             action="subscribe_event",
             trigger_id="test-ext",
             source_id="github",
@@ -1532,8 +1573,8 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
             prompt="Merged",
             match={"repo": "org/app", "number": 7},
         )
-        await tool.triggers(action="watch_thread", trigger_id="test-tag", prompt="Resolved", tag="resolved")
-        await tool.triggers(action="create", trigger_id="test-direct", public_key=_PUBLIC_KEY)
+        await tool.triggers_write(action="watch_thread", trigger_id="test-tag", prompt="Resolved", tag="resolved")
+        await tool.triggers_write(action="create", trigger_id="test-direct", public_key=_PUBLIC_KEY)
 
     triage_mock = AsyncMock(
         side_effect=[
@@ -1545,7 +1586,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
         tool_runtime_context(_context(tmp_path, config=config)),
         patch("mindroom.custom_tools.triggers.evaluate_triage", new=triage_mock),
     ):
-        miss = _payload(await tool.triggers(action="test", trigger_id="test-room", text="hello world"))
+        miss = _payload(await tool.triggers_read(action="test", trigger_id="test-room", text="hello world"))
         assert (miss["matched"], miss["triage_decision"], miss["would_fire"]) == (False, None, False)
         assert (
             miss["note"]
@@ -1553,7 +1594,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
         )
         assert triage_mock.await_count == 0
 
-        hit = _payload(await tool.triggers(action="test", trigger_id="test-room", text="prod deploy failed"))
+        hit = _payload(await tool.triggers_read(action="test", trigger_id="test-room", text="prod deploy failed"))
         assert (hit["matched"], hit["triage_decision"], hit["triage_reason"], hit["would_fire"]) == (
             True,
             True,
@@ -1565,7 +1606,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
             "(does not evaluate live policy, sender permissions, cooldown, or rate limits)."
         )
 
-        fail_closed = _payload(await tool.triggers(action="test", trigger_id="test-room", text="deploy check"))
+        fail_closed = _payload(await tool.triggers_read(action="test", trigger_id="test-room", text="deploy check"))
         assert (
             fail_closed["matched"],
             fail_closed["triage_decision"],
@@ -1579,10 +1620,18 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
         )
 
         ext_hit = _payload(
-            await tool.triggers(action="test", trigger_id="test-ext", sample_data={"repo": "org/app", "number": 7}),
+            await tool.triggers_read(
+                action="test",
+                trigger_id="test-ext",
+                sample_data={"repo": "org/app", "number": 7},
+            ),
         )
         ext_miss = _payload(
-            await tool.triggers(action="test", trigger_id="test-ext", sample_data={"repo": "org/app", "number": 8}),
+            await tool.triggers_read(
+                action="test",
+                trigger_id="test-ext",
+                sample_data={"repo": "org/app", "number": 8},
+            ),
         )
         assert (ext_hit["would_fire"], ext_miss["matched"]) == (True, False)
         assert ext_hit["note"] == (
@@ -1590,14 +1639,14 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
         )
 
         tag_hit = _payload(
-            await tool.triggers(
+            await tool.triggers_read(
                 action="test",
                 trigger_id="test-tag",
                 sample_data={"tag": "resolved", "transition": "added"},
             ),
         )
         tag_miss = _payload(
-            await tool.triggers(
+            await tool.triggers_read(
                 action="test",
                 trigger_id="test-tag",
                 sample_data={"tag": "resolved", "transition": "removed"},
@@ -1605,11 +1654,15 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
         )
         assert (tag_hit["would_fire"], tag_miss["matched"]) == (True, False)
 
-        assert _payload(await tool.triggers(action="test", trigger_id="test-direct"))["status"] == "error"
+        assert _payload(await tool.triggers_read(action="test", trigger_id="test-direct"))["status"] == "error"
 
-        await tool.triggers(action="set_enabled", trigger_id="test-ext", enabled=False)
+        await tool.triggers_write(action="set_enabled", trigger_id="test-ext", enabled=False)
         disabled_res = _payload(
-            await tool.triggers(action="test", trigger_id="test-ext", sample_data={"repo": "org/app", "number": 7}),
+            await tool.triggers_read(
+                action="test",
+                trigger_id="test-ext",
+                sample_data={"repo": "org/app", "number": 7},
+            ),
         )
         assert (disabled_res["matched"], disabled_res["would_fire"]) == (True, False)
         assert "disabled" in disabled_res["note"]
@@ -1634,18 +1687,19 @@ def _load_trigger_approval_rules(tmp_path: Path, *rules: str | tuple[str, str]) 
 @pytest.mark.parametrize(
     ("match", "retired"),
     [
-        ("watch_room", "watch_room is now triggers"),
-        ("watch_thread", "watch_thread is now triggers"),
-        ("watch_pr", "watch_pr is now triggers"),
-        ("subscribe_event", "subscribe_event is now triggers"),
-        ("create_trigger", "create_trigger is now triggers"),
-        ("list_triggers", "list_triggers is now triggers"),
-        ("disable_trigger", "disable_trigger is now triggers"),
-        ("delete_trigger", "delete_trigger is now triggers"),
-        ("rotate_trigger_key", "rotate_trigger_key is now triggers"),
-        ("watch_*", "watch_room is now triggers"),
-        ("*_trigger", "create_trigger is now triggers"),
-        ("*_trigger*", "create_trigger is now triggers"),
+        ("watch_room", "watch_room is now triggers_write"),
+        ("watch_thread", "watch_thread is now triggers_write"),
+        ("watch_pr", "watch_pr is now triggers_write"),
+        ("subscribe_event", "subscribe_event is now triggers_write"),
+        ("create_trigger", "create_trigger is now triggers_write"),
+        ("list_triggers", "list_triggers is now triggers_read"),
+        ("disable_trigger", "disable_trigger is now triggers_write"),
+        ("delete_trigger", "delete_trigger is now triggers_write"),
+        ("rotate_trigger_key", "rotate_trigger_key is now triggers_write"),
+        ("triggers", "triggers is now triggers_read"),
+        ("watch_*", "watch_room is now triggers_write"),
+        ("*_trigger", "create_trigger is now triggers_write"),
+        ("*_trigger*", "create_trigger is now triggers_write"),
     ],
 )
 def test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails(
@@ -1653,33 +1707,33 @@ def test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails(
     match: str,
     retired: str,
 ) -> None:
-    """A rule matching a retired trigger function that does not also decide `triggers` fails config load."""
+    """A rule matching a retired trigger function (including old `triggers`) fails config load."""
     expected = rf"tool_approval\.rules\[1\]\.match {re.escape(repr(match))} .*{re.escape(retired)}"
     with pytest.raises(ConfigRuntimeValidationError, match=expected):
         _load_trigger_approval_rules(tmp_path, "run_shell_command", match)
 
 
 def test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails(tmp_path: Path) -> None:
-    """A non-exact rule matching `triggers` with a different decision from a retired trigger gate fails config load."""
+    """A non-exact rule matching `triggers_write` with a different decision from a retired trigger gate fails config load."""
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"rules\[1\]\.match 'create_trigger' .*create_trigger is now triggers",
+        match=r"rules\[1\]\.match 'create_trigger' .*create_trigger is now triggers_write",
     ):
         _load_trigger_approval_rules(tmp_path, ("trigger*", "auto_approve"), ("create_trigger", "require_approval"))
     with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[0\]\.match 'create_trigger'"):
         _load_trigger_approval_rules(tmp_path, ("create_trigger", "require_approval"), ("*", "auto_approve"))
-    # Same effective decision for every retired function and `triggers` loads cleanly.
+    # Same effective decision for every retired function and `triggers_read`/`triggers_write` loads cleanly.
     assert _load_trigger_approval_rules(tmp_path, ("create_trigger", "require_approval"), ("*", "require_approval"))
 
 
-@pytest.mark.parametrize("match", ["triggers", "*"])
+@pytest.mark.parametrize("match", ["triggers_read", "triggers_write", "*"])
 def test_approval_rules_that_decide_triggers_load(tmp_path: Path, match: str) -> None:
-    """Exact `triggers` rules and uniform catch-all rules load cleanly."""
+    """Exact `triggers_read`/`triggers_write` rules and uniform catch-all rules load cleanly."""
     assert _load_trigger_approval_rules(tmp_path, match).tool_approval.rules[0].match == match
 
 
 def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path: Path) -> None:
-    """Conditional `triggers` rules load cleanly while retired list/conditional rules and broad globs fail closed."""
+    """Conditional `triggers_read`/`triggers_write` rules load cleanly while retired rules fail closed."""
     base = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": ["triggers"]}},
@@ -1687,17 +1741,17 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
     for approval in (
         {
             "default": "require_approval",
-            "rules": [{"match": "triggers", "arguments": {"action": "list"}, "action": "auto_approve"}],
+            "rules": [{"match": "triggers_read", "arguments": {"action": "list"}, "action": "auto_approve"}],
         },
         {
             "default": "auto_approve",
-            "rules": [{"match": "triggers", "arguments": {"action": "delete"}, "action": "require_approval"}],
+            "rules": [{"match": "triggers_write", "arguments": {"action": "delete"}, "action": "require_approval"}],
         },
         {
             "default": "auto_approve",
             "rules": [
                 {"match": "*", "agents": "guest", "action": "require_approval"},
-                {"match": "triggers", "action": "auto_approve"},
+                {"match": ["triggers_read", "triggers_write"], "action": "auto_approve"},
                 {"match": "*", "action": "require_approval"},
             ],
         },
@@ -1705,7 +1759,7 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
             "default": "auto_approve",
             "rules": [
                 {"match": "*", "arguments": {"action": "list"}, "action": "auto_approve"},
-                {"match": "triggers", "action": "auto_approve"},
+                {"match": ["triggers_read", "triggers_write"], "action": "auto_approve"},
                 {"match": "*", "action": "require_approval"},
             ],
         },
@@ -1715,15 +1769,22 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
     for approval in (
         {"rules": [{"match": ["delete_trigger", "slack_post"], "action": "require_approval"}]},
         {"rules": [{"match": "delete_trigger", "agents": "research", "action": "require_approval"}]},
+        {"rules": [{"match": "triggers", "action": "require_approval"}]},
+        {
+            "rules": [
+                {"match": "triggers", "action": "require_approval"},
+                {"match": "triggers_write", "action": "require_approval"},
+            ],
+        },
         {
             "default": "require_approval",
-            "rules": [{"match": "*triggers", "arguments": {"action": "list"}, "action": "auto_approve"}],
+            "rules": [{"match": "triggers_*", "arguments": {"action": "list"}, "action": "auto_approve"}],
         },
         {
             "rules": [
                 {"match": "delete_trigger", "agents": "ops", "action": "require_approval"},
                 {"match": "*", "agents": "ops", "action": "auto_approve"},
-                {"match": "triggers", "action": "require_approval"},
+                {"match": "triggers_write", "action": "require_approval"},
             ],
         },
     ):
@@ -1736,10 +1797,10 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
     [
         [
             {"match": "delete_*", "action": "require_approval"},
-            {"match": "triggers", "action": "require_approval"},
+            {"match": "triggers_write", "action": "require_approval"},
         ],
         [
-            {"match": "triggers", "action": "require_approval"},
+            {"match": "triggers_write", "action": "require_approval"},
             {"match": "delete_*", "action": "require_approval"},
         ],
     ],
@@ -1748,7 +1809,7 @@ def test_explicit_triggers_rule_with_delete_glob_loads_in_either_order(
     tmp_path: Path,
     rules: list[dict[str, str]],
 ) -> None:
-    """An explicit exact `triggers` rule allows `delete_*` alongside it in either order when filesystem+triggers are enabled."""
+    """An explicit exact `triggers_write` rule allows `delete_*` alongside it in either order when filesystem+triggers are enabled."""
     data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": ["filesystem", "triggers"]}},
@@ -1821,6 +1882,8 @@ def test_retired_trigger_approval_rule_fails_even_when_another_toolkit_offers_sa
         {"exclude_tools": ["watch_pr"]},
         {"include_tools": ["watch_pr"]},
         {"include_tools": "watch_room, list_triggers"},
+        {"include_tools": ["triggers"]},
+        {"exclude_tools": ["triggers"]},
     ],
 )
 def test_retired_trigger_include_exclude_overrides_fail_config_load(
@@ -1863,7 +1926,7 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
         assert (
             _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="watch_thread",
                     trigger_id="watch-priv-tag",
                     room_id="!other-room:example.org",
@@ -1877,7 +1940,7 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
         )
         assert (
             _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="watch_room",
                     trigger_id="watch-priv-msg",
                     room_id="!other-room:example.org",
@@ -1888,12 +1951,12 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
             == "ok"
         )
         assert (
-            _payload(await tool.triggers(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
+            _payload(await tool.triggers_write(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
             == "ok"
         )
         assert (
             _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="subscribe_event",
                     trigger_id="watch-gh",
                     source_id="github",
@@ -1966,7 +2029,7 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     # While still joined to both rooms, unscoped history returns all 4 firings and caches each room check once
     client.room_get_state.reset_mock()
     with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
-        before = _payload(await tool.triggers(action="history"))
+        before = _payload(await tool.triggers_read(action="history"))
     assert before["status"] == "ok"
     assert [row["dedupe_key"] for row in before["firings"]] == ["$ev_gh", "$ev_priv_msg", "$ev_priv_tag", "$ev_lobby"]
     assert client.room_get_state.await_count == 2
@@ -1974,8 +2037,8 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     # Owner leaves private room A (stale client.rooms.users intentionally still contains owner!)
     live_members["!other-room:example.org"] = ["@someone_else:example.org"]
     with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
-        scoped_left = _payload(await tool.triggers(action="history", trigger_id="watch-priv-tag"))
-        unscoped_left = _payload(await tool.triggers(action="history"))
+        scoped_left = _payload(await tool.triggers_read(action="history", trigger_id="watch-priv-tag"))
+        unscoped_left = _payload(await tool.triggers_read(action="history"))
     assert scoped_left["status"] == "error"
     assert "no longer have access to the source for trigger watch-priv-tag" in scoped_left["message"].lower()
     assert unscoped_left["status"] == "ok"
@@ -1984,8 +2047,8 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     # Unreadable room state fails closed even if stale cached client.rooms still lists the owner
     del live_members["!other-room:example.org"]
     with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
-        scoped_unreadable = _payload(await tool.triggers(action="history", trigger_id="watch-priv-tag"))
-        unscoped_unreadable = _payload(await tool.triggers(action="history"))
+        scoped_unreadable = _payload(await tool.triggers_read(action="history", trigger_id="watch-priv-tag"))
+        unscoped_unreadable = _payload(await tool.triggers_read(action="history"))
     assert scoped_unreadable["status"] == "error"
     assert [row["dedupe_key"] for row in unscoped_unreadable["firings"]] == ["$ev_gh", "$ev_lobby"]
 
@@ -2002,8 +2065,8 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
         },
     )
     with tool_runtime_context(_context(tmp_path, config=revoked_config, client=client, orchestrator=orch)):
-        scoped_gh = _payload(await tool.triggers(action="history", trigger_id="watch-gh"))
-        unscoped_gh = _payload(await tool.triggers(action="history"))
+        scoped_gh = _payload(await tool.triggers_read(action="history", trigger_id="watch-gh"))
+        unscoped_gh = _payload(await tool.triggers_read(action="history"))
     assert scoped_gh["status"] == "error"
     assert "no longer have access to the source for trigger watch-gh" in scoped_gh["message"].lower()
     assert [row["dedupe_key"] for row in unscoped_gh["firings"]] == ["$ev_lobby"]
@@ -2012,7 +2075,7 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     with tool_runtime_context(
         _context(tmp_path, requester_id="@admin:example.org", config=revoked_config, client=client, orchestrator=orch),
     ):
-        admin_hist = _payload(await tool.triggers(action="history"))
+        admin_hist = _payload(await tool.triggers_read(action="history"))
     assert admin_hist["status"] == "ok"
     assert [row["trigger_id"] for row in admin_hist["firings"]] == [
         "watch-gh",
@@ -2044,7 +2107,7 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
     tool = TriggersTools()
 
     with tool_runtime_context(_context(tmp_path, config=config)):
-        await tool.triggers(
+        await tool.triggers_write(
             action="watch_room",
             trigger_id="dr-no-bots",
             prompt="React",
@@ -2053,7 +2116,7 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
             triage_instructions="Only prod",
             triage_model="fast",
         )
-        await tool.triggers(
+        await tool.triggers_write(
             action="watch_room",
             trigger_id="dr-with-bots",
             prompt="React",
@@ -2062,7 +2125,7 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
             triage_instructions="Only prod",
             triage_model="fast",
         )
-        await tool.triggers(
+        await tool.triggers_write(
             action="watch_room",
             trigger_id="dr-team-bots",
             prompt="Team react",
@@ -2083,14 +2146,16 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
     ):
         # Target agent's own ID is skipped for BOTH include_bots=False and include_bots=True without calling triage
         for tid in ("dr-no-bots", "dr-with-bots"):
-            res = _payload(await tool.triggers(action="test", trigger_id=tid, text="prod deploy", actor=watcher_id))
+            res = _payload(
+                await tool.triggers_read(action="test", trigger_id=tid, text="prod deploy", actor=watcher_id),
+            )
             assert (res["matched"], res["would_fire"], res["triage_decision"]) == (False, False, None)
             assert "target agent or team" in res["note"].lower()
         assert triage_mock.await_count == 0
 
         # Target team also skips member agent messages even when include_bots=True
         team_res = _payload(
-            await tool.triggers(action="test", trigger_id="dr-team-bots", text="prod deploy", actor=other_bot_id),
+            await tool.triggers_read(action="test", trigger_id="dr-team-bots", text="prod deploy", actor=other_bot_id),
         )
         assert (team_res["matched"], team_res["would_fire"], team_res["triage_decision"]) == (False, False, None)
         assert "target agent or team" in team_res["note"].lower()
@@ -2098,7 +2163,7 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
 
         # Other bot is skipped when include_bots=False without invoking triage
         bot_skip = _payload(
-            await tool.triggers(action="test", trigger_id="dr-no-bots", text="prod deploy", actor=other_bot_id),
+            await tool.triggers_read(action="test", trigger_id="dr-no-bots", text="prod deploy", actor=other_bot_id),
         )
         assert (bot_skip["matched"], bot_skip["would_fire"], bot_skip["triage_decision"]) == (False, False, None)
         assert "include_bots=false" in bot_skip["note"].lower()
@@ -2106,7 +2171,7 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
 
         # Other bot IS allowed when include_bots=True and invokes triage
         bot_allow = _payload(
-            await tool.triggers(action="test", trigger_id="dr-with-bots", text="prod deploy", actor=other_bot_id),
+            await tool.triggers_read(action="test", trigger_id="dr-with-bots", text="prod deploy", actor=other_bot_id),
         )
         assert (bot_allow["matched"], bot_allow["would_fire"], bot_allow["triage_decision"]) == (True, True, True)
         assert triage_mock.await_count == 1
@@ -2169,7 +2234,7 @@ async def test_admin_cannot_update_another_owners_reactive_trigger_for_personal_
             ("alice-shared", "watcher"),
         ):
             created = _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="watch_room",
                     trigger_id=trigger_id,
                     prompt="Initial prompt",
@@ -2181,7 +2246,7 @@ async def test_admin_cannot_update_another_owners_reactive_trigger_for_personal_
     with tool_runtime_context(_context(tmp_path, requester_id=trigger_admin, config=config)):
         for trigger_id in ("alice-personal", "alice-team", "alice-private", "alice-shared"):
             blocked = _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="update",
                     trigger_id=trigger_id,
                     prompt="Admin hijacked prompt",
@@ -2192,17 +2257,17 @@ async def test_admin_cannot_update_another_owners_reactive_trigger_for_personal_
                 "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
             )
 
-        disabled = _payload(await tool.triggers(action="set_enabled", trigger_id="alice-private", enabled=False))
+        disabled = _payload(await tool.triggers_write(action="set_enabled", trigger_id="alice-private", enabled=False))
         assert disabled["status"] == "ok"
         assert disabled["trigger"]["enabled"] is False
-        reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="alice-private", enabled=True))
+        reenabled = _payload(await tool.triggers_write(action="set_enabled", trigger_id="alice-private", enabled=True))
         assert reenabled["status"] == "ok"
         assert reenabled["trigger"]["enabled"] is True
 
     with tool_runtime_context(_context(tmp_path, requester_id=alice, config=config)):
         for trigger_id in ("alice-personal", "alice-team", "alice-private", "alice-shared"):
             owned_updated = _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     action="update",
                     trigger_id=trigger_id,
                     prompt="Alice updated prompt",
@@ -2212,7 +2277,7 @@ async def test_admin_cannot_update_another_owners_reactive_trigger_for_personal_
             assert owned_updated["trigger"]["target"]["prompt"] == "Alice updated prompt"
 
     with tool_runtime_context(_context(tmp_path, requester_id=trigger_admin, config=config)):
-        deleted = _payload(await tool.triggers(action="delete", trigger_id="alice-private"))
+        deleted = _payload(await tool.triggers_write(action="delete", trigger_id="alice-private"))
         assert deleted["status"] == "ok"
         assert deleted["trigger_id"] == "alice-private"
 
@@ -2230,7 +2295,7 @@ def test_retired_trigger_approval_check_skips_configs_without_triggers(tmp_path:
     assert loaded.tool_approval.rules[0].match == "delete_*"
 
 
-@pytest.mark.parametrize("match", ["*triggers", "*trigger*"])
+@pytest.mark.parametrize("match", ["triggers_*", "*trigger*"])
 @pytest.mark.parametrize(
     "tools_config",
     [
@@ -2246,7 +2311,7 @@ def test_retired_trigger_approval_rule_weakening_require_approval_default_fails(
     match: str,
     tools_config: dict[str, object],
 ) -> None:
-    """Under default=require_approval, a broad glob now matching `triggers` with auto_approve fails."""
+    """Under default=require_approval, a broad glob now matching `triggers_read`/`triggers_write` with auto_approve fails."""
     data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         **tools_config,
@@ -2255,7 +2320,7 @@ def test_retired_trigger_approval_rule_weakening_require_approval_default_fails(
             "rules": [{"match": match, "action": "auto_approve"}],
         },
     }
-    expected = rf"tool_approval\.rules\[0\]\.match {re.escape(repr(match))} .*triggers.*watch_room"
+    expected = rf"tool_approval\.rules\[0\]\.match {re.escape(repr(match))} .*triggers_(read|write).*watch_room"
     with pytest.raises(ConfigRuntimeValidationError, match=expected):
         Config.validate_with_runtime(data, _runtime_paths(tmp_path))
 
@@ -2277,10 +2342,11 @@ def test_retired_trigger_approval_rule_weakening_require_approval_default_fails(
 def test_explicit_triggers_rule_and_same_decision_glob_load_under_require_approval_default(
     tmp_path: Path,
 ) -> None:
-    """Exact `triggers` rules and non-weakening globs still load under default=require_approval."""
+    """Exact `triggers_read`/`triggers_write` rules and non-weakening globs still load under default=require_approval."""
     for match, action in (
-        ("triggers", "auto_approve"),
-        ("*triggers", "require_approval"),
+        ("triggers_read", "auto_approve"),
+        ("triggers_write", "auto_approve"),
+        ("triggers_*", "require_approval"),
         ("*", "auto_approve"),
     ):
         data = {
@@ -2335,7 +2401,7 @@ async def test_history_same_room_verifies_live_membership_and_fails_closed(tmp_p
 
     with tool_runtime_context(_context(tmp_path, config=config, client=client)):
         assert (
-            _payload(await tool.triggers(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
+            _payload(await tool.triggers_write(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
             == "ok"
         )
 
@@ -2356,16 +2422,16 @@ async def test_history_same_room_verifies_live_membership_and_fails_closed(tmp_p
 
     # Still joined in live room state -> visible
     with tool_runtime_context(_context(tmp_path, config=config, client=client)):
-        scoped_ok = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
-        unscoped_ok = _payload(await tool.triggers(action="history"))
+        scoped_ok = _payload(await tool.triggers_read(action="history", trigger_id="watch-lobby"))
+        unscoped_ok = _payload(await tool.triggers_read(action="history"))
     assert [row["dedupe_key"] for row in scoped_ok["firings"]] == ["$ev_lobby"]
     assert [row["dedupe_key"] for row in unscoped_ok["firings"]] == ["$ev_lobby"]
 
     # Requester leaves live room state even though stale client.rooms still contains them
     live_members["!lobby:example.org"] = ["@someone:example.org"]
     with tool_runtime_context(_context(tmp_path, config=config, client=client)):
-        scoped_left = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
-        unscoped_left = _payload(await tool.triggers(action="history"))
+        scoped_left = _payload(await tool.triggers_read(action="history", trigger_id="watch-lobby"))
+        unscoped_left = _payload(await tool.triggers_read(action="history"))
     assert scoped_left["status"] == "error"
     assert "no longer have access" in scoped_left["message"].lower()
     assert unscoped_left["status"] == "ok"
@@ -2374,8 +2440,8 @@ async def test_history_same_room_verifies_live_membership_and_fails_closed(tmp_p
     # Live room state becomes unreadable -> fails closed / omits rows
     del live_members["!lobby:example.org"]
     with tool_runtime_context(_context(tmp_path, config=config, client=client)):
-        scoped_unreadable = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
-        unscoped_unreadable = _payload(await tool.triggers(action="history"))
+        scoped_unreadable = _payload(await tool.triggers_read(action="history", trigger_id="watch-lobby"))
+        unscoped_unreadable = _payload(await tool.triggers_read(action="history"))
     assert scoped_unreadable["status"] == "error"
     assert unscoped_unreadable["status"] == "ok"
     assert unscoped_unreadable["firings"] == []
@@ -2383,8 +2449,8 @@ async def test_history_same_room_verifies_live_membership_and_fails_closed(tmp_p
     # Client without live state support also fails closed instead of using same-room shortcut
     no_live_client = SimpleNamespace(rooms=client.rooms)
     with tool_runtime_context(_context(tmp_path, config=config, client=no_live_client)):
-        scoped_no_live = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
-        unscoped_no_live = _payload(await tool.triggers(action="history"))
+        scoped_no_live = _payload(await tool.triggers_read(action="history", trigger_id="watch-lobby"))
+        unscoped_no_live = _payload(await tool.triggers_read(action="history"))
     assert scoped_no_live["status"] == "error"
     assert unscoped_no_live["status"] == "ok"
     assert unscoped_no_live["firings"] == []
@@ -2410,7 +2476,7 @@ async def test_history_rechecks_per_event_external_source_grants_for_non_admins(
 
     with tool_runtime_context(_context(tmp_path, config=initial_config)):
         created = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 trigger_id="watch-prs",
                 source_id="github",
@@ -2449,18 +2515,18 @@ async def test_history_rechecks_per_event_external_source_grants_for_non_admins(
     )
 
     with tool_runtime_context(_context(tmp_path, config=narrowed_config)):
-        scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
-        scoped_limit1 = _payload(await tool.triggers(action="history", trigger_id="watch-prs", limit=1))
-        unscoped = _payload(await tool.triggers(action="history"))
-        unscoped_limit1 = _payload(await tool.triggers(action="history", limit=1))
+        scoped = _payload(await tool.triggers_read(action="history", trigger_id="watch-prs"))
+        scoped_limit1 = _payload(await tool.triggers_read(action="history", trigger_id="watch-prs", limit=1))
+        unscoped = _payload(await tool.triggers_read(action="history"))
+        unscoped_limit1 = _payload(await tool.triggers_read(action="history", limit=1))
     assert [row["dedupe_key"] for row in scoped["firings"]] == ["$pr_org/a"]
     assert [row["dedupe_key"] for row in scoped_limit1["firings"]] == ["$pr_org/a"]
     assert [row["dedupe_key"] for row in unscoped["firings"]] == ["$pr_org/a"]
     assert [row["dedupe_key"] for row in unscoped_limit1["firings"]] == ["$pr_org/a"]
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=narrowed_config)):
-        admin_scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
-        admin_unscoped = _payload(await tool.triggers(action="history"))
+        admin_scoped = _payload(await tool.triggers_read(action="history", trigger_id="watch-prs"))
+        admin_unscoped = _payload(await tool.triggers_read(action="history"))
     assert len(admin_scoped["firings"]) == 2
     assert len(admin_unscoped["firings"]) == 2
     for row in (*admin_scoped["firings"], *admin_unscoped["firings"]):
@@ -2483,12 +2549,16 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config, client=client)):
         assert (
-            _payload(await tool.triggers(action="watch_room", trigger_id="owner-private", prompt="Watch"))["status"]
+            _payload(await tool.triggers_write(action="watch_room", trigger_id="owner-private", prompt="Watch"))[
+                "status"
+            ]
             == "ok"
         )
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config, client=client)):
         assert (
-            _payload(await tool.triggers(action="watch_room", trigger_id="admin-own", prompt="Watch own"))["status"]
+            _payload(await tool.triggers_write(action="watch_room", trigger_id="admin-own", prompt="Watch own"))[
+                "status"
+            ]
             == "ok"
         )
 
@@ -2528,9 +2598,9 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     )
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config, client=client)):
-        scoped_other = _payload(await tool.triggers(action="history", trigger_id="owner-private"))
-        scoped_own = _payload(await tool.triggers(action="history", trigger_id="admin-own"))
-        unscoped = _payload(await tool.triggers(action="history"))
+        scoped_other = _payload(await tool.triggers_read(action="history", trigger_id="owner-private"))
+        scoped_own = _payload(await tool.triggers_read(action="history", trigger_id="admin-own"))
+        unscoped = _payload(await tool.triggers_read(action="history"))
 
     assert scoped_other["status"] == "ok"
     assert scoped_other["count"] == 1
@@ -2559,8 +2629,8 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     # Once admin leaves the watched room, even their own trigger's event content is redacted.
     live_members["!lobby:example.org"] = ["@owner:example.org"]
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config, client=client)):
-        scoped_own_after_leave = _payload(await tool.triggers(action="history", trigger_id="admin-own"))
-        unscoped_after_leave = _payload(await tool.triggers(action="history"))
+        scoped_own_after_leave = _payload(await tool.triggers_read(action="history", trigger_id="admin-own"))
+        unscoped_after_leave = _payload(await tool.triggers_read(action="history"))
     for row in (*scoped_own_after_leave["firings"], *unscoped_after_leave["firings"]):
         _assert_redacted(row)
 
@@ -2584,7 +2654,7 @@ async def test_history_paginates_past_more_than_100_revoked_external_source_firi
 
     with tool_runtime_context(_context(tmp_path, config=initial_config)):
         created = _payload(
-            await tool.triggers(
+            await tool.triggers_write(
                 action="subscribe_event",
                 trigger_id="watch-prs",
                 source_id="github",
@@ -2636,8 +2706,8 @@ async def test_history_paginates_past_more_than_100_revoked_external_source_firi
     )
 
     with tool_runtime_context(_context(tmp_path, config=narrowed_config)):
-        scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs", limit=1))
-        unscoped = _payload(await tool.triggers(action="history", limit=1))
+        scoped = _payload(await tool.triggers_read(action="history", trigger_id="watch-prs", limit=1))
+        unscoped = _payload(await tool.triggers_read(action="history", limit=1))
 
     assert scoped["status"] == "ok"
     assert scoped["count"] == 1
@@ -2675,13 +2745,13 @@ async def test_reactive_triggers_room_escape_and_reopen_on_fire(tmp_path: Path) 
     ]
     with tool_runtime_context(_context(tmp_path, config=config)):
         for kwargs in cases:
-            created = _payload(await tool.triggers(**kwargs, target_thread_id="room", reopen_on_fire=True))
+            created = _payload(await tool.triggers_write(**kwargs, target_thread_id="room", reopen_on_fire=True))
             assert created["status"] == "ok", (kwargs, created)
             assert created["trigger"]["target"]["thread_id"] is None
             assert created["trigger"]["target"]["reopen_on_fire"] is True
 
             conflict = _payload(
-                await tool.triggers(
+                await tool.triggers_write(
                     **{k: v for k, v in kwargs.items() if k != "trigger_id"},
                     target_thread_id="room",
                     new_thread=True,
@@ -2690,11 +2760,11 @@ async def test_reactive_triggers_room_escape_and_reopen_on_fire(tmp_path: Path) 
             assert conflict["status"] == "error"
             assert "mutually exclusive" in conflict["message"]
 
-        off = _payload(await tool.triggers(action="update", trigger_id="wr-room", reopen_on_fire=False))
+        off = _payload(await tool.triggers_write(action="update", trigger_id="wr-room", reopen_on_fire=False))
         assert (off["status"], off["trigger"]["target"]["reopen_on_fire"]) == ("ok", False)
-        on = _payload(await tool.triggers(action="update", trigger_id="wr-room", reopen_on_fire=True))
+        on = _payload(await tool.triggers_write(action="update", trigger_id="wr-room", reopen_on_fire=True))
         assert (on["status"], on["trigger"]["target"]["reopen_on_fire"]) == ("ok", True)
 
-        bad = _payload(await tool.triggers(action="list", reopen_on_fire=True))
+        bad = _payload(await tool.triggers_write(action="delete", trigger_id="wr-room", reopen_on_fire=True))
         assert bad["status"] == "error"
-        assert "Unsupported parameter(s)" in bad["message"]
+        assert "cannot be used with action='delete'" in bad["message"]
