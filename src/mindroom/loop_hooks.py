@@ -30,6 +30,7 @@ from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.delegation.lifecycle import child_usage_hook
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
+from mindroom.history.native_compaction_hook import native_compaction_after_turn_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.provider import DeferredTools
@@ -227,6 +228,14 @@ def _loop_hooks(
     notice_text = turn.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
     return LoopHooks(
         before_request=tuple(before_request),
+        after_turn=(
+            native_compaction_after_turn_hook(
+                config=turn.config,
+                scope=scope,
+                model_name=turn.model_name,
+                model=model,
+            ),
+        ),
         answer_tool_calls=_answer_tool_calls(),
         rewrite_tool_calls=resolve_call_tool_calls if deferred_tools.portable else None,
         before_dispatch=checkpoint.before_dispatch if checkpoint is not None else None,

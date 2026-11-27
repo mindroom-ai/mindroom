@@ -891,6 +891,7 @@ visibility = [
     "mindroom.ai_run_metadata",
     "mindroom.api.openai_compat",
     "mindroom.skill_learning.reviewer",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.request_size",
     "mindroom.providers.pipeline",
     "mindroom.usage.provider_analytics",
@@ -1420,6 +1421,7 @@ depends_on = [
     "mindroom.approval.receipt",
     "mindroom.delegation.lifecycle",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.run_checkpoint",
     "mindroom.history.types",
     "mindroom.llm",
@@ -3456,6 +3458,7 @@ depends_on = [
 visibility = [
     "mindroom.execution_preparation",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.runtime",
 ]
 
@@ -3517,10 +3520,23 @@ visibility = [
     "mindroom.providers.anthropic.legacy_stored_turns",
     "mindroom.history.replay",
     "mindroom.history.native",
+    "mindroom.history.native_compaction_hook",
     "mindroom.history.request_size",
     "mindroom.history.summarizer",
     "mindroom.providers.openai",
 ]
+
+[[modules]]
+path = "mindroom.history.native_compaction_hook"
+depends_on = [
+    "mindroom.history.compaction",
+    "mindroom.history.request_size",
+    "mindroom.hooks",
+    "mindroom.llm",
+    "mindroom.model_usage",
+    "mindroom.native_compaction",
+]
+visibility = ["mindroom.loop_hooks"]
 
 [[modules]]
 path = "mindroom.providers.anthropic"
