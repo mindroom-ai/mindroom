@@ -8394,3 +8394,88 @@ async def test_proxy_shell_scope_holds_worker_in_flight_lease_until_scope_closes
     manager.touched.clear()
     touch_workers_in_flight(manager)
     assert manager.touched == []
+
+
+def test_open_worker_http_client_caches_default_ssl_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Real httpx.Client caches default and stat-keyed SSL_CERT_FILE contexts, bypasses SSL_CERT_DIR, and preserves custom factories."""
+    import certifi  # noqa: PLC0415
+
+    worker_proxy_client_module._cached_default_ssl_context.cache_clear()
+    created_contexts: list[object] = []
+    real_create_ssl_context = httpx.create_ssl_context
+
+    def _tracking_create_ssl_context(*, verify: bool = True) -> object:
+        assert verify is True
+        ctx = real_create_ssl_context(verify=True)
+        created_contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(worker_proxy_client_module.httpx, "create_ssl_context", _tracking_create_ssl_context)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+    # 1. Default env reuses the cached SSLContext.
+    with (
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as first,
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=10.0) as second,
+    ):
+        assert isinstance(first, httpx.Client)
+        assert isinstance(second, httpx.Client)
+        assert first._transport._pool._ssl_context is second._transport._pool._ssl_context
+    assert len(created_contexts) == 1
+
+    # 2. Unchanged SSL_CERT_FILE reuses the cached SSLContext keyed by file stat identity.
+    ca_bytes = Path(certifi.where()).read_bytes()
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_bytes(ca_bytes)
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+    with (
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as file_first,
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as file_second,
+    ):
+        assert isinstance(file_first, httpx.Client)
+        assert isinstance(file_second, httpx.Client)
+        assert file_first._transport._pool._ssl_context is file_second._transport._pool._ssl_context
+        assert file_first._transport._pool._ssl_context is not created_contexts[0]
+    assert len(created_contexts) == 2
+
+    # 3. Replacing SSL_CERT_FILE at the same path immediately loads and caches a fresh SSLContext.
+    rotated_ca = tmp_path / "ca-rotated.pem"
+    rotated_ca.write_bytes(ca_bytes + b"\n")
+    rotated_ca.replace(ca_file)
+    with (
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as rotated_first,
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as rotated_second,
+    ):
+        assert isinstance(rotated_first, httpx.Client)
+        assert isinstance(rotated_second, httpx.Client)
+        assert rotated_first._transport._pool._ssl_context is rotated_second._transport._pool._ssl_context
+        assert rotated_first._transport._pool._ssl_context is not created_contexts[1]
+    assert len(created_contexts) == 3
+
+    # 4. Setting SSL_CERT_DIR bypasses the cache on every call.
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+    with (
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as dir_first,
+        worker_proxy_client_module._open_worker_http_client(httpx.Client, timeout=5.0) as dir_second,
+    ):
+        assert isinstance(dir_first, httpx.Client)
+        assert isinstance(dir_second, httpx.Client)
+        assert dir_first._transport._pool._ssl_context is not dir_second._transport._pool._ssl_context
+    assert len(created_contexts) == 5
+
+    # 5. Custom / monkeypatched client factories only receive timeout=... (no verify kwarg).
+    custom_kwargs: list[dict[str, object]] = []
+
+    def _custom_factory(**kwargs: object) -> contextlib.nullcontext[None]:
+        custom_kwargs.append(kwargs)
+        return contextlib.nullcontext()
+
+    with worker_proxy_client_module._open_worker_http_client(_custom_factory, timeout=7.5):
+        pass
+    assert custom_kwargs == [{"timeout": 7.5}]
+    worker_proxy_client_module._cached_default_ssl_context.cache_clear()
