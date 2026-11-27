@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from typing import Literal
+
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.runs import RunRecord, RunStatus
-from tests.storage_oracle.backend import NOTICE_TURN_KEY
 from tests.storage_oracle.notice_rewrites import finalize, recover
 
 
-def _notice(turn: str, marker: object = True) -> Message:
+def _notice(turn: str, marker: bool | Literal["persisted"] = True) -> Message:
     return Message(
         role="user",
         content="Pause.",
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: marker, NOTICE_TURN_KEY: turn},
+        meta=MessageMeta(queued_message_notice=marker, queued_notice_turn_id=turn),
     )
 
 
@@ -21,10 +22,7 @@ def _run(run_id: str, *messages: Message, status: RunStatus = RunStatus.complete
 
 
 def _shape(run: RunRecord) -> list[tuple[object, object]]:
-    return [
-        (message.content, (message.provider_data or {}).get(QUEUED_MESSAGE_NOTICE_MARKER_KEY))
-        for message in run.messages
-    ]
+    return [(message.content, message.meta.queued_message_notice or None) for message in run.messages]
 
 
 def test_finalization_keeps_one_persisted_notice_where_the_newest_visible_run_first_held_it() -> None:

@@ -13,8 +13,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from mindroom.history.run_visibility import is_model_history_visible_run
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
-from tests.storage_oracle.backend import NOTICE_TURN_KEY
+from mindroom.llm.messages import Message, MessageMeta
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -25,12 +24,12 @@ _PERSISTED = "persisted"
 
 
 def _marker(message: Message) -> object:
-    marker = (message.provider_data or {}).get(QUEUED_MESSAGE_NOTICE_MARKER_KEY)
-    return marker if marker in (True, _PERSISTED) else None
+    marker = message.meta.queued_message_notice
+    return marker if marker is True or marker == _PERSISTED else None
 
 
 def _turn(message: Message) -> str | None:
-    turn = (message.provider_data or {}).get(NOTICE_TURN_KEY)
+    turn = message.meta.queued_notice_turn_id
     return turn if isinstance(turn, str) and turn else None
 
 
@@ -82,7 +81,7 @@ def finalize(runs: Sequence[AnyRunRecord], turn: str) -> list[AnyRunRecord]:
     persisted = Message(
         role="user",
         content=text,
-        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: _PERSISTED, NOTICE_TURN_KEY: turn},
+        meta=MessageMeta(queued_message_notice=_PERSISTED, queued_notice_turn_id=turn),
     )
     copy.messages.insert(position, persisted)
     return list(edited.values())

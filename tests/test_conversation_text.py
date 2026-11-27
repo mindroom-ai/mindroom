@@ -10,7 +10,7 @@ from mindroom.history.conversation_text import own_thread_message, thread_contex
 from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.llm.media import Image
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message
+from mindroom.llm.messages import Message, MessageMeta
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 
@@ -137,7 +137,7 @@ def test_runtime_prompts_and_stopped_summaries_are_nobodys_words(
             Message(
                 role="user",
                 content="[SYSTEM NOTICE] A newer message arrived; pause here.",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
+                meta=MessageMeta(queued_message_notice=True),
             ),
             id="queued-message-notice",
         ),
@@ -209,7 +209,7 @@ def test_a_turns_stored_context_is_neither_said_nor_agent_work(agent_work: bool)
     """Memory results, live enrichment, and the approval receipt a run stores never reach a transcript or memory."""
     run = _run(
         Message(role="user", content="Deploy it."),
-        Message(role="user", content="<mindroom_transient_context>Alice lives in Delft.", add_to_agent_memory=False),
+        Message(role="user", content="<mindroom_transient_context>Alice lives in Delft.", is_turn_context=True),
         Message(role="assistant", content="Deployed."),
     )
 

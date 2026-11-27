@@ -434,7 +434,7 @@ async def test_a_resumed_claude_run_sends_the_paused_request_unchanged_before_th
         Message(role="user", content="Hi", from_history=True),
         Message(role="assistant", content="Hello.", from_history=True),
     ]
-    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
+    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", is_turn_context=True)
     turn = TurnMessages(prompt=Message(role="user", content="Echo x, then add 2 and 3."), transient=(memory,))
     _, paused = await collect(
         run_agent(

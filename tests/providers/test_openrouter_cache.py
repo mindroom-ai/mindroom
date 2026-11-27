@@ -233,16 +233,16 @@ async def test_moving_markers_preserves_the_prefix_with_consecutive_user_message
     prefix = [Message(role="system", content=_SHARED), Message(role="user", content="Current message.")]
     first = [
         *prefix,
-        Message(role="user", content=render_transient_context(["Current memory."]), add_to_agent_memory=False),
+        Message(role="user", content=render_transient_context(["Current memory."]), is_turn_context=True),
     ]
     second = [*first, *_lookup("call_1")]
     third = [*second, *_lookup("call_2")]
     fourth = [
         # A message-limited history replays the conversation without the previous transient context.
-        *(message for message in third if message.add_to_agent_memory),
+        *(message for message in third if not message.is_turn_context),
         Message(role="assistant", content="Reply."),
         Message(role="user", content="Next message."),
-        Message(role="user", content=render_transient_context(["Updated memory."]), add_to_agent_memory=False),
+        Message(role="user", content=render_transient_context(["Updated memory."]), is_turn_context=True),
     ]
     requests = [
         (await _send(tmp_path / f"r{index}", messages, tools=_TOOLS))[0]["messages"]

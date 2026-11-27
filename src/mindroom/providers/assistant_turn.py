@@ -1,6 +1,6 @@
 """What adapters share to build a turn: its timings and stream progress, the events that end it, and inline reasoning.
 
-Every assistant message a model answered is stored with its provenance (``llm/messages.py`` ``model_provenance``),
+Every assistant message a model answered is stored with its provenance (``MessageMeta.model``),
 which usage accounting and a run's own model messages read; ``stamp_model`` is how an adapter records it on the turn
 it finishes.
 """
@@ -8,10 +8,10 @@ it finishes.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import EMPTY_META, Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import ReasoningDelta, StreamProgress, TextDelta, ToolCallReady, TurnCompleted, UsageReported
 
 if TYPE_CHECKING:
@@ -37,11 +37,8 @@ _THINK_CLOSE = "</think>"
 
 
 def stamp_model(message: Message, identity: ModelIdentity) -> None:
-    """Record on ``message`` which model answered it (``model_provenance``), keeping the rest of its provider data."""
-    message.provider_data = {
-        **(message.provider_data or {}),
-        **model_provenance(identity.id, identity.provider),
-    }
+    """Record on ``message`` which model answered it (``ModelProvenance``), keeping the rest of its metadata."""
+    message.meta = replace(message.meta, model=ModelProvenance(identity.id, identity.provider))
 
 
 @dataclass(slots=True)
@@ -88,6 +85,7 @@ def finished_turn(
     reasoning: str | None = None,
     tool_calls: Sequence[dict[str, Any]],
     provider_data: dict[str, Any] | None = None,
+    meta: MessageMeta = EMPTY_META,
     usage: MessageMetrics | None,
     stop_reason: StopReason | None,
     raw_stop_reason: str | None = None,
@@ -98,7 +96,8 @@ def finished_turn(
         content=content,
         reasoning_content=reasoning,
         tool_calls=list(tool_calls) or None,
-        provider_data=provider_data,
+        provider_data=provider_data or None,
+        meta=meta,
     )
     if usage is not None:
         message.metrics = usage

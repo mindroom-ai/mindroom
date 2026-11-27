@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message
+from mindroom.llm.messages import Message, MessageMeta, is_queued_notice_message
 from mindroom.logging_config import get_logger
 from mindroom.mid_turn import MidTurnOutcome
 
@@ -31,8 +31,6 @@ __all__ = [
 
 logger = get_logger(__name__)
 
-
-_QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY = "mindroom_queued_message_notice_response_turn_id"
 
 EMPTY_RESPONSE_NOTICE = "The model returned an empty response — please try again."
 
@@ -91,10 +89,7 @@ def bind_mid_turn_conversation_context(
 
 def _is_response_notice(message: Message, response_turn_id: str) -> bool:
     """Return whether one message is the queued-message notice that response ``response_turn_id`` appended."""
-    return (
-        is_queued_notice_message(message)
-        and (message.provider_data or {}).get(_QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY) == response_turn_id
-    )
+    return is_queued_notice_message(message) and message.meta.queued_notice_turn_id == response_turn_id
 
 
 def _append_queued_notice_if_needed(
@@ -131,10 +126,7 @@ def _append_queued_notice_if_needed(
         Message(
             role="user",
             content=notice_text,
-            provider_data={
-                QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
-                _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
-            },
+            meta=MessageMeta(queued_message_notice=True, queued_notice_turn_id=response_turn_id),
         ),
     )
     if not notice_context.notice_fired:

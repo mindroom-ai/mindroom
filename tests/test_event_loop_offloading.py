@@ -346,7 +346,7 @@ async def test_prepare_agent_and_prompt_joins_overlapping_branches_before_histor
         assert system_text(kwargs["system_messages"]).endswith("existing context\n\nsession memory")
         assert len(kwargs["transient_context_messages"]) == 1
         assert kwargs["transient_context_messages"][0].content == render_transient_context(("turn memory",))
-        assert kwargs["transient_context_messages"][0].add_to_agent_memory is False
+        assert kwargs["transient_context_messages"][0].is_turn_context is True
         assert kwargs["resolved_runtime_model"].model_name == "default"
         return _prepared_execution(kwargs["prompt"], kwargs["transient_context_messages"])
 
@@ -602,7 +602,7 @@ async def test_parallel_file_prompt_matches_sequential_output_and_bookkeeping(
     )
 
     def shape(messages: Sequence[Message]) -> list[tuple[str, object, bool]]:
-        return [(message.role, message.content, message.add_to_agent_memory) for message in messages]
+        return [(message.role, message.content, message.is_turn_context) for message in messages]
 
     assert shape(parallel.turn.in_request_order()) == shape(sequential.turn.in_request_order())
     assert parallel.prompt_text == sequential.prompt_text

@@ -38,7 +38,7 @@ from mindroom.llm.errors import (
     RateLimited,
     fails_over,
 )
-from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message, model_provenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     Capabilities,
     DeferredTools,
@@ -54,7 +54,6 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
 from mindroom.providers.anthropic.prompt_cache import prepare_request_body
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import ChatWire, chat_request_kwargs
@@ -128,7 +127,7 @@ def _answer(model: str, text: str = "answer") -> list[_Step]:
     message = Message(
         role="assistant",
         content=text,
-        provider_data=model_provenance(f"{model}-id", f"{model}-provider"),
+        meta=MessageMeta(model=ModelProvenance(f"{model}-id", f"{model}-provider")),
     )
     return [TextDelta(text), TurnCompleted(message=message, stop_reason="end")]
 
@@ -321,7 +320,7 @@ async def test_a_fallback_is_sent_the_request_without_the_first_routes_replay_st
     assert (sent.portable_replay, sent.strip_encrypted_replay, sent.prompt_hold) == (True, True, None)
     turn = events[-1]
     assert isinstance(turn, TurnCompleted)
-    assert (turn.message.provider_data or {})[REWRITTEN_ATTEMPT_KEY] is True
+    assert turn.message.meta.attempt_rewritten is True
 
 
 @pytest.mark.asyncio
@@ -348,7 +347,7 @@ async def test_failed_primary_and_answering_fallback_keep_separate_usage_and_cos
     answer = Message(
         role="assistant",
         content="hi",
-        provider_data=model_provenance("gpt-6-mini", "OpenAI"),
+        meta=MessageMeta(model=ModelProvenance("gpt-6-mini", "OpenAI")),
         metrics=fallback_usage,
     )
     fallback = _Model(
@@ -399,7 +398,7 @@ async def test_a_model_is_tried_last_until_the_reset_its_failure_named() -> None
     assert len(primary.requests) == 2
     turn = events[-1]
     assert isinstance(turn, TurnCompleted)
-    assert REWRITTEN_ATTEMPT_KEY not in (turn.message.provider_data or {})
+    assert turn.message.meta.attempt_rewritten is False
     assert "codex" not in fallback_stage._COOLDOWN_UNTIL
 
 
@@ -548,7 +547,7 @@ async def test_compaction_summary_fails_over_on_quota_but_defers_transient_retri
     answer = Message(
         role="assistant",
         content="Compact summary.",
-        provider_data=model_provenance("fallback-id", "fallback-provider"),
+        meta=MessageMeta(model=ModelProvenance("fallback-id", "fallback-provider")),
         metrics=billed,
     )
     fallback = _Model("fallback", [[TextDelta("Compact summary."), TurnCompleted(message=answer, stop_reason="end")]])
@@ -591,7 +590,7 @@ async def test_the_run_records_and_publishes_the_model_that_answered() -> None:
             "bedrock": ModelConfig(provider="anthropic", id="bedrock-id", display_name="Bedrock", context_window=9000),
         },
     )
-    answer = Message(role="assistant", content="hi", provider_data=model_provenance("bedrock-id", "Anthropic"))
+    answer = Message(role="assistant", content="hi", meta=MessageMeta(model=ModelProvenance("bedrock-id", "Anthropic")))
     answer.metrics = MessageMetrics(tokens=TokenCounts(input_tokens=3, total_tokens=3))
     fallback = _Model("bedrock", [[TextDelta("hi"), TurnCompleted(message=answer, stop_reason="end")]])
 
@@ -637,7 +636,7 @@ async def test_a_fallback_cut_off_after_output_records_the_fallback(*, with_usag
 
     assert (record.model, record.model_provider, record.model_name) == ("fallback-id", "fallback-provider", "fallback")
     cut_off = record.messages[-1]
-    assert (cut_off.provider_data or {})["mindroom_model"] == {"id": "fallback-id", "provider": "fallback-provider"}
+    assert cut_off.meta.model == ModelProvenance("fallback-id", "fallback-provider")
     expected_usage = [("fallback-id", "fallback-provider", 100)] if with_usage else []
     assert [
         (entry.id, entry.provider, entry.tokens.input_tokens)
@@ -904,14 +903,14 @@ async def test_portable_replay_works_when_primary_recovers_after_fallback_tool_c
     primary_checkpoint = Message(
         role="assistant",
         content="earlier answer",
-        provider_data={
-            **model_provenance("gpt-6", "OpenAI"),
-            NATIVE_CHECKPOINT_KEY: {
+        meta=MessageMeta(
+            model=ModelProvenance("gpt-6", "OpenAI"),
+            native_compaction={
                 "route": native.route,
                 "threshold": native.threshold,
                 "items": [{"type": "compaction", "id": "cmp_a", "encrypted_content": "checkpoint-from-a"}],
             },
-        },
+        ),
     )
     user = Message(role="user", content="check weather")
     call = {
@@ -923,8 +922,8 @@ async def test_portable_replay_works_when_primary_recovers_after_fallback_tool_c
     fallback_msg = Message(
         role="assistant",
         tool_calls=[call],
+        meta=MessageMeta(model=ModelProvenance("gpt-6", "OpenAI")),
         provider_data={
-            **model_provenance("gpt-6", "OpenAI"),
             "response_id": "resp_project_b",
             "mindroom_response_stored": True,
             "mindroom_conversation_sha256": conversation_digest([older_user, primary_checkpoint, user]),
@@ -950,7 +949,7 @@ async def test_portable_replay_works_when_primary_recovers_after_fallback_tool_c
     )
     first_turn = first_events[-1]
     assert isinstance(first_turn, TurnCompleted)
-    assert (first_turn.message.provider_data or {})[FALLBACK_MODEL_KEY] == "project-b"
+    assert first_turn.message.meta.fallback_model == "project-b"
 
     # Expire primary A's unavailability cooldown so the follow-up turn probes A again.
     fallback_stage._COOLDOWN_UNTIL["project-a"] = time.monotonic() - 1
@@ -1035,7 +1034,7 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
     fallback = _Model("or-b", [[TurnCompleted(message=b_tool_turn, stop_reason="tool_use")], _answer("or-b", "done")])
     provider = _with_fallbacks(primary, fallback)
 
-    # Turn 1: primary fails -> fallback B answers with its own signed reasoning (stamped FALLBACK_MODEL_KEY="or-b").
+    # Turn 1: primary fails -> fallback B answers with its own signed reasoning (stamped fallback_model="or-b").
     t1_messages = (
         Message(role="user", content="hi"),
         a_turn,
@@ -1044,7 +1043,7 @@ async def test_openrouter_chat_fallback_strips_encrypted_and_signed_reasoning_de
     t1_events = await drain(provider, ModelRequest(messages=t1_messages))
     b_saved = t1_events[-1]
     assert isinstance(b_saved, TurnCompleted)
-    assert (b_saved.message.provider_data or {})[FALLBACK_MODEL_KEY] == "or-b"
+    assert b_saved.message.meta.fallback_model == "or-b"
 
     # Turn 2a: fallback B continues its own tool call -> strips A's foreign signed reasoning, keeps B's own.
     t2_messages = (*t1_messages, b_saved.message, Message(role="tool", tool_call_id="call_2", content="r2"))
@@ -1106,7 +1105,7 @@ async def test_same_id_backup_account_and_level_metadata() -> None:
                     message=Message(
                         role="assistant",
                         content="from backup",
-                        provider_data=model_provenance("gpt-6", "OpenAI"),
+                        meta=MessageMeta(model=ModelProvenance("gpt-6", "OpenAI")),
                     ),
                     stop_reason="end",
                 ),

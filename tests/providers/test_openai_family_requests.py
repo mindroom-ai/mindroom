@@ -28,7 +28,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_argu
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, scope_history_messages
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, File, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import ModelRequest, RequestOverrides, TurnCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.media_inputs import MediaInputs
@@ -161,7 +161,12 @@ def _parsed(adapter: ResponsesAdapter, output: list[dict[str, Any]], **message: 
             allow_authored=False,
         ),
     )
-    fields = {"content": parts.content, "tool_calls": parts.tool_calls or None, "provider_data": parts.provider_data}
+    fields = {
+        "content": parts.content,
+        "tool_calls": parts.tool_calls or None,
+        "provider_data": parts.provider_data,
+        "meta": parts.meta,
+    }
     return Message(role="assistant", **{**fields, **message})
 
 
@@ -798,7 +803,7 @@ def test_a_stored_tool_turn_continues_whatever_the_model_name(tmp_path: Path) ->
 
 def _claude_tool_turn() -> list[Message]:
     """Return a Claude tool turn as a thread stores it: text beside a ``toolu_`` call, its result, then the answer."""
-    claude = {"mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"}}
+    claude = MessageMeta(model=ModelProvenance("claude-sonnet-5-5", "Anthropic"))
     call = {
         "id": "toolu_01Weather",
         "type": "function",
@@ -806,9 +811,9 @@ def _claude_tool_turn() -> list[Message]:
     }
     return [
         Message(role="user", content="What should I pack for Paris?"),
-        Message(role="assistant", content="Let me check the forecast first.", tool_calls=[call], provider_data=claude),
+        Message(role="assistant", content="Let me check the forecast first.", tool_calls=[call], meta=claude),
         Message(role="tool", tool_call_id="toolu_01Weather", content="light rain"),
-        Message(role="assistant", content="Pack a rain jacket.", provider_data=claude),
+        Message(role="assistant", content="Pack a rain jacket.", meta=claude),
         Message(role="user", content="And for the evening?"),
     ]
 
@@ -950,7 +955,7 @@ async def test_an_approval_resume_on_a_stored_chain_continues_it_with_the_result
     question = Message(role="user", content="Look it up.")
     call = await _reply(adapter, [*prompt, question])
     result = Message(role="tool", tool_call_id="fc_lookup", content="Found it")
-    receipt = Message(role="user", content="trusted approval receipt", add_to_agent_memory=False)
+    receipt = Message(role="user", content="trusted approval receipt", is_turn_context=True)
 
     await _reply(adapter, [*prompt, question, call, result, receipt])
 
@@ -1060,7 +1065,7 @@ async def test_a_turn_after_an_approved_run_finished_continues_the_chain_it_left
         system_messages=(Message(role="system", content="You are Code."),),
         toolkits=(gated(lookup),),
     )
-    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", add_to_agent_memory=False)
+    memory = Message(role="user", content="<memory>Alice prefers short answers.</memory>", is_turn_context=True)
     first_turn = TurnMessages(prompt=Message(role="user", content="Look it up."), transient=(memory,))
     _, paused = await collect(
         run_agent(
@@ -1312,9 +1317,9 @@ def test_only_a_completed_response_records_its_replay_policy(*, portable: bool, 
     parts = _streamed(_response([_ANSWER], status=status), store=True, portable_replay=portable)
 
     if status == "completed":
-        assert parts.provider_data["mindroom_portable_replay"] is portable
+        assert parts.meta.portable_replay is portable
     else:
-        assert "mindroom_portable_replay" not in parts.provider_data
+        assert parts.meta.portable_replay is None
 
 
 # --- The stable prompt prefix ---------------------------------------------------------------------------------

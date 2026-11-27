@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable, fails_over
-from mindroom.llm.messages import FALLBACK_MODEL_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
     DeferredTools,
     ModelSelected,
@@ -57,7 +57,7 @@ def _follows_fallback(messages: Sequence[Message]) -> bool:
     """Return whether the latest assistant message in ``messages`` was answered by a fallback model."""
     for message in reversed(messages):
         if message.role == "assistant":
-            return FALLBACK_MODEL_KEY in (message.provider_data or {})
+            return message.meta.fallback_model is not None
     return False
 
 
@@ -65,7 +65,7 @@ def _primary_request(request: ModelRequest) -> ModelRequest:
     """Return ``request`` for the primary model, making continuation portable when following a fallback turn.
 
     Keeps the primary's own ``native_compaction`` checkpoint intact: foreign Responses IDs and encrypted items are
-    already rejected per message via ``FALLBACK_MODEL_KEY``.
+    already rejected per message via ``meta.fallback_model``.
     """
     return replace(request, portable_replay=True) if _follows_fallback(request.messages) else request
 
@@ -244,12 +244,11 @@ async def fallback_stream(
                     usage.observe(event)
                     committed = committed or commits_attempt(event)
                     if is_fallback and isinstance(event, TurnCompleted):
-                        message = event.message
-                        message.provider_data = {
-                            **(message.provider_data or {}),
-                            REWRITTEN_ATTEMPT_KEY: True,
-                            FALLBACK_MODEL_KEY: member.name,
-                        }
+                        event.message.meta = replace(
+                            event.message.meta,
+                            attempt_rewritten=True,
+                            fallback_model=member.name,
+                        )
                     yield event
         except ProviderError as error:
             defer_transient = request.overrides.transient_retries == "caller" and error.retryable

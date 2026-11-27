@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import FALLBACK_MODEL_KEY
 from mindroom.native_compaction import checkpoint_items
 from mindroom.providers.openai.legacy_response_replay import legacy_tool_search_items
 
@@ -41,7 +40,7 @@ def assistant_replay_items(
     as recorded while canonical history still holds what it records; any other message is rebuilt, as is every
     message of a replay that sends no provider-encrypted state (``encrypted`` false).
     """
-    encrypted = encrypted and FALLBACK_MODEL_KEY not in (message.provider_data or {})
+    encrypted = encrypted and message.meta.fallback_model is None
     if encrypted and (checkpoint := checkpoint_items(message, native_route)):
         return checkpoint
     calls = _function_call_items(message)

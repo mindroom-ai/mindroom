@@ -268,6 +268,7 @@ class ResponsesAdapter:
             reasoning=parts.reasoning,
             tool_calls=parts.tool_calls,
             provider_data=parts.provider_data,
+            meta=parts.meta,
             usage=parts.usage,
             stop_reason=stop_reason,
             raw_stop_reason=(parts.incomplete_reason or parts.status if stop_reason in ABNORMAL_STOP_REASONS else None),

@@ -48,7 +48,7 @@ from mindroom.hooks import (
 )
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message, system_text
+from mindroom.llm.messages import Message, is_queued_notice_message, system_text
 from mindroom.llm.provider import (
     Capabilities,
     NativeCompactionReplay,
@@ -959,11 +959,7 @@ async def test_a_queued_message_is_announced_after_a_tool_batch(
 
 
 def _notice_markers(messages: Sequence[Message]) -> list[object]:
-    return [
-        (message.provider_data or {})[QUEUED_MESSAGE_NOTICE_MARKER_KEY]
-        for message in messages
-        if is_queued_notice_message(message)
-    ]
+    return [message.meta.queued_message_notice for message in messages if is_queued_notice_message(message)]
 
 
 @pytest.mark.asyncio
@@ -1066,12 +1062,14 @@ async def test_a_notice_an_earlier_release_stored_replays_as_it_is_stored(
     reply = _reply(tmp_path, monkeypatch, [answer("final answer")])
 
     def notice(marker: object, text: str) -> Message:
-        return Message(
-            role="user",
-            content=text,
-            provider_data={
-                QUEUED_MESSAGE_NOTICE_MARKER_KEY: marker,
-                "mindroom_queued_message_notice_response_turn_id": f"turn-{text}",
+        return Message.from_dict(
+            {
+                "role": "user",
+                "content": text,
+                "provider_data": {
+                    "mindroom_queued_message_notice": marker,
+                    "mindroom_queued_message_notice_response_turn_id": f"turn-{text}",
+                },
             },
         )
 

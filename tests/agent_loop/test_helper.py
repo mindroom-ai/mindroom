@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.agent_loop.structured import output_format_prompt
 from mindroom.llm.errors import QUOTA_EXHAUSTED, ProviderError, ProviderUnavailable
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message, ModelProvenance
+from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     Capabilities,
@@ -81,7 +81,7 @@ class _RecordingProvider(PlainRequestSizing):
         )
         if self.sums_attempts:
             # The retrying stage marks a finished turn whose usage adds up failed attempts.
-            message.provider_data = {AGGREGATE_USAGE_KEY: True}
+            message.meta = MessageMeta(aggregate_usage=True)
         stamp_model(message, self.identity)
         yield TurnCompleted(message=message, stop_reason="end")
 

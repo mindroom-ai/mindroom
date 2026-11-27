@@ -21,7 +21,7 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.messages import Message, ModelProvenance
 from mindroom.llm.provider import (
     ModelIdentity,
     ReasoningDelta,
@@ -562,7 +562,8 @@ def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelt
     assert timer.first_output_at == first_output_at
     assert message.metrics.time_to_first_token == first_output_at - timer.started
     assert 0 <= message.metrics.time_to_first_token <= message.metrics.duration <= time.monotonic() - timer.started
-    assert message.provider_data == model_provenance("m", "P")
+    assert message.provider_data is None
+    assert message.meta.model == ModelProvenance("m", "P")
 
 
 @pytest.mark.parametrize(

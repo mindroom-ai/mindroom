@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import request_layout
-from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
+from mindroom.llm.request_identity import request_prefixes
 from mindroom.model_usage import message_context_tokens
 from mindroom.native_compaction import native_replay
 
@@ -100,7 +100,7 @@ class RequestSizer:
         sends_audio = "audio" not in self.model.capabilities.omitted_media
         for index in range(len(request.messages) - 1, replay.boundary, -1):
             message = request.messages[index]
-            recorded = (message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
+            recorded = message.meta.request_identity
             if (
                 message.role != "assistant"
                 or recorded is None

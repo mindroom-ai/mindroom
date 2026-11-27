@@ -205,10 +205,10 @@ def _serialize_run_excerpt(
 def _compaction_replay_messages(run: AnyRunRecord, history_settings: ResolvedHistorySettings) -> list[Message]:
     """Return the run's messages a summary reads, windowed as replay windows them; the stored objects, not copies.
 
-    Turn context (``add_to_agent_memory=False``) replays but is not conversation, so a summary leaves it out. The
+    Turn context (``is_turn_context=True``) replays but is not conversation, so a summary leaves it out. The
     agent's own thread message, a tagged user message in a request, is the one copy: the assistant's words.
     """
-    messages = [message for message in replayable_messages([run]) if message.add_to_agent_memory]
+    messages = [message for message in replayable_messages([run]) if not message.is_turn_context]
     if history_settings.max_tool_calls_from_history is not None:
         messages = filter_tool_calls(messages, history_settings.max_tool_calls_from_history)
     return [spoken_message(message) for message in messages]

@@ -17,7 +17,7 @@ from mindroom.history.request_size import RequestSizer, request_sizer
 from mindroom.hooks import EVENT_COMPACTION_AFTER
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts, message_context_tokens
-from mindroom.native_compaction import ENCRYPTED_REPLAY_RESET_KEY, extract_native_checkpoint, native_replay
+from mindroom.native_compaction import extract_native_checkpoint, native_replay
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,9 +51,7 @@ def native_compaction_after_turn_hook(
         if not compaction_hooks_registered(EVENT_COMPACTION_AFTER):
             return
         try:
-            stripped = sent_request.strip_encrypted_replay or bool(
-                (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY),
-            )
+            stripped = sent_request.strip_encrypted_replay or bool(message.meta.encrypted_replay_reset)
             reset_scope = model.capabilities.replay_reset_scope
             effective_request = replace(sent_request, strip_encrypted_replay=True) if stripped else sent_request
             sizer = request_sizer(model, config, model_name)

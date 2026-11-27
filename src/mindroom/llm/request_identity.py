@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import is_queued_notice_message, media_items, stable_serialize
+from mindroom.llm.messages import EMPTY_META, is_queued_notice_message, media_items, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -23,12 +23,8 @@ if TYPE_CHECKING:
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest
 
-__all__ = ["CACHE_ROUTING_KEY", "REQUEST_IDENTITY_KEY", "cache_routing_digest", "message_digest", "request_prefixes"]
+__all__ = ["cache_routing_digest", "message_digest", "request_prefixes"]
 
-# ``Message.provider_data`` key holding the identity of the request an assistant message answered.
-REQUEST_IDENTITY_KEY = "mindroom_request"
-# ``Message.provider_data`` key holding the digest of cache-routing params (``prompt_cache_key``, ``session_id``).
-CACHE_ROUTING_KEY = "mindroom_cache_routing"
 # The message fields no route sends.
 _UNSENT_FIELDS = frozenset({"id", "created_at", "from_history", "metrics"})
 
@@ -72,7 +68,7 @@ def message_digest(message: Message, *, count_queued_notices: bool = False) -> b
     if is_queued_notice_message(message):
         if not count_queued_notices:
             return b""
-        message = replace(message, provider_data=None)
+        message = replace(message, provider_data=None, meta=EMPTY_META)
     without_media = replace(message, images=None, audio=None, videos=None, files=None)
     fields = {key: value for key, value in without_media.to_dict().items() if key not in _UNSENT_FIELDS}
     media: list[object] = []

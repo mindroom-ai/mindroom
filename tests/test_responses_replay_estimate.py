@@ -36,7 +36,7 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, stable_serialize
+from mindroom.llm.messages import EMPTY_META, Message, MessageMeta, ModelProvenance, stable_serialize
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.openai.replay_estimate import responses_replay_uses_visual_tokens
@@ -418,13 +418,11 @@ def _reasoned_answer(ciphertext: str, *, reasoning_tokens: int = 0, own_turn: bo
             "content": [{"type": "output_text", "text": "Ready", "annotations": []}],
         },
     ]
-    provider_data: dict[str, Any] = {"mindroom_response_output": output}
-    if own_turn:
-        provider_data[MODEL_PROVENANCE_KEY] = {"id": "gpt-6-astra", "provider": "openai"}
     answer = Message(
         role="assistant",
         content="Ready",
-        provider_data=provider_data,
+        provider_data={"mindroom_response_output": output},
+        meta=MessageMeta(model=ModelProvenance("gpt-6-astra", "openai")) if own_turn else EMPTY_META,
         metrics=MessageMetrics(tokens=TokenCounts(reasoning_tokens=reasoning_tokens)),
         from_history=not own_turn,
     )
@@ -532,14 +530,14 @@ def test_native_checkpoint_estimate_does_not_count_the_summary_it_replaced(tmp_p
     checkpoint = Message(
         role="assistant",
         content="",
-        provider_data={
-            "mindroom_native_compaction": {
+        meta=MessageMeta(
+            native_compaction={
                 "route": route,
                 "threshold": 100,
                 "checkpoint_prefix": True,
                 "items": [{"type": "compaction", "content": "provider checkpoint"}],
             },
-        },
+        ),
     )
     runs = [_completed_run("run-1", messages=[Message(role="user", content="question"), checkpoint])]
     adapter = responses_adapter(tmp_path, store=False)
