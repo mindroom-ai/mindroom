@@ -228,7 +228,7 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
         "google_drive": ("secondary_google_drive_read", {"action": "list"}),
         "google_docs": ("secondary_google_docs_get_document", {"document_id": "test"}),
         "google_sheets": ("secondary_google_sheets_read", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
-        "google_tasks": ("secondary_google_tasks_list_tasks", {}),
+        "google_tasks": ("secondary_google_tasks_read", {"action": "list_tasks"}),
     }[service]
     result = json.loads(toolkit_offers(tool, function_name).entrypoint(**args))
     assert result["oauth_connection_required"] is True

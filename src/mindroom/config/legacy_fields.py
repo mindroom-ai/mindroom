@@ -355,15 +355,16 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 3b native toolkits (gmail, google_calendar, github,
-#   google_drive, google_sheets, homeassistant, including prefixed secondary Google Workspace plugin copies),
-#   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
-#   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
-#   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
-#   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
-#   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
-#   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   google_drive, google_sheets, homeassistant), Wave 5 native toolkits (file_generation, visualization, unsplash),
+#   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
+#   zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify,
+#   reddit, google_maps, brandfetch, mem0, zep), skills, attachments, and Google Docs / Google Tasks (google_docs,
+#   google_tasks, including prefixed secondary Google Workspace plugin copies for all Google Workspace toolkits)
+#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657;
+#   google_docs/google_tasks: v2026.11.659); replacement: unreleased; consolidated into action-dispatched and
+#   risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
 #   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
@@ -520,12 +521,25 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "google_drive_move_file": "google_drive_write",
         "google_drive_trash_file": "google_drive_write",
     },
+    "google_docs": {
+        "google_docs_create_document": "google_docs_write",
+        "google_docs_insert_text": "google_docs_write",
+        "google_docs_replace_text": "google_docs_write",
+        "google_docs_batch_update": "google_docs_write",
+    },
     "google_sheets": {
         "read_sheet": "google_sheets_read",
         "create_sheet": "google_sheets_write",
         "update_sheet": "google_sheets_write",
         "batch_update_sheet": "google_sheets_write",
         "create_duplicate_sheet": "google_sheets_write",
+    },
+    "google_tasks": {
+        "google_tasks_list_task_lists": "google_tasks_read",
+        "google_tasks_list_tasks": "google_tasks_read",
+        "google_tasks_create_task": "google_tasks_write",
+        "google_tasks_update_task": "google_tasks_write",
+        "google_tasks_delete_task": "google_tasks_write",
     },
     "homeassistant": {
         "list_entities": "homeassistant_read",
