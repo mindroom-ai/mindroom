@@ -91,7 +91,7 @@ def test_resolved_from_state_event_parses_live_fallback_tombstone_and_ignores_ot
     "source",
     [
         pytest.param(_reply(content={"msgtype": mt, "body": "x", "m.relates_to": THREAD_REL}), id=mt)
-        for mt in ("m.text", "m.emote", "m.image", "m.audio", "m.video", "m.file")
+        for mt in ("m.text", "m.emote", "m.image", "m.audio", "m.video", "m.file", "m.location")
     ]
     + [
         pytest.param(_reply(event_type="m.sticker", content={"body": "cat", "m.relates_to": THREAD_REL}), id="sticker"),
@@ -307,6 +307,26 @@ def test_segmented_edit_and_resolved_in_turn_continuations_never_reopen() -> Non
     assert seg_edit is not None
     assert seg_edit.continuations
     for part in seg_edit.continuations:
+        assert part.get(RESOLVED_IN_TURN_KEY) is True
+        assert extract_auto_reopen_reply(_reply(sender=BOT, content=part), sender_is_managed=_is_managed) is None
+
+    # Plain long no-placeholder reply: segment 1 still reopens, while continuation segments 2..N never reopen.
+    plain_new = build_message_content(large_body, extra_content={"m.relates_to": THREAD_REL})
+    seg_plain = segment_matrix_content(
+        plain_new,
+        room_encrypted=False,
+        continuation_thread_id=ROOT,
+        continuation_reply_to_event_id="$cause",
+    )
+    assert seg_plain is not None
+    assert seg_plain.continuations
+    assert RESOLVED_IN_TURN_KEY not in seg_plain.first
+    assert extract_auto_reopen_reply(_reply(sender=BOT, content=seg_plain.first), sender_is_managed=_is_managed) == (
+        ROOT,
+        "$reply:localhost",
+        2_000,
+    )
+    for part in seg_plain.continuations:
         assert part.get(RESOLVED_IN_TURN_KEY) is True
         assert extract_auto_reopen_reply(_reply(sender=BOT, content=part), sender_is_managed=_is_managed) is None
 

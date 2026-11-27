@@ -1138,8 +1138,9 @@ async def reopen_resolved_thread_record(
     expected_record: ThreadTagRecord,
     requester_user_id: str | None = None,
 ) -> bool:
-    """Conditionally clear ``resolved`` via single-key state GETs (never ``room_get_state``).
+    """Conditionally clear ``resolved`` via single-key state GETs for tag reads (never ``room_get_state``).
 
+    Permission checks for Matrix room v12 creators may still read room state when power levels fall short.
     Returns ``True`` when ``resolved`` is cleared (or already absent), ``False`` when room state now holds a
     different ``resolved`` record that must be preserved.
     """

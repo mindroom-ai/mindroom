@@ -188,6 +188,26 @@ async def test_restore_shares_single_room_get_state_drains_buffered_replies_and_
 
 
 @pytest.mark.asyncio
+async def test_live_room_without_restore_reopens_immediately_from_live_resolved_state(tmp_path: Path) -> None:
+    """Rooms joined after startup without restore_room (e.g. personal rooms) still auto-reopen from live state."""
+    bot = _bot(ROOM, name="code")
+    _snooze, auto_reopen = _coordinators(tmp_path, {"code": bot})
+    assert ROOM not in auto_reopen._restored_rooms
+
+    auto_reopen.observe_state_event(ROOM, _resolved_event(root=ROOT, ts=1_000, event_id="$s-live"))
+    reopen_mock = AsyncMock(return_value=True)
+    with patch(_REOPEN_FN, new=reopen_mock):
+        auto_reopen.observe_timeline_event(ROOM, _reply_event(root=ROOT, ts=1_000, event_id="$r-old"))
+        await _drain_tasks(auto_reopen)
+        reopen_mock.assert_not_awaited()
+
+        auto_reopen.observe_timeline_event(ROOM, _reply_event(root=ROOT, ts=2_000, event_id="$r-new"))
+        await _drain_tasks(auto_reopen)
+    reopen_mock.assert_awaited_once()
+    assert ROOM not in auto_reopen._resolved
+
+
+@pytest.mark.asyncio
 async def test_fast_path_ordering_and_stale_multibot_state_echoes(tmp_path: Path) -> None:
     """Open threads do zero I/O, replies <= resolved_ts do not reopen, stale echoes do not overwrite newer state."""
     bot = _bot(ROOM, name="code")

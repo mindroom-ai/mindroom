@@ -148,10 +148,11 @@ class ThreadAutoReopenCoordinator:
         if reply is None:
             return
         thread_root_id, _event_id, origin_server_ts = reply
+        if thread_root_id in self._resolved.get(room_id, ()):
+            self._maybe_schedule_reopen(room_id, thread_root_id, origin_server_ts)
+            return
         if not restored:
             self._buffer_pending(room_id, thread_root_id, origin_server_ts)
-            return
-        self._maybe_schedule_reopen(room_id, thread_root_id, origin_server_ts)
 
     def _mark_live(self, room_id: str, thread_root_id: str) -> None:
         if (live_roots := self._live_during_restore.get(room_id)) is not None:

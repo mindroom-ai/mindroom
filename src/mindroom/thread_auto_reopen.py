@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 _TOOL_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
-_QUALIFYING_MESSAGE_TYPES = frozenset({"m.text", "m.emote", "m.image", "m.audio", "m.video", "m.file"})
+_QUALIFYING_MESSAGE_TYPES = frozenset({"m.text", "m.emote", "m.image", "m.audio", "m.video", "m.file", "m.location"})
 
 __all__ = [
     "ResolvedThread",
