@@ -708,6 +708,7 @@ def test_systemd_slice_probe_caches_by_bus_env_and_fails_open_on_invalid_or_reje
             "--description=MindRoom shell",
             "--expand-environment=no",
             "--slice=s.slice",
+            "--property=OOMPolicy=kill",
             "--",
         )
         expected = _SystemdSliceLauncher(
@@ -821,6 +822,49 @@ def test_systemd_user_manager_states_and_invalid_generations_fail_open(monkeypat
         _probe_systemd_slice_launcher.cache_clear()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux resource wrappers are Linux-only")
+def test_systemd_slice_probe_timeout_is_not_cached_while_nonzero_exit_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient probe timeouts fail open without caching None; non-zero exits stay cached per generation."""
+    probe_outcome: int | subprocess.TimeoutExpired = subprocess.TimeoutExpired(["/systemd-run"], timeout=5)
+
+    def probe_rc() -> int:
+        if isinstance(probe_outcome, subprocess.TimeoutExpired):
+            raise probe_outcome
+        return probe_outcome
+
+    _, probe_calls = _stub_systemd_tools(
+        monkeypatch,
+        lambda: (0, "UserspaceTimestampMonotonic=100\nSystemState=running\n"),
+        probe_rc,
+    )
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", "s.slice")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/42")
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    _probe_systemd_slice_launcher.cache_clear()
+    try:
+        assert _systemd_slice_launcher() is None
+        assert len(probe_calls) == 1
+        assert _probe_systemd_slice_launcher.cache_info().currsize == 0
+
+        probe_outcome = 0
+        launcher = _systemd_slice_launcher()
+        assert launcher is not None
+        assert _systemd_slice_launcher() == launcher
+        assert len(probe_calls) == 2
+
+        probe_calls.clear()
+        _probe_systemd_slice_launcher.cache_clear()
+        probe_outcome = 1
+        assert _systemd_slice_launcher() is None
+        assert _systemd_slice_launcher() is None
+        assert len(probe_calls) == 1
+        assert _probe_systemd_slice_launcher.cache_info().currsize == 1
+    finally:
+        _probe_systemd_slice_launcher.cache_clear()
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="SCHED_IDLE is Linux-only")
 @pytest.mark.asyncio
 async def test_idle_fallback_runs_when_chrt_is_absent_even_if_other_wrappers_prepend(
@@ -864,8 +908,11 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
     caller_env = {"PATH": os.environ["PATH"], "MINDROOM_TEST_VAR": "expanded"}
     script = (
         "import os, pathlib, sys; "
+        "cg = pathlib.Path('/proc/self/cgroup').read_text().strip(); "
+        "rel = next((line[3:] for line in cg.splitlines() if line.startswith('0::')), ''); "
+        "oom = pathlib.Path(f'/sys/fs/cgroup{rel}/memory.oom.group') if rel else None; "
         "print(sys.argv[1:], os.environ.get('XDG_RUNTIME_DIR'), os.environ.get('DBUS_SESSION_BUS_ADDRESS'), "
-        "pathlib.Path('/proc/self/cgroup').read_text().strip())"
+        "cg, f'oom={oom.read_text().strip()}' if oom and oom.exists() else 'oom=absent')"
     )
     argv = [sys.executable, "-c", script, "$$", "$MINDROOM_TEST_VAR", "${MINDROOM_TEST_VAR}"]
     result = await run_command(
@@ -881,6 +928,7 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
     assert result.handle is None
     assert result.message.startswith("['$$', '$MINDROOM_TEST_VAR', '${MINDROOM_TEST_VAR}'] None None ")
     assert "/app.slice/" in result.message
+    assert result.message.endswith((" oom=1", " oom=absent"))
     assert "XDG_RUNTIME_DIR" not in caller_env
 
     # Custom caller bus vars (pointing nowhere) must not break systemd-run and must reach the command verbatim.
@@ -901,6 +949,7 @@ async def test_systemd_slice_moves_command_and_preserves_dollar_args(
         f"['$$', '$MINDROOM_TEST_VAR', '${{MINDROOM_TEST_VAR}}'] {custom_xdg} {custom_dbus} ",
     )
     assert "/app.slice/" in custom_result.message
+    assert custom_result.message.endswith((" oom=1", " oom=absent"))
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="systemd slices are Linux-only")
