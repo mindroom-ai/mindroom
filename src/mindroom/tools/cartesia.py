@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import CARTESIA_TTS
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -45,34 +52,10 @@ if TYPE_CHECKING:
             required=False,
             default="78ab82d5-25be-4f7d-82b3-7ad64e5b85b2",
         ),
-        ConfigField(
-            name="enable_text_to_speech",
-            label="Enable Text To Speech",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_voices",
-            label="Enable List Voices",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_localize_voice",
-            label="Enable Localize Voice",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_text_to_speech", "Enable Text To Speech"),
+        bool_config_field("enable_list_voices", "Enable List Voices"),
+        bool_config_field("enable_localize_voice", "Enable Localize Voice", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["cartesia"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#cartesia",

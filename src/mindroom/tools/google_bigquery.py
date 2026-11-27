@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -64,34 +65,10 @@ if TYPE_CHECKING:
             description="Maximum rows returned by run_sql_query (1 to 1000)",
             validation={"min": 1, "max": 1000},
         ),
-        ConfigField(
-            name="list_tables",
-            label="List Tables",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="describe_table",
-            label="Describe Table",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="run_sql_query",
-            label="Run SQL Query",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("list_tables", "List Tables"),
+        bool_config_field("describe_table", "Describe Table"),
+        bool_config_field("run_sql_query", "Run SQL Query"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -17,8 +24,12 @@ from mindroom.tools.native_helpers import (
     require_non_blank_text,
     require_non_empty,
     resolve_toggle,
+    restrict_actions,
     safe_path_segment,
 )
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _WriteAction = Literal["create_page", "update_page"]
 _NOTION_API_VERSION = "2022-06-28"
@@ -45,16 +56,29 @@ class _NotionTools(Toolkit):
         self.client: Any = Client(auth=self.api_key)
 
         enable_all = resolve_toggle(all, default=False)
-        self._allow_create = resolve_toggle(enable_create_page, default=True, enable_all=enable_all)
-        self._allow_update = resolve_toggle(enable_update_page, default=True, enable_all=enable_all)
         self._allow_search = resolve_toggle(enable_search_pages, default=True, enable_all=enable_all)
+        self._write_actions: tuple[_WriteAction, ...] = tuple(
+            action
+            for action, value in (("create_page", enable_create_page), ("update_page", enable_update_page))
+            if resolve_toggle(value, default=True, enable_all=enable_all)
+        )
 
         tools: list[Any] = []
         if self._allow_search:
             tools.append(self.notion_search)
-        if self._allow_create or self._allow_update:
+        if self._write_actions:
             tools.append(self.notion_write)
         super().__init__(name="notion", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``notion_write`` schema and description to enabled actions."""
+        if function.name == "notion_write":
+            return restrict_actions(
+                function,
+                self._write_actions,
+                action_fields={"create_page": "title tag content", "update_page": "page_id content"},
+            )
+        return function
 
     def notion_search(self, tag: str) -> str:
         """Search Notion database pages matching a `Tag` select value."""
@@ -121,7 +145,7 @@ class _NotionTools(Toolkit):
         """
         try:
             if action == "create_page":
-                if not self._allow_create:
+                if "create_page" not in self._write_actions:
                     return error_json("Creating Notion pages is disabled.", success=False)
                 clean_title = require_non_empty(title, "title")
                 clean_tag = require_non_empty(tag, "tag")
@@ -153,7 +177,7 @@ class _NotionTools(Toolkit):
                     },
                 )
 
-            if not self._allow_update:
+            if "update_page" not in self._write_actions:
                 return error_json("Updating Notion pages is disabled.", success=False)
             safe_page = safe_path_segment(require_non_empty(page_id, "page_id"), "page_id")
             body_text = require_non_blank_text(content, "content")
@@ -201,34 +225,10 @@ class _NotionTools(Toolkit):
             placeholder="Notion database ID",
             description="ID of the Notion database to work with",
         ),
-        ConfigField(
-            name="enable_create_page",
-            label="Enable Create Page",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_update_page",
-            label="Enable Update Page",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_pages",
-            label="Enable Search Pages",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_create_page", "Enable Create Page"),
+        bool_config_field("enable_update_page", "Enable Update Page"),
+        bool_config_field("enable_search_pages", "Enable Search Pages"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["notion-client"],
     docs_url="https://docs.mindroom.chat/tools/project-management/#notion",

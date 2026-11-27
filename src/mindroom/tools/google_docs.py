@@ -5,12 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -31,28 +31,19 @@ if TYPE_CHECKING:
     icon="SiGoogledocs",
     icon_color="text-blue-600",
     config_fields=[
-        ConfigField(
-            name="create_document",
-            label="Create Documents",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "create_document",
+            "Create Documents",
             description="Allow creating Google Docs and adding initial text.",
         ),
-        ConfigField(
-            name="read_document",
-            label="Read Documents",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "read_document",
+            "Read Documents",
             description="Allow reading complete tab-aware document structure and content.",
         ),
-        ConfigField(
-            name="edit_document",
-            label="Edit Documents",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "edit_document",
+            "Edit Documents",
             description="Allow editing Google Docs: text insertion, text replacement, and batch updates.",
         ),
     ],

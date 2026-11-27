@@ -12,6 +12,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -65,34 +66,10 @@ if TYPE_CHECKING:
             required=False,
             default="troy",
         ),
-        ConfigField(
-            name="enable_transcribe_audio",
-            label="Enable Transcribe Audio",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_translate_audio",
-            label="Enable Translate Audio",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_generate_speech",
-            label="Enable Generate Speech",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_transcribe_audio", "Enable Transcribe Audio"),
+        bool_config_field("enable_translate_audio", "Enable Translate Audio"),
+        bool_config_field("enable_generate_speech", "Enable Generate Speech"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["groq"],

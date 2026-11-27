@@ -4003,7 +4003,7 @@
     "functions": [
       {
         "name": "openbb_get",
-        "description": "Fetch equity data from the configured OpenBB provider.\n\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).\n- `search_symbol`: search ticker symbols matching `company_name`.\n- `company_news`: recent news for `symbol` (up to `num_stories`).\n- `company_profile`: company overview for `symbol`.\n- `price_targets`: consensus price targets and recommendations for `symbol`.",
+        "description": "Fetch equity data from the configured OpenBB provider.\nActions:\n- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).\n- `search_symbol`: search ticker symbols matching `company_name`.\n- `company_news`: recent news for `symbol` (up to `num_stories`).\n- `company_profile`: company overview for `symbol`.\n- `price_targets`: consensus price targets and recommendations for `symbol`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6617,7 +6617,7 @@
     "functions": [
       {
         "name": "yfinance_get",
-        "description": "Fetch financial data for `symbol` from Yahoo Finance.\n\nActions:\n- `stock_price`: current/regular market stock price.\n- `company_info`: company profile and key metrics.\n- `fundamentals`: valuation and summary fundamentals.\n- `income_statements`: income statement table as JSON.\n- `financial_ratios`: full ticker info/ratios JSON.\n- `analyst_recommendations`: analyst recommendation history.\n- `company_news`: recent news items (capped by `num_stories`).\n- `technical_indicators`: OHLCV history for `period` (default `3mo`).\n- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
+        "description": "Fetch financial data for `symbol` from Yahoo Finance.\nActions:\n- `stock_price`: current/regular market stock price.\n- `company_info`: company profile and key metrics.\n- `fundamentals`: valuation and summary fundamentals.\n- `income_statements`: income statement table as JSON.\n- `financial_ratios`: full ticker info/ratios JSON.\n- `analyst_recommendations`: analyst recommendation history.\n- `company_news`: recent news items (capped by `num_stories`).\n- `technical_indicators`: OHLCV history for `period` (default `3mo`).\n- `historical_prices`: OHLCV history for `period` (default `1mo`) and `interval` (default `1d`).",
         "parameters": {
           "type": "object",
           "properties": {

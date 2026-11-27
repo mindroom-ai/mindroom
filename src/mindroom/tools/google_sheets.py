@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -47,28 +48,11 @@ if TYPE_CHECKING:
             placeholder="e.g., Sheet1!A1:Z100",
             description="Default range to use for operations (optional)",
         ),
-        ConfigField(
-            name="read",
-            label="Enable Read Operations",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow reading data from spreadsheets",
-        ),
-        ConfigField(
-            name="create",
-            label="Enable Create Operations",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Allow creating new spreadsheets",
-        ),
-        ConfigField(
-            name="update",
-            label="Enable Update Operations",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field("read", "Enable Read Operations", description="Allow reading data from spreadsheets"),
+        bool_config_field("create", "Enable Create Operations", description="Allow creating new spreadsheets"),
+        bool_config_field(
+            "update",
+            "Enable Update Operations",
             description="Allow updating and formatting existing spreadsheets",
         ),
     ],

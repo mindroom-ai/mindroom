@@ -8,7 +8,14 @@ from email.headerregistry import Address
 from email.message import EmailMessage
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 
@@ -92,20 +99,8 @@ class _EmailTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_email_user",
-            label="Enable Email User",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_email_user", "Enable Email User"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=[],  # Uses built-in smtplib
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#email",

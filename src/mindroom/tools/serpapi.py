@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -30,27 +37,9 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_search_google",
-            label="Enable Search Google",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_youtube",
-            label="Enable Search Youtube",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_search_google", "Enable Search Google"),
+        bool_config_field("enable_search_youtube", "Enable Search Youtube", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["google-search-results"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#serpapi",

@@ -18,6 +18,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.browser_proxy import (
@@ -29,23 +30,12 @@ from mindroom.worker_computer.browser_proxy import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import ModuleType
 
     from playwright.async_api import BrowserContext, Page
 
     from mindroom.constants import RuntimePaths
 
 logger = get_logger(__name__)
-
-
-def _require_crawl4ai() -> ModuleType:
-    """Import and return ``crawl4ai``, raising a helpful ImportError when absent."""
-    try:
-        import crawl4ai
-    except ImportError as exc:
-        msg = "`crawl4ai` not installed. Please install using `pip install crawl4ai`"
-        raise ImportError(msg) from exc
-    return crawl4ai
 
 
 class _Crawl4aiTools(Toolkit):
@@ -65,7 +55,6 @@ class _Crawl4aiTools(Toolkit):
         enable_crawl: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_crawl4ai()
         self._runtime_paths = runtime_paths
         self.max_length = max_length
         self.timeout = timeout
@@ -130,7 +119,8 @@ class _Crawl4aiTools(Toolkit):
 
     async def _async_crawl(self, url: str, search_query: str | None = None) -> str:
         """Crawl one validated URL with connect-time destination checks on every browser connection."""
-        crawl4ai_pkg = _require_crawl4ai()
+        import crawl4ai as crawl4ai_pkg
+
         destination_proxy: BrowserDestinationProxy | None = None
         try:
             # Page routes see neither WebSockets, service-worker fetches, nor the address Chromium resolves for
@@ -208,13 +198,7 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default=60,
         ),
-        ConfigField(
-            name="use_pruning",
-            label="Use Pruning",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("use_pruning", "Use Pruning", default=False),
         ConfigField(
             name="pruning_threshold",
             label="Pruning Threshold",
@@ -229,13 +213,7 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default=1.0,
         ),
-        ConfigField(
-            name="headless",
-            label="Headless",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("headless", "Headless"),
         ConfigField(
             name="wait_until",
             label="Wait Until",
@@ -243,20 +221,8 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default="domcontentloaded",
         ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_crawl", "Enable Crawl"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["crawl4ai"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#crawl4ai",
@@ -265,5 +231,4 @@ class _Crawl4aiTools(Toolkit):
 )
 def crawl4ai_tools() -> type[Toolkit]:
     """Return Crawl4AI tools for web crawling and scraping."""
-    _require_crawl4ai()
     return _Crawl4aiTools

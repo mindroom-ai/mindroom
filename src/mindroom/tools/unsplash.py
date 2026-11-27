@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -31,41 +38,11 @@ if TYPE_CHECKING:
             placeholder="Unsplash API access key",
             description="API access key from Unsplash Developer account",
         ),
-        ConfigField(
-            name="enable_search_photos",
-            label="Enable Search Photos",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_photo",
-            label="Enable Get Photo",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_random_photo",
-            label="Enable Get Random Photo",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_download_photo",
-            label="Enable Download Photo",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_search_photos", "Enable Search Photos"),
+        bool_config_field("enable_get_photo", "Enable Get Photo"),
+        bool_config_field("enable_get_random_photo", "Enable Get Random Photo"),
+        bool_config_field("enable_download_photo", "Enable Download Photo", default=False),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",

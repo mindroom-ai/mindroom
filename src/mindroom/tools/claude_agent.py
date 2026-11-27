@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -42,11 +49,9 @@ if TYPE_CHECKING:
             default=None,
             description="Optional bearer token for Anthropic-compatible gateways.",
         ),
-        ConfigField(
-            name="disable_experimental_betas",
-            label="Disable Experimental Betas",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "disable_experimental_betas",
+            "Disable Experimental Betas",
             default=False,
             description="Set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 for Anthropic-compatible gateway compatibility.",
         ),
@@ -60,11 +65,9 @@ if TYPE_CHECKING:
             default="default",
             description="default, acceptEdits, plan, or bypassPermissions",
         ),
-        ConfigField(
-            name="continue_conversation",
-            label="Continue Conversation",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "continue_conversation",
+            "Continue Conversation",
             default=False,
             description="Continue the same Claude conversation context across queries in a session.",
         ),

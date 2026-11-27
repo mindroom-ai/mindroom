@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import REPLICATE_VIDEO
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -38,20 +45,8 @@ if TYPE_CHECKING:
             required=False,
             default=REPLICATE_VIDEO,
         ),
-        ConfigField(
-            name="enable_generate_media",
-            label="Enable Generate Media",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_generate_media", "Enable Generate Media"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["replicate"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#replicate",

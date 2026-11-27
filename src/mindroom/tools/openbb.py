@@ -7,21 +7,27 @@ import importlib.util
 import json
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
-    narrow_action_enum,
     require_enabled_action,
     require_non_empty,
     resolve_bool_toggle,
+    restrict_actions,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +37,13 @@ logger = get_logger(__name__)
 
 _OpenBBProvider = Literal["benzinga", "fmp", "intrinio", "polygon", "tiingo", "tmx", "yfinance"]
 _OpenBBAction = Literal["stock_price", "search_symbol", "company_news", "company_profile", "price_targets"]
+_OPENBB_ACTION_FIELDS: dict[str, str] = {
+    "stock_price": "symbol",
+    "search_symbol": "company_name",
+    "company_news": "symbol num_stories",
+    "company_profile": "symbol",
+    "price_targets": "symbol",
+}
 
 
 def _build_isolated_openbb_app(obb: Any) -> Any:  # noqa: ANN401 - OpenBB app object
@@ -115,27 +128,7 @@ class _OpenBBTools(Toolkit):
         """Restrict ``openbb_get`` schema and description to enabled actions."""
         if function.name != "openbb_get":
             return function
-        narrowed = narrow_action_enum(function, self._enabled_actions)
-        enabled = set(self._enabled_actions)
-        unused_params = set()
-        if not (enabled - {"search_symbol"}):
-            unused_params.add("symbol")
-        if "search_symbol" not in enabled:
-            unused_params.add("company_name")
-        if "company_news" not in enabled:
-            unused_params.add("num_stories")
-        props = {k: v for k, v in narrowed.parameters["properties"].items() if k not in unused_params}
-        action_docs = {
-            "stock_price": "- `stock_price`: quotes for `symbol` (comma-separated allowed, e.g. `AAPL,MSFT`).",
-            "search_symbol": "- `search_symbol`: search ticker symbols matching `company_name`.",
-            "company_news": "- `company_news`: recent news for `symbol` (up to `num_stories`).",
-            "company_profile": "- `company_profile`: company overview for `symbol`.",
-            "price_targets": "- `price_targets`: consensus price targets and recommendations for `symbol`.",
-        }
-        desc = "Fetch equity data from the configured OpenBB provider.\n\nActions:\n" + "\n".join(
-            action_docs[a] for a in self._enabled_actions if a in action_docs
-        )
-        return replace(narrowed, description=desc, parameters={**narrowed.parameters, "properties": props})
+        return restrict_actions(function, self._enabled_actions, action_fields=_OPENBB_ACTION_FIELDS)
 
     @property
     def obb(self) -> Any:  # noqa: ANN401 - OpenBB app object
@@ -286,48 +279,12 @@ class _OpenBBTools(Toolkit):
             default="yfinance",
             description="Data provider: yfinance, benzinga, fmp, intrinio, polygon, tiingo, or tmx",
         ),
-        ConfigField(
-            name="enable_get_stock_price",
-            label="Enable Get Stock Price",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_company_symbol",
-            label="Enable Search Company Symbol",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_company_news",
-            label="Enable Get Company News",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_company_profile",
-            label="Enable Get Company Profile",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_price_targets",
-            label="Enable Get Price Targets",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_get_stock_price", "Enable Get Stock Price"),
+        bool_config_field("enable_search_company_symbol", "Enable Search Company Symbol", default=False),
+        bool_config_field("enable_get_company_news", "Enable Get Company News", default=False),
+        bool_config_field("enable_get_company_profile", "Enable Get Company Profile", default=False),
+        bool_config_field("enable_get_price_targets", "Enable Get Price Targets", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["openbb", "polars", "pyarrow"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#openbb",

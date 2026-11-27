@@ -42,6 +42,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.output_files import (
     ToolOutputFileHandled,
@@ -309,20 +310,8 @@ def _shell_subprocess_args(args: list[str], env: dict[str, str]) -> list[str]:
             default=None,
             authored_override=False,
         ),
-        ConfigField(
-            name="enable_run_shell_command",
-            label="Enable Run Shell Command",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_run_shell_command", "Enable Run Shell Command"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="extra_env_passthrough",
             label="Extra Env Passthrough",

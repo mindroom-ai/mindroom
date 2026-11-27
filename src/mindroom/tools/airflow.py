@@ -16,6 +16,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import UNSET, UnsetType, resolve_toggle
@@ -98,27 +99,9 @@ class _AirflowTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_save_dag_file",
-            label="Enable Save Dag File",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_read_dag_file",
-            label="Enable Read Dag File",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_save_dag_file", "Enable Save Dag File"),
+        bool_config_field("enable_read_dag_file", "Enable Read Dag File"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=[],

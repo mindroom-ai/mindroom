@@ -9,7 +9,14 @@ from pydantic import BaseModel, Field, HttpUrl
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -167,34 +174,10 @@ class _JinaReaderTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="search_query_content",
-            label="Search Query Content",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_read_url",
-            label="Enable Read URL",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_query",
-            label="Enable Search Query",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("search_query_content", "Search Query Content"),
+        bool_config_field("enable_read_url", "Enable Read URL"),
+        bool_config_field("enable_search_query", "Enable Search Query", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["httpx", "pydantic"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#jina",

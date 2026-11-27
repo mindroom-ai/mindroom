@@ -12,6 +12,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -38,13 +39,7 @@ if TYPE_CHECKING:
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="vertexai",
-            label="Vertexai",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("vertexai", "Vertexai", default=False),
         ConfigField(
             name="project_id",
             env=("GOOGLE_CLOUD_PROJECT",),
@@ -75,27 +70,9 @@ if TYPE_CHECKING:
             required=False,
             default=GOOGLE_VEO,
         ),
-        ConfigField(
-            name="enable_generate_image",
-            label="Enable Generate Image",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_generate_video",
-            label="Enable Generate Video",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_generate_image", "Enable Generate Image"),
+        bool_config_field("enable_generate_video", "Enable Generate Video"),
+        bool_config_field("all", "All", default=False),
     ],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["google-genai"],

@@ -15,11 +15,11 @@ from mindroom.custom_tools.google_service import (
     GoogleApiToolkit,
     filter_google_tools,
     matches_google_function,
-    restrict_google_actions,
     visible_google_function_map,
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tools.native_helpers import UNSET, restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -51,24 +51,6 @@ _WriteAction = Literal[
     "move_event",
     "respond_to_event",
 ]
-_ALL_READ_ACTIONS: tuple[str, ...] = (
-    "list_events",
-    "get_event",
-    "fetch_all_events",
-    "search_events",
-    "get_event_attendees",
-    "list_calendars",
-    "check_availability",
-    "find_available_slots",
-)
-_ALL_WRITE_ACTIONS: tuple[str, ...] = (
-    "create_event",
-    "update_event",
-    "delete_event",
-    "quick_add_event",
-    "move_event",
-    "respond_to_event",
-)
 _READ_ACTION_FIELDS: dict[str, str] = {
     "list_events": "limit start_date end_date page_token",
     "get_event": "event_id",
@@ -87,7 +69,6 @@ _WRITE_ACTION_FIELDS: dict[str, str] = {
     "move_event": "event_id destination_calendar_id notify_attendees",
     "respond_to_event": "event_id response",
 }
-_UNSET = object()
 _VALID_RESPONSES = frozenset({"accepted", "declined", "tentative"})
 _CALENDAR_WRITE_SCOPES = frozenset(
     {
@@ -319,12 +300,12 @@ class GoogleCalendarTools(GoogleApiToolkit):
         check_availability: bool | None = True,
         get_event_attendees: bool | None = True,
         search_events: bool | None = True,
-        create_event: object = _UNSET,
-        update_event: object = _UNSET,
-        delete_event: object = _UNSET,
-        quick_add_event: object = _UNSET,
-        move_event: object = _UNSET,
-        respond_to_event: object = _UNSET,
+        create_event: object = UNSET,
+        update_event: object = UNSET,
+        delete_event: object = UNSET,
+        quick_add_event: object = UNSET,
+        move_event: object = UNSET,
+        respond_to_event: object = UNSET,
         include_tools: Sequence[str] | None = None,
         exclude_tools: Sequence[str] | None = None,
         instructions: str | None = None,
@@ -358,7 +339,7 @@ class GoogleCalendarTools(GoogleApiToolkit):
             (respond_to_event, "respond_to_event"),
         )
         self._write_actions: tuple[str, ...] = tuple(
-            action for flag, action in write_toggles if writes_allowed and (flag is _UNSET or bool(flag))
+            action for flag, action in write_toggles if writes_allowed and (flag is UNSET or bool(flag))
         )
 
         tools: list[Callable[..., str]] = []
@@ -396,14 +377,10 @@ class GoogleCalendarTools(GoogleApiToolkit):
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Restrict calendar action enums and parameters to enabled actions."""
-        if matches_google_function(function.name, "google_calendar_read") and len(self._read_actions) < len(
-            _ALL_READ_ACTIONS,
-        ):
-            return restrict_google_actions(function, self._read_actions, _READ_ACTION_FIELDS)
-        if matches_google_function(function.name, "google_calendar_write") and len(self._write_actions) < len(
-            _ALL_WRITE_ACTIONS,
-        ):
-            return restrict_google_actions(function, self._write_actions, _WRITE_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_calendar_read"):
+            return restrict_actions(function, self._read_actions, action_fields=_READ_ACTION_FIELDS)
+        if matches_google_function(function.name, "google_calendar_write"):
+            return restrict_actions(function, self._write_actions, action_fields=_WRITE_ACTION_FIELDS)
         return function
 
     @property

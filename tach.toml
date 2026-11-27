@@ -8047,6 +8047,7 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "bool_config_field",
     "is_matrix_room_runtime_function",
     "unconfined_by_file_access",
 ]

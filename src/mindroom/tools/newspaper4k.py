@@ -11,12 +11,18 @@ from typing import TYPE_CHECKING, Any
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import fetch_public_url_sync
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import ModuleType
 
 logger = get_logger(__name__)
 
@@ -27,16 +33,6 @@ _DECLARED_CHARSET_PREFIX_BYTES = 1024
 _META_CHARSET_RE = re.compile(r'<meta.*?charset=["\']*(.+?)["\'>]', flags=re.IGNORECASE)
 _META_PRAGMA_RE = re.compile(r'<meta.*?content=["\']*;?charset=(.+?)["\'>]', flags=re.IGNORECASE)
 _XML_ENCODING_RE = re.compile(r'^<\?xml.*?encoding=["\']*(.+?)["\'>]')
-
-
-def _require_newspaper() -> ModuleType:
-    """Import and return ``newspaper``, raising a helpful ImportError when absent."""
-    try:
-        import newspaper
-    except ImportError as exc:
-        msg = "`newspaper4k` not installed. Please run `pip install newspaper4k lxml_html_clean`."
-        raise ImportError(msg) from exc
-    return newspaper
 
 
 def _declared_charsets(prefix: str) -> list[str]:
@@ -72,7 +68,8 @@ def _text_only_article_cls(article_cls: type[Any]) -> type[Any]:
 
 def _guarded_article(url: str) -> Any:  # noqa: ANN401 - optional newspaper.Article instance
     """Download and parse one article through the shared SSRF guard, skipping image downloads."""
-    newspaper = _require_newspaper()
+    import newspaper
+
     page = fetch_public_url_sync(url, max_bytes=_MAX_PAGE_BYTES, user_agent=f"newspaper/{newspaper.__version__}")
     article = _text_only_article_cls(newspaper.Article)(url)
     article.download(input_html=_decode_page(page.content, page.content_type))
@@ -89,7 +86,8 @@ class _Newspaper4kTools(Toolkit):
         enable_read_article: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_newspaper()
+        import newspaper  # noqa: F401 - warm optional import at toolkit init
+
         self.article_length = article_length
 
         tools: list[Callable[..., Any]] = []
@@ -171,20 +169,8 @@ class _Newspaper4kTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_read_article",
-            label="Enable Read Article",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_read_article", "Enable Read Article"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["newspaper4k", "lxml_html_clean"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#newspaper",
@@ -192,5 +178,4 @@ class _Newspaper4kTools(Toolkit):
 )
 def newspaper4k_tools() -> type[Toolkit]:
     """Return Newspaper4k tools whose downloads follow the server-fetch policy."""
-    _require_newspaper()
     return _Newspaper4kTools

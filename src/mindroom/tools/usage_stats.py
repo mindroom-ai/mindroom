@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system.declarations import (
-    ConfigField,
     SetupType,
     ToolCategory,
     ToolExecutionTarget,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -36,13 +36,7 @@ if TYPE_CHECKING:
     function_names=("get_my_usage", "get_my_private_usage", "get_all_usage"),
     managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     agent_override_fields=[
-        ConfigField(
-            name="admin_scope",
-            label="Enable Admin Scope",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("admin_scope", "Enable Admin Scope", default=False),
     ],
 )
 def usage_stats_tools() -> type[UsageStatsTools]:
