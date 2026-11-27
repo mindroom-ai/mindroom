@@ -50,11 +50,8 @@ if TYPE_CHECKING:
     ],
     dependencies=["youtube_transcript_api"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#youtube",
-    function_names=(
-        "get_video_timestamps",
-        "get_youtube_video_captions",
-        "get_youtube_video_data",
-    ),
+    function_names=("youtube_video",),
+    action_scoped_grants=("youtube_video",),
 )
 def youtube_tools() -> type[YouTubeTools]:
     """Return YouTube tools for video data extraction."""

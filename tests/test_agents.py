@@ -4227,7 +4227,7 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[
-                    ApprovalRuleConfig(match="add", action="require_approval"),
+                    ApprovalRuleConfig(match="calculate", action="require_approval"),
                     ApprovalRuleConfig(match="run_shell_command", action="require_approval"),
                 ],
             ),
@@ -4240,7 +4240,7 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
 
     functions = _offered(build)
     expected = ToolGate.JOB if asks_as_job else ToolGate.POLICY
-    assert functions["add"].gate is expected
+    assert functions["calculate"].gate is expected
     assert functions["run_shell_command"].gate is expected
 
 

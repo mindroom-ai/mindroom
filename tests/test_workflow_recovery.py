@@ -105,7 +105,7 @@ def barrier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 async def _started(stack: WorkflowStack, **arguments: object) -> dict[str, str]:
     """Start a run as its job and return the handle, once its first attempt runs."""
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT, **arguments))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT, **arguments))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     return handle
@@ -332,7 +332,7 @@ async def test_crash_between_admission_and_launch_launches_once(
 ) -> None:
     """The job was admitted and no attempt started: the intent stays, and the job's continuation launches it once."""
     monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).job_id == handle["job_id"])
 
@@ -354,7 +354,7 @@ async def test_first_attempt_that_a_continued_job_cannot_start_fails_the_run_wit
 ) -> None:
     """A first attempt is the start the owner asked for, so its refusal is told, as before the restart."""
     monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     stack.run_id = handle["run_id"]
     await stack.restart(kill=True)
     stack.scripts.refuse_launch = RuntimeError("No worker is free.")
@@ -373,7 +373,7 @@ async def test_first_attempt_of_a_continued_job_waits_for_a_script_runtime_that_
 ) -> None:
     """The job coordinator may continue a job before the script runtime takes launches: the job tries until it does."""
     monkeypatch.setattr(stack.engine, "launch", lambda *_args, **_options: asyncio.Event().wait())
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     stack.run_id = handle["run_id"]
     await stack.restart(kill=True)
     stack.scripts.refuse_launch = ScriptRuntimeNotReadyError("Background script runtime reconciliation is in progress.")
@@ -402,7 +402,7 @@ async def test_resume_that_waits_for_a_starting_script_runtime_counts_as_no_idle
     await _ended_job(stack, first["job_id"])
     stack.scripts.refuse_launch = ScriptRuntimeNotReadyError("Background script runtime reconciliation is in progress.")
 
-    handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+    handle = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
     await stack.until(lambda: stack.scripts.refused >= 2)
     assert await stack.maintain() == []
     waiting = stack.store.get_run(stack.run_id)
@@ -433,7 +433,7 @@ async def test_first_attempt_of_a_call_that_waits_itself_fails_on_a_starting_scr
 async def test_crash_between_launch_and_naming_the_attempt_retires_it_and_launches_once(stack: WorkflowStack) -> None:
     """A process the run never named is retired like any inherited attempt, and the run gets one that it names."""
     stack.scripts.hold_launch = asyncio.Event()
-    handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+    handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: len(stack.scripts.launched) == 1)
     unnamed = stack.scripts.launched[0].run_id
@@ -476,7 +476,7 @@ async def test_run_with_no_job_is_replayed_under_its_owner_and_keeps_its_report(
 
     assert (await stack.submit("@0", "tool", _A)).cached
     await stack.finish_attempt(result="the report")
-    status = json.loads(await stack.call("get_workflow", run_id=stack.run_id))
+    status = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id))
     assert (status["status"], status["attempt"], status["result"]) == ("completed", 2, "the report")
     assert stack.counting_tool.lines == ["a"]
 
@@ -523,7 +523,7 @@ async def test_graceful_stop_while_the_first_attempt_starts_leaves_the_run_to_th
     """A shutdown in the middle of a launch ends no admitted run: the next primary starts it, once."""
     stack.scripts.hold_launch = asyncio.Event()
     if managed:
-        handle = json.loads(await stack.call("start_workflow", source=SCRIPT))
+        handle = json.loads(await stack.call("workflow", action="start", source=SCRIPT))
         stack.run_id = handle["run_id"]
     else:
         launching = asyncio.create_task(stack.start(SCRIPT))
@@ -673,7 +673,8 @@ async def test_automatic_resume_stops_after_five_idle_attempts(stack: WorkflowSt
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.attempt) == (WorkflowRunState.INTERRUPTED, 8)
     assert (
-        run.error == "Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow."
+        run.error
+        == 'Stopped resuming after 5 attempts that finished nothing. Fix the script and call workflow(action="resume", run_id=...).'
     )
 
 
@@ -780,7 +781,7 @@ async def test_attempt_at_its_process_limit_is_resumed_only_while_working_time_i
         left,
     )
     # A run with no time left gets no process that would be stopped at once.
-    out_of_time = "The run used its 72 hours of working time. resume_workflow continues it."
+    out_of_time = 'The run used its 72 hours of working time. workflow(action="resume", run_id=...) continues it.'
     assert (run.attempt, run.error, len(stack.scripts.launched)) == ((2, None, 2) if resumed else (1, out_of_time, 1))
 
 
@@ -835,7 +836,7 @@ async def _resumed_by_a_person(stack: WorkflowStack, **arguments: object) -> Non
     await stack.finish_attempt(result="the report")
     await _ended_job(stack, str(stack.store.get_run(stack.run_id).job_id))
     attempt = stack.store.get_run(stack.run_id).attempt
-    await stack.call("resume_workflow", run_id=stack.run_id, **arguments)
+    await stack.call("workflow", action="resume", run_id=stack.run_id, **arguments)
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == attempt + 1)
 
 
@@ -1017,7 +1018,7 @@ async def test_run_whose_job_ended_without_a_stop_is_replayed_under_its_owner(st
     assert await stack.recover() == [stack.run_id]
 
     await stack.finish_attempt(result="the report")
-    status = json.loads(await stack.call("get_workflow", run_id=stack.run_id))
+    status = json.loads(await stack.call("workflow", action="get", run_id=stack.run_id))
     assert (status["status"], status["attempt"], status["result"]) == ("completed", 2, "the report")
     assert (await _ended_job(stack, handle["job_id"])).status == "interrupted"
 
@@ -1167,7 +1168,7 @@ async def test_pass_that_began_before_a_resume_was_admitted_leaves_the_resumed_r
     await stack.until(scanning.is_set)
     stack.scripts.hold_launch = asyncio.Event()
     try:
-        handle = json.loads(await stack.call("resume_workflow", run_id=first["run_id"]))
+        handle = json.loads(await stack.call("workflow", action="resume", run_id=first["run_id"]))
         await stack.until(lambda: len(stack.scripts.launched) == 2)
     finally:
         scanned.set()
@@ -1661,7 +1662,9 @@ async def test_resume_that_was_admitted_and_killed_before_it_took_the_run_takes_
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
-    resumed = json.loads(await stack.call("resume_workflow", run_id=stack.run_id, source=edited, rerun=["n1"]))
+    resumed = json.loads(
+        await stack.call("workflow", action="resume", run_id=stack.run_id, source=edited, rerun=["n1"]),
+    )
 
     await stack.restart(kill=True)
     assert await stack.recover() == []
@@ -1692,7 +1695,7 @@ async def test_accepted_resume_waits_for_the_owners_access_instead_of_failing_it
     await stack.finish_attempt(result="the first report")
     await _ended_job(stack, first["job_id"])
     monkeypatch.setattr(stack.engine, "reopen", lambda *_args, **_options: asyncio.Event().wait())
-    resumed = json.loads(await stack.call("resume_workflow", run_id=stack.run_id, rerun=["n1"]))
+    resumed = json.loads(await stack.call("workflow", action="resume", run_id=stack.run_id, rerun=["n1"]))
     await stack.restart(kill=True)
     stack.access = "pending"
 

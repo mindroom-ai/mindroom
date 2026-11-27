@@ -52,6 +52,20 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 # hook source, or its tool ceiling when launching a plain script), and a script has none.
 _WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "script", "slack"})
 
+_SCRIPT_CHECK_RESTRICTED_TOOLKITS = _SCRIPT_RESTRICTED_TOOLKITS | frozenset(
+    {
+        "browser_mcp",
+        "callback_manager",
+        "config_manager",
+        "desktop",
+        "oauth_connections",
+        "scheduler",
+        "shared_directories",
+        "terminal",
+        "triggers",
+    },
+)
+
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
@@ -83,6 +97,7 @@ def resolve_current_script_tool(
     grant: ScriptToolGrant,
     *,
     workflow: bool = False,
+    script_check: bool = False,
     rejected_toolkit_cleanup: Callable[[Toolkit], None] | None = None,
 ) -> CurrentScriptTool | None:
     """Build one requested live toolkit only when its granted function remains visible, adapting that function alone."""
@@ -92,7 +107,7 @@ def resolve_current_script_tool(
     tool_entry = next(
         (
             entry
-            for entry in _visible_script_tool_entries(context, config, workflow=workflow)
+            for entry in _visible_script_tool_entries(context, config, workflow=workflow, script_check=script_check)
             if entry.name == grant.toolkit_name
         ),
         None,
@@ -122,17 +137,27 @@ def _visible_script_tool_entries(
     config: Config,
     *,
     workflow: bool = False,
+    script_check: bool = False,
 ) -> tuple[EffectiveToolConfig, ...]:
+    if workflow and script_check:
+        msg = "Cannot resolve script tools as both workflow and script_check."
+        raise ValueError(msg)
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
     # The registry the call's tool hooks come from, so its toolkits and hooks share one generation.
     tools = context.plugins.tools
-    restricted = _WORKFLOW_RESTRICTED_TOOLKITS if workflow else _SCRIPT_RESTRICTED_TOOLKITS
+    if script_check:
+        restricted = _SCRIPT_CHECK_RESTRICTED_TOOLKITS
+        allowed = config.external_trigger_policy.script_check_allowed_tools
+        allowed_set = None if allowed is None else frozenset(allowed)
+    else:
+        restricted = _WORKFLOW_RESTRICTED_TOOLKITS if workflow else _SCRIPT_RESTRICTED_TOOLKITS
+        allowed_set = None
     return tuple(
         entry
         for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
-        if entry.name in tools and entry.name not in restricted
+        if entry.name in tools and entry.name not in restricted and (allowed_set is None or entry.name in allowed_set)
     )
 
 

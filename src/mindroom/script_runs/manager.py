@@ -21,6 +21,7 @@ from mindroom.config.tool_aliases import TOOL_ALIASES
 from mindroom.constants import subprocess_path_with_prepends
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
+from mindroom.origins import configured_public_url
 from mindroom.path_confinement import (
     open_directory_within_root,
     read_regular_file_within_root,
@@ -35,6 +36,7 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
     script_worker_key_belongs_to_run,
     script_worker_key_for_run,
+    validated_script_run_id,
 )
 from mindroom.script_runs.policy import resolve_script_launch_grants, resolve_script_launch_toolkit_names
 from mindroom.script_runs.reasons import (
@@ -96,6 +98,8 @@ __all__ = [
     "ScriptRuntimeNotReadyError",
     "script_execution_uses_worker",
     "script_gateway_isolated",
+    "unsupported_private_script_worker_scope_message",
+    "unsupported_script_worker_backend_message",
     "workflow_placement",
 ]
 
@@ -108,6 +112,17 @@ _WORKFLOW_ATTEMPT_SECONDS = 30 * 24 * 3600
 _WORKFLOW_PLACEMENT_REFUSAL = (
     "Workflows run code. Route this agent to a worker, "
     "or set defaults.allow_shell_without_worker: true to run it on this machine."
+)
+_STATIC_RUNNER_SCRIPT_ERROR = (
+    "Background scripts cannot use the shared static sandbox runner; configure explicit "
+    "unsafe-local mode or a dedicated Docker or isolated Kubernetes worker backend."
+)
+_KUBERNETES_GATEWAY_SCRIPT_ERROR = (
+    "Kubernetes background scripts require a gateway-only listener; "
+    "use Docker or explicit unsafe-local mode until that boundary is configured."
+)
+_MISSING_SCRIPT_GATEWAY_URL_ERROR = (
+    "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
 )
 
 
@@ -159,12 +174,17 @@ def script_execution_uses_worker(
 def workflow_placement(config: Config, runtime_paths: RuntimePaths) -> str:
     """Return where a workflow attempt runs, `worker` or `local`, or the sentence that refuses it.
 
+    Returns `"worker"`, `"local"`, or a refusal message string explaining why placement is unavailable.
     A configured dedicated backend or sandbox proxy always wins, so a backend that is down fails the launch
     instead of moving the script to the host.
     """
+    try:
+        dedicated_backend = worker_backend_kind(runtime_paths).dedicated
+    except WorkerBackendError as exc:
+        return str(exc)
     if script_execution_uses_worker(
         runtime_paths,
-        worker_backend_configured=worker_backend_kind(runtime_paths).dedicated,
+        worker_backend_configured=dedicated_backend,
     ):
         return "worker"
     local_allowed = (
@@ -354,14 +374,23 @@ class ScriptRunManager:
         resource_profile: ScriptResourceProfileName | None = None,
         limits: ScriptRunLimits | None = None,
         workflow_run_id: str | None = None,
+        run_id: str | None = None,
+        script_check_rule_uid: str | None = None,
+        max_runtime_seconds: int | None = None,
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope.
 
-        With *workflow_run_id* the run is one attempt of that workflow run: the shim hands the source to the workflow
-        SDK, and placement, the grant surface and the runtime limit follow the workflow rules.
+        With *workflow_run_id* or *script_check_rule_uid*, placement follows workflow_placement, launch grants stay
+        empty (live tools are checked per call), and the run is hidden from plain-script listings and limits.
         """
-        workflow = workflow_run_id is not None
-        effective_limits = limits or ScriptRunLimits()
+        resolved_run_id, resolved_max_runtime = _validate_run_options(
+            workflow_run_id=workflow_run_id,
+            script_check_rule_uid=script_check_rule_uid,
+            run_id=run_id,
+            max_runtime_seconds=max_runtime_seconds,
+            effective_limits=(effective_limits := limits or ScriptRunLimits()),
+        )
+        managed_run = workflow_run_id is not None or script_check_rule_uid is not None
         source_bytes = await self.resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = context.execution_identity
@@ -373,24 +402,22 @@ class ScriptRunManager:
             runtime_paths=context.runtime_paths,
         )
         execution_mode = sandbox_proxy_config(context.runtime_paths).execution_mode
-        run_id = f"script-{uuid.uuid4().hex}"
         worker_spec: WorkerSpec | None
-        if self._launches_on_worker(context, workflow=workflow):
+        if self._launches_on_worker(context, workflow=managed_run):
             _require_supported_private_script_worker_scope(context)
             if not self.gateway_url:
-                msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
-                raise ScriptRunManagerError(msg)
+                raise ScriptRunManagerError(_MISSING_SCRIPT_GATEWAY_URL_ERROR)
             _require_script_launch_backend(self.worker_backend, context.runtime_paths)
             if worker_target.worker_key is None:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
             worker_spec = WorkerSpec(
-                worker_key=script_worker_key_for_run(worker_target.worker_key, run_id),
+                worker_key=script_worker_key_for_run(worker_target.worker_key, resolved_run_id),
                 private_agent_names=worker_target.private_agent_names,
                 mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
             )
-        elif workflow or execution_mode in _LOCAL_EXECUTION_MODES:
+        elif managed_run or execution_mode in _LOCAL_EXECUTION_MODES:
             if resource_profile is not None:
                 msg = "Resource profiles require a worker backend that advertises enforceable profiles."
                 raise ScriptRunManagerError(msg)
@@ -402,11 +429,11 @@ class ScriptRunManager:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        # A workflow attempt keeps no list: each of its calls is resolved from its owner's tools when it is made.
-        launch_grants = () if workflow else await self._resolve_launch_grants(context, effective_limits)
+        # Workflow attempts and script_check ticks resolve live tools per call instead of capturing launch grants.
+        launch_grants = () if managed_run else await self._resolve_launch_grants(context, effective_limits)
         token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
-            run_id=run_id,
+            run_id=resolved_run_id,
             agent_name=context.agent_name,
             owner_user_id=context.requester_id,
             room_id=context.room_id,
@@ -415,16 +442,15 @@ class ScriptRunManager:
             source_digest=source_digest,
             grants=launch_grants,
             token_hash=token_hash,
-            preapprove_launch_grants=effective_limits.allowed_tools is not None,
+            preapprove_launch_grants=(not managed_run) and effective_limits.allowed_tools is not None,
             worker_key=None if worker_spec is None else worker_spec.worker_key,
             worker_backend_locator=None,
             workflow_run_id=workflow_run_id,
+            script_check_rule_uid=script_check_rule_uid,
             name=_validated_name(name),
             local_unsafe=worker_spec is None,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
-            max_runtime_seconds=(
-                _WORKFLOW_ATTEMPT_SECONDS if workflow else max(1, round(effective_limits.max_runtime_hours * 60 * 60))
-            ),
+            max_runtime_seconds=resolved_max_runtime,
         )
         await self._admit_launch()
         try:
@@ -471,7 +497,7 @@ class ScriptRunManager:
                 worker_backend_locator=backend.cleanup_locator,
                 # A workflow attempt stores none: a new primary retires its process and the engine starts the next.
                 recovery_signature=None
-                if run.workflow_run_id is not None
+                if not run.is_plain_script
                 else script_recovery_signature(
                     backend=self.worker_backend,
                     # The config the worker launches with, so recovery binds to the authority it actually got.
@@ -509,8 +535,8 @@ class ScriptRunManager:
                     )
                     # The limit is the plain scripts': the workflow store limits its owner's top-level runs, and
                     # the attempt of a run inside another takes no slot.
-                    plain = sum(active_run.workflow_run_id is None for active_run in active)
-                    if run.workflow_run_id is None and plain >= max_concurrent_runs:
+                    plain = sum(active_run.is_plain_script for active_run in active)
+                    if run.is_plain_script and plain >= max_concurrent_runs:
                         _raise_concurrent_run_limit()
                     await run_blocking_until_complete(self.store.create_run, run)
                 created = await asyncio.to_thread(self.store.get_run, run.run_id)
@@ -680,7 +706,7 @@ class ScriptRunManager:
             owner_user_id=context.requester_id,
             include_finished=include_finished,
         )
-        return [run for run in runs if run.workflow_run_id is None]
+        return [run for run in runs if run.is_plain_script]
 
     async def reconcile_durable(
         self,
@@ -705,6 +731,31 @@ class ScriptRunManager:
                     return await self._terminate_durable_run_locked(run_id, reason=MAX_RUNTIME_EXCEEDED)
                 status = await self._process_status(run)
                 return await self._apply_process_status(run, status)
+        except _REQUEST_FAILURES as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
+
+    async def observe_process_exit(self, run_id: str) -> ScriptRunRecord | None:
+        """Query process status and durably record exit without waiting for worker retirement."""
+        try:
+            # Read durable state first so a concurrent reconcile_durable holding the run lock
+            # through slow worker retirement cannot block observing an already-recorded exit.
+            try:
+                existing = await asyncio.to_thread(self.store.get_run, run_id)
+            except ScriptRunNotFoundError:
+                return None
+            if existing.state in TERMINAL_SCRIPT_RUN_STATES or existing.finished_at is not None:
+                return existing
+            async with self._run_lock(run_id):
+                try:
+                    run = await asyncio.to_thread(self.store.get_run, run_id)
+                except ScriptRunNotFoundError:
+                    return None
+                if run.state in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is not None:
+                    return run
+                status = await self._process_status(run)
+                if status.state == "running":
+                    return None
+                return await self._record_observed_process_exit(run, status)
         except _REQUEST_FAILURES as exc:
             raise ScriptRunManagerError(str(exc)) from exc
 
@@ -864,7 +915,7 @@ class ScriptRunManager:
             raise ScriptRunManagerError(not_found) from None
         mine = run.agent_name == context.agent_name and run.owner_user_id == context.requester_id
         # A workflow's attempt is no script of its owner's: only its run starts and stops it.
-        if not mine or run.workflow_run_id is not None:
+        if not mine or not run.is_plain_script:
             raise ScriptRunManagerError(not_found)
         return run
 
@@ -928,6 +979,14 @@ class ScriptRunManager:
             if run.state is ScriptRunState.STARTING:
                 return await asyncio.to_thread(self.store.transition_run, run.run_id, state=ScriptRunState.RUNNING)
             return run
+        observed = await self._record_observed_process_exit(run, status)
+        return await self._finalize_observed_exit(observed)
+
+    async def _record_observed_process_exit(
+        self,
+        run: ScriptRunRecord,
+        status: WorkerScriptStatus,
+    ) -> ScriptRunRecord:
         bounded_output = _bounded_output(status.output)
         if status.state == "unknown":
             reason = SUPERVISOR_UNAVAILABLE
@@ -939,7 +998,7 @@ class ScriptRunManager:
                 if status.exit_code == 0
                 else bounded_output or f"Background script exited with code {status.exit_code}."
             )
-        observed = await asyncio.to_thread(
+        return await asyncio.to_thread(
             self.store.record_process_exit,
             run.run_id,
             exit_code=status.exit_code,
@@ -947,7 +1006,6 @@ class ScriptRunManager:
             output=bounded_output,
             cancellation_reason=reason,
         )
-        return await self._finalize_observed_exit(observed)
 
     async def _reconcile_revoked_process_run(
         self,
@@ -1144,14 +1202,17 @@ class ScriptRunManager:
         await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
 
 
+def unsupported_private_script_worker_scope_message(config: Config, agent_name: str) -> str | None:
+    """Return an error sentence if ``agent_name`` is a private agent whose worker scope cannot run background scripts."""
+    agent_config = config.get_agent(agent_name)
+    if agent_config.private is not None and agent_policy(config, agent_name).effective_execution_scope != "user_agent":
+        return "Background-script workers for private agents require private.per=user_agent."
+    return None
+
+
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
-    agent_config = context.config.get_agent(context.agent_name)
-    if (
-        agent_config.private is not None
-        and agent_policy(context.config, context.agent_name).effective_execution_scope != "user_agent"
-    ):
-        msg = "Background-script workers for private agents require private.per=user_agent."
-        raise ScriptRunManagerError(msg)
+    if message := unsupported_private_script_worker_scope_message(context.config, context.agent_name):
+        raise ScriptRunManagerError(message)
 
 
 def _resolve_script_resource_profile(
@@ -1267,6 +1328,39 @@ def _runtime_expired(run: ScriptRunRecord, *, now: datetime) -> bool:
     return (now - started).total_seconds() >= run.max_runtime_seconds
 
 
+def _validate_run_options(
+    *,
+    workflow_run_id: str | None,
+    script_check_rule_uid: str | None,
+    run_id: str | None,
+    max_runtime_seconds: int | None,
+    effective_limits: ScriptRunLimits,
+) -> tuple[str, int]:
+    if workflow_run_id is not None and script_check_rule_uid is not None:
+        msg = "Cannot specify both workflow_run_id and script_check_rule_uid."
+        raise ScriptRunManagerError(msg)
+    if max_runtime_seconds is not None and max_runtime_seconds <= 0:
+        msg = "max_runtime_seconds must be positive."
+        raise ScriptRunManagerError(msg)
+    if run_id is not None:
+        try:
+            resolved_run_id = validated_script_run_id(run_id)
+        except ValueError as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
+    else:
+        resolved_run_id = f"script-{uuid.uuid4().hex}"
+    resolved_max_runtime = (
+        max_runtime_seconds
+        if max_runtime_seconds is not None
+        else (
+            _WORKFLOW_ATTEMPT_SECONDS
+            if workflow_run_id is not None
+            else max(1, round(effective_limits.max_runtime_hours * 60 * 60))
+        )
+    )
+    return resolved_run_id, resolved_max_runtime
+
+
 def _validated_name(name: str | None) -> str | None:
     if name is None:
         return None
@@ -1295,6 +1389,30 @@ def _raise_concurrent_run_limit() -> None:
     raise ScriptRunManagerError(msg)
 
 
+def _unsupported_script_worker_backend_for_kind(
+    backend_kind: WorkerBackendKind,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    if backend_kind is WorkerBackendKind.STATIC_RUNNER:
+        return _STATIC_RUNNER_SCRIPT_ERROR
+    if backend_kind is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(runtime_paths):
+        return _KUBERNETES_GATEWAY_SCRIPT_ERROR
+    if not (
+        (runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip() or configured_public_url(runtime_paths)
+    ):
+        return _MISSING_SCRIPT_GATEWAY_URL_ERROR
+    return None
+
+
+def unsupported_script_worker_backend_message(runtime_paths: RuntimePaths) -> str | None:
+    """Return an error sentence if configured worker backend cannot launch background scripts."""
+    try:
+        backend_kind = worker_backend_kind(runtime_paths)
+    except WorkerBackendError as exc:
+        return str(exc)
+    return _unsupported_script_worker_backend_for_kind(backend_kind, runtime_paths)
+
+
 def _require_script_worker_backend(
     backend: WorkerBackend | None,
 ) -> RetiringWorkerBackend:
@@ -1302,11 +1420,7 @@ def _require_script_worker_backend(
         msg = "Background script worker backend is unavailable."
         raise ScriptRunManagerError(msg)
     if isinstance(backend, StaticSandboxRunnerBackend):
-        msg = (
-            "Background scripts cannot use the shared static sandbox runner; configure explicit "
-            "unsafe-local mode or a dedicated Docker or isolated Kubernetes worker backend."
-        )
-        raise ScriptRunManagerError(msg)
+        raise ScriptRunManagerError(_STATIC_RUNNER_SCRIPT_ERROR)
     if backend.cleanup_locator is None:
         msg = "Background script worker backend has no durable cleanup locator."
         raise ScriptRunManagerError(msg)
@@ -1321,14 +1435,10 @@ def _require_script_launch_backend(
     runtime_paths: RuntimePaths,
 ) -> RetiringWorkerBackend:
     admitted_backend = _require_script_worker_backend(backend)
-    if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not script_gateway_isolated(
-        runtime_paths,
-    ):
-        msg = (
-            "Kubernetes background scripts require a gateway-only listener; "
-            "use Docker or explicit unsafe-local mode until that boundary is configured."
-        )
-        raise ScriptRunManagerError(msg)
+    if (backend_kind := worker_backend_kind(runtime_paths)) is WorkerBackendKind.KUBERNETES and (
+        message := _unsupported_script_worker_backend_for_kind(backend_kind, runtime_paths)
+    ) is not None:
+        raise ScriptRunManagerError(message)
     return admitted_backend
 
 

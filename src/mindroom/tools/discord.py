@@ -105,18 +105,11 @@ class _DiscordTools(Toolkit):
         channel_id: str | None = None,
         limit: int = 100,
     ) -> str:
-        """Read Discord channels or channel message history.
+        """Read Discord channels or channel messages.
 
         - `list_channels`: `guild_id`
         - `get_channel_info`: `channel_id`
-        - `get_channel_messages`: `channel_id`
-
-        Args:
-            action: Read operation.
-            guild_id: Discord server ID.
-            channel_id: Discord channel ID.
-            limit: Maximum messages (1-100).
-
+        - `get_channel_messages`: `channel_id` (`limit` 1-100)
         """
         if action not in self._read_actions:
             return f"Error: action '{action}' is disabled."
@@ -142,13 +135,7 @@ class _DiscordTools(Toolkit):
 
     @tool
     def discord_send(self, channel_id: str, message: str) -> str:
-        """Send a text message to a Discord channel.
-
-        Args:
-            channel_id: Target Discord channel ID.
-            message: Message text to send.
-
-        """
+        """Send `message` to Discord `channel_id`."""
         if not self._allow_send:
             return "Error: send_message is disabled."
         if not channel_id.strip():

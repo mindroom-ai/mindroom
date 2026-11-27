@@ -514,15 +514,15 @@ docker_inspect("get_container_logs", target="postgres", tail=50)
 
 ## [`calculator`]
 
-`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without running arbitrary code.
-Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
-`factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
+`calculator` provides `calculate(action, a, b=None)` with actions `add`, `subtract`, `multiply`, `divide`, `exponentiate`, `factorial`, `is_prime`, and `square_root` for exact arithmetic without running arbitrary code.
+Each action returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
+`factorial` accepts integers up to 1558 and `is_prime` accepts integers up to 10**12; larger arguments return a JSON error.
 `calculator` has no configuration fields.
 
 ```python
-divide(22, 7)
-factorial(6)
-is_prime(97)
+calculate("divide", 22, 7)
+calculate("factorial", 6)
+calculate("is_prime", 97)
 ```
 
 ## [`reasoning`]

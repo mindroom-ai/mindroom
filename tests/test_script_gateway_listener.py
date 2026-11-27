@@ -42,12 +42,27 @@ class _ReceiptBroker:
         return ScriptCallRecord(
             run_id=run_id,
             call_id=call_id,
-            grant=ScriptToolGrant("calculator", "add"),
+            grant=ScriptToolGrant("calculator", "calculate"),
             arguments_digest="digest",
             state=ScriptCallState.COMPLETED,
             created_at="2026-01-01T00:00:00Z",
             result=3,
         )
+
+    async def get_authenticated_check_input(self, run_id: str, authorization: str | None) -> dict[str, object]:
+        raise AssertionError((run_id, authorization))
+
+    async def submit_authenticated_check_result(
+        self,
+        run_id: str,
+        authorization: str | None,
+        *,
+        result: object,
+        state: dict[str, object],
+        state_changed: bool,
+        error: str | None,
+    ) -> None:
+        raise AssertionError((run_id, authorization, result, state, state_changed, error))
 
 
 class _CliOwner:

@@ -115,6 +115,7 @@ def follow_up_envelope(
             intent=TurnIntent.JOB_FOLLOW_UP,
             source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else MESSAGE_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,
+            automation_origin=SILENT_SCHEDULE_SOURCE_KIND if key.silent else TurnIntent.JOB_FOLLOW_UP.value,
         ),
     )
 

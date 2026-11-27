@@ -160,9 +160,9 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
         "            raise RuntimeError('Synthetic tool unavailable')\n"
         "        super().__init__()\n"
         "\n"
-        "    def add(self, a: float, b: float) -> str:\n"
+        "    def calculate(self, action: str, a: float, b: float | None = None) -> str:\n"
         "        self.executed_calls.append((a, b))\n"
-        "        return super().add(a, b)\n"
+        "        return super().calculate(action, a, b)\n"
         "\n"
         "@register_tool_with_metadata(\n"
         "    name='approval_calculator',\n"
@@ -319,14 +319,14 @@ def _observe_ordinary_calculator_calls(
     if not enabled:
         return calls_seen
     config.agents["general"].tools.append(ToolConfigEntry(name="calculator"))
-    original_add = CalculatorTools.add
+    original_calculate = CalculatorTools.calculate
 
-    def add(self: CalculatorTools, a: float, b: float) -> str:
+    def calculate(self: CalculatorTools, action: str, a: float, b: float | None = None) -> str:
         """Count real arithmetic executions without replacing the local tool behavior."""
-        calls_seen.append((a, b))
-        return original_add(self, a, b)
+        calls_seen.append((a, b or 0.0))
+        return original_calculate(self, action, a, b)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
     return calls_seen
 
 
@@ -360,8 +360,8 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     retry_denied: bool = False,
     initial_collision: bool = False,
 ) -> None:
-    function_name = "example_lookup" if tool_name == "mcp_example" else "add"
-    arguments: dict[str, object] = {} if tool_name == "mcp_example" else {"a": 2, "b": 3}
+    function_name = "example_lookup" if tool_name == "mcp_example" else "calculate"
+    arguments: dict[str, object] = {} if tool_name == "mcp_example" else {"action": "add", "a": 2, "b": 3}
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -420,7 +420,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     ordinary_calls = _observe_ordinary_calculator_calls(config, monkeypatch, enabled=mixed_calls)
     second_call = _deferred_call("call_second", function_name, **arguments)
     first_turn: list[ScriptStep] = calls(
-        *([tool_call("add", "call_ordinary", a=2, b=3)] if mixed_calls else []),
+        *([tool_call("calculate", "call_ordinary", action="add", a=2, b=3)] if mixed_calls else []),
         _deferred_call("call_example", function_name, **arguments),
         *([_deferred_call("call_denied", function_name, **arguments)] if mixed_decisions else []),
     )

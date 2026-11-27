@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote, urlsplit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -14,22 +13,24 @@ from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     GraphSession,
     MicrosoftGraphError,
+    MicrosoftGraphToolkit,
     graph_call,
+    graph_error_payload,
     graph_int,
     graph_object,
     graph_records,
-    graph_session,
     graph_upload_errors,
+    invalid_action,
     next_page_token,
     page_offset,
     page_path,
     path_segment,
+    reject_unexpected_args,
+    require_arg,
     required_text,
     share_id,
 )
 from mindroom.file_access import checked_upload_source
-from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -40,9 +41,6 @@ if TYPE_CHECKING:
     from mindroom.file_access import AuthorizedFile
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
-_WRITE_FUNCTIONS = frozenset(
-    {"microsoft_files_replace_file", "microsoft_files_upload_file", "microsoft_files_excel_update_range"},
-)
 # Downloads land on the primary's storage volume, so one file must not fill it.
 _MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 # Graph's single-request upload limit.
@@ -65,6 +63,20 @@ _ADDRESS = re.compile(
 _INVALID_NAME_CHARACTERS = frozenset('"*:<>?/\\|')
 _INVALID_WORKSHEET_CHARACTERS = frozenset("\\/?*[]:")
 _INVALID_FILE = "file must be a Graph item path /drives/{drive-id}/items/{item-id} or a OneDrive or SharePoint link."
+_ReadAction = Literal[
+    "search",
+    "list_folder",
+    "get_file",
+    "download_file",
+    "excel_list_worksheets",
+    "excel_read_range",
+]
+_WriteAction = Literal["replace_file", "upload_file", "excel_update_range"]
+_WRITE_ALLOWED_ARGS: dict[str, frozenset[str]] = {
+    "replace_file": frozenset({"file", "local_path", "expected_etag", "expected_web_url"}),
+    "upload_file": frozenset({"local_path", "folder", "name", "expected_web_url"}),
+    "excel_update_range": frozenset({"file", "worksheet", "address", "values", "expected_web_url"}),
+}
 
 
 @dataclass(frozen=True)
@@ -88,8 +100,10 @@ def _is_link(value: str) -> bool:
     )
 
 
-def _parse_file(file: str, field_name: str = "file") -> _Item | None:
+def _parse_file(file: str | None, field_name: str = "file") -> _Item | None:
     """Return the item a Graph path names, None for a link to resolve, or raise for anything else."""
+    if not isinstance(file, str):
+        raise MicrosoftGraphError(code="invalid_file", message=_INVALID_FILE.replace("file", field_name, 1))
     value = file.strip()
     if match := _ITEM_PATH.match(value):
         item = _Item(match["drive"], match["item"])
@@ -106,9 +120,10 @@ def _parse_file(file: str, field_name: str = "file") -> _Item | None:
     raise MicrosoftGraphError(code="invalid_file", message=_INVALID_FILE.replace("file", field_name, 1))
 
 
-def _resolve(file: str, session: GraphSession, field_name: str = "file") -> _Item:
+def _resolve(file: str | None, session: GraphSession, field_name: str = "file") -> _Item:
     if (item := _parse_file(file, field_name)) is not None:
         return item
+    assert isinstance(file, str)
     # Redeeming the link is the same as opening it in a browser; without it, access lasts only for this request.
     shared = session.json(
         "GET",
@@ -144,8 +159,8 @@ def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _etag(value: str) -> str:
-    if not value.strip():
+def _etag(value: str | None) -> str:
+    if value is None or not value.strip():
         msg = "expected_etag must be the etag of the download or details this edit started from."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value.strip()
@@ -177,9 +192,9 @@ def _upload_name(name: str) -> str:
     return name
 
 
-def _address(value: str) -> tuple[str, tuple[int, int]]:
+def _address(value: str | None) -> tuple[str, tuple[int, int]]:
     """Return a cell or range address and the rows and columns it covers."""
-    address = value.strip()
+    address = value.strip() if isinstance(value, str) else ""
     if not (match := _ADDRESS.fullmatch(address)):
         msg = "address must be a cell or range such as A1 or A1:C10, without a worksheet name."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
@@ -203,10 +218,11 @@ def _checked_range_size(rows: int, columns: int) -> None:
         raise MicrosoftGraphError(code="too_large", message=msg)
 
 
-def _worksheet(value: str) -> str:
+def _worksheet(value: str | None) -> str:
     """Return a worksheet name as an escaped path segment; Excel allows `#` but not these characters."""
     if (
-        not 1 <= len(value) <= 31
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 31
         # A name of only dots would be read as a relative path segment and reach another endpoint.
         or not value.strip(".")
         or any(character in _INVALID_WORKSHEET_CHARACTERS or ord(character) < 32 for character in value)
@@ -220,7 +236,7 @@ def _cell_count(values: list[Any]) -> int:
     return len(values) * max((len(row) for row in values if isinstance(row, list)), default=0)
 
 
-def _range_write(address: str, values: list[list[Any]]) -> str:
+def _range_write(address: str | None, values: list[list[Any]] | None) -> str:
     """Return the checked address of a range write; the values must be equally long rows of the address's shape."""
     target, shape = _address(address)
     if not values or any(len(row) != len(values[0]) for row in values):
@@ -250,7 +266,7 @@ def _range(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-class MicrosoftFilesTools(Toolkit):
+class MicrosoftFilesTools(MicrosoftGraphToolkit):
     """Search, read, and save OneDrive and SharePoint files, and Excel ranges, as the requester."""
 
     def __init__(
@@ -264,66 +280,44 @@ class MicrosoftFilesTools(Toolkit):
         file_access: FileAccess = "workspace",
         write: bool = True,
     ) -> None:
-        if credentials_manager is None:
-            msg = "MicrosoftFilesTools requires an explicit credentials_manager"
-            raise RuntimeError(msg)
-        self._session = partial(
-            graph_session,
-            microsoft_oauth_provider(_TOOL_NAME),
-            runtime_paths,
-            credentials_manager,
-            worker_target,
-            runtime_config,
-        )
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
-        functions: dict[str, Callable[..., str]] = {
-            "microsoft_files_search": self.microsoft_files_search,
-            "microsoft_files_list_folder": self.microsoft_files_list_folder,
-            "microsoft_files_get_file": self.microsoft_files_get_file,
-            "microsoft_files_download_file": self.microsoft_files_download_file,
-            "microsoft_files_replace_file": self.microsoft_files_replace_file,
-            "microsoft_files_upload_file": self.microsoft_files_upload_file,
-            "microsoft_files_excel_list_worksheets": self.microsoft_files_excel_list_worksheets,
-            "microsoft_files_excel_read_range": self.microsoft_files_excel_read_range,
-            "microsoft_files_excel_update_range": self.microsoft_files_excel_update_range,
-        }
+        tools: list[Callable[..., str]] = [self.microsoft_files_read]
+        if write:
+            tools.append(self.microsoft_files_write)
         super().__init__(
-            name=_TOOL_NAME,
-            tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
+            tool_name=_TOOL_NAME,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            tools=tools,
         )
 
     @staticmethod
     def _metadata(item: _Item, session: GraphSession) -> dict[str, Any]:
         return session.json("GET", item.path, params={"$select": _ITEM_SELECT})
 
-    def _upload_source(self, local_path: str) -> AuthorizedFile:
+    def _upload_source(self, local_path: str | None) -> AuthorizedFile:
+        path = require_arg(local_path, "local_path")
         with graph_upload_errors():
             return checked_upload_source(
-                local_path,
+                path,
                 workspace_root=self._workspace_root,
                 file_access=self._file_access,
                 max_bytes=_MAX_UPLOAD_BYTES,
             )
 
-    def microsoft_files_search(self, query: str, limit: int = 25, page_token: str | None = None) -> str:
-        """Search the OneDrive and SharePoint files the requester can open, by name and content.
-
-        Args:
-            query: Search words, as typed into Microsoft 365 search.
-            limit: Maximum number of files to return, from 1 to 50.
-            page_token: The next_page_token of the previous call, to continue the same search.
-
-        """
-
-        def build() -> int:
+    def _search(self, query: str | None, limit: int, page_token: str | None) -> str:
+        def build() -> tuple[int, str]:
             offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
-            required_text(query, "query")
+            text = required_text(query, "query")
             graph_int(limit, "limit", maximum=50)
-            return offset
+            return offset, text
 
-        def operation(session: GraphSession, offset: int) -> Mapping[str, object]:
-            request = {"entityTypes": ["driveItem"], "query": {"queryString": query}, "from": offset, "size": limit}
+        def operation(session: GraphSession, checked: tuple[int, str]) -> Mapping[str, object]:
+            offset, text = checked
+            request = {"entityTypes": ["driveItem"], "query": {"queryString": text}, "from": offset, "size": limit}
             payload = session.json("POST", "/search/query", json={"requests": [request]})
             containers = [
                 container for answer in graph_records(payload) for container in graph_records(answer, "hitsContainers")
@@ -339,22 +333,7 @@ class MicrosoftFilesTools(Toolkit):
 
         return graph_call(_TOOL_NAME, self._session, build, operation)
 
-    def microsoft_files_list_folder(
-        self,
-        folder: str | None = None,
-        limit: int = 50,
-        page_token: str | None = None,
-    ) -> str:
-        """List the files and folders in one folder, or in the requester's OneDrive root when no folder is given.
-
-        Args:
-            folder: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link of the folder.
-            limit: Maximum number of entries to return, from 1 to 200.
-            page_token: The next_page_token of the previous call, to continue the same listing; folder and limit
-                are then taken from the token.
-
-        """
-
+    def _list_folder(self, folder: str | None, limit: int, page_token: str | None) -> str:
         def build() -> str | None:
             if page_token is not None:
                 return page_path(page_token, _CHILDREN_PAGES)
@@ -368,38 +347,19 @@ class MicrosoftFilesTools(Toolkit):
                 payload = session.json("GET", next_page)
             else:
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
-                params = {"$top": str(limit), "$select": _ITEM_SELECT}
-                payload = session.json("GET", f"{parent}/children", params=params)
-            entries = [_summary(entry) for entry in graph_records(payload)]
-            return {"files": entries, "next_page_token": next_page_token(payload)}
+                payload = session.json(
+                    "GET",
+                    f"{parent}/children",
+                    params={"$top": str(limit), "$select": _ITEM_SELECT},
+                )
+            return {
+                "files": [_summary(entry) for entry in graph_records(payload)],
+                "next_page_token": next_page_token(payload),
+            }
 
         return graph_call(_TOOL_NAME, self._session, build, operation)
 
-    def microsoft_files_get_file(self, file: str) -> str:
-        """Get one OneDrive or SharePoint file's details, including the etag microsoft_files_replace_file checks.
-
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-
-        """
-        return graph_call(
-            _TOOL_NAME,
-            self._session,
-            lambda: _parse_file(file),
-            lambda session, _item: {"file": _summary(self._metadata(_resolve(file, session), session))},
-        )
-
-    def microsoft_files_download_file(self, file: str) -> str:
-        """Download one OneDrive or SharePoint file, up to 100 MB, into the workspace's microsoft-files-downloads directory.
-
-        A later download of the same name overwrites that copy, so save any edited version under a new name
-        outside microsoft-files-downloads, and pass this result's etag to microsoft_files_replace_file.
-
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-
-        """
-
+    def _download_file(self, file: str | None) -> str:
         def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
             if self._workspace_root is None:
                 raise MicrosoftGraphError(code="workspace_required", message="Downloads need an agent workspace.")
@@ -421,27 +381,99 @@ class MicrosoftFilesTools(Toolkit):
 
         return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
 
-    def microsoft_files_replace_file(
+    def _excel_read_range(self, file: str | None, worksheet: str | None, address: str | None) -> str:
+        def build() -> str:
+            _parse_file(file)
+            sheet = _worksheet(worksheet)
+            if address is None:
+                return f"{sheet}/usedRange(valuesOnly=true)"
+            checked, shape = _address(address)
+            _checked_range_size(*shape)
+            return f"{sheet}/range(address='{checked}')"
+
+        def operation(session: GraphSession, target: str) -> Mapping[str, object]:
+            item = _resolve(file, session)
+            payload = session.json(
+                "GET",
+                f"{item.path}/workbook/worksheets/{target}",
+                params={"$select": "address,values,rowCount,columnCount"},
+            )
+            return {"range": _range(payload)}
+
+        return graph_call(_TOOL_NAME, self._session, build, operation)
+
+    def microsoft_files_read(
         self,
-        file: str,
-        local_path: str,
-        expected_etag: str,
-        expected_web_url: str,
+        action: _ReadAction,
+        query: str | None = None,
+        folder: str | None = None,
+        file: str | None = None,
+        worksheet: str | None = None,
+        address: str | None = None,
+        limit: int | None = None,
+        page_token: str | None = None,
     ) -> str:
-        """Replace one OneDrive or SharePoint file's contents with a workspace file, up to 250 MB.
+        """Search, browse, inspect, download, and read Excel ranges in OneDrive and SharePoint as the requester.
 
-        The replace fails with target_mismatch unless expected_web_url is the file's web_url, and with
-        etag_mismatch when someone changed the file after the download or details whose etag is passed, so a newer
-        edit is never overwritten; the file's version history keeps the replaced version.
+        `file` and `folder` take a Graph item path `/drives/{drive-id}/items/{item-id}` or an https OneDrive/SharePoint link.
 
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-            local_path: The workspace file to upload.
-            expected_etag: The etag from the download or details this edit started from; required.
-            expected_web_url: The file's web_url from the same download or details; required.
-
+        - `search`: search accessible files by name/content (`query`; optional `limit` 1-50 default 25, `page_token`)
+        - `list_folder`: list entries in `folder` or OneDrive root if omitted (optional `limit` 1-200 default 50, `page_token`)
+        - `get_file`: read details for `file`, including `etag` and `web_url` needed for writes
+        - `download_file`: save `file` (<=100 MB) to workspace `microsoft-files-downloads/` (overwrites same name, so
+          save edits under a new name outside `microsoft-files-downloads` and pass returned `etag` to `replace_file`)
+        - `excel_list_worksheets`: list worksheets of Excel workbook `file`
+        - `excel_read_range`: read up to 10,000 cells from `worksheet` of workbook `file` (optional `address` like
+          `A1:C10`; omit for used range)
         """
+        if action == "search":
+            result = self._search(query, 25 if limit is None else limit, page_token)
+        elif action == "list_folder":
+            result = self._list_folder(folder, 50 if limit is None else limit, page_token)
+        elif action == "get_file":
+            result = graph_call(
+                _TOOL_NAME,
+                self._session,
+                lambda: _parse_file(file),
+                lambda session, _item: {"file": _summary(self._metadata(_resolve(file, session), session))},
+            )
+        elif action == "download_file":
+            result = self._download_file(file)
+        elif action == "excel_list_worksheets":
+            result = graph_call(
+                _TOOL_NAME,
+                self._session,
+                lambda: _parse_file(file),
+                lambda session, _item: {
+                    "worksheets": [
+                        {
+                            "name": sheet.get("name"),
+                            "position": sheet.get("position"),
+                            "visibility": sheet.get("visibility"),
+                        }
+                        for sheet in graph_records(
+                            session.json(
+                                "GET",
+                                f"{_resolve(file, session).path}/workbook/worksheets",
+                                params={"$select": "name,position,visibility"},
+                            ),
+                        )
+                    ],
+                },
+            )
+        elif action == "excel_read_range":
+            result = self._excel_read_range(file, worksheet, address)
+        else:
+            result = graph_error_payload(_TOOL_NAME, invalid_action(action))
+        return result
 
+    def _replace_file(
+        self,
+        file: str | None,
+        local_path: str | None,
+        expected_etag: str | None,
+        expected_web_url: str | None,
+    ) -> str:
         def build() -> tuple[str, AuthorizedFile]:
             _parse_file(file)
             etag = _etag(expected_etag)
@@ -467,31 +499,22 @@ class MicrosoftFilesTools(Toolkit):
 
         return graph_call(_TOOL_NAME, self._session, build, operation)
 
-    def microsoft_files_upload_file(
+    def _upload_file(
         self,
-        local_path: str,
-        folder: str | None = None,
-        name: str | None = None,
-        expected_web_url: str | None = None,
+        local_path: str | None,
+        folder: str | None,
+        name: str | None,
+        expected_web_url: str | None,
     ) -> str:
-        """Upload a workspace file, up to 250 MB, as a new OneDrive or SharePoint file; it never overwrites a file.
-
-        An upload into a folder fails with target_mismatch unless expected_web_url is the folder's web_url.
-
-        Args:
-            local_path: The workspace file to upload.
-            folder: Graph item path or OneDrive or SharePoint link of the target folder; omit for the requester's
-                OneDrive root.
-            name: The new file's name; defaults to the local file's name.
-            expected_web_url: The folder's web_url as microsoft_files_get_file or microsoft_files_list_folder
-                returns it; search results show a different form of it. Required with folder.
-
-        """
-
         def build() -> tuple[AuthorizedFile, str]:
             if folder is not None:
                 _parse_file(folder, "folder")
                 _web_url(expected_web_url)
+            elif expected_web_url is not None:
+                raise MicrosoftGraphError(
+                    code="invalid_argument",
+                    message="expected_web_url is only supported when folder is set.",
+                )
             source = self._upload_source(local_path)
             return source, _upload_name(source.name if name is None else name)
 
@@ -508,87 +531,23 @@ class MicrosoftFilesTools(Toolkit):
             except MicrosoftGraphError as exc:
                 if exc.code != "conflict":
                     raise
-                msg = "A file with that name already exists there; use microsoft_files_replace_file or another name."
+                msg = (
+                    "A file with that name already exists there; use microsoft_files_write with action "
+                    "replace_file or another name."
+                )
                 raise MicrosoftGraphError(code="name_conflict", message=msg) from None
             return {"file": _summary(result)}
 
         return graph_call(_TOOL_NAME, self._session, build, operation)
 
-    def microsoft_files_excel_list_worksheets(self, file: str) -> str:
-        """List the worksheets in one Excel workbook stored in OneDrive or SharePoint.
-
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-
-        """
-
-        def operation(session: GraphSession, _item: _Item | None) -> Mapping[str, object]:
-            item = _resolve(file, session)
-            payload = session.json(
-                "GET",
-                f"{item.path}/workbook/worksheets",
-                params={"$select": "name,position,visibility"},
-            )
-            sheets = [
-                {"name": sheet.get("name"), "position": sheet.get("position"), "visibility": sheet.get("visibility")}
-                for sheet in graph_records(payload)
-            ]
-            return {"worksheets": sheets}
-
-        return graph_call(_TOOL_NAME, self._session, lambda: _parse_file(file), operation)
-
-    def microsoft_files_excel_read_range(self, file: str, worksheet: str, address: str | None = None) -> str:
-        """Read cell values from one worksheet of an Excel workbook, up to 10,000 cells.
-
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-            worksheet: The worksheet name.
-            address: A cell or range such as A1:C10; omit to read the worksheet's used range.
-
-        """
-
-        def build() -> str:
-            _parse_file(file)
-            sheet = _worksheet(worksheet)
-            if address is None:
-                return f"{sheet}/usedRange(valuesOnly=true)"
-            checked, shape = _address(address)
-            _checked_range_size(*shape)
-            return f"{sheet}/range(address='{checked}')"
-
-        def operation(session: GraphSession, target: str) -> Mapping[str, object]:
-            item = _resolve(file, session)
-            payload = session.json(
-                "GET",
-                f"{item.path}/workbook/worksheets/{target}",
-                params={"$select": "address,values,rowCount,columnCount"},
-            )
-            return {"range": _range(payload)}
-
-        return graph_call(_TOOL_NAME, self._session, build, operation)
-
-    def microsoft_files_excel_update_range(
+    def _excel_update_range(
         self,
-        file: str,
-        worksheet: str,
-        address: str,
-        values: list[list[str | int | float | bool | None]],
-        expected_web_url: str,
+        file: str | None,
+        worksheet: str | None,
+        address: str | None,
+        values: list[list[str | int | float | bool | None]] | None,
+        expected_web_url: str | None,
     ) -> str:
-        """Write cell values into one worksheet range of an Excel workbook, up to 10,000 cells.
-
-        The write fails with target_mismatch unless expected_web_url is the workbook's web_url.
-
-        Args:
-            file: Graph item path `/drives/{drive-id}/items/{item-id}` or a OneDrive or SharePoint link.
-            worksheet: The worksheet name.
-            address: The range to write, such as A1:C2, matching the shape of values.
-            values: Rows of cell values; a string starting with = is written as a formula.
-            expected_web_url: The workbook's web_url as microsoft_files_get_file or microsoft_files_list_folder
-                returns it; search results show a different form of it. Required.
-
-        """
-
         def build() -> tuple[str, str]:
             sheet = _worksheet(worksheet)
             target = _range_write(address, values)
@@ -608,3 +567,56 @@ class MicrosoftFilesTools(Toolkit):
             return {"range": _range(payload)}
 
         return graph_call(_TOOL_NAME, self._session, build, operation)
+
+    def microsoft_files_write(
+        self,
+        action: _WriteAction,
+        file: str | None = None,
+        local_path: str | None = None,
+        expected_etag: str | None = None,
+        expected_web_url: str | None = None,
+        folder: str | None = None,
+        name: str | None = None,
+        worksheet: str | None = None,
+        address: str | None = None,
+        values: list[list[str | int | float | bool | None]] | None = None,
+    ) -> str:
+        """Replace/upload OneDrive and SharePoint files or update Excel ranges as the requester.
+
+        Before calling, tell the requester the target file, folder, or workbook and what will change. Writes fail with
+        `target_mismatch` unless `expected_web_url` is the target's `web_url` from `microsoft_files_read` (`get_file` or
+        `list_folder`; search results return a different URL form).
+
+        - `replace_file`: replace `file` with workspace `local_path` (<=250 MB; requires `expected_etag` and
+          `expected_web_url`); fails with `etag_mismatch` if changed since read; version history keeps prior version
+        - `upload_file`: upload workspace `local_path` (<=250 MB) as a new file—never overwrites (`folder` optional,
+          omit for OneDrive root; `name` optional; `expected_web_url` required with `folder`)
+        - `excel_update_range`: write up to 10,000 cells into `worksheet` `address` of workbook `file` (`values` rows
+          matching `address` shape, `=` prefix writes formula; requires `expected_web_url`)
+        """
+        if (
+            rejected := reject_unexpected_args(
+                _TOOL_NAME,
+                action,
+                _WRITE_ALLOWED_ARGS,
+                {
+                    "file": file,
+                    "local_path": local_path,
+                    "expected_etag": expected_etag,
+                    "expected_web_url": expected_web_url,
+                    "folder": folder,
+                    "name": name,
+                    "worksheet": worksheet,
+                    "address": address,
+                    "values": values,
+                },
+            )
+        ) is not None:
+            return rejected
+        if action == "replace_file":
+            return self._replace_file(file, local_path, expected_etag, expected_web_url)
+        if action == "upload_file":
+            return self._upload_file(local_path, folder, name, expected_web_url)
+        if action == "excel_update_range":
+            return self._excel_update_range(file, worksheet, address, values, expected_web_url)
+        return graph_error_payload(_TOOL_NAME, invalid_action(action))

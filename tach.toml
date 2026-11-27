@@ -952,6 +952,7 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.skills",
+    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend_kinds",
@@ -1591,6 +1592,7 @@ visibility = [
     "mindroom.custom_tools.egress_credentials",
     "mindroom.custom_tools.temporary_secrets",
     "mindroom.custom_tools.email_invite",
+    "mindroom.reactive_triggers.script_check",
 ]
 
 [[modules]]
@@ -2219,6 +2221,7 @@ depends_on = [
     "mindroom.event_sources",
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.store",
 ]
 
@@ -3910,6 +3913,17 @@ path = "mindroom.orchestration.runtime"
 depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindroom.constants"]
 
 [[modules]]
+path = "mindroom.orchestration.script_checks"
+depends_on = [
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
+    "mindroom.reactive_triggers.script_check_poller",
+    "mindroom.tool_system.worker_routing",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
 path = "mindroom.orchestration.script_runtime"
 depends_on = [
     "mindroom.approval.manager",
@@ -3964,6 +3978,7 @@ depends_on = [
     "mindroom.orchestration.call_transcripts_runtime",
     "mindroom.orchestration.computer_runtime",
     "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.orchestration.script_checks",
     "mindroom.orchestration.workflow_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
@@ -4897,6 +4912,7 @@ visibility = [
     "mindroom.matrix.rooms",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.orchestration.rooms",
+    "mindroom.orchestration.script_checks",
     "mindroom.reactive_triggers.dispatch",
     "mindroom.reactive_triggers.service",
     "mindroom.thread_tags",
@@ -7662,6 +7678,7 @@ expose = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
+    "non_resumable_alias_refusal_message",
     "team_background_jobs",
 ]
 from = ["mindroom.agents"]
@@ -11606,6 +11623,7 @@ depends_on = [
     "mindroom.event_sources",
     "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.github_pr",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
@@ -11617,6 +11635,20 @@ path = "mindroom.reactive_triggers.github_pr"
 depends_on = [
     "mindroom.github_client",
     "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.script_check"
+depends_on = [
+    "mindroom.approval.tool_approval",
+    "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.script_check_poller"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
 ]
 
 [[modules]]
@@ -11639,6 +11671,7 @@ depends_on = [
     "mindroom.reactive_triggers.dispatch",
     "mindroom.event_sources",
     "mindroom.reactive_triggers.github_pr",
+    "mindroom.reactive_triggers.script_check_poller",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
@@ -11659,10 +11692,13 @@ depends_on = [
     "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.store",
     "mindroom.reactive_triggers.triage",
     "mindroom.thread_tags",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]

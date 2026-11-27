@@ -46,6 +46,7 @@ class IngressFacts:
     # reply for, or the owner of an agent party in its contact room when someone else wrote it.
     acting_requester_id: str | None = None
     hook_source: str | None = None
+    automation_origin: str | None = None
     message_received_depth: int = 0
     # The person's events a steward's hidden route names: its responder answers the last one.
     routed_event_ids: tuple[str, ...] = ()
@@ -136,6 +137,7 @@ class IngressFacts:
             trusted_user_relay=self.trusted_user_relay,
             acts_for_requester=self.acts_for_requester,
             routed=self._routed,
+            automation_origin=self.automation_origin,
         )
 
 

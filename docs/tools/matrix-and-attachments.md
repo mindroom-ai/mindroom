@@ -104,22 +104,24 @@ matrix_voice_message(
 
 `thread_tags` adds, removes, and lists tags that every member sees on a thread, such as on MindRoom Chat thread cards.
 
-- `tag_thread(tag, thread_id=None, room_id=None, note=None, data=None)` adds or updates one tag and returns the thread's updated tags.
-- `untag_thread(tag, thread_id=None, room_id=None)` removes one tag and returns the updated tags.
-- `list_thread_tags(thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
+All operations use a single unified function `thread_tags(action=...)`:
 
-Without `thread_id`, `tag_thread()` and `untag_thread()` use the current thread; outside a thread, pass `thread_id`.
-Without `thread_id`, `list_thread_tags()` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
+- `thread_tags(action="tag", tag=..., thread_id=None, room_id=None, note=None, data=None)` adds or updates one tag and returns the thread's updated tags.
+- `thread_tags(action="untag", tag=..., thread_id=None, room_id=None, canonical=False)` removes one tag and returns the updated tags.
+- `thread_tags(action="list", thread_id=None, room_id=None, tag=None, include_tag=None, exclude_tag=None, include_untagged=False)` lists tags for one thread or the whole room.
+
+Without `thread_id`, `action="tag"` and `action="untag"` use the current thread; outside a thread, pass `thread_id`.
+Without `thread_id`, `action="list"` lists the current thread only when no `room_id`, tag filter, or `include_untagged=True` is given; passing any of those without `thread_id` (or calling outside a thread) lists the whole room.
 
 Tag names that are already valid IDs of up to 50 characters are kept; other input is lowercased and hyphenated into a tag of at most 25 characters.
-The `tag_thread()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.
+The `thread_tags()` description shows the agent up to 20 of the room's most-used tags, refreshed daily, so it reuses existing vocabulary.
 Some tags validate their `data`: `blocked.data.blocked_by` must be a list of strings, `waiting.data.waiting_on` a non-empty string, `priority.data.level` one of `high`, `medium`, or `low`, and `due.data.deadline` an ISO-8601 timestamp.
 
-`resolved` is thread lifecycle state, so `tag_thread()` and `untag_thread()` reject it; use [`thread_resolution`] instead.
-`snoozed` is lifecycle state too, and `tag_thread()` and `untag_thread()` point to [`thread_snooze`].
+`resolved` is thread lifecycle state, so `action="tag"` and `action="untag"` reject it; use [`thread_resolution`] instead.
+`snoozed` is lifecycle state too, and `action="tag"` and `action="untag"` point to [`thread_snooze`].
 Listing and filtering by `resolved` still works.
 
-Filters for `list_thread_tags()`:
+Filters for `action="list"`:
 
 - `tag` keeps only that tag in the output.
 - `include_tag` returns only threads that have the tag, and `exclude_tag` returns only threads without it; they can be combined.
@@ -127,9 +129,9 @@ Filters for `list_thread_tags()`:
   It reads at most 2,000 thread roots, so check the `truncated` field before treating the list as complete.
 
 ```python
-tag_thread("blocked", data={"blocked_by": ["$otherThread"]})
-untag_thread("blocked")
-list_thread_tags(exclude_tag="resolved", include_untagged=True)  # unresolved threads
+thread_tags(action="tag", tag="blocked", data={"blocked_by": ["$otherThread"]})
+thread_tags(action="untag", tag="blocked")
+thread_tags(action="list", exclude_tag="resolved", include_untagged=True)  # unresolved threads
 ```
 
 Writing a tag requires both the agent's Matrix account and the requesting user to have enough power level to send room state in the target room, and the requesting user must be joined to it.
@@ -152,7 +154,7 @@ agents:
       - thread_resolution
 ```
 
-To close out finished threads, find candidates with `list_thread_tags(exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
 
 ## [`thread_snooze`]
 

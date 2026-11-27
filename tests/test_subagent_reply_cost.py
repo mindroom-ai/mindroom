@@ -461,7 +461,7 @@ def _approval_config(pause: _Pause) -> Config:
         tools=[_DEFERRED_ADD] if pause == "child_tool" else [],
     )
     with_responder_access(config, "mid", users=[DELEGATING_REQUESTER])
-    rule = "run_subagent" if pause == "delegation" else "add"
+    rule = "run_subagent" if pause == "delegation" else "calculate"
     config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match=rule, action="require_approval")])
     return config
 
@@ -501,9 +501,9 @@ async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
         *sibling,
         metrics=_LEADER_REQUEST,
     )
-    own_add = calls(_deferred_call("own-add", "add", a=2, b=3), metrics=_LEADER_REQUEST)
+    own_add = calls(_deferred_call("own-add", "calculate", action="add", a=2, b=3), metrics=_LEADER_REQUEST)
     leader = [delegate, *([own_add] if pause == "own_tool" else []), answer("Done", _LEADER_REQUEST)]
-    child_add = calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)
+    child_add = calls(_deferred_call("child-add", "calculate", action="add", a=2, b=3), metrics=_CHILD_REQUEST)
     mid = [*([child_add] if pause == "child_tool" else []), answer("Mid answer", _CHILD_REQUEST)]
     leaf = [child_add, answer("Leaf answer", _CHILD_REQUEST)]
     cheap = model_identity(config.models["cheap"])
@@ -521,7 +521,7 @@ async def test_a_reply_resumed_after_an_approval_reports_its_subagent_s_cost(
         approvals = approval_calls_for(
             paused,
             default_agent={"child_tool": "mid", "sibling_tool": "leaf"}.get(pause, "leader"),
-            toolkit_names={"add": "calculator", "run_subagent": "delegate"},
+            toolkit_names={"calculate": "calculator", "run_subagent": "delegate"},
         )
         resumed = await resume(
             approval_executor(config, paths),
@@ -557,7 +557,7 @@ async def test_a_child_cancelled_in_its_parent_s_turn_keeps_its_own_subagent_cos
         metrics=_LEADER_REQUEST,
     )
     cheap = model_identity(config.models["cheap"])
-    child_add = calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)
+    child_add = calls(_deferred_call("child-add", "calculate", action="add", a=2, b=3), metrics=_CHILD_REQUEST)
     ScriptedAgents(
         {
             "leader": ScriptedModel([delegate], identity=model_identity(config.models["default"])),
@@ -607,7 +607,11 @@ async def test_a_team_reply_resumed_after_an_approval_reports_its_member_s_subag
             "leader": ScriptedModel(
                 [
                     calls(tool_call("run_subagent", "delegate", agent_name="mid", task="Work")),
-                    *([calls(_deferred_call("own-add", "add", a=2, b=3))] if pause == "own_tool" else []),
+                    *(
+                        [calls(_deferred_call("own-add", "calculate", action="add", a=2, b=3))]
+                        if pause == "own_tool"
+                        else []
+                    ),
                     answer("Member done"),
                 ],
                 identity=priced,
@@ -615,7 +619,12 @@ async def test_a_team_reply_resumed_after_an_approval_reports_its_member_s_subag
             "mid": ScriptedModel(
                 [
                     *(
-                        [calls(_deferred_call("child-add", "add", a=2, b=3), metrics=_CHILD_REQUEST)]
+                        [
+                            calls(
+                                _deferred_call("child-add", "calculate", action="add", a=2, b=3),
+                                metrics=_CHILD_REQUEST,
+                            ),
+                        ]
                         * (pause == "child_tool")
                     ),
                     answer("Mid answer", _CHILD_REQUEST),
@@ -639,7 +648,7 @@ async def test_a_team_reply_resumed_after_an_approval_reports_its_member_s_subag
     approvals = approval_calls_for(
         paused,
         default_agent="mid" if pause == "child_tool" else "leader",
-        toolkit_names={"add": "calculator"},
+        toolkit_names={"calculate": "calculator"},
     )
     resumed = await resume_team(
         "squad",

@@ -441,14 +441,14 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
     _, runtime_paths = _make_config(tmp_path)
     store = ReactiveTriggerStore(runtime_paths)
     with closing(sqlite3.connect(store.db_path)) as conn:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         conn.execute("DROP TABLE applied_migrations")
         conn.execute("UPDATE schema_version SET version = 2")
         conn.commit()
 
     upgraded = ReactiveTriggerStore(runtime_paths)
     with closing(sqlite3.connect(upgraded.db_path)) as conn:
-        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         assert "applied_migrations" in {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }

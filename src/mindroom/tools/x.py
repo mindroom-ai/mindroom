@@ -128,18 +128,11 @@ class _XTools(Toolkit):
         query: str | None = None,
         max_results: int = 10,
     ) -> str:
-        """Read X user info, home timeline, or recent posts matching a query.
+        """Read X user info, timeline, or posts.
 
         - `get_user_info`: `username`
-        - `get_home_timeline`: no required arguments.
-        - `search_posts`: `query`
-
-        Args:
-            action: Read operation to perform.
-            username: X handle for `get_user_info`.
-            query: Search query for `search_posts`.
-            max_results: Maximum posts; search clamps to 10-100.
-
+        - `get_home_timeline`: `max_results`
+        - `search_posts`: `query` (`max_results` clamped to 10-100)
         """
         try:
             if action == "get_user_info":
@@ -192,18 +185,11 @@ class _XTools(Toolkit):
         post_id: str | None = None,
         recipient: str | None = None,
     ) -> str:
-        """Create an X post, reply to a post, or send a direct message.
+        """Post, reply, or DM on X.
 
         - `create_post`: `text`
         - `reply_to_post`: `text`, `post_id`
-        - `send_dm`: `text`, `recipient`
-
-        Args:
-            action: Write operation to perform.
-            text: Text content of the post, reply, or direct message.
-            post_id: Target post ID for `reply_to_post`.
-            recipient: Recipient username or numeric user ID for `send_dm`.
-
+        - `send_dm`: `text`, `recipient` (username or numeric user ID)
         """
         try:
             if action == "create_post":

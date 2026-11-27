@@ -701,7 +701,7 @@ async def _run_tool_node(
     call: Callable[[], Awaitable[Outcome]],
 ) -> None:
     """Run one tool call and settle its node."""
-    # A `start_workflow` this call makes starts a run inside this one, under this node.
+    # A `workflow(action="start", ...)` this call makes starts a run inside this one, under this node.
     CALLING_NODE.set((node.run_id, node.key, node.generation))
     try:
         outcome = await call()
@@ -754,9 +754,19 @@ def _settle_broker(engine: WorkflowEngine, node: WorkflowNode, epoch: int, outco
     return state
 
 
+def _is_nested_workflow_start(request: dict[str, object]) -> bool:
+    if request.get("toolkit") != "workflow":
+        return False
+    function = request.get("function")
+    if function == "workflow":
+        arguments = request.get("arguments")
+        return isinstance(arguments, dict) and arguments.get("action") == "start"
+    return function == "start_workflow"
+
+
 def _nested_interrupted(engine: WorkflowEngine, node: WorkflowNode) -> Outcome | None:
     """Return a non-completed outcome when this generation's nested run ended interrupted."""
-    if (node.request.get("toolkit"), node.request.get("function")) != ("workflow", "start_workflow"):
+    if not _is_nested_workflow_start(node.request):
         return None
     for child in engine.store.child_runs(node.run_id):
         if child.parent_node_key != node.key or child.state is not WorkflowRunState.INTERRUPTED:
