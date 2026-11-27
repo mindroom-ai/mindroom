@@ -39,6 +39,8 @@ def _parse_until(until: object) -> datetime | str:
 class ThreadSnoozeTools(Toolkit):
     """Tools for snoozing Matrix threads in the current room until a set time."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="thread_snooze",

@@ -9,6 +9,7 @@ error reply see one rule with one precedence.
 from __future__ import annotations
 
 import re
+import ssl
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -20,6 +21,7 @@ from mindroom.llm.errors import (
     CONNECTION_ERROR,
     MISSING_API_KEY,
     QUOTA_EXHAUSTED,
+    TLS_CERTIFICATE_ERROR,
     TOKENS_PER_MINUTE,
     TRANSPORT_TIMEOUT,
     AuthenticationFailed,
@@ -349,6 +351,8 @@ def provider_failure(error: BaseException, *, provider: str) -> ProviderError | 
     import httpx2  # noqa: PLC0415 - the OpenAI and Claude SDKs' transport, loaded only once a request fails
     from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
 
+    if _has_ssl_cert_verification_error(error, aiohttp.ClientConnectorCertificateError):
+        return ProviderError(failure_text(error), provider=provider, code=TLS_CERTIFICATE_ERROR)
     chain = list(_visible_chain(error))
     transport = (
         httpx.TransportError,
@@ -418,6 +422,19 @@ def part_at(body: object, tokens: Sequence[str | int]) -> Mapping[str, Any] | No
 def media_ids(messages: Sequence[Message], kind: MediaKind) -> frozenset[str]:
     """Return the ids of every ``kind`` media item in ``messages``, for a rejection that names the kind alone."""
     return frozenset(item.id for message in messages for item_kind, item in media_items(message) if item_kind == kind)
+
+
+def _has_ssl_cert_verification_error(error: BaseException, *extra_types: type[BaseException]) -> bool:
+    """Return whether ``error`` or any chained cause (including suppressed context) is a TLS cert error."""
+    cert_types = (ssl.SSLCertVerificationError, *extra_types)
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, cert_types):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _visible_chain(error: BaseException) -> Iterator[BaseException]:

@@ -7,7 +7,7 @@ import contextlib
 import html as html_lib
 import json
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _SettingsSection = Literal[
     "general",
@@ -152,6 +153,8 @@ def _canvas_presentation_error(width: int | None, libraries: list[_CanvasLibrary
 class ChatUITools(Toolkit):
     """Ask MindRoom Chat to show the user one bounded part of its interface."""
 
+    offer_output_path = False
+
     def __init__(
         self,
         *,
@@ -171,6 +174,12 @@ class ChatUITools(Toolkit):
         if enable_show_canvas:
             tools.extend([self.show_canvas, self.read_canvas_state])
         super().__init__(name="chat_ui", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Allow redirecting canvas state reads while keeping UI actions lean."""
+        if function.name == "read_canvas_state":
+            return replace(function, offer_output_path=True)
+        return function
 
     @property
     def instructions(self) -> str:  # ty: ignore[incompatible-property-override]  # Toolkit writes it only when passed one

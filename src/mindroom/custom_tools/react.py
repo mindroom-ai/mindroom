@@ -46,6 +46,8 @@ async def _event_error(client: nio.AsyncClient, room_id: str, event_id: str) -> 
 class ReactTools(Toolkit):
     """React to messages in the current room; unlike matrix_message, it cannot send, edit, or read."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         self._operations = MatrixMessageOperations()
         super().__init__(name="react", tools=[self.react])

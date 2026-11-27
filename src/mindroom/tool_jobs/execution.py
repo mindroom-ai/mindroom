@@ -244,6 +244,7 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
         name: _default_wait(tool.function)
         for name, tool in actor.tools.items()
         if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
+        and tool.function.offer_background_after
     }
     return project_definitions(definitions, managed)
 

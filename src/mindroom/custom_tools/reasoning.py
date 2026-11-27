@@ -76,6 +76,7 @@ class ReasoningTools(Toolkit):
     """Step-by-step reasoning scratchpad providing think and analyze tools."""
 
     name = "reasoning_tools"
+    offer_background_after = False
 
     DEFAULT_INSTRUCTIONS = dedent(
         """\

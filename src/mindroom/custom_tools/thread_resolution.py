@@ -25,6 +25,8 @@ logger = get_logger(__name__)
 class ThreadResolutionTools(Toolkit):
     """Tools for resolving or reopening Matrix threads in the current room."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(
             name="thread_resolution",

@@ -376,7 +376,7 @@ _SIGNATURES = {
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "shared_room_ids": "(context, *, contact_room_ok)",
     "stop_worker_service": "(context, service, target)",
-    "tool": "(function, /, *, name, description)",
+    "tool": "(function, /, *, name, description, offer_background_after, offer_output_path)",
     "toolkit_functions": "(toolkit)",
     "write_agent_file": "(raw_path, payload, *, workspace_root, file_access)",
     "write_file_within_root": "(root, relative_path, payload, *, file_mode, dir_mode, exclusive)",
@@ -683,7 +683,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 35), "9d9a2904c400cf06c02a2d9fdc2a6aa7903faeef54098b847f4b7566b25ffb48")
+_PINNED_VERSION = ((1, 36), "64a9afe1ceb9b97efc102cfe4eb6def66dbddd4b5c86ccb84656b4f64c7870d7")
 
 
 def _is_enum(obj: object) -> bool:

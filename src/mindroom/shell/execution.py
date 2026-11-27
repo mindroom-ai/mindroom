@@ -14,6 +14,7 @@ import contextlib
 import errno
 import functools
 import itertools
+import json
 import os
 import re
 import shlex
@@ -26,7 +27,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
@@ -50,7 +51,12 @@ from mindroom.tool_jobs.control import job_owns_execution
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+_DESKTOP_SHELL_FUNCTION = "run_desktop_shell"
 _DEFAULT_RUN_TIMEOUT_SECONDS = 120
+_SHELL_ARGS_ERROR = (
+    '\'args\' must be a shell command string or a flat list of strings. Send args like "ls -la" or ["git", "status"].'
+)
+_SHELL_COMMAND_LINE_CHARS = frozenset("$|&;<>*?~`!(){}[]\n\r")
 # Time a worker shell request needs beyond its command's foreground wait to deliver the answer.
 _SHELL_REQUEST_GRACE_SECONDS = 30.0
 
@@ -89,7 +95,7 @@ class _OutputChunk(NamedTuple):
 
 
 @dataclass
-class _OutputBuffer:
+class ShellOutputBuffer:
     """Bound shell output by both line count and encoded byte size."""
 
     max_lines: int = _MAX_OUTPUT_LINES
@@ -107,11 +113,12 @@ class _OutputBuffer:
     last_append: int = 0
     _log_file: BackgroundLogFile | None = field(default=None, repr=False)
 
-    def attach_log_file(self, log_file: BackgroundLogFile) -> None:
+    def _attach_log_file(self, log_file: BackgroundLogFile) -> None:
         """Forward every subsequent appended chunk to *log_file* before buffer truncation."""
         self._log_file = log_file
 
     def append(self, text: str) -> None:
+        """Append decoded output text, trimming oldest chunks to stay within byte and line bounds."""
         if not text:
             return
         if self._log_file is not None:
@@ -151,9 +158,9 @@ class _OutputBuffer:
 
     def render(self, *, tail: int | None = None) -> str:
         """Return the last ``tail`` retained lines, after one notice of what was left out."""
-        return "\n".join(part for part in self.render_parts(tail=tail) if part)
+        return "\n".join(part for part in self._render_parts(tail=tail) if part)
 
-    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
+    def _render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]:
         """Return the notice of what was left out, empty when nothing was, and the last ``tail`` retained lines."""
         lines = self.lines()
         shown = lines if tail is None else lines[-tail:]
@@ -178,6 +185,7 @@ class _OutputBuffer:
         return f"[{'; '.join(cuts)}. {advice}]", "\n".join(shown)
 
     def __len__(self) -> int:
+        """Return the number of retained lines currently held in the buffer."""
         if not self.chunks:
             return 0
         return self.retained_newlines + (not self.chunks[-1].text.endswith("\n"))
@@ -244,8 +252,8 @@ class ProcessRecord:
     pid: int
     args: list[str]
     process: asyncio.subprocess.Process
-    stdout_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
-    stderr_buf: _OutputBuffer = field(default_factory=_OutputBuffer)
+    stdout_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
+    stderr_buf: ShellOutputBuffer = field(default_factory=ShellOutputBuffer)
     started_at: float = field(default_factory=time.monotonic)
     tail: int = 100
     finished: bool = False
@@ -263,8 +271,13 @@ class ProcessRecord:
         """Path of the live background log file, if one is attached."""
         return str(self._log_file.path) if self._log_file is not None else None
 
+    @property
+    def timed_out(self) -> bool:
+        """Whether this process was stopped because it reached ``max_runtime_seconds``."""
+        return self._stop_reason == "timeout"
 
-def _progress_lines(buffer: _OutputBuffer) -> str:
+
+def _progress_lines(buffer: ShellOutputBuffer) -> str:
     """Return what a running command printed so far, each line in the state it was redrawn to last.
 
     It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
@@ -275,10 +288,15 @@ def _progress_lines(buffer: _OutputBuffer) -> str:
     return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
 
 
-class _OutputProgress:
+class ShellOutputProgress:
     """Report a running command's latest output, at most twice a second and only when it changed."""
 
-    def __init__(self, report: Callable[[str], None], stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer) -> None:
+    def __init__(
+        self,
+        report: Callable[[str], None],
+        stdout_buf: ShellOutputBuffer,
+        stderr_buf: ShellOutputBuffer,
+    ) -> None:
         self._report = report
         self._stdout_buf = stdout_buf
         self._stderr_buf = stderr_buf
@@ -287,6 +305,7 @@ class _OutputProgress:
         self._due = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
 
     def poll(self) -> None:
+        """Emit the latest combined progress snapshot when the throttle interval has elapsed and output changed."""
         now = time.monotonic()
         last_appends = (self._stdout_buf.last_append, self._stderr_buf.last_append)
         if now < self._due or last_appends == self._last_appends:
@@ -339,10 +358,68 @@ def default_run_timeout_seconds() -> float:
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
-    """Return when a shell call's command is stopped: its own timeout, none for a job's call, else the default."""
+    """Return when a shell call's command is stopped: its own timeout, none for a top-level job, else the default."""
     if timeout is not None:
         return timeout
-    return None if job_owns_execution() else _DEFAULT_RUN_TIMEOUT_SECONDS
+    if job_owns_execution() and current_shell_background_scope() is None:
+        return None
+    return _DEFAULT_RUN_TIMEOUT_SECONDS
+
+
+def _looks_like_shell_command_line(command: str) -> bool:
+    """Return whether a single argv item is probably a shell command line."""
+    if any(char.isspace() for char in command):
+        return True
+    return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
+
+
+def _parse_shell_args(args: object) -> str | list[str]:
+    """Parse natural shell command strings and explicit argv lists.
+
+    Returns a raw shell command line string when the caller supplied one (including a
+    single-item list containing shell syntax or whitespace), or an explicit argv list.
+    """
+    if isinstance(args, str):
+        stripped = args.strip()
+        if not stripped:
+            raise ValueError(_SHELL_ARGS_ERROR)
+        if stripped[0] not in "[{":
+            return args
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError as exc:
+            if any(char.isspace() for char in stripped):
+                return args
+            raise ValueError(_SHELL_ARGS_ERROR) from exc
+
+    if not isinstance(args, list):
+        raise ValueError(_SHELL_ARGS_ERROR)  # noqa: TRY004
+
+    if any(not isinstance(item, str) for item in args):
+        raise ValueError(_SHELL_ARGS_ERROR)
+
+    normalized_args = cast("list[str]", args)
+    if len(normalized_args) == 1 and _looks_like_shell_command_line(normalized_args[0]):
+        if not normalized_args[0].strip():
+            raise ValueError(_SHELL_ARGS_ERROR)
+        return normalized_args[0]
+    return normalized_args
+
+
+def normalize_shell_args(args: object) -> list[str]:
+    """Normalize natural shell command strings and explicit argv lists into argv."""
+    parsed = _parse_shell_args(args)
+    return ["bash", "-c", parsed] if isinstance(parsed, str) else parsed
+
+
+def shell_args_to_command(args: object) -> str:
+    """Convert natural shell command strings or argv lists into one shell command line."""
+    parsed = _parse_shell_args(args)
+    if isinstance(parsed, str):
+        return parsed
+    if not parsed or not parsed[0]:
+        raise ValueError(_SHELL_ARGS_ERROR)
+    return shlex.join(parsed)
 
 
 def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -> float | None:
@@ -351,7 +428,7 @@ def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -
     The reply waits as long as a command outside a job may run, then the command continues as a job, so a command
     that runs longer than the model expected never holds the conversation longer than one outside a job would.
     """
-    if registered_toolkit == "shell" and function_name == SHELL_FUNCTION:
+    if (registered_toolkit, function_name) in {("shell", SHELL_FUNCTION), ("desktop", _DESKTOP_SHELL_FUNCTION)}:
         return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
     return None
 
@@ -469,8 +546,8 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if capture is not None:
                     capture.close()
 
-        stdout_buf = _OutputBuffer()
-        stderr_buf = _OutputBuffer()
+        stdout_buf = ShellOutputBuffer()
+        stderr_buf = ShellOutputBuffer()
         stdout_reader = asyncio.create_task(
             _read_stream(process.stdout, stdout_buf, capture.stdout if capture else None),
         )
@@ -483,7 +560,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 await _await_process_exit(
                     process,
                     timeout_seconds=timeout,
-                    on_poll=_OutputProgress(on_progress, stdout_buf, stderr_buf).poll
+                    on_poll=ShellOutputProgress(on_progress, stdout_buf, stderr_buf).poll
                     if on_progress is not None
                     else None,
                 )
@@ -570,7 +647,7 @@ async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
             errors = stderr_buf.render() if stderr_buf else None
             message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
         else:
-            message = _success_message(stdout_buf, stderr_buf, tail)
+            message = format_shell_success(stdout_buf, stderr_buf, tail)
         return ShellRunResult(message=message, handle=finished_handle, return_code=return_code)
     finally:
         if handle is not None and handle_reservations is not None:
@@ -586,7 +663,7 @@ async def _start_command(
     stderr: int = asyncio.subprocess.PIPE,
 ) -> asyncio.subprocess.Process:
     """Start one command at idle priority as the leader of its own session, with its stdout on a pipe."""
-    launch = _idle_launch_argv(argv, env, cwd)
+    launch = await asyncio.to_thread(_idle_launch_argv, argv, env, cwd)
     process = await asyncio.create_subprocess_exec(
         *launch.argv,
         stdin=stdin,
@@ -776,10 +853,10 @@ async def stream_command(
             process.stdin.close()
 
 
-def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
+def format_shell_success(stdout_buf: ShellOutputBuffer, stderr_buf: ShellOutputBuffer, tail: int) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
-    output_notice, output = stdout_buf.render_parts(tail=tail)
-    errors_notice, errors = stderr_buf.render_parts(tail=tail, stream="stderr")
+    output_notice, output = stdout_buf._render_parts(tail=tail)
+    errors_notice, errors = stderr_buf._render_parts(tail=tail, stream="stderr")
     completion = format_shell_completion(output, errors if stderr_buf else None, return_code=0)
     return "\n".join(part for part in (output_notice, errors_notice, completion) if part)
 
@@ -787,8 +864,8 @@ def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail:
 async def _stop_timed_out_process(
     process: asyncio.subprocess.Process,
     *,
-    stdout_buf: _OutputBuffer,
-    stderr_buf: _OutputBuffer,
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
@@ -827,8 +904,8 @@ def _unused_handle(registry: dict[str, ProcessRecord]) -> str:
 
 def _seed_background_log(
     log_file: BackgroundLogFile,
-    stdout_buf: _OutputBuffer,
-    stderr_buf: _OutputBuffer,
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
 ) -> None:
     """Write buffered foreground stdout and stderr into a newly opened background log file."""
     prev_ended_newline = True
@@ -838,7 +915,7 @@ def _seed_background_log(
             continue
         if not prev_ended_newline:
             log_file.write("\n")
-        notice, _ = buf.render_parts(tail=None, stream=stream)
+        notice, _ = buf._render_parts(tail=None, stream=stream)
         log_file.write(f"{notice}\n{raw}" if notice else raw)
         prev_ended_newline = raw.endswith("\n")
 
@@ -851,8 +928,8 @@ def _format_auto_background_message(
     display_root: str | None,
     max_runtime_seconds: float | None,
     no_output_path: str | None,
-    stdout_buf: _OutputBuffer,
-    stderr_buf: _OutputBuffer,
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
     tail: int,
 ) -> str:
     """Format the tool response returned when a shell command moves to the background."""
@@ -912,8 +989,8 @@ def _prepare_background_log(
     pid: int,
     handle: str,
     registry: dict[str, ProcessRecord],
-    stdout_buf: _OutputBuffer,
-    stderr_buf: _OutputBuffer,
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
 ) -> BackgroundLogFile:
     active_paths = {
         record._log_path
@@ -929,8 +1006,8 @@ def _prepare_background_log(
         with contextlib.suppress(OSError):
             log_file.path.unlink()
         raise
-    stdout_buf.attach_log_file(log_file)
-    stderr_buf.attach_log_file(log_file)
+    stdout_buf._attach_log_file(log_file)
+    stderr_buf._attach_log_file(log_file)
     return log_file
 
 
@@ -940,8 +1017,8 @@ async def _background_process(
     namespace: str,
     argv: list[str],
     process: asyncio.subprocess.Process,
-    stdout_buf: _OutputBuffer,
-    stderr_buf: _OutputBuffer,
+    stdout_buf: ShellOutputBuffer,
+    stderr_buf: ShellOutputBuffer,
     tail: int,
     timeout: float,  # noqa: ASYNC109
     requested_handle: str | None,
@@ -1210,7 +1287,7 @@ async def _pace_capped_stream(stream: asyncio.StreamReader) -> None:
 
 
 def _count_capped_read(
-    buf: _OutputBuffer,
+    buf: ShellOutputBuffer,
     capture: CapturedShellStream | None,
     stream: asyncio.StreamReader,
     chunk_len: int,
@@ -1231,7 +1308,7 @@ def _count_capped_read(
 
 async def _read_stream(
     stream: asyncio.StreamReader | None,
-    buf: _OutputBuffer,
+    buf: ShellOutputBuffer,
     capture: CapturedShellStream | None = None,
 ) -> None:
     """Read bounded chunks from an async stream into *buf* until EOF."""
@@ -1385,13 +1462,58 @@ def _idle_io_launcher() -> str | None:
     return None
 
 
-@functools.cache
+_SYSTEMD_UNAVAILABLE_STATES = frozenset({"stopping", "offline"})
+
+
+def _systemd_bus_env(runtime_dir: str | None, dbus_addr: str | None) -> dict[str, str]:
+    """Return the minimal bus environment passed to user-systemd probe commands."""
+    return {
+        key: value
+        for key, value in (("XDG_RUNTIME_DIR", runtime_dir), ("DBUS_SESSION_BUS_ADDRESS", dbus_addr))
+        if value is not None
+    }
+
+
+def _user_manager_generation(runtime_dir: str | None, dbus_addr: str | None) -> int | None:
+    """Return the active ``systemd --user`` monotonic startup timestamp, or ``None`` if unavailable."""
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return None
+    systemctl = str(Path(systemctl).absolute())  # commands run in other directories
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        result = subprocess.run(
+            [systemctl, "--user", "show", "--property=UserspaceTimestampMonotonic", "--property=SystemState"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env=_systemd_bus_env(runtime_dir, dbus_addr),
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        props = {
+            key: value.strip()
+            for line in result.stdout.splitlines()
+            for key, sep, value in (line.partition("="),)
+            if sep
+        }
+        if props.get("SystemState") in _SYSTEMD_UNAVAILABLE_STATES:
+            return None
+        raw_generation = props.get("UserspaceTimestampMonotonic", "")
+        if raw_generation.isascii() and raw_generation.isdigit() and (generation := int(raw_generation)) > 0:
+            return generation
+    return None
+
+
+@functools.lru_cache(maxsize=4)
 def _probe_systemd_slice_launcher(
     slice_name: str,
     runtime_dir: str | None,
     dbus_addr: str | None,
+    generation: int,
 ) -> _SystemdSliceLauncher | None:
     """Return a ``systemd-run --user --scope`` launcher when probing *slice_name* succeeds, else ``None``."""
+    del generation  # cache key only; re-probes when the user manager restarts
     systemd_run = shutil.which("systemd-run")
     env_bin = shutil.which("env")
     if systemd_run is None or env_bin is None:
@@ -1414,14 +1536,13 @@ def _probe_systemd_slice_launcher(
         ("XDG_RUNTIME_DIR", runtime_dir),
         ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
     )
-    probe_env = {k: v for k, v in bus_env if v is not None}
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         probe = subprocess.run(
             [*prefix, env_bin, "-u", "MINDROOM_PROBE_UNSET", "--", "MINDROOM_PROBE_SET=1", systemd_run, "--version"],
             capture_output=True,
             timeout=5,
             check=False,
-            env=probe_env,
+            env=_systemd_bus_env(runtime_dir, dbus_addr),
         )
         if probe.returncode == 0:
             return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
@@ -1439,11 +1560,13 @@ def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
         or any(ch.isspace() or ch == "\x00" for ch in slice_name)
     ):
         return None
-    return _probe_systemd_slice_launcher(
-        slice_name,
-        os.environ.get("XDG_RUNTIME_DIR") or None,
-        os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None,
-    )
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or None
+    dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None
+    generation = _user_manager_generation(runtime_dir, dbus_addr)
+    if generation is None:
+        _probe_systemd_slice_launcher.cache_clear()
+        return None
+    return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
 
 
 def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:

@@ -38,6 +38,8 @@ _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
 class ReportPublishingTools(Toolkit):
     """Tools that publish authorized report artifacts through revocable public links."""
 
+    offer_output_path = False
+
     def __init__(self) -> None:
         super().__init__(name="report_publishing")
 

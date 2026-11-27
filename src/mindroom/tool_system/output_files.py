@@ -32,9 +32,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 OUTPUT_PATH_ARGUMENT = "mindroom_output_path"
-_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
-    "Optional workspace-relative path: save full supported output to file and return a receipt."
-)
 # Beside a workdir, the path is below the saved outputs, which tools working in the workdir open by absolute path.
 _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = "Optional path under saved tool outputs dir: save full supported output and return a receipt with its absolute path."
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
@@ -258,13 +255,10 @@ def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdi
     """
     finished = dict(parameters)
     properties = dict(finished.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-        "default": None,
-        "description": _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION
-        if tools_use_workdir
-        else _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
-    }
+    output_path_schema: dict[str, Any] = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    if tools_use_workdir:
+        output_path_schema["description"] = _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION
+    properties[OUTPUT_PATH_ARGUMENT] = output_path_schema
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
     required = finished.get("required")
@@ -625,13 +619,15 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
-    """Return ``function`` also taking and handling ``mindroom_output_path``, its unset ``strict`` made False.
+    """Return ``function`` handling output files, with unset ``strict`` made False and ``mindroom_output_path`` offered when ``offer_output_path`` is set.
 
-    Its schema offers the argument as its last, optional property. The entrypoint takes the argument out of each call,
-    runs the call with the rest, and saves or redirects its output. A strict function keeps its schema as its author
-    made it, and a function that takes the argument itself, by its entrypoint or its schema, stays as it is too. So does
-    a function that can stop the run (``controls_run``): its result answers the run, and a saved one would be a receipt
-    that no longer stops it.
+    When ``offer_output_path`` is True, its schema offers the argument as its last, optional property. When
+    ``offer_output_path`` is False, the schema stays unchanged while the entrypoint still wraps calls so large-result
+    auto-save remains active and stray/replayed output-path arguments do not fail with unexpected keyword errors;
+    ``strict`` still becomes False so OpenAI's Responses API does not default omitted ``strict`` to True on tools with
+    optional parameters. A strict function keeps its schema as its author made it, and a function that takes the
+    argument itself, by its entrypoint or its schema, stays as it is too. So does a function that can stop the run
+    (``controls_run``): its result answers the run, and a saved one would be a receipt that no longer stops it.
     """
     parameters = inspect.signature(function.entrypoint).parameters
     properties = function.parameters.get("properties")
@@ -644,11 +640,14 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
             argument_name=OUTPUT_PATH_ARGUMENT,
         )
         return function
+    entrypoint = _handling_output_files(function.entrypoint, policy, tool_name=function.name)
+    if not function.offer_output_path:
+        return replace(function, strict=False, entrypoint=entrypoint)
     return replace(
         function,
         parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
         strict=False,
-        entrypoint=_handling_output_files(function.entrypoint, policy, tool_name=function.name),
+        entrypoint=entrypoint,
     )
 
 
