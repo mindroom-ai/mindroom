@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -59,6 +60,7 @@ _CALC = {
     "src/__init__.py": "",
     "src/calc.py": "def apply_discount(price: float, pct: float) -> float:\n    return price + (price * pct / 100.0)\n",
     "check_calc.py": (
+        "import sys; sys.dont_write_bytecode = True\n"
         "from src.calc import apply_discount\n"
         'assert apply_discount(100.0, 20.0) == 80.0\nassert apply_discount(50.0, 10.0) == 45.0\nprint("OK")\n'
     ),
@@ -93,8 +95,8 @@ def _ends(v: object, suffix: str) -> bool:
     return _str(v) and Path(str(v)).as_posix().endswith(suffix)
 
 
-def parse_future_iso_seconds(raw: object) -> float | None:
-    """Return positive seconds until an ISO-8601 datetime string (naive treated as UTC), or None."""
+def parse_future_iso_seconds(raw: object, *, timezone: str | None = None) -> float | None:
+    """Return positive seconds until an ISO-8601 datetime string (naive uses ``timezone`` or UTC), or None."""
     if not isinstance(raw, str):
         return None
     s = raw.strip()
@@ -102,10 +104,11 @@ def parse_future_iso_seconds(raw: object) -> float | None:
         return None
     try:
         dt = datetime.fromisoformat(s)
-    except ValueError:
+        if dt.tzinfo is None:
+            tz = ZoneInfo(timezone.strip()) if isinstance(timezone, str) and timezone.strip() else UTC
+            dt = dt.replace(tzinfo=tz)
+    except (ValueError, ZoneInfoNotFoundError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
     delta = (dt.astimezone(UTC) - datetime.now(UTC)).total_seconds()
     return delta if delta > 0 else None
 
@@ -126,7 +129,7 @@ def _v_sched(_ws: Path, c: Sequence[CallTrace]) -> bool:
         delta = (
             float(d)
             if isinstance(d, int) and not isinstance(d, bool)
-            else parse_future_iso_seconds(a.get("execute_at"))
+            else parse_future_iso_seconds(a.get("execute_at"), timezone=a.get("timezone"))
         )
         return (
             a.get("action") == "create"
@@ -195,7 +198,13 @@ def _v_view(_ws: Path, c: Sequence[CallTrace]) -> bool:
     sent = _ok(
         c,
         "matrix_message",
-        lambda a: a.get("action", "send") == "send" and _str(a.get("message")) and not a.get("new_thread"),
+        lambda a: (
+            a.get("action", "send") == "send"
+            and _str(a.get("message"))
+            and not a.get("new_thread")
+            and a.get("room_id") in (None, "!room:localhost")
+            and a.get("thread_id") in (None, "$thread")
+        ),
     )
     return viewed and sent
 

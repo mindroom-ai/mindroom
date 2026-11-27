@@ -5,9 +5,10 @@ from __future__ import annotations
 import itertools
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -179,7 +180,9 @@ async def test_portable_surface_and_provider_resolution(tmp_path: Path, monkeypa
     assert "tool_search" in sys_text
 
     url = "http://llama.local/v1"
-    loc_p = resolve_provider("local:inkling-2:mini-vllm", config_path=None, base_url=url)
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path / "storage"))
+    monkeypatch.setenv("MINDROOM_SHARED_CREDENTIALS_PATH", str(tmp_path / "storage" / "credentials"))
+    loc_p = resolve_provider("local:inkling-2:mini-vllm", config_path=None, base_url=url, tmp_dir=tmp_path / "local")
     assert loc_p.capabilities.native_tool_search is False
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
@@ -228,7 +231,7 @@ async def test_alternative_paths_and_stripped_env_isolation(tmp_path: Path, monk
     c = [_ct("show_canvas", title="Deploy", path="widget.html")]
     assert (await _run("canvas_dashboard", w, c)).first_try_passed
     g = [_call("grep", pattern="LEGACY_PORT")]
-    s = [_call("run_shell_command", args="sed -i 's/8080/9090/' src/config.py")]
+    s = [_call("run_shell_command", args="sed -i.bak 's/8080/9090/' src/config.py")]
     assert (await _run("grep_and_edit_config", g, s)).first_try_passed
 
     monkeypatch.setenv("EVAL_SECRET_SHOULD_NOT_LEAK", "super-secret")
@@ -250,7 +253,8 @@ async def test_alternative_paths_and_stripped_env_isolation(tmp_path: Path, monk
 
     env_cmd = 'test -z "$EVAL_SECRET_SHOULD_NOT_LEAK" && test -z "$HTTPS_PROXY" && test "$HOME" = "$PWD"'
     json_cmd = """printf '{"error": 4}\\n'"""
-    s_t1 = [_call("run_shell_command", args=env_cmd), _call("run_shell_command", args=json_cmd)]
+    awk_call = _call("run_shell_command", args=["awk", "/ERROR/ && NF", "logs/service.log"])
+    s_t1 = [_call("run_shell_command", args=env_cmd), _call("run_shell_command", args=json_cmd), awk_call]
     assert (await _run("shell_pipeline_logs", s_t1, [_call("run_shell_command", args=_LOG_CMD)])).first_try_passed
 
 
@@ -299,7 +303,7 @@ async def test_stateful_stubs_and_attachment_validation() -> None:
     assert view_att.failure_counts == {"invalid_param_value": 1, "missing_required_param": 2}
 
 
-_TWO_HOURS_ISO = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
+_TWO_HOURS_LA = (datetime.now(ZoneInfo("America/Los_Angeles")) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
 _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
     "nested_call_tool_and_unknown": (
         "canvas_dashboard",
@@ -340,7 +344,7 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
                 _sched(new_thread=False, execute_at="in 2 hours"),
                 _sched(new_thread=False, execute_at="2000-01-01T00:00:00Z"),
             ],
-            [_sched(new_thread=False, execute_at=_TWO_HOURS_ISO)],
+            [_sched(new_thread=False, execute_at=_TWO_HOURS_LA, timezone="America/Los_Angeles")],
         ],
         True,
         {"unknown_tool": 1, "invalid_param_value": 3, "missing_required_param": 1},
@@ -374,6 +378,12 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
         False,
         {},
     ),
+    "view_rejects_room_thread_id": (
+        "view_image_and_notify",
+        [[_VIEW, _call("matrix_message", action="send", message="Done.", thread_id="room")]],
+        False,
+        {},
+    ),
 }
 
 
@@ -402,6 +412,7 @@ async def test_shell_syntax_plural_validation_raw_preview_trace_matching_and_ver
     assert has_shell_argv_syntax({"args": ["ls", "~/logs"]})
     assert not has_shell_argv_syntax({"args": ["bash", "-c", "grep ERROR logs/service.log | wc -l"]})
     assert not has_shell_argv_syntax({"args": ["bash", "-o", "pipefail", "-c", "grep ERROR logs/service.log | wc -l"]})
+    assert not has_shell_argv_syntax({"args": ["awk", "/ERROR/ && NF", "logs/service.log"]})
 
     bad_raw = '{"name": "show_canvas", "html": "<div>unterminated'
     res = await _run(
@@ -460,7 +471,7 @@ async def test_run_cli_end_to_end_and_output_limit_resilience(
         provider_factory=factory,
     )
     stdout = capsys.readouterr().out
-    assert "| Model | First-Try | Recovered | Mis-Calls | Failure Breakdown | Tokens | Elapsed |" in stdout
+    assert "| Model | First-Try | Passed (+rec) | Mis-Calls | Failure Breakdown | Tokens | Elapsed |" in stdout
     assert "| clean | 1/1 | 1/1 | 0 | none |" in stdout
     assert "| noisy | 0/1 | 1/1 (+1) | 1 | nested_call_tool_name=1 |" in stdout
     assert "| oom | 0/1 | 0/1 | 0 | none |" in stdout

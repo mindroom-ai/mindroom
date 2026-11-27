@@ -152,7 +152,7 @@ def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) ->
         _need(timings == 1, "Missing required parameter: timing field.")
         delay, ex_at = kw.get("delay_seconds"), kw.get("execute_at")
         _need(delay is None or delay >= 1, "Invalid value for parameter 'delay_seconds': must be >= 1.")
-        ok_at = ex_at is None or parse_future_iso_seconds(ex_at) is not None
+        ok_at = ex_at is None or parse_future_iso_seconds(ex_at, timezone=kw.get("timezone")) is not None
         _need(ok_at, "Invalid value for parameter 'execute_at': must be a future ISO-8601 datetime.")
     elif name == "memory" and action in {"search", "add", "get", "delete", "update"}:
         req = {"search": "query", "add": "content"}.get(action, "memory_id")
@@ -282,8 +282,7 @@ def has_shell_argv_syntax(args: Mapping[str, Any], *, is_error: bool = False) ->
         tok in _SHELL_OPS
         or tok == "~"
         or tok.startswith(("~/", "<<", ">", "<"))
-        or any(op in tok for op in ("&&", "||", "$(", "<<"))
-        or (is_error and any(c in tok for c in "|;><"))
+        or (is_error and (any(op in tok for op in ("&&", "||", "$(", "<<")) or any(c in tok for c in "|;><")))
         for tok in raw
     )
 

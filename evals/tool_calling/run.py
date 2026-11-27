@@ -53,7 +53,13 @@ def _configure_cli_logging(*, verbose: bool) -> None:
     logging.getLogger("mindroom").setLevel(level)
 
 
-def resolve_provider(model_spec: str, *, config_path: Path | None, base_url: str) -> ModelProvider:
+def resolve_provider(
+    model_spec: str,
+    *,
+    config_path: Path | None,
+    base_url: str,
+    tmp_dir: Path | None = None,
+) -> ModelProvider:
     """Build a MindRoom ``ModelProvider`` from ``local:<id>``, ``openrouter:<id>``, or a config model name."""
     if model_spec.startswith(("local:", "openrouter:")):
         is_local = model_spec.startswith("local:")
@@ -67,12 +73,11 @@ def resolve_provider(model_spec: str, *, config_path: Path | None, base_url: str
             else {"provider": "openrouter", "id": model_spec.removeprefix("openrouter:")}
         )
         cfg_file = None if is_local else (config_path if config_path and config_path.is_file() else None)
-        tmp = Path(tempfile.gettempdir()) / "mindroom-tool-calling-eval"
-        rp = (
-            resolve_runtime_paths(config_path=cfg_file)
-            if cfg_file
-            else resolve_runtime_paths(config_path=tmp / "c.yaml", storage_path=tmp / "s")
-        )
+        if cfg_file:
+            rp = resolve_runtime_paths(config_path=cfg_file)
+        else:
+            tmp = tmp_dir or Path(tempfile.mkdtemp(prefix="mindroom-eval-provider-"))
+            rp = resolve_runtime_paths(config_path=tmp / "c.yaml", storage_path=tmp / "s")
         authored = {
             "defaults": {"tools": []},
             "router": {"model": "_eval_explicit"},
@@ -115,7 +120,7 @@ def _summarize(model: str, results: Sequence[CaseResult], elapsed_s: float) -> d
 def format_markdown_table(summaries: Sequence[dict[str, Any]]) -> str:
     """Format model summaries into a compact Markdown table."""
     rows = [
-        "| Model | First-Try | Recovered | Mis-Calls | Failure Breakdown | Tokens | Elapsed |",
+        "| Model | First-Try | Passed (+rec) | Mis-Calls | Failure Breakdown | Tokens | Elapsed |",
         "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for s in summaries:
@@ -156,15 +161,21 @@ async def run_cli(
         cases = CASES
 
     summaries: list[dict[str, Any]] = []
-    for spec in models:
-        started = time.monotonic()
-        prov = (
-            provider_factory(spec)
-            if provider_factory
-            else resolve_provider(spec, config_path=args.config, base_url=args.base_url)
-        )
-        results = await evaluate_model(prov, cases, max_turns=args.max_turns, concurrency=args.concurrency)
-        summaries.append(_summarize(spec, results, time.monotonic() - started))
+    with tempfile.TemporaryDirectory(prefix="mindroom-tool-calling-eval-") as tmp_root:
+        for i, spec in enumerate(models):
+            started = time.monotonic()
+            prov = (
+                provider_factory(spec)
+                if provider_factory
+                else resolve_provider(
+                    spec,
+                    config_path=args.config,
+                    base_url=args.base_url,
+                    tmp_dir=Path(tmp_root) / f"p{i}",
+                )
+            )
+            results = await evaluate_model(prov, cases, max_turns=args.max_turns, concurrency=args.concurrency)
+            summaries.append(_summarize(spec, results, time.monotonic() - started))
 
     print(format_markdown_table(summaries))
     serialized = (
