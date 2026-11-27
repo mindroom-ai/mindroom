@@ -1583,6 +1583,7 @@ async def lifespan(lifecycle: PluginLifecycle):
 | `context()` | The plugin's [context](#plugin-context) under the config MindRoom serves now; it raises once that config no longer loads the plugin |
 | `process_state` | A dict that every start of this plugin shares for as long as the MindRoom process runs; a reload cancels no task kept in it |
 | `stop_reason` | Set before the stop code runs: `"reload"` when the plugin's new lifespan already started and can take over `process_state`, `"disabled"` when no new lifespan did because a config change removed or disabled the plugin or its new code failed to load or start, and `"shutdown"` when MindRoom stops, after its agents have stopped |
+| `register_event_source(source)` | Registers an [`EventSource`](#event-sources) on the primary runtime's reactive trigger service, returns its `EventSourceEmitter`, and auto-unregisters it when the lifespan stops |
 
 MindRoom starts each plugin's lifespan once the plugin loads at startup, in the process that runs the agents.
 `mindroom plugins check`, `mindroom config validate`, and `mindroom doctor` import the lifecycle module but never run `lifespan`, and workers never run it either.
@@ -1597,6 +1598,71 @@ A start or stop that raises or takes longer than 10 seconds logs `Plugin lifespa
 A lifecycle module that fails to import or defines no `lifespan` logs `Plugin lifecycle module failed to load; running no lifespan` with the reason, and `mindroom plugins check` fails on it.
 Either failure costs the plugin only its lifespan, and its tools, hooks, and routes keep working, except that a lifecycle module that fails to import also fails a module that imports it: MindRoom then skips the plugin when that is its tools or hooks module, and serves no routes when it is its routes module.
 A plugin with a lifecycle module states `"mindroom_plugin_api": "1.8"` in its manifest, so an older MindRoom skips it with a clear reason.
+
+## Event sources
+
+A plugin can feed normalized events into MindRoom's reactive trigger pipeline so agents and users can subscribe to them with `triggers(action="subscribe_event", source_id=..., ...)` and manage them in the Room Triggers UI (plugin API `1.38`).
+
+Subclass `EventSource` from `mindroom.plugin_api` and register it from your plugin's `lifespan(lifecycle)` using `lifecycle.register_event_source(source)`.
+Registration returns an `EventSourceEmitter` that stamps `source_type="external_event"` and `source_id` on emitted events:
+
+```python
+# lifecycle.py
+from contextlib import asynccontextmanager
+
+from mindroom.plugin_api import EventSource, EventSourceDescriptor, PluginLifecycle
+
+
+class AlertsEventSource(EventSource):
+    source_id = "my-plugin-alerts"
+    description = "Incoming operational alerts from my-plugin."
+    allowed_kinds = ("fired", "resolved")
+    match_fields = ("severity",)
+    default_once = False
+    default_new_thread = True
+    default_thread_key_from_event = True
+
+
+@asynccontextmanager
+async def lifespan(lifecycle: PluginLifecycle):
+    emitter = lifecycle.register_event_source(AlertsEventSource())
+    lifecycle.process_state["alerts_emitter"] = emitter
+    yield
+```
+
+HTTP routes in `routes_module` can look up the active emitter for one of the plugin's own registered sources with `event_source_emitter(request, source_id)` from `mindroom.plugin_http`:
+
+```python
+# routes.py
+from fastapi import APIRouter, Request
+
+from mindroom.plugin_http import event_source_emitter
+
+router = APIRouter()
+
+
+@router.post("/webhook")
+async def receive_alert(request: Request) -> dict[str, int]:
+    # Verify the incoming provider signature or shared secret before emitting.
+    verify_provider_signature(request)
+    payload = await request.json()
+    emitter = event_source_emitter(request, "my-plugin-alerts")
+    enqueued = await emitter.emit(
+        kind=payload["kind"],
+        event_id=payload["id"],
+        title=payload.get("title"),
+        text=payload.get("body"),
+        thread_key=payload.get("incident_id"),
+        data={"severity": payload.get("severity", "info")},
+    )
+    return {"enqueued": enqueued}
+```
+
+Key contracts:
+
+- **Namespace:** A plugin's `source_id` must match `^[A-Za-z0-9_-]{1,64}$` and equal the plugin's `name` or start with `<name>_` or `<name>-`. Collisions with built-in sources, YAML `external_trigger_policy.event_sources`, or other plugins raise `ValueError`.
+- **Reload safety:** Registrations are token-fenced. During hot reload, the new lifespan atomically replaces the plugin's registration; when the old lifespan exits, its teardown leaves the replacement intact, and any call to the old `EventSourceEmitter.emit(...)` fails closed with `EventSourceInactiveError`.
+- **Access control & hooks on `EventSource`:** Override `describe_for_user(ctx) -> EventSourceDescriptor | None` to restrict which users can discover or subscribe to your source (returning `None` hides the source; otherwise any user with the `triggers` tool can subscribe). Always authenticate incoming webhook requests in your route before calling `event_source_emitter(...).emit(...)`. You can also override `validate_subscription(ctx, *, kind, match, existing_binding=None) -> ValidatedSubscription`, `matches_rule(rule, event, *, audience=None, has_thread_binding=False) -> bool`, `dry_run_audience(rule)`, `check_delivery_access(ctx, *, rule, event=None) -> EventSourceAccessDenial | None`, and `check_history_access(ctx, *, rule, event=None)` for per-user discovery, OAuth or room-privacy checks, ephemeral audience filtering, and private history gating. `EventSourceDescriptor.private_room_only` controls core listing visibility for non-owners, while plugins must enforce room and user access inside `validate_subscription`, `check_delivery_access` (returning `EventSourceAccessDenial`), and `check_history_access`. Returning `EventSourceAccessDenial(reason=..., retry=True)` retries the firing later, whereas `retry=False` (the default) skips it permanently.
 
 ## Worker services
 
