@@ -73,7 +73,13 @@ _CONFIG: dict[str, Any] = {
         "code": {"provider": "synthetic", "id": "code-model", "display_name": "Code Model", "context_window": 200000},
         "helper": {"provider": "synthetic", "id": "helper-model"},
     },
-    "tool_approval": {"default": "auto_approve", "rules": [{"match": "multiply", "action": "require_approval"}]},
+    "tool_approval": {
+        "default": "auto_approve",
+        "rules": [
+            {"match": "multiply", "action": "require_approval"},
+            {"match": "calculate", "action": "require_approval"},
+        ],
+    },
 }
 
 
@@ -182,13 +188,14 @@ async def setup_resume(
     helper = helper or scripted("helper-model")
     ScriptedAgents({"code": code, "helper": helper}).install(monkeypatch)
     executed: list[tuple[float, float]] = []
-    original_multiply = CalculatorTools.multiply
+    from mindroom.tool_system.authoring import tool  # noqa: PLC0415
 
     def multiply(self: CalculatorTools, a: float, b: float) -> str:
+        """Multiply two numbers (frozen Agno 3.0.9 capture shim)."""
         executed.append((a, b))
-        return original_multiply(self, a, b)
+        return self.calculate("multiply", a, b)
 
-    monkeypatch.setattr(CalculatorTools, "multiply", multiply)
+    monkeypatch.setattr(CalculatorTools, "multiply", tool(multiply), raising=False)
     attempt = paused_attempt_from_response(
         paused,
         toolkit_owners={("code", "multiply"): "calculator"},

@@ -303,8 +303,8 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
 ) -> None:
     """A minimal child sees one Bash tool and a short prompt, never gated tools; its follow-up stays minimal."""
     config = _config(
-        helper_tools=["shell", "calculator"],
-        approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="factorial", action="require_approval")]),
+        helper_tools=["shell", "calculator", "sleep"],
+        approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="sleep", action="require_approval")]),
     )
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
@@ -377,7 +377,7 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
         assert "mindroom-agent" in system
     assert len(listings) == 2
     # Native callers support approval, but a minimal child must never pause for it.
-    assert all("is_prime" in listing and "factorial" not in listing for listing in listings), listings
+    assert all("calculate" in listing and "sleep" not in listing for listing in listings), listings
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_a_minimal_subagent_started_after_a_reload_runs_its_bash(
             overlay = base.model_copy(
                 update={
                     "tool_approval": ToolApprovalConfig(
-                        rules=[ApprovalRuleConfig(match="factorial", action="require_approval")],
+                        rules=[ApprovalRuleConfig(match="sleep", action="require_approval")],
                     ),
                 },
             )
@@ -564,8 +564,8 @@ async def _run_minimal_turn_through_a_reload(
             operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="calculator",
-                function="is_prime",
-                arguments={"n": 7},
+                function="calculate",
+                arguments={"action": "is_prime", "a": 7},
                 call_id=call_id,
             ),
         )

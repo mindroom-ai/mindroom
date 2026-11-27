@@ -853,7 +853,7 @@ def test_native_tool_search_attaches_deferred_toolkits_and_skips_portable_tool_s
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
@@ -1366,7 +1366,7 @@ def test_openai_native_tool_search_attaches_deferred_toolkits_and_skips_portable
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     # Only defer&&!initial tools go on the wire deferred; initial stays plain.
     assert _native_deferred_names(agent) == frozenset({"sleep"})
     assert "tool_search" not in function_names
@@ -1428,7 +1428,7 @@ def test_immutable_tool_schema_eagerly_materializes_every_deferred_tool(tmp_path
 
     function_names = _function_names(agent)
     assert "sleep" in function_names
-    assert "add" in function_names
+    assert "calculate" in function_names
     assert agent.request_template.deferred_tools.names == frozenset()
     assert "tool_search" not in function_names
     assert not any(block.startswith("## Deferred Tools\n") for block in agent.prompt.instructions)
@@ -1475,7 +1475,7 @@ def test_unsupported_models_use_portable_tool_search(
     agent = _code_agent(config, tmp_path)
 
     function_names = _function_names(agent)
-    assert {"sleep", "add", "tool_search", "call_tool"} <= function_names
+    assert {"sleep", "calculate", "tool_search", "call_tool"} <= function_names
     assert "load_tool" not in function_names
     # initial tools stay ordinary eager tools, so only sleep is hidden behind call_tool.
     assert _portable_deferred_names(agent) == frozenset({"sleep"})
@@ -1786,19 +1786,48 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     deferred_first: bool,
 ) -> None:
     """The registry uses the first toolkit's function for a name; deferral follows that owner and search offers only it."""
+    plugin_root = tmp_path / "colliding_plugin"
+    plugin_root.mkdir()
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "colliding_plugin", "mindroom_plugin_api": "1.35", "tools_module": "tools.py"}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool\n"
+        "class _FirstTools(Toolkit):\n"
+        "    name = 'first_search'\n"
+        "    @tool\n"
+        "    def shared_search(self, query: str) -> str:\n"
+        "        return query\n"
+        "class _SecondTools(Toolkit):\n"
+        "    name = 'second_search'\n"
+        "    @tool\n"
+        "    def shared_search(self, query: str) -> str:\n"
+        "        return query\n"
+        "@register_tool_with_metadata(name='first_search', display_name='First', description='First', "
+        "category=ToolCategory.RESEARCH, file_access=ToolFileAccess.NONE, function_names=('shared_search',))\n"
+        "def first_tools(): return _FirstTools\n"
+        "@register_tool_with_metadata(name='second_search', display_name='Second', description='Second', "
+        "category=ToolCategory.RESEARCH, file_access=ToolFileAccess.NONE, function_names=('shared_search',))\n"
+        "def second_tools(): return _SecondTools\n",
+        encoding="utf-8",
+    )
     raw = _base_config_data()
+    raw["plugins"] = [{"path": str(plugin_root)}]
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["duckduckgo", {"googlesearch": {"defer": True}}]
+    tools: list[object] = ["first_search", {"second_search": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
 
+    refresh_plugins(config, _runtime_paths(tmp_path))
     agent = _code_agent(config, tmp_path)
 
-    assert ("web_search" in agent.request_template.deferred_tools.names) is deferred_first
+    assert ("shared_search" in agent.request_template.deferred_tools.names) is deferred_first
     if "tool_search" in _function_names(agent):
-        matches = (await _search(agent, "web_search"))["matches"]
-        offered = [match["toolkit"] for match in matches if match["name"] == "web_search"]
-        assert offered == (["googlesearch"] if deferred_first else [])
+        matches = (await _search(agent, "shared_search"))["matches"]
+        offered = [match["toolkit"] for match in matches if match["name"] == "shared_search"]
+        assert offered == (["second_search"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

@@ -1311,16 +1311,21 @@
     "guidance": null,
     "functions": [
       {
-        "name": "scrape_as_markdown",
-        "description": "Scrape a webpage and return content in Markdown format.",
+        "name": "brightdata",
+        "description": "Scrape pages, capture screenshots, run SERP searches, or query structured datasets via Bright Data.\n- `scrape_markdown`: Scrape `url` as Markdown.\n- `screenshot`: Capture PNG screenshot of `url` as an image artifact.\n- `search_engine`: Search `query` on `engine` (google, bing, yandex, default \"google\"; optional `num_results`, default 10, `language`, `country_code`).\n- `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "URL to scrape."
+              "enum": [
+                "scrape_markdown",
+                "screenshot",
+                "search_engine",
+                "web_data_feed"
+              ]
             },
-            "mindroom_output_path": {
+            "url": {
               "anyOf": [
                 {
                   "type": "string"
@@ -1329,62 +1334,34 @@
                   "type": "null"
                 }
               ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_screenshot",
-        "description": "Capture a screenshot of a webpage.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "URL to screenshot."
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_engine",
-        "description": "Search using Google, Bing, or Yandex and return results in Markdown.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "query": {
-              "type": "string",
-              "description": "Search query."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "engine": {
               "type": "string",
-              "description": "Search engine - 'google', 'bing', or 'yandex'."
+              "enum": [
+                "google",
+                "bing",
+                "yandex"
+              ]
             },
             "num_results": {
-              "type": "integer",
-              "description": "Number of results to return."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "language": {
               "anyOf": [
@@ -1394,8 +1371,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Two-letter language code."
+              ]
             },
             "country_code": {
               "anyOf": [
@@ -1405,10 +1381,9 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Two-letter country code."
+              ]
             },
-            "mindroom_output_path": {
+            "source_type": {
               "anyOf": [
                 {
                   "type": "string"
@@ -1417,29 +1392,6 @@
                   "type": "null"
                 }
               ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "web_data_feed",
-        "description": "Retrieve structured web data from various sources like LinkedIn, Amazon, Instagram, etc.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "source_type": {
-              "type": "string",
-              "description": "Type of data source (e.g., 'linkedin_person_profile', 'amazon_product')."
-            },
-            "url": {
-              "type": "string",
-              "description": "URL of the web resource to retrieve data from."
             },
             "num_of_reviews": {
               "anyOf": [
@@ -1449,8 +1401,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Number of reviews to retrieve."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -1464,8 +1415,7 @@
             }
           },
           "required": [
-            "source_type",
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -3082,14 +3032,28 @@
     "guidance": null,
     "functions": [
       {
-        "name": "navigate_to",
-        "description": "Navigates to a URL asynchronously.",
+        "name": "browserbase",
+        "description": "Control a remote Browserbase headless browser session.\n- `navigate`: Open `url` (optional `connect_url`).\n- `get_page_content`: Return current page text or HTML (optional `connect_url`).\n- `close_session`: Close and clean up the active browser session.",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL to navigate to."
+              "enum": [
+                "navigate",
+                "get_page_content",
+                "close_session"
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "connect_url": {
               "anyOf": [
@@ -3099,8 +3063,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The connection URL from an existing session."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3114,7 +3077,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -3123,17 +3086,15 @@
       },
       {
         "name": "screenshot",
-        "description": "Takes a screenshot of the current page asynchronously.",
+        "description": "Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`).",
         "parameters": {
           "type": "object",
           "properties": {
             "path": {
-              "type": "string",
-              "description": "Where to save the screenshot."
+              "type": "string"
             },
             "full_page": {
-              "type": "boolean",
-              "description": "Whether to capture the full page."
+              "type": "boolean"
             },
             "connect_url": {
               "anyOf": [
@@ -3143,8 +3104,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The connection URL from an existing session."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -3160,63 +3120,6 @@
           "required": [
             "path"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_page_content",
-        "description": "Gets the content of the current page asynchronously.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "connect_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The connection URL from an existing session."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "close_session",
-        "description": "Closes a browser session asynchronously.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,
@@ -3380,176 +3283,41 @@
     "guidance": null,
     "functions": [
       {
-        "name": "add",
-        "description": "Add two numbers and return the result.",
+        "name": "calculate",
+        "description": "Evaluate a math operation and return JSON ``{\"operation\", \"result\"}`` or ``{\"operation\", \"error\"}``.\n- `add`, `subtract`, `multiply`, `divide`, `exponentiate`: Binary ops on finite `a` and `b`.\n- `factorial`: Factorial of integer `a` (0 <= a <= 1558).\n- `is_prime`: Primality check for integer `a` (a <= 10**12).\n- `square_root`: Square root of non-negative `a`.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "add",
+                "subtract",
+                "multiply",
+                "divide",
+                "exponentiate",
+                "factorial",
+                "is_prime",
+                "square_root"
+              ]
+            },
             "a": {
-              "type": "number",
-              "description": "(float) First number."
+              "type": "number"
             },
             "b": {
-              "type": "number",
-              "description": "(float) Second number."
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
-            "a",
-            "b"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "subtract",
-        "description": "Subtract second number from first and return the result.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "a": {
-              "type": "number",
-              "description": "(float) First number."
-            },
-            "b": {
-              "type": "number",
-              "description": "(float) Second number."
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "multiply",
-        "description": "Multiply two numbers and return the result.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "a": {
-              "type": "number",
-              "description": "(float) First number."
-            },
-            "b": {
-              "type": "number",
-              "description": "(float) Second number."
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "divide",
-        "description": "Divide first number by second and return the result.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "a": {
-              "type": "number",
-              "description": "(float) Numerator."
-            },
-            "b": {
-              "type": "number",
-              "description": "(float) Denominator."
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "exponentiate",
-        "description": "Raise first number to the power of the second number and return the result.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "a": {
-              "type": "number",
-              "description": "(float) Base."
-            },
-            "b": {
-              "type": "number",
-              "description": "(float) Exponent."
-            }
-          },
-          "required": [
-            "a",
-            "b"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "factorial",
-        "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "n": {
-              "type": "integer",
-              "description": "(int) Number to calculate the factorial of, at most 1558."
-            }
-          },
-          "required": [
-            "n"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "is_prime",
-        "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "n": {
-              "type": "integer",
-              "description": "(int) Number to check if prime, at most 10**12."
-            }
-          },
-          "required": [
-            "n"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "square_root",
-        "description": "Calculate the square root of a number and return the result.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "n": {
-              "type": "number",
-              "description": "(float) Number to calculate the square root of."
-            }
-          },
-          "required": [
-            "n"
+            "action",
+            "a"
           ]
         },
         "strict": false,
@@ -5458,7 +5226,7 @@
     "functions": [
       {
         "name": "discord_read",
-        "description": "Read Discord channels or channel message history.\n- `list_channels`: `guild_id`\n- `get_channel_info`: `channel_id`\n- `get_channel_messages`: `channel_id`",
+        "description": "Read Discord channels or channel messages.\n- `list_channels`: `guild_id`\n- `get_channel_info`: `channel_id`\n- `get_channel_messages`: `channel_id` (`limit` 1-100)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5468,8 +5236,7 @@
                 "list_channels",
                 "get_channel_info",
                 "get_channel_messages"
-              ],
-              "description": "Read operation."
+              ]
             },
             "guild_id": {
               "anyOf": [
@@ -5479,8 +5246,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Discord server ID."
+              ]
             },
             "channel_id": {
               "anyOf": [
@@ -5490,12 +5256,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Discord channel ID."
+              ]
             },
             "limit": {
-              "type": "integer",
-              "description": "Maximum messages (1-100)."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5518,17 +5282,15 @@
       },
       {
         "name": "discord_send",
-        "description": "Send a text message to a Discord channel.",
+        "description": "Send `message` to Discord `channel_id`.",
         "parameters": {
           "type": "object",
           "properties": {
             "channel_id": {
-              "type": "string",
-              "description": "Target Discord channel ID."
+              "type": "string"
             },
             "message": {
-              "type": "string",
-              "description": "Message text to send."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -5590,7 +5352,7 @@
     "functions": [
       {
         "name": "docker_inspect",
-        "description": "Read-only inspection of Docker containers, images, volumes, and networks.\nActions:\n- `list_containers`: list containers (`all_containers=True` includes stopped).\n- `inspect_container` / `get_container_logs`: inspect or fetch last `tail` log lines of `target`.\n- `list_images` / `inspect_image`: list images or inspect `target`.\n- `list_volumes` / `inspect_volume`: list volumes or inspect `target`.\n- `list_networks` / `inspect_network`: list networks or inspect `target`.",
+        "description": "Read-only Docker inspection (`target` for inspect/logs).\n- `list_containers` (`all_containers`), `inspect_container`, `get_container_logs` (`tail`)\n- `list_images`, `inspect_image`, `list_volumes`, `inspect_volume`, `list_networks`, `inspect_network`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5645,7 +5407,7 @@
       },
       {
         "name": "docker_container",
-        "description": "Run, execute inside, start, stop, or remove Docker containers.\nActions:\n- `run`: start a container from `image` (optional `command`, `name`, `detach`, `ports`, `volumes`, `environment`, `network`).\n- `exec`: run `command` inside running `container_id`.\n- `start` / `stop`: start or stop `container_id` (optional `timeout` seconds for `stop`).\n- `remove`: remove `container_id` (`force`, `remove_volumes`).",
+        "description": "Manage Docker containers.\n- `run`: `image` (`command`, `name`, `detach`, `ports`, `volumes`, `environment`, `network`)\n- `exec`: `container_id`, `command`\n- `start` / `stop`: `container_id` (`timeout` s for `stop`)\n- `remove`: `container_id` (`force`, `remove_volumes`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5803,7 +5565,7 @@
       },
       {
         "name": "docker_resource",
-        "description": "Manage Docker images, volumes, and networks.\nActions:\n- `pull_image`: pull `name` with `tag` (default `latest`).\n- `build_image`: build `tag` from `path` and `dockerfile` (`rm=True` removes intermediates).\n- `tag_image` / `remove_image`: tag `name` into `repository`[:`tag`] or remove `name` (`force`).\n- `create_volume` / `remove_volume`: create (`driver`, `labels`) or remove (`force`) volume `name`.\n- `create_network` / `remove_network`: create (`driver`, `internal`, `labels`) or remove network `name`.\n- `connect_network` / `disconnect_network`: attach or detach `container_id` on network `name`.",
+        "description": "Manage Docker images, volumes, and networks by `name`.\n- `pull_image`: `tag` (`latest`)\n- `build_image`: `path`, `tag`, `dockerfile` (`rm`)\n- `tag_image` (`repository`, `tag`) / `remove_image` (`force`)\n- `create_volume` (`driver`, `labels`) / `remove_volume` (`force`)\n- `create_network` (`driver`, `internal`, `labels`) / `remove_network`\n- `connect_network` / `disconnect_network`: `container_id`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6142,18 +5904,30 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search",
-        "description": "Use this function to search the web for a query.",
+        "name": "duckduckgo_search",
+        "description": "Search DuckDuckGo for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "enum": [
+                "web",
+                "news"
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6167,40 +5941,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Use this function to get the latest news from the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -6265,7 +6007,7 @@
     "functions": [
       {
         "name": "e2b_run",
-        "description": "Execute Python code, shell commands, background jobs, or web servers in the E2B sandbox.\nActions:\n- `python`: execute Python `code` (output capped at 64 MiB).\n- `command` / `stream_command`: run shell `command` and capture stdout/stderr (capped at 64 MiB).\n- `background_command`: start shell `command` in background and return its `pid`.\n- `kill_background`: terminate background command identified by `pid`.\n- `server`: start background server `command` on `port` and return its public URL and `pid`.",
+        "description": "Run code, commands, or servers in the E2B sandbox (outputs capped at 64 MiB).\n- `python`: `code`\n- `command` / `stream_command`: shell `command`\n- `background_command`: start `command`, returns `pid`\n- `kill_background`: stop `pid`\n- `server`: start `command` on `port`, returns public URL + `pid`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6341,7 +6083,7 @@
       },
       {
         "name": "e2b_inspect",
-        "description": "Read-only inspection of E2B sandbox files, status, running sandboxes, and public URLs.\nActions:\n- `list_files`: list entries under `path` (default `/`).\n- `read_file`: stream and decode sandbox file `path` using `encoding` (capped at 64 MiB).\n- `watch_directory`: observe changes under `path` for `duration_seconds`.\n- `status` / `list_sandboxes`: return current sandbox ID or list running sandboxes.\n- `public_url`: return public HTTP URL for sandbox `port`.",
+        "description": "Read-only E2B sandbox inspection.\n- `list_files`: `path` (`/`)\n- `read_file`: `path`, `encoding` (<=64 MiB)\n- `watch_directory`: `path`, `duration_seconds`\n- `status` / `list_sandboxes`\n- `public_url`: HTTP URL for `port`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6396,7 +6138,7 @@
       },
       {
         "name": "e2b_files",
-        "description": "Write sandbox files, transfer files with the agent workspace, or save execution PNG/chart artifacts.\nActions:\n- `write`: write UTF-8 `content` to `sandbox_path` (or `file_path`) in the sandbox.\n- `upload`: upload local `file_path` (confined by agent `file_access`, <=64 MiB) to `sandbox_path`.\n- `download`: stream `sandbox_path` (<=64 MiB) to workspace-relative `local_path`.\n- `download_png`: attach PNG result at `result_index` as image media and optionally save to `local_path`.\n- `download_chart`: save interactive chart JSON at `result_index` to `local_path` (optionally with PNG artifact).",
+        "description": "Write/transfer E2B sandbox files (<=64 MiB) or save PNG/chart artifacts.\n- `write`: UTF-8 `content` to `sandbox_path` (or `file_path`)\n- `upload`: workspace `file_path` (confined by `file_access`) to `sandbox_path`\n- `download`: `sandbox_path` to workspace `local_path`\n- `download_png` / `download_chart`: save `result_index` artifact (optional `local_path`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6477,7 +6219,7 @@
       },
       {
         "name": "e2b_lifecycle",
-        "description": "Update timeout or shut down the E2B sandbox.\nActions:\n- `set_timeout`: update sandbox timeout to `timeout` seconds.\n- `shutdown`: immediately kill the sandbox.",
+        "description": "Update E2B sandbox timeout (`set_timeout` with `timeout` s) or kill it (`shutdown`).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -6826,18 +6568,62 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_exa",
-        "description": "Use this function to search the web using Exa for a query.",
+        "name": "exa_lookup",
+        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text`, default False, to include citation full text).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The query to search for."
+              "enum": [
+                "search",
+                "contents",
+                "similar",
+                "answer"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "urls": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "num_results": {
-              "type": "integer",
-              "description": "Number of results to return. Defaults to 5."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "category": {
               "anyOf": [
@@ -6847,106 +6633,17 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The category to filter search results. Options are \"company\", \"research paper\", \"news\",\n\"pdf\", \"github\", \"tweet\", \"personal site\", \"linkedin profile\", \"financial report\"."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
               ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_contents",
-        "description": "Retrieve detailed content from specific URLs using the Exa API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "urls": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "A list of URLs from which to fetch content."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "urls"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "find_similar",
-        "description": "Find similar links to a given URL using the Exa API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL for which to find similar links."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "The number of similar links to return. Defaults to 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "exa_answer",
-        "description": "Get an LLM answer to a question informed by Exa search results.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "The question or query to answer."
             },
             "text": {
-              "type": "boolean",
-              "description": "Include full text from citation. Default is False."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6960,7 +6657,7 @@
             }
           },
           "required": [
-            "query"
+            "action"
           ]
         },
         "strict": false,
@@ -7666,7 +7363,7 @@
     "functions": [
       {
         "name": "github_read_repo",
-        "description": "Read GitHub repositories, branches, files, directories, and code search results.\n- `list_repositories`: list authenticated user's repository full names\n- `search_repositories`: search repos by `query` (`sort`, `order`, `page`, `per_page`)\n- `get_repository`: repository metadata for `repo_name` (`owner/repo`)\n- `get_repository_with_stats`: detailed stats, languages, PR metrics, and contributors for `repo_name`\n- `get_repository_languages`: language byte counts for `repo_name`\n- `get_repository_stars`: star count for `repo_name`\n- `list_branches`: branch names for `repo_name`\n- `get_file_content`: decoded file text and SHA for `repo_name` and `path` (optional `ref`)\n- `get_directory_content`: directory listing for `repo_name` and `path` (optional `ref`)\n- `get_branch_content`: root directory listing for `repo_name` at `ref` (default `main`)\n- `search_code`: search code by `query` (optional `repo_name`, `language`, `user`, `path`, `filename`)",
+        "description": "Read GitHub repos, branches, files, or search code. Most repo actions require `repo_name` (`owner/repo`).\n- `list_repositories`: user's repos\n- `search_repositories`: `query` (`sort`, `order`, `page`, `per_page`)\n- `get_repository` / `get_repository_with_stats` / `get_repository_languages` / `get_repository_stars` / `list_branches`: `repo_name`\n- `get_file_content` / `get_directory_content`: `repo_name`, `path` (optional `ref`; file returns text + SHA)\n- `get_branch_content`: `repo_name` root at `ref` (default `main`)\n- `search_code`: `query` (`repo_name`, `language`, `user`, `path`, `filename`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -7789,7 +7486,7 @@
       },
       {
         "name": "github_read_issues_prs",
-        "description": "Read and search GitHub issues and pull requests.\n- `list_issues`: issues in `repo_name` (`state` default `open`, `page`, `per_page` default 20)\n- `get_issue`: issue details for `repo_name` and `number`\n- `list_issue_comments`: comments on issue `number` in `repo_name`\n- `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `page`, `per_page` default 50)\n- `get_pull_request`: PR metadata for `repo_name` and `number`\n- `get_pull_request_changes`: changed files and patches for PR `number` in `repo_name`\n- `get_pull_request_comments`: comments on PR `number` in `repo_name` (`include_issue_comments`)\n- `get_pull_request_with_details`: full PR details, comments, commits, and files for `repo_name` and `number`\n- `get_pull_request_count`: count PRs in `repo_name` (`state` default `all`, optional `user` author, `base`, `head`)\n- `search_issues_and_prs`: search by `query` (optional `repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` default 30)",
+        "description": "Read/search GitHub issues and PRs. All except `search_issues_and_prs` require `repo_name` (`owner/repo`); single-item actions require `number`.\n- `list_issues`: `state` (`open`), `page`, `per_page` (20)\n- `get_issue` / `list_issue_comments` / `get_pull_request` / `get_pull_request_changes` / `get_pull_request_with_details`: `number`\n- `get_pull_requests`: `state` (`open`), `sort`, `order`, `page`, `per_page` (50)\n- `get_pull_request_comments`: `number` (`include_issue_comments`)\n- `get_pull_request_count`: `state` (`all`), `user`, `base`, `head`\n- `search_issues_and_prs`: `query` (`repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` 30)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -7941,7 +7638,7 @@
       },
       {
         "name": "github_write_issues",
-        "description": "Create, edit, comment on, close, reopen, assign, or label GitHub issues.\n- `create_issue`: create issue in `repo_name` (`title`, optional `body`)\n- `edit_issue`: update `title` and/or `body` on `issue_number`\n- `comment_on_issue`: post `body` comment on `issue_number`\n- `close_issue`: close `issue_number`\n- `reopen_issue`: reopen `issue_number`\n- `assign_issue`: assign `assignees` to `issue_number`\n- `label_issue`: set `labels` on `issue_number`",
+        "description": "Manage GitHub issues in `repo_name`. All except `create_issue` require `issue_number`.\n- `create_issue`: `title` (`body`)\n- `edit_issue`: `title` and/or `body`\n- `comment_on_issue`: `body`\n- `close_issue` / `reopen_issue`: toggle state\n- `assign_issue`: `assignees`\n- `label_issue`: `labels`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -8038,7 +7735,7 @@
       },
       {
         "name": "github_write_pr",
-        "description": "Create pull requests, review comments, and review requests on GitHub.\n- `create_pull_request`: open PR in `repo_name` (`title`, `body`, `head`, `base`, optional `draft`, `maintainer_can_modify`)\n- `create_pull_request_comment`: post diff review comment on `pr_number` (`body`, `commit_id`, `path`, `position`)\n- `edit_pull_request_comment`: update `comment_id` in `repo_name` with `body`\n- `create_review_request`: request `reviewers` (and optional `team_reviewers`) on `pr_number`",
+        "description": "Manage GitHub PRs and reviews in `repo_name`.\n- `create_pull_request`: `title`, `body`, `head`, `base` (`draft`, `maintainer_can_modify`)\n- `create_pull_request_comment`: `pr_number`, `body`, `commit_id`, `path`, `position`\n- `edit_pull_request_comment`: `comment_id`, `body`\n- `create_review_request`: `pr_number`, `reviewers` (`team_reviewers`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -8198,7 +7895,7 @@
       },
       {
         "name": "github_write_repo",
-        "description": "Create/delete repositories, manage branches, and create/update/delete repository files.\n- `create_repository`: create repo `name` (optional `private`, `description`, `auto_init`, `organization`)\n- `delete_repository`: permanently delete `repo_name`\n- `create_branch`: create `branch` in `repo_name` (optional `source_branch`, defaults to default branch)\n- `set_default_branch`: set `repo_name` default branch to `branch`\n- `create_file`: create `path` in `repo_name` (`content`, `message`, optional `branch`)\n- `update_file`: update `path` in `repo_name` (`content`, `message`, `sha`, optional `branch`)\n- `delete_file`: delete `path` in `repo_name` (`message`, `sha`, optional `branch`)",
+        "description": "Manage GitHub repos, branches, and files. All except `create_repository` require `repo_name`.\n- `create_repository`: `name` (`private`, `description`, `auto_init`, `organization`)\n- `delete_repository`: permanently delete `repo_name`\n- `create_branch`: `branch` (`source_branch`, default repo default)\n- `set_default_branch`: `branch`\n- `create_file` / `update_file` / `delete_file`: `path`, `message`, optional `branch` (`content` for create/update; `sha` required for update/delete)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -10115,18 +9812,30 @@
     "guidance": null,
     "functions": [
       {
-        "name": "web_search",
-        "description": "Use this function to search the web for a query.",
+        "name": "google_search",
+        "description": "Search Google for `query` (optional `max_results`, default 5).\n- `web`: Web search.\n- `news`: Recent news articles.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The query to search for."
+              "enum": [
+                "web",
+                "news"
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -10140,40 +9849,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Use this function to get the latest news from the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The query to search for."
-            },
-            "max_results": {
-              "type": "integer",
-              "description": "(optional, default=5) The maximum number of results to return."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -14594,20 +14271,21 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_google",
-        "description": "Search Google for a query.",
+        "name": "oxylabs",
+        "description": "Query Google SERP, Amazon products, or universal web scraping via Oxylabs and return JSON.\n- `search_google`: Google search for `query` on `domain_code` (default `\"com\"`).\n- `amazon_product`: Amazon product details for 10-char `asin` on `domain_code` (default `\"com\"`).\n- `search_amazon`: Search Amazon products for `query` on `domain_code` (default `\"com\"`).\n- `scrape`: Scrape `url` (http/https; optional `render_javascript`, default False, `markdown`).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "search_google",
+                "amazon_product",
+                "search_amazon",
+                "scrape"
+              ]
+            },
             "query": {
-              "type": "string",
-              "description": "Search query."
-            },
-            "domain_code": {
-              "type": "string",
-              "description": "Google domain to search (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -14616,31 +14294,8 @@
                   "type": "null"
                 }
               ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_amazon_product",
-        "description": "Get detailed information about an Amazon product by ASIN.",
-        "parameters": {
-          "type": "object",
-          "properties": {
+            },
             "asin": {
-              "type": "string",
-              "description": "Amazon Standard Identification Number (10 alphanumeric characters, e.g., \"B07FZ8S74R\")."
-            },
-            "domain_code": {
-              "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -14649,62 +14304,36 @@
                   "type": "null"
                 }
               ]
-            }
-          },
-          "required": [
-            "asin"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_amazon_products",
-        "description": "Search Amazon for products and return search results.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "Product search query."
             },
-            "domain_code": {
-              "type": "string",
-              "description": "Amazon domain (e.g., \"com\", \"co.uk\", \"de\", default: \"com\")."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "scrape_website",
-        "description": "Scrape content from any website URL.",
-        "parameters": {
-          "type": "object",
-          "properties": {
             "url": {
-              "type": "string",
-              "description": "Website URL to scrape (must start with http:// or https://)."
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "domain_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "render_javascript": {
-              "type": "boolean",
-              "description": "Whether to enable JavaScript rendering for dynamic content (default: False)."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "markdown": {
               "anyOf": [
@@ -14714,8 +14343,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Whether to return content as Markdown instead of parsed HTML (default: uses constructor setting)."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -14729,7 +14357,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -16355,18 +15983,24 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_web",
-        "description": "Searches Google for the provided query using the Serper API.",
+        "name": "serper_search",
+        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search.\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
         "parameters": {
           "type": "object",
           "properties": {
             "query": {
+              "type": "string"
+            },
+            "action": {
               "type": "string",
-              "description": "(str) The search query to search for on Google."
+              "enum": [
+                "web",
+                "news",
+                "scholar"
+              ]
             },
             "num_results": {
-              "type": "integer",
-              "description": "(int) Number of search results to retrieve."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -16380,73 +16014,8 @@
             }
           },
           "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_news",
-        "description": "Searches for news articles using the Serper News API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The search query for news articles."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "(int) Number of news results to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "search_scholar",
-        "description": "Searches for academic papers using Google Scholar via Serper API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string",
-              "description": "(str) The search query for academic papers."
-            },
-            "num_results": {
-              "type": "integer",
-              "description": "(int) Number of academic papers to retrieve."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query"
+            "query",
+            "action"
           ]
         },
         "strict": false,
@@ -17379,14 +16948,38 @@
     "guidance": null,
     "functions": [
       {
-        "name": "search_web",
-        "description": "Use this function to search the web.",
+        "name": "spider",
+        "description": "Search, scrape, or crawl the web via Spider and return JSON results.\n- `search`: Search for `query` (optional `max_results`, default toolkit setting or 5).\n- `scrape`: Scrape `url` as Markdown.\n- `crawl`: Crawl `url` as Markdown (optional `limit`, default 10).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
+            "action": {
               "type": "string",
-              "description": "The query to search the web with."
+              "enum": [
+                "search",
+                "scrape",
+                "crawl"
+              ]
+            },
+            "query": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "max_results": {
               "anyOf": [
@@ -17396,66 +16989,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The maximum number of results to return. Defaults to the value set on the toolkit, or 5."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
               ]
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "scrape",
-        "description": "Use this function to scrape the content of a webpage.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the webpage to scrape."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "crawl",
-        "description": "Use this function to crawl the web.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the webpage to crawl."
             },
             "limit": {
               "anyOf": [
@@ -17465,8 +16999,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "The maximum number of pages to crawl. Defaults to 10."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17480,7 +17013,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -17495,7 +17028,7 @@
     "functions": [
       {
         "name": "spotify_search",
-        "description": "Search Spotify catalog, get recommendations, or inspect album/artist tracks.\nActions:\n- `search`: Search by `query` and `search_type` (`track`/`playlist`/`artist`/`album`, `limit`, `market`).\n- `recommendations`: Recommend tracks from `seed_tracks`/`seed_artists`/`seed_genres` and audio targets (`limit`).\n- `album_tracks`: Fetch tracks for album `item_id` (`market`).\n- `artist_top_tracks`: Fetch top tracks for artist `item_id` (`market`).",
+        "description": "Search Spotify catalog or fetch recommendations/tracks.\n- `search`: `query`, `search_type` (`track`/`playlist`/`artist`/`album`), `limit`, `market`\n- `recommendations`: `seed_tracks`/`seed_artists`/`seed_genres`, audio targets, `limit`\n- `album_tracks` / `artist_top_tracks`: `item_id`, `market`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17650,7 +17183,7 @@
       },
       {
         "name": "spotify_library",
-        "description": "Read the user's Spotify profile, playback state, playlists, and top items.\nActions:\n- `current_user`: Authenticated user profile.\n- `currently_playing`: Current track, device, and playback progress.\n- `user_playlists`: Current user's playlists (`limit`).\n- `playlist`: Details and optional track list for `playlist_id` (`include_tracks`, `limit`, `offset`).\n- `my_top_tracks`: User's top tracks (`time_range`, `limit`).\n- `my_top_artists`: User's top artists (`time_range`, `limit`).",
+        "description": "Read Spotify profile, playback, playlists, and top items.\n- `current_user` / `currently_playing`\n- `user_playlists` (`limit`)\n- `playlist`: `playlist_id` (`include_tracks`, `limit`, `offset`)\n- `my_top_tracks` / `my_top_artists` (`time_range`, `limit`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17713,7 +17246,7 @@
       },
       {
         "name": "spotify_playlist_write",
-        "description": "Create or modify Spotify playlists.\nActions:\n- `create`: Create a playlist (`name`; optional `description`, `public`, `track_uris`).\n- `update`: Update `playlist_id` details (`name`, `description`, or `public`).\n- `add_tracks`: Add `track_uris` (max 100) to `playlist_id` (optional 0-indexed `position`).\n- `remove_tracks`: Remove `track_uris` from `playlist_id`.",
+        "description": "Create or modify Spotify playlists.\n- `create`: `name` (`description`, `public`, `track_uris`)\n- `update`: `playlist_id` (`name`, `description`, `public`)\n- `add_tracks`: `playlist_id`, `track_uris` (max 100; optional 0-indexed `position`)\n- `remove_tracks`: `playlist_id`, `track_uris`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -18030,8 +17563,7 @@
               "type": "string",
               "enum": [
                 "message"
-              ],
-              "description": "Send operation."
+              ]
             },
             "message": {
               "anyOf": [
@@ -18041,8 +17573,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Text content for `message`."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18917,14 +18448,41 @@
     "guidance": null,
     "functions": [
       {
-        "name": "extract_text",
-        "description": "Extract main text content from a web page URL using Trafilatura.",
+        "name": "trafilatura_extract",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL to extract content from."
+              "enum": [
+                "text",
+                "metadata",
+                "batch"
+              ]
+            },
+            "url": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "urls": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "output_format": {
               "anyOf": [
@@ -18934,41 +18492,17 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
               ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "extract_metadata_only",
-        "description": "Extract only metadata from a web page URL.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL to extract metadata from."
             },
             "as_json": {
-              "type": "boolean",
-              "description": "Whether to return metadata as JSON string."
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -18982,7 +18516,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -18991,17 +18525,15 @@
       },
       {
         "name": "html_to_text",
-        "description": "Convert HTML content to plain text using Trafilatura's html2txt function.",
+        "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
           "properties": {
             "html_content": {
-              "type": "string",
-              "description": "The HTML content to convert."
+              "type": "string"
             },
             "clean": {
-              "type": "boolean",
-              "description": "Whether to remove potentially undesirable elements."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19023,50 +18555,16 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "extract_batch",
-        "description": "Extract content from multiple URLs in batch.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "urls": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              },
-              "description": "List of URLs to extract content from."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "urls"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
         "name": "crawl_website",
-        "description": "Crawl a website and optionally extract content from discovered pages.",
+        "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
           "properties": {
             "homepage_url": {
-              "type": "string",
-              "description": "The starting URL (preferably homepage) to crawl from."
+              "type": "string"
             },
             "extract_content": {
-              "type": "boolean",
-              "description": "Whether to extract content from discovered URLs."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20360,7 +19858,7 @@
     "functions": [
       {
         "name": "whatsapp_send",
-        "description": "Send a WhatsApp Business API message.\nRequires `recipient` unless configured.\n- `text`: `text`\n- `template`: `template_name`",
+        "description": "Send a WhatsApp Business message (`recipient` defaults to configured `recipient_waid`).\n- `text`: `text` (`preview_url`)\n- `template`: `template_name` (`language_code`, `components`)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20369,8 +19867,7 @@
               "enum": [
                 "text",
                 "template"
-              ],
-              "description": "Message type to send."
+              ]
             },
             "recipient": {
               "anyOf": [
@@ -20380,8 +19877,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Recipient WhatsApp ID or phone number; defaults to configured `recipient_waid`."
+              ]
             },
             "text": {
               "anyOf": [
@@ -20391,12 +19887,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Message text."
+              ]
             },
             "preview_url": {
-              "type": "boolean",
-              "description": "Show link previews (`text`)."
+              "type": "boolean"
             },
             "template_name": {
               "anyOf": [
@@ -20406,12 +19900,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Approved template name (`template`)."
+              ]
             },
             "language_code": {
-              "type": "string",
-              "description": "Template locale, e.g. `en_US`."
+              "type": "string"
             },
             "components": {
               "anyOf": [
@@ -20428,8 +19920,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Optional template components (`template`)."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20661,7 +20152,7 @@
     "functions": [
       {
         "name": "x_read",
-        "description": "Read X user info, home timeline, or recent posts matching a query.\n- `get_user_info`: `username`\n- `get_home_timeline`: no required arguments.\n- `search_posts`: `query`",
+        "description": "Read X user info, timeline, or posts.\n- `get_user_info`: `username`\n- `get_home_timeline`: `max_results`\n- `search_posts`: `query` (`max_results` clamped to 10-100)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20671,8 +20162,7 @@
                 "get_user_info",
                 "get_home_timeline",
                 "search_posts"
-              ],
-              "description": "Read operation to perform."
+              ]
             },
             "username": {
               "anyOf": [
@@ -20682,8 +20172,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "X handle for `get_user_info`."
+              ]
             },
             "query": {
               "anyOf": [
@@ -20693,12 +20182,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Search query for `search_posts`."
+              ]
             },
             "max_results": {
-              "type": "integer",
-              "description": "Maximum posts; search clamps to 10-100."
+              "type": "integer"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20721,7 +20208,7 @@
       },
       {
         "name": "x_write",
-        "description": "Create an X post, reply to a post, or send a direct message.\n- `create_post`: `text`\n- `reply_to_post`: `text`, `post_id`\n- `send_dm`: `text`, `recipient`",
+        "description": "Post, reply, or DM on X.\n- `create_post`: `text`\n- `reply_to_post`: `text`, `post_id`\n- `send_dm`: `text`, `recipient` (username or numeric user ID)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20731,12 +20218,10 @@
                 "create_post",
                 "reply_to_post",
                 "send_dm"
-              ],
-              "description": "Write operation to perform."
+              ]
             },
             "text": {
-              "type": "string",
-              "description": "Text content of the post, reply, or direct message."
+              "type": "string"
             },
             "post_id": {
               "anyOf": [
@@ -20746,8 +20231,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Target post ID for `reply_to_post`."
+              ]
             },
             "recipient": {
               "anyOf": [
@@ -20757,8 +20241,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Recipient username or numeric user ID for `send_dm`."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20828,14 +20311,34 @@
     "guidance": null,
     "functions": [
       {
-        "name": "get_youtube_video_captions",
-        "description": "Use this function to get captions from a YouTube video.",
+        "name": "youtube_video",
+        "description": "Extract info for YouTube `url`.\n- `captions`: Plain transcript text (optional `languages` override).\n- `data`: JSON oEmbed metadata (`title`, `author_name`, `thumbnail_url`, etc.).\n- `timestamps`: Timestamped `M:SS - text` lines (optional `languages` override).",
         "parameters": {
           "type": "object",
           "properties": {
-            "url": {
+            "action": {
               "type": "string",
-              "description": "The URL of the YouTube video."
+              "enum": [
+                "captions",
+                "data",
+                "timestamps"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "languages": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20849,64 +20352,7 @@
             }
           },
           "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_youtube_video_data",
-        "description": "Function to get video data from a YouTube URL.\nData returned includes {title, author_name, author_url, type, height, width, version, provider_name, provider_url, thumbnail_url}",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the YouTube video."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "url"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_video_timestamps",
-        "description": "Generate timestamps for a YouTube video based on captions.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "The URL of the YouTube video."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
+            "action",
             "url"
           ]
         },
@@ -21051,7 +20497,7 @@
     "functions": [
       {
         "name": "zoom_read",
-        "description": "Read Zoom meetings or meeting recordings.\n- `get_meeting`: `meeting_id`\n- `list_meetings`: no required arguments.\n- `get_upcoming_meetings`: no required arguments.\n- `get_meeting_recordings`: `meeting_id`",
+        "description": "Read Zoom meetings or recordings (`user_id` defaults to `\"me\"`).\n- `get_meeting`: `meeting_id`\n- `list_meetings`: `user_id`, `meeting_type`\n- `get_upcoming_meetings`: `user_id`\n- `get_meeting_recordings`: `meeting_id`",
         "parameters": {
           "type": "object",
           "properties": {
@@ -21062,8 +20508,7 @@
                 "list_meetings",
                 "get_upcoming_meetings",
                 "get_meeting_recordings"
-              ],
-              "description": "Read operation."
+              ]
             },
             "meeting_id": {
               "anyOf": [
@@ -21073,12 +20518,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Zoom meeting ID or UUID for `get_meeting` or `get_meeting_recordings`."
+              ]
             },
             "user_id": {
-              "type": "string",
-              "description": "Zoom user ID or `\"me\"` for `list_meetings` or `get_upcoming_meetings`."
+              "type": "string"
             },
             "meeting_type": {
               "type": "string",
@@ -21088,8 +20531,7 @@
                 "upcoming",
                 "upcoming_meetings",
                 "previous_meetings"
-              ],
-              "description": "Meeting filter for `list_meetings`."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -21112,7 +20554,7 @@
       },
       {
         "name": "zoom_manage",
-        "description": "Schedule or delete a Zoom meeting.\n- `schedule_meeting`: `topic`, `start_time`, `duration`\n- `delete_meeting`: `meeting_id`",
+        "description": "Schedule or delete a Zoom meeting.\n- `schedule_meeting`: `topic`, ISO 8601 `start_time`, `duration` (minutes), optional IANA `timezone`\n- `delete_meeting`: `meeting_id` (`schedule_for_reminder` emails cancellation notices)",
         "parameters": {
           "type": "object",
           "properties": {
@@ -21121,8 +20563,7 @@
               "enum": [
                 "schedule_meeting",
                 "delete_meeting"
-              ],
-              "description": "Meeting operation."
+              ]
             },
             "topic": {
               "anyOf": [
@@ -21132,8 +20573,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Meeting title for `schedule_meeting`."
+              ]
             },
             "start_time": {
               "anyOf": [
@@ -21143,8 +20583,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "ISO 8601 start time for `schedule_meeting`."
+              ]
             },
             "duration": {
               "anyOf": [
@@ -21154,12 +20593,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Duration in minutes for `schedule_meeting`."
+              ]
             },
             "timezone": {
-              "type": "string",
-              "description": "IANA timezone name for `schedule_meeting`."
+              "type": "string"
             },
             "meeting_id": {
               "anyOf": [
@@ -21169,12 +20606,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Target Zoom meeting ID for `delete_meeting`."
+              ]
             },
             "schedule_for_reminder": {
-              "type": "boolean",
-              "description": "Whether to email cancellation notices on `delete_meeting`."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [

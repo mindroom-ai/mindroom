@@ -9171,9 +9171,7 @@ agents:
     tools:
       - serper:
           include_tools:
-            - search_web
-            - search_news
-            - scrape_webpage
+            - serper_search
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
@@ -12157,15 +12155,15 @@ docker_inspect("get_container_logs", target="postgres", tail=50)
 
 ## [`calculator`]
 
-`calculator` provides `add()`, `subtract()`, `multiply()`, `divide()`, `exponentiate()`, `factorial()`, `is_prime()`, and `square_root()` for exact arithmetic without running arbitrary code.
-Each function returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
-`factorial()` accepts `n` up to 1558 and `is_prime()` accepts `n` up to 10**12; larger arguments return a JSON error.
+`calculator` provides `calculate(action, a, b=None)` with actions `add`, `subtract`, `multiply`, `divide`, `exponentiate`, `factorial`, `is_prime`, and `square_root` for exact arithmetic without running arbitrary code.
+Each action returns a small JSON result, and errors such as division by zero, negative factorials, and negative square roots come back as JSON errors.
+`factorial` accepts integers up to 1558 and `is_prime` accepts integers up to 10**12; larger arguments return a JSON error.
 `calculator` has no configuration fields.
 
 ```python
-divide(22, 7)
-factorial(6)
-is_prime(97)
+calculate("divide", 22, 7)
+calculate("factorial", 6)
+calculate("is_prime", 97)
 ```
 
 ## [`reasoning`]
@@ -12744,13 +12742,13 @@ Every toolkit that has an `all` option enables all of its functions when `all: t
 ## [`duckduckgo`]
 
 `duckduckgo` searches the web and news through DuckDuckGo with no API key.
-It provides `web_search(query, max_results=5)` and `search_news(query, max_results=5)`, both returning DDGS results as JSON.
+It provides `duckduckgo_search(query, action, max_results=None)` with actions `web` and `news`, returning DDGS results as JSON.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_search` | `boolean` | `true` | Enable `web_search()`. |
-| `enable_news` | `boolean` | `true` | Enable `search_news()`. |
-| `modifier` | `text` | `null` | Text prepended to every `web_search()` and `search_news()` query, for example `site:docs.example.com`. |
+| `enable_search` | `boolean` | `true` | Enable `action="web"`. |
+| `enable_news` | `boolean` | `true` | Enable `action="news"`. |
+| `modifier` | `text` | `null` | Text prepended to every `duckduckgo_search()` query, for example `site:docs.example.com`. |
 | `fixed_max_results` | `number` | `null` | Result count for every call, replacing the per-call `max_results`. |
 | `timelimit` | `text` | `null` | Age filter: `d`, `w`, `m`, or `y`. |
 | `region` | `text` | `null` | DDGS region code, such as `us-en`. |
@@ -12770,7 +12768,7 @@ agents:
 
 ## [`googlesearch`]
 
-`googlesearch` provides the same `web_search()` and `search_news()` functions, options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
+`googlesearch` provides `google_search(query, action, max_results=None)` with the same `web` and `news` actions, options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
 It is not an official Google API.
 DDGS currently falls back to automatic engine selection for Google requests, so results and ranking are not guaranteed to come from Google.
 Use [`serper`] or [`serpapi`] when you need real Google results.
@@ -12860,16 +12858,16 @@ agents:
 ## [`exa`]
 
 `exa` is the research-oriented search toolkit.
-It provides `search_exa(query, num_results=5, category=None)`, `get_contents(urls)`, `find_similar(url, num_results=5)`, `exa_answer(query, text=False)`, and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
+It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=None)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
 Search results include title, author, published date, URL, and page text truncated to `text_length_limit`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Exa API key; required unless `EXA_API_KEY` is set. |
-| `enable_search` | `boolean` | `true` | Enable `search_exa()`. |
-| `enable_get_contents` | `boolean` | `true` | Enable `get_contents()`. |
-| `enable_find_similar` | `boolean` | `true` | Enable `find_similar()`. |
-| `enable_answer` | `boolean` | `true` | Enable `exa_answer()`. |
+| `enable_search` | `boolean` | `true` | Enable `exa_lookup(action="search")`. |
+| `enable_get_contents` | `boolean` | `true` | Enable `exa_lookup(action="contents")`. |
+| `enable_find_similar` | `boolean` | `true` | Enable `exa_lookup(action="similar")`. |
+| `enable_answer` | `boolean` | `true` | Enable `exa_lookup(action="answer")`. |
 | `enable_research` | `boolean` | `false` | Enable `research()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `text` | `boolean` | `true` | Include page text in results. |
@@ -12882,15 +12880,15 @@ Search results include title, author, published date, URL, and page text truncat
 | `exclude_domains` | `string[]` | `null` | Domain denylist. |
 | `include_text` | `string[]` | `null` | Text every result must contain; Exa takes a list of one string of at most five words. |
 | `exclude_text` | `string[]` | `null` | Text no result may contain; Exa takes a list of one string of at most five words. |
-| `user_location` | `text` | `null` | Two-letter country code that localizes `search_exa()` results. |
-| `moderation` | `boolean` | `null` | Filter unsafe content from `search_exa()` results. |
+| `user_location` | `text` | `null` | Two-letter country code that localizes `exa_lookup(action="search")` results. |
+| `moderation` | `boolean` | `null` | Filter unsafe content from `exa_lookup(action="search")` results. |
 | `highlights` | `boolean` | `false` | Add the most relevant snippets of each page to results. |
 | `start_published_date` | `text` | `null` | Earliest publication date, ISO 8601. |
 | `end_published_date` | `text` | `null` | Latest publication date, ISO 8601. |
 | `start_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
-| `model` | `text` | `null` | Model for `exa_answer()` only: `exa` or `exa-pro`. |
+| `model` | `text` | `null` | Model for `exa_lookup(action="answer")` only: `exa` or `exa-pro`. |
 | `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
 | `show_results` | `boolean` | `false` | Log raw parsed results. |
@@ -12933,7 +12931,7 @@ agents:
 
 ## [`serper`]
 
-`serper` provides `search_web(query, num_results=None)`, `search_news(query, num_results=None)`, `search_scholar(query, num_results=None)`, and `scrape_webpage(url, markdown=False)` through the Serper API.
+`serper` provides `serper_search(query, action, num_results=None)` (`web`, `news`, `scholar`) and `scrape_webpage(url, markdown=False)` through the Serper API.
 All functions return Serper's raw JSON, and `scrape_webpage(markdown=True)` also requests the page as Markdown.
 
 | Option | Type | Default | Notes |
@@ -12943,9 +12941,9 @@ All functions return Serper's raw JSON, and `scrape_webpage(markdown=True)` also
 | `language` | `text` | `en` | Google language code (`hl`) for all searches. |
 | `num_results` | `number` | `10` | Default result count when a call does not pass one. |
 | `date_range` | `text` | `null` | Google date filter (`tbs`) for all searches, such as `qdr:w`. |
-| `enable_search` | `boolean` | `true` | Enable `search_web()`. |
-| `enable_search_news` | `boolean` | `true` | Enable `search_news()`. |
-| `enable_search_scholar` | `boolean` | `true` | Enable `search_scholar()`. |
+| `enable_search` | `boolean` | `true` | Enable `serper_search(action="web")`. |
+| `enable_search_news` | `boolean` | `true` | Enable `serper_search(action="news")`. |
+| `enable_search_scholar` | `boolean` | `true` | Enable `serper_search(action="scholar")`. |
 | `enable_scrape_webpage` | `boolean` | `true` | Enable `scrape_webpage()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
@@ -13081,10 +13079,10 @@ agents:
 
 ### [`trafilatura`]
 
-`trafilatura` exposes `extract_text()`, `extract_metadata_only()`, `crawl_website()`, `html_to_text()`, and `extract_batch()`.
-`extract_batch()` returns one JSON payload listing successes and failures.
+`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=None)` (`text`, `metadata`, `batch`), `html_to_text()`, and `crawl_website()`.
+`trafilatura_extract(action="batch")` returns one JSON payload listing successes and failures.
 `crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that; `extract_content=True` reports each refused page it tries to extract.
-`extract_batch()` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
+`trafilatura_extract(action="batch")` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
 A crawl stops visiting new pages after 90 seconds, so the pages it found can still be extracted in the rest of that time.
 
 | Option | Type | Default | Notes |
@@ -13103,10 +13101,10 @@ A crawl stops visiting new pages after 90 seconds, so the pages it found can sti
 | `max_tree_size` | `number` | `null` | Parser tree-size limit. |
 | `max_crawl_urls` | `number` | `10` | Maximum URLs visited per crawl. |
 | `max_known_urls` | `number` | `100000` | Maximum discovered URLs tracked per crawl. |
-| `enable_extract_text` | `boolean` | `true` | Enable `extract_text()`. |
-| `enable_extract_metadata_only` | `boolean` | `true` | Enable `extract_metadata_only()`. |
+| `enable_extract_text` | `boolean` | `true` | Enable `trafilatura_extract(action="text")`. |
+| `enable_extract_metadata_only` | `boolean` | `true` | Enable `trafilatura_extract(action="metadata")`. |
 | `enable_html_to_text` | `boolean` | `true` | Enable `html_to_text()`. |
-| `enable_extract_batch` | `boolean` | `true` | Enable `extract_batch()`. |
+| `enable_extract_batch` | `boolean` | `true` | Enable `trafilatura_extract(action="batch")`. |
 | `enable_crawl_website` | `boolean` | `true` | Enable `crawl_website()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
@@ -13210,17 +13208,17 @@ agents:
 
 ### [`spider`]
 
-`spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
+`spider` exposes `spider(action, query=None, url=None, max_results=None, limit=None)` with actions `search`, `scrape`, and `crawl`, returning Markdown.
 Search results do not include full page content.
 It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `max_results` | `number` | `null` | Default result count for `search_web()`. |
-| `url` | `url` | `null` | Unused; `scrape()` and `crawl()` always take the URL as an argument. |
-| `enable_search` | `boolean` | `true` | Enable `search_web()`. |
-| `enable_scrape` | `boolean` | `true` | Enable `scrape()`. |
-| `enable_crawl` | `boolean` | `true` | Enable `crawl()`. |
+| `max_results` | `number` | `null` | Default result count for `action="search"`. |
+| `url` | `url` | `null` | Unused; `scrape` and `crawl` always take `url` as an argument. |
+| `enable_search` | `boolean` | `true` | Enable `action="search"`. |
+| `enable_scrape` | `boolean` | `true` | Enable `action="scrape"`. |
+| `enable_crawl` | `boolean` | `true` | Enable `action="crawl"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ### [`scrapegraph`]
@@ -13265,17 +13263,17 @@ agents:
 
 ### [`brightdata`]
 
-`brightdata` exposes `scrape_as_markdown()`, `get_screenshot()`, `search_engine()` for Google, Bing, and Yandex, and `web_data_feed()` for Bright Data's supported source types.
-`get_screenshot()` returns the image directly to the model rather than a file path.
+`brightdata` exposes `brightdata(action, ...)` with actions `scrape_markdown`, `screenshot`, `search_engine` (Google, Bing, and Yandex), and `web_data_feed` (Bright Data's supported source types).
+`action="screenshot"` returns the image directly to the model rather than a file path.
 It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `BRIGHT_DATA_API_KEY`. |
-| `enable_scrape_markdown` | `boolean` | `true` | Enable `scrape_as_markdown()`. |
-| `enable_screenshot` | `boolean` | `true` | Enable `get_screenshot()`. |
-| `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
-| `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
+| `enable_scrape_markdown` | `boolean` | `true` | Enable `action="scrape_markdown"`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `action="screenshot"`. |
+| `enable_search_engine` | `boolean` | `true` | Enable `action="search_engine"`. |
+| `enable_web_data_feed` | `boolean` | `true` | Enable `action="web_data_feed"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
 | `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
@@ -13284,8 +13282,8 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
 ### [`oxylabs`]
 
-`oxylabs` exposes `search_google()`, `get_amazon_product()`, `search_amazon_products()`, and `scrape_website()`.
-`search_google()` returns organic results with title, URL, description, and position.
+`oxylabs` exposes `oxylabs(action, ...)` with actions `search_google`, `amazon_product`, `search_amazon`, and `scrape`.
+`action="search_google"` returns organic results with title, URL, description, and position.
 Pass `domain_code`, such as `com` or `de`, to choose the regional Google or Amazon domain.
 It requires both a username and password.
 
@@ -13293,7 +13291,7 @@ It requires both a username and password.
 | --- | --- | --- | --- |
 | `username` | `text` | `null` | Falls back to `OXYLABS_USERNAME`. |
 | `password` | `password` | `null` | Falls back to `OXYLABS_PASSWORD`. |
-| `markdown` | `boolean` | `false` | Return `scrape_website()` content as Markdown instead of parsed HTML. |
+| `markdown` | `boolean` | `false` | Return `action="scrape"` content as Markdown instead of parsed HTML. |
 
 ## Browser Tools
 
@@ -13326,7 +13324,7 @@ agents:
 
 ### [`browserbase`]
 
-`browserbase` exposes `navigate_to()`, `screenshot()`, `get_page_content()`, and `close_session()` against a hosted Browserbase session that it creates automatically.
+`browserbase` exposes `browserbase(action, ...)` (`navigate`, `get_page_content`, `close_session`) and `screenshot(path, full_page=True, connect_url=None)` against a hosted Browserbase session that it creates automatically.
 It still needs local Playwright to connect to the remote browser.
 It requires an API key and project ID.
 Use it when you need remote navigation, screenshots, and page reads without the full action set of `browser`.
@@ -13336,10 +13334,10 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 | `api_key` | `password` | `null` | Falls back to `BROWSERBASE_API_KEY`. |
 | `project_id` | `text` | `null` | Falls back to `BROWSERBASE_PROJECT_ID`. |
 | `base_url` | `url` | `null` | Browserbase API endpoint, not the site to visit; falls back to `BROWSERBASE_BASE_URL`. |
-| `enable_navigate_to` | `boolean` | `true` | Enable `navigate_to()`. |
+| `enable_navigate_to` | `boolean` | `true` | Enable `action="navigate"`. |
 | `enable_screenshot` | `boolean` | `true` | Enable `screenshot()`. |
-| `enable_get_page_content` | `boolean` | `true` | Enable `get_page_content()`. |
-| `enable_close_session` | `boolean` | `true` | Enable `close_session()`. |
+| `enable_get_page_content` | `boolean` | `true` | Enable `action="get_page_content"`. |
+| `enable_close_session` | `boolean` | `true` | Enable `action="close_session"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `parse_html` | `boolean` | `true` | Return visible text instead of raw HTML. |
 | `max_content_length` | `number` | `100000` | Maximum returned characters of page content. |
@@ -13896,20 +13894,22 @@ agents:
 
 `youtube` works on one YouTube video URL; it cannot search YouTube by keyword, so use a search tool such as `serpapi` for discovery.
 
-- `get_youtube_video_data(url)` returns title, author, thumbnail, size, and provider fields.
-- `get_youtube_video_captions(url)` returns the video's transcript text.
-- `get_video_timestamps(url)` returns transcript lines with timestamps.
+It exposes `youtube_video(action, url, languages=None)` with three actions:
+
+- `data` returns title, author, thumbnail, size, and provider fields.
+- `captions` returns the video's transcript text.
+- `timestamps` returns transcript lines with timestamps.
 
 Invalid or unsupported URLs return an error message.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_get_video_captions` | `boolean` | `true` | Enable `get_youtube_video_captions()`. |
-| `enable_get_video_data` | `boolean` | `true` | Enable `get_youtube_video_data()`. |
-| `enable_get_video_timestamps` | `boolean` | `true` | Enable `get_video_timestamps()`. |
-| `all` | `boolean` | `false` | Enable all functions. |
-| `languages` | `string[]` | `null` | Preferred transcript languages, for example `["en", "es"]`; affects only the caption and timestamp functions. |
-| `timeout` | `number` | `30` | Timeout in seconds for `get_youtube_video_data()`; caption and timestamp requests do not use it. |
+| `enable_get_video_captions` | `boolean` | `true` | Enable `action="captions"`. |
+| `enable_get_video_data` | `boolean` | `true` | Enable `action="data"`. |
+| `enable_get_video_timestamps` | `boolean` | `true` | Enable `action="timestamps"`. |
+| `all` | `boolean` | `false` | Enable all actions. |
+| `languages` | `string[]` | `null` | Preferred transcript languages, for example `["en", "es"]`; affects only `captions` and `timestamps`. |
+| `timeout` | `number` | `30` | Timeout in seconds for `action="data"`; caption and timestamp requests do not use it. |
 
 Proxy settings are not configurable.
 
@@ -25246,7 +25246,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
@@ -25284,7 +25284,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
 

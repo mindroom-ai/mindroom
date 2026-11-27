@@ -236,7 +236,7 @@ def _run(
         thread_root_event_id="$thread:example.test",
         execution_identity=serialize_tool_execution_identity(identity),
         source_digest="digest",
-        grants=(ScriptToolGrant("calculator", "add"),),
+        grants=(ScriptToolGrant("calculator", "calculate"),),
         token_hash="capability",  # noqa: S106
         worker_key=target.worker_key,
         worker_id="worker-1",
@@ -570,7 +570,7 @@ def _process_authority_change_scenario(
     store.claim_call(
         run_id=run.run_id,
         call_id="call-1",
-        grant=ScriptToolGrant("calculator", "add"),
+        grant=ScriptToolGrant("calculator", "calculate"),
         arguments_digest="arguments-digest",
     )
     broker = ScriptToolBroker(store=store, runtime_resolver=approval_resolver)  # type: ignore[arg-type]
@@ -1259,7 +1259,7 @@ async def test_shutdown_preserves_worker_and_settles_orphaned_calls(tmp_path: Pa
     runtime.store.claim_call(
         run_id=run.run_id,
         call_id="accepted-before-restart",
-        grant=ScriptToolGrant("calculator", "add"),
+        grant=ScriptToolGrant("calculator", "calculate"),
         arguments_digest="arguments-digest",
     )
 
@@ -1677,8 +1677,8 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
                     "run_id": inherited.run_id,
                     "call_id": "startup-call",
                     "toolkit_name": "calculator",
-                    "function_name": "add",
-                    "arguments": {"a": 1, "b": 2},
+                    "function_name": "calculate",
+                    "arguments": {"action": "add", "a": 1, "b": 2},
                 },
                 headers={"Authorization": f"Bearer {token}"},
             )
@@ -2355,7 +2355,7 @@ async def test_script_tool_removal_drains_a_launch_admitted_before_durable_creat
         worker_client=client,  # type: ignore[arg-type]
         worker_backend=backend,
         gateway_url="http://primary.test/api/script-gateway",
-        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "add"),),
+        grant_resolver=lambda _context: (ScriptToolGrant("calculator", "calculate"),),
         cancellation_grace_seconds=0,
         cancellation_poll_interval_seconds=0,
     )
@@ -3135,7 +3135,7 @@ async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(tmp_
     store.claim_call(
         run_id=run.run_id,
         call_id="call-1",
-        grant=ScriptToolGrant("calculator", "add"),
+        grant=ScriptToolGrant("calculator", "calculate"),
         arguments_digest="arguments-digest",
     )
     actions: list[str] = []
@@ -3750,7 +3750,7 @@ def _origin() -> BackgroundScriptToolOrigin:
         call_id="call-1",
         requester_id="@alice:example.test",
         toolkit_name="calculator",
-        function_name="add",
+        function_name="calculate",
     )
 
 
@@ -3830,8 +3830,8 @@ async def test_live_resolver_rebuilds_exact_context_and_worker_authority(
     decision = await resolver.request_approval(
         origin=_origin(),
         context=context,
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
         timeout_seconds=30.0,
     )
 
@@ -3873,8 +3873,8 @@ async def test_live_resolver_approves_without_a_card_inside_the_requesters_auto_
     decision = await resolver.request_approval(
         origin=_origin(),
         context=_approval_context(run, runtime_paths),
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
         timeout_seconds=30.0,
     )
 
@@ -3903,8 +3903,8 @@ async def test_live_resolver_denies_a_call_no_one_can_answer_without_a_card(
     decision = await resolver.request_approval(
         origin=_origin(),
         context=_approval_context(run, runtime_paths),
-        grant=ScriptToolGrant("calculator", "add"),
-        arguments={"a": 1, "b": 2},
+        grant=ScriptToolGrant("calculator", "calculate"),
+        arguments={"action": "add", "a": 1, "b": 2},
         timeout_seconds=30.0,
     )
 

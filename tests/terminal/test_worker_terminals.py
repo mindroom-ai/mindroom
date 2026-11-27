@@ -331,7 +331,7 @@ async def test_runner_routes_need_the_runner_token_and_a_shell_call(runner: str)
         for headers in _REFUSED_TOKEN_HEADERS:
             async with client.get(sessions, params={"owner": "x"}, headers=headers) as response:
                 assert response.status == 401
-        body = {"request": {"protocol": 1, "tool_name": "calculator", "function_name": "add"}}
+        body = {"request": {"protocol": 1, "tool_name": "calculator", "function_name": "calculate"}}
         async with client.post(
             sessions,
             params={"owner": "x"},

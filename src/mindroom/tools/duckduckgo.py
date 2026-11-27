@@ -75,7 +75,8 @@ def ddgs_config_fields(
     ),
     dependencies=["ddgs"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#duckduckgo",
-    function_names=("web_search", "search_news"),
+    function_names=("duckduckgo_search",),
+    action_scoped_grants=("duckduckgo_search",),
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:
     """Return DuckDuckGo tools for web search and news."""

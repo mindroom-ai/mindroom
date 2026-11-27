@@ -113,7 +113,7 @@ async def test_a_delegated_child_s_calls_tell_their_hooks_the_chat_does_not_show
     parent = ScriptedModel(
         [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add them")), answer("Parent done")],
     )
-    child = ScriptedModel([calls(tool_call("add", "add", a=1, b=2)), answer("Child done")])
+    child = ScriptedModel([calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Child done")])
     ScriptedAgents({"child": child}, by_session={identity.session_id: parent}).install(monkeypatch)
     registry = HookRegistry.from_plugins([_plugin("call-mirror", [before])])
 
@@ -129,7 +129,7 @@ async def test_a_delegated_child_s_calls_tell_their_hooks_the_chat_does_not_show
 
     # The reply shows its own delegation call and none of the child's.
     assert answered == "🔧 `run_subagent` [1]\n\nParent done"
-    assert seen == [("leader", "run_subagent", True), ("child", "add", False)]
+    assert seen == [("leader", "run_subagent", True), ("child", "calculate", False)]
 
 
 @pytest.mark.asyncio
@@ -162,7 +162,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
 
     plugin = _plugin("subagent-policy", [before, after])
     registry = HookRegistry.from_plugins([plugin])
-    config = _leader_and_child(tool_approval={"rules": [{"match": "add", "action": "require_approval"}]})
+    config = _leader_and_child(tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}]})
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
@@ -172,7 +172,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
             answer("Parent done"),
         ],
     )
-    child = ScriptedModel([calls(tool_call("add", "add", a=1, b=2)), answer("Child done")])
+    child = ScriptedModel([calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Child done")])
     ScriptedAgents({"child": child}, by_session={identity.session_id: parent}).install(monkeypatch)
     if outcome in {"live_cancel", "cancelled_output"}:
 

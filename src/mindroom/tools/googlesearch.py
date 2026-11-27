@@ -37,7 +37,8 @@ if TYPE_CHECKING:
     ),
     dependencies=["ddgs"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#googlesearch",
-    function_names=("web_search", "search_news"),
+    function_names=("google_search",),
+    action_scoped_grants=("google_search",),
 )
 def googlesearch_tools() -> type[GoogleSearchTools]:
     """Return Google Search tools for web search."""
