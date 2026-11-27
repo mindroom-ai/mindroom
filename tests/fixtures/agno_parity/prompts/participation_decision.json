@@ -95,14 +95,7 @@
                 "type": "number"
               },
               "b": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "type": "number"
               }
             },
             "required": [
@@ -163,14 +156,7 @@
                 "type": "number"
               },
               "b": {
-                "anyOf": [
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+                "type": "number"
               }
             },
             "required": [

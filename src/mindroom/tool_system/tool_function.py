@@ -45,6 +45,8 @@ class ToolFunction:
     """One callable tool with its model-facing definition and the flags the loop reads.
 
     ``parameters`` is the final JSON schema the model receives; readers must not mutate it.
+    ``nullable_optional_parameters`` names derived parameters whose ``None`` branch ``parameters`` omitted because
+    their default is ``None``, so execution-side validation still accepts explicit JSON ``null`` for them.
     ``description`` and ``strict`` are None when the tool never set them, which the wire omits.
     ``gate`` says why a call waits before it runs, None for a function whose calls run at once.
     ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
@@ -70,6 +72,7 @@ class ToolFunction:
     registered_toolkit: str | None = None
     description: str | None
     parameters: Mapping[str, Any]
+    nullable_optional_parameters: frozenset[str] = frozenset()
     strict: bool | None = None
     gate: ToolGate | None = None
     stop_after_call: bool = False

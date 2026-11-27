@@ -270,7 +270,7 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
     schema = dict(function.parameters)
     unknown = set(arguments) - set(schema.get("properties", {}))
     try:
-        validate_tool_arguments(schema, arguments)
+        validate_tool_arguments(function, arguments)
     except ValueError:
         return "the arguments do not match the tool's current parameters"
     # Tool entrypoints reject arguments they do not take, which would fail only after the approval is spent.

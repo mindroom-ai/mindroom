@@ -33,7 +33,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
-from mindroom.tool_system.authoring import Toolkit, current_call
+from mindroom.tool_system.authoring import Toolkit, current_call, passthrough_tool
 from mindroom.tool_system.declarations import ApprovalAlias, ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.registry import ToolRegistry
@@ -1370,3 +1370,43 @@ async def test_generated_cli_authorization_keeps_exact_owner(
             await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
     else:
         await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=target)
+
+
+@pytest.mark.asyncio
+async def test_cli_tool_call_allows_explicit_null_only_for_derived_nullable_optionals(tmp_path: Path) -> None:
+    """CLI execution admits explicit null for derived ``X | None = None`` and rejects it for non-nullable/authored."""
+
+    def derived_lookup(query: str, tag: str | None = None, count: int = 5) -> str:
+        return f"{query}:{tag}:{count}"
+
+    authored_schema = {
+        "type": "object",
+        "properties": {"query": {"type": "string"}, "tag": {"type": "string"}},
+        "required": ["query"],
+    }
+
+    @passthrough_tool(name="authored_lookup", parameters=authored_schema)
+    def authored_lookup(query: str, tag: str | None = None) -> str:
+        return f"{query}:{tag}"
+
+    catalog = await _catalog(tmp_path, [_toolkit("notes", derived_lookup, authored_lookup)])
+
+    async def run_one(name: str, arguments: dict[str, object]) -> agent_tool_calls.AgentToolCallStep:
+        events = await _events(catalog, "notes", name, arguments)
+        return next(
+            event
+            for event in events
+            if isinstance(event, agent_tool_calls.AgentToolCallStep) and event.kind == "completed"
+        )
+
+    ok = await run_one("derived_lookup", {"query": "hi", "tag": None})
+    assert not ok.call.is_error
+    assert ok.call.result == "hi:None:5"
+
+    non_nullable = await run_one("derived_lookup", {"query": "hi", "count": None})
+    assert non_nullable.call.is_error
+    assert non_nullable.call.result == "Invalid tool arguments"
+
+    authored_null = await run_one("authored_lookup", {"query": "hi", "tag": None})
+    assert authored_null.call.is_error
+    assert authored_null.call.result == "Invalid tool arguments"

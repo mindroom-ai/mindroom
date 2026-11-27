@@ -465,6 +465,7 @@
             "title": "create_eventArguments",
             "type": "object"
           },
+          "strict": false,
           "type": "function"
         },
         {
@@ -572,6 +573,7 @@
             ],
             "type": "object"
           },
+          "strict": false,
           "type": "function"
         }
       ]

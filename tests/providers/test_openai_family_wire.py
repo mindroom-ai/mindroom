@@ -3641,6 +3641,67 @@ async def test_responses_tool_parameters_keep_a_list_of_types(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_responses_wire_sets_strict_false_only_when_unset_strict_has_optional_properties(
+    tmp_path: Path,
+) -> None:
+    """Responses emits ``strict: false`` when ``strict`` is unset on tools with optional properties (e.g. minimal bash).
+
+    Explicit ``strict=True`` and ``strict=False`` are preserved verbatim, and ``strict=None`` stays omitted when every
+    declared property is required or ``properties`` is empty/absent.
+    """
+    from mindroom.agent_cli.bash import minimal_bash_toolkit  # noqa: PLC0415
+
+    (bash_fn,) = minimal_bash_toolkit().functions
+    assert bash_fn.strict is None
+    assert bash_fn.parameters["properties"]["timeout"]["type"] == "integer"
+
+    tools = [
+        bash_fn.definition(),
+        ToolSpec(
+            name="explicit_strict_true",
+            description="Strict.",
+            parameters={"type": "object", "properties": {"x": {"type": "string"}}, "required": []},
+            strict=True,
+        ),
+        ToolSpec(
+            name="explicit_strict_false",
+            description="Non-strict.",
+            parameters={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+            strict=False,
+        ),
+        ToolSpec(
+            name="all_required",
+            description="All required.",
+            parameters={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+            strict=None,
+        ),
+        ToolSpec(
+            name="empty_properties",
+            description="Empty.",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+        ),
+        ToolSpec(
+            name="no_properties",
+            description="Absent.",
+            parameters={"type": "object"},
+            strict=None,
+        ),
+    ]
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed()))
+
+    await _turn(built, ModelRequest(messages=[_user()], tools=tools))
+
+    by_name = {entry["name"]: entry for entry in built.body()["tools"]}
+    assert by_name["bash"]["strict"] is False
+    assert by_name["explicit_strict_true"]["strict"] is True
+    assert by_name["explicit_strict_false"]["strict"] is False
+    assert "strict" not in by_name["all_required"]
+    assert "strict" not in by_name["empty_properties"]
+    assert "strict" not in by_name["no_properties"]
+
+
+@pytest.mark.asyncio
 async def test_configured_groq_host_keeps_the_sdk_path(tmp_path: Path) -> None:
     config = {
         "provider": "groq",

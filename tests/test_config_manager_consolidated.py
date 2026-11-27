@@ -675,7 +675,9 @@ class TestConsolidatedConfigManager:
     def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
         """The model-facing patch schema must allow scalars, lists, objects, and null."""
         parameters = toolkit_offers(_config_manager(_minimal_config_path(tmp_path)), "manage_config").parameters
-        changes_schema = parameters["properties"]["changes"]["anyOf"][0]
+        changes_schema = parameters["properties"]["changes"]
+        assert changes_schema["type"] == "array"
+        assert "anyOf" not in changes_schema
         entry_schema = changes_schema["items"]
 
         assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]
