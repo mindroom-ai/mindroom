@@ -458,7 +458,7 @@ def _personal_agent_template(config: Config, tokens: list[str]) -> tuple[str, st
         f"/personal_agents/{instance.template}{field}",
         f"Agent '{tokens[1]}' has no `agents` entry: it is generated from the template "
         f"`personal_agents.{instance.template}` for {instance.user_id}. Its configuration is that template, "
-        "plus the template's `users` overrides for its owner and any edits its owner made with update_agent.",
+        'plus the template\'s `users` overrides for its owner and any edits its owner made with agent_manager_write(action="update", ...).',
     )
 
 

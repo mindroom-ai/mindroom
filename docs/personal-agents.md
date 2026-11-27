@@ -67,7 +67,7 @@ Every generated agent also gets these settings, whatever the template says:
 
 - The owner is added to `access.users` and `credential_managers` when missing.
 - `access.members_of_rooms` is `[]` when missing or null, so membership of the agent's rooms grants nothing unless you list rooms yourself.
-- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `update_agent` instead.
+- `allow_self_config` is `false`, even when `defaults.allow_self_config` is true, because `self_config` edits `agents.<name>`, which a generated agent does not have, so owners use `agent_manager_write(action="update", ...)` instead.
 
 Config validation rejects `private` and `allow_self_config: true` in the template's `agent` and in any `users` override, because a personal agent already belongs to one user.
 It also rejects `matrix_username` there, because the template's own `matrix_username` names every user's account.
@@ -90,7 +90,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 - Editing the template changes every user's agent at the next reload.
   The name, Matrix account, `{user_display_name}`, and `{user_first_name}` stay fixed at what onboarding stored.
-  A field its owner changed with [`update_agent`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
+  A field its owner changed with [`agent_manager_write(action="update", ...)`](#updating-a-generated-agent) keeps the owner's value until the owner restores it.
 - An authored agent or team that uses a generated agent's name fails validation with an error such as `agents.mind_alice collides with the agent generated from personal_agents.mind for @alice:example.org`.
   The same error rejects a dashboard or `config_manager` save that edits a generated agent in place, so use `personal_agents.<key>.users` for per-user changes.
 - A team member or `delegate_to` entry can name a generated agent only once it exists, because validation rejects an unknown agent name before then.
@@ -181,17 +181,17 @@ Every call that creates, changes, or deletes an agent waits for the person askin
 ### Updating a Generated Agent
 
 Ask the agent to change itself, for example to answer more briefly or to drop a tool.
-It calls `agent_settings` to read its current values and the tool names it may choose from, then `update_agent` with only the fields to change.
+It calls `agent_settings` to read its current values and the tool names it may choose from, then `agent_manager_write(action="update", changes=...)` with only the fields to change.
 
 - Each value replaces the whole field, so send a changed `instructions` list in full.
 - `null` restores the template's value, or for a created agent its creator's value.
 - `tools` are toolkit names such as `calculator`, never function names, chosen from the `allowed_tools` that `agent_settings` returns, which are the tools of the template or creator.
   A chosen tool keeps the settings it has there, and so does each tool it brings along, such as `attachments` with `matrix_message`; any other tool that was not chosen is left out, even one from `defaults.tools`.
-- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `create_agent`.
+- A change that the next config load would reject is refused with `The agent would not load with this change, so nothing was stored: <reason>`, and so is a new agent from `agent_manager_write(action="create", ...)`.
 - A field with no edit follows its template or creator, so a later change to either reaches it.
 
 To change the agent's picture, attach a PNG, JPEG, GIF, or WebP image in a conversation with the agent and ask it to use the image as its avatar.
-It calls `set_avatar`, which crops the image to its center square, and the new picture applies without a reload.
+It calls `agent_manager_write(action="set_avatar", attachment_id=...)`, which crops the image to its center square, and the new picture applies without a reload.
 An animated image keeps only its first frame.
 
 Only the agent's owners may ask, and anyone else is refused with `Only <owners> may change <agent>`.
@@ -212,7 +212,7 @@ agents:
     created_agents_per_owner: 2
 ```
 
-The person asks `mind` for a helper, and `mind` calls `create_agent` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
+The person asks `mind` for a helper, and `mind` calls `agent_manager_write(action="create", ...)` with a `name`, a `display_name`, a `role`, and optionally `instructions` and `tools`.
 
 - The new agent's ID is the creator's name, an underscore, and the `name` lowercased with other characters turned into underscores, trimmed of leading and trailing underscores, and cut to 30 characters, so `Research Helper` from `mind` gives `mind_research_helper`.
   The tool replies with its Matrix ID.
@@ -227,7 +227,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
 The new agent joins no room by itself.
 The owner invites its Matrix ID to a room to talk to it, and the agent accepts because the invitation comes from an owner.
 Authored config cannot reference a created agent, so a `delegate_to` list or a team that names one fails to load.
-A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with update_agent`, because saving it to `config.yaml` would lose it.
+A change to a created agent through `self_config` or `config_manager` is refused with `agents.<name> was created by another agent; its owners change it with agent_manager_write(action="update", ...)`, because saving it to `config.yaml` would lose it.
 
 > [!WARNING]
 > **A created agent has its creator's tools, knowledge bases, skills, and model.**
@@ -247,13 +247,13 @@ A name stays taken after the agent is deleted, because its Matrix account stays.
 The person whose request creates an agent is its owner, resolved through any [bridge alias](authorization.md#bridge-aliases) to the person.
 Only a person can own an agent, so a MindRoom account is refused, and so is a Matrix ID with `[`, `]`, a space, `*`, or `?`.
 
-An owner can share a created agent by passing `co_owners` to `update_agent`, and passing `null` clears them.
+An owner can share a created agent by passing `co_owners` in `changes` to `agent_manager_write(action="update", ...)`, and passing `null` clears them.
 Co-owners may use the agent, invite it, change its `display_name`, `role`, `instructions`, and `tools`, and set its avatar.
-Only the owner may change `co_owners` or delete the agent with `delete_agent`.
+Only the owner may change `co_owners` or delete the agent with `agent_manager_write(action="delete")`.
 
 ### Approval Cards
 
-`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` each show an [approval card](tool-approval.md#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
+`agent_manager_write` (`create`, `update`, `set_avatar`, and `delete`) always shows an [approval card](tool-approval.md#approving-and-denying) to the person asking, whatever `tool_approval` says, because the agent asking may have read text its owner did not write.
 The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](tool-approval.md#auto-approve-everything).
 `agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
@@ -265,7 +265,7 @@ A created agent is built again from its creator at every config load, so changin
 - A tool removed from the creator leaves the created agents that chose it, and the load logs `generated_agent_tool_dropped`.
   The choice stays stored, so the tool returns if the creator gets it back.
 - Lowering `created_agents_per_owner` keeps each person's oldest agents up to the new cap and stops the rest with `created_agent_skipped` and `reason=over_cap`.
-  Setting it to 0 stops them all and removes `create_agent`.
+  Setting it to 0 stops them all and removes the `create` action from `agent_manager_write`.
 - Removing the creator stops its agents with `reason=creator_missing`.
 - Stopped agents keep their roster entries and Matrix accounts, so restoring the creator or raising the cap starts them again.
   A stopped agent leaves every room except its direct messages, so an owner must invite it back into those rooms.
@@ -286,7 +286,7 @@ The retry log lines are described in [Troubleshooting Personal Rooms](personal-r
 | `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
 | `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, `<user> cannot own an agent: brackets in a Matrix ID are not supported` for an ID with `[` or `]`, `<user> cannot own a personal agent: <reason>` for another unsupported Matrix ID such as one with a space, `*`, or `?`, or `<user> is a MindRoom account and cannot own a personal agent`. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
-| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `create_agent` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
+| `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `agent_manager_write(action="create", ...)` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
 | `generated_agent_tool_dropped` | A tool an owner chose is no longer among the tools of the template or creator, so the agent loads without it. |
 | `generated_agents_invalid` | The config with the owners' edits and the created agents is invalid for the reason in `error`, so MindRoom ignores them all until it is fixed, and each personal agent runs from its template. |
 

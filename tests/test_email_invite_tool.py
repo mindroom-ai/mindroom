@@ -122,15 +122,24 @@ def _code_from(text: str) -> str:
 def test_no_function_asks_for_confirmation_itself() -> None:
     """Approval is the operator's `tool_approval` config; the toolkit gates nothing itself."""
     gates = {function.name: function.gate for function in adapt_toolkit(EmailInviteTools()).functions}
-    assert set(gates) == {"invite_by_email", "list_email_invites", "revoke_email_invite"}
+    assert set(gates) == {"list_email_invites", "email_invite_write"}
     assert ToolGate.CONFIRM not in gates.values()
+
+
+@pytest.mark.asyncio
+async def test_email_invite_write_rejects_invalid_action(harness: Harness) -> None:
+    """An unsupported action returns an error without touching invites or sending mail."""
+    result = await harness.call("email_invite_write", BAS, "bogus", "alice@example.com")
+    assert result.startswith("Error: Unsupported action")
+    assert harness.rows() == []
+    assert harness.mails == []
 
 
 @pytest.mark.asyncio
 async def test_refuses_bad_address(harness: Harness) -> None:
     """A second address or a header line is refused."""
     for raw in ("alice@example.com, bob@example.com", "alice@example.com\nBcc: x@example.org"):
-        result = await harness.call("invite_by_email", BAS, raw)
+        result = await harness.call("email_invite_write", BAS, "invite", raw)
         assert result == "Error: that is not an email address this tool accepts (one plain ASCII address)."
     assert harness.rows() == []
     assert harness.mails == []
@@ -144,7 +153,7 @@ async def test_refuses_bad_address(harness: Harness) -> None:
 async def test_refuses_refused_rooms(harness: Harness, kind: str, text: str) -> None:
     """Personal and onboarding rooms are refused."""
     harness.monkeypatch.setattr(tool_module, "refused_room_kind", AsyncMock(return_value=kind))
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == f"Error: people cannot be invited by email to {text}."
     assert harness.rows() == []
     assert harness.mails == []
@@ -155,7 +164,7 @@ async def test_refuses_refused_rooms(harness: Harness, kind: str, text: str) -> 
 async def test_refuses_when_the_answering_account_may_not_invite(harness: Harness, own_right: bool | None) -> None:
     """The account that answers sends the Matrix invite, so without the invite right it refuses."""
     harness.own_right = own_right
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == "Error: I need moderator rights in this room to invite people."
     assert harness.rows() == []
     assert harness.mails == []
@@ -165,7 +174,7 @@ async def test_refuses_when_the_answering_account_may_not_invite(harness: Harnes
 async def test_unreadable_asker_rights(harness: Harness) -> None:
     """Unreadable room state refuses without storing."""
     harness.rights[BAS] = None
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert "room state unreadable" in result
     assert harness.rows() == []
 
@@ -173,7 +182,7 @@ async def test_unreadable_asker_rights(harness: Harness) -> None:
 @pytest.mark.asyncio
 async def test_asker_without_right_stores_waiting(harness: Harness) -> None:
     """An asker who may not invite stores a waiting request and sends nothing."""
-    result = await harness.call("invite_by_email", CAROL, " Alice@Example.com ")
+    result = await harness.call("email_invite_write", CAROL, "invite", " Alice@Example.com ")
     assert result == (
         f"Stored, nothing sent: {CAROL} may not invite people to this room. Someone who may invite can approve it "
         'by asking an agent here: "approve the invite for alice@example.com".'
@@ -189,14 +198,14 @@ async def test_asker_without_right_stores_waiting(harness: Harness) -> None:
 @pytest.mark.asyncio
 async def test_asker_without_right_asks_again(harness: Harness) -> None:
     """Asking again reports the waiting request, then the sent one."""
-    await harness.call("invite_by_email", CAROL, "alice@example.com")
-    result = await harness.call("invite_by_email", CAROL, "alice@example.com")
+    await harness.call("email_invite_write", CAROL, "invite", "alice@example.com")
+    result = await harness.call("email_invite_write", CAROL, "invite", "alice@example.com")
     assert result == "An invite for alice@example.com is already waiting for someone who may invite."
     assert len(harness.rows()) == 1
-    await harness.call("invite_by_email", BAS, "alice@example.com")
+    await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     (row,) = harness.rows()
     date = _date(row.expires_at)
-    result = await harness.call("invite_by_email", CAROL, "alice@example.com")
+    result = await harness.call("email_invite_write", CAROL, "invite", "alice@example.com")
     assert result == f"An invite for alice@example.com was already sent; it is valid until {date}."
     assert len(harness.mails) == 1
 
@@ -210,8 +219,8 @@ def _date(timestamp: int) -> str:
 @pytest.mark.asyncio
 async def test_approver_sends_waiting_request(harness: Harness) -> None:
     """A person who may invite sends the waiting request in their name."""
-    await harness.call("invite_by_email", CAROL, "alice@example.com")
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    await harness.call("email_invite_write", CAROL, "invite", "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     (row,) = harness.rows()
     assert (
         result == f"Invitation mailed to alice@example.com. The link works once and expires on {_date(row.expires_at)}."
@@ -233,8 +242,8 @@ async def test_approver_sends_waiting_request(harness: Harness) -> None:
 async def test_approver_resend_revokes_old_code(harness: Harness) -> None:
     """Sending again for the same address makes the first link stop working."""
     harness.smtp = False
-    first = _code_from(await harness.call("invite_by_email", BAS, "alice@example.com"))
-    second = _code_from(await harness.call("invite_by_email", BAS, "alice@example.com"))
+    first = _code_from(await harness.call("email_invite_write", BAS, "invite", "alice@example.com"))
+    second = _code_from(await harness.call("email_invite_write", BAS, "invite", "alice@example.com"))
     assert first != second
     assert store.find_by_code(harness.paths, first) is None
     assert store.find_by_code(harness.paths, second) is not None
@@ -245,7 +254,7 @@ async def test_approver_resend_revokes_old_code(harness: Harness) -> None:
 async def test_listed_approver_not_in_room_may_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A listed approver may send without room power."""
     harness = Harness(tmp_path, monkeypatch, approvers=["@ops:example.org"])
-    result = await harness.call("invite_by_email", "@ops:example.org", "alice@example.com")
+    result = await harness.call("email_invite_write", "@ops:example.org", "invite", "alice@example.com")
     assert result.startswith("Invitation mailed to alice@example.com.")
     assert harness.rows()[0].inviter_id == "@ops:example.org"
 
@@ -253,7 +262,7 @@ async def test_listed_approver_not_in_room_may_send(tmp_path: Path, monkeypatch:
 @pytest.mark.asyncio
 async def test_smtp_mode_returns_no_code(harness: Harness) -> None:
     """With SMTP the result never carries the code or the link."""
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     body = harness.mails[0].get_content()
     code = _code_from(body.split("\n")[3])
     assert code not in result
@@ -264,7 +273,7 @@ async def test_smtp_mode_returns_no_code(harness: Harness) -> None:
 async def test_no_smtp_mode_returns_link(harness: Harness) -> None:
     """Without SMTP the result carries the link to forward by hand."""
     harness.smtp = False
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     code = _code_from(result)
     (row,) = harness.rows()
     assert result == (
@@ -279,13 +288,13 @@ async def test_no_smtp_mode_returns_link(harness: Harness) -> None:
 async def test_send_failure_revokes(harness: Harness) -> None:
     """A failed send cancels the invite, and the attempt still counts."""
     harness.mail_error = EmailInviteMailError("connection refused")
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == "Error: the mail could not be sent (connection refused). The invite was cancelled."
     assert harness.rows() == []
     harness.mail_error = None
     for _ in range(2):
-        await harness.call("invite_by_email", BAS, "alice@example.com")
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+        await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == "Error: limit reached: at most 3 mails per address per day."
 
 
@@ -306,7 +315,7 @@ async def test_cap_texts(harness: Harness, limit: str, text: str) -> None:
         raise store.EmailInviteLimitError(limit)  # type: ignore[arg-type]
 
     harness.monkeypatch.setattr(tool_module.store, "issue_code", raise_limit)
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == f"Error: limit reached: {text}."
     assert harness.mails == []
 
@@ -314,8 +323,8 @@ async def test_cap_texts(harness: Harness, limit: str, text: str) -> None:
 @pytest.mark.asyncio
 async def test_list_is_room_scoped(harness: Harness) -> None:
     """Only this room's open requests are listed, with their state."""
-    await harness.call("invite_by_email", CAROL, "waiting@example.com")
-    await harness.call("invite_by_email", BAS, "sent@example.com")
+    await harness.call("email_invite_write", CAROL, "invite", "waiting@example.com")
+    await harness.call("email_invite_write", BAS, "invite", "sent@example.com")
     store.create_request(
         harness.paths,
         store.Request("!other:example.org", None, "elsewhere@example.com", BAS, "code"),
@@ -337,21 +346,22 @@ async def test_list_is_room_scoped(harness: Harness) -> None:
 @pytest.mark.asyncio
 async def test_revoke_rules(harness: Harness) -> None:
     """The asker or anyone who may invite may revoke; a stranger may not."""
-    await harness.call("invite_by_email", CAROL, "alice@example.com")
+    await harness.call("email_invite_write", CAROL, "invite", "alice@example.com")
     stranger = "@dave:example.org"
-    assert await harness.call("revoke_email_invite", stranger, "alice@example.com") == (
+    assert await harness.call("email_invite_write", stranger, "revoke", "alice@example.com") == (
         "Error: only the asker, the approver, or someone who may invite can revoke this."
     )
-    assert await harness.call("revoke_email_invite", CAROL, "alice@example.com") == (
+    assert await harness.call("email_invite_write", CAROL, "revoke", "alice@example.com") == (
         "Revoked the invite for alice@example.com."
     )
     assert harness.rows() == []
-    assert await harness.call("revoke_email_invite", CAROL, "alice@example.com") == (
+    assert await harness.call("email_invite_write", CAROL, "revoke", "alice@example.com") == (
         "No open invite for alice@example.com in this room."
     )
-    await harness.call("invite_by_email", CAROL, "bob@example.com")
+    await harness.call("email_invite_write", CAROL, "invite", "bob@example.com")
     assert (
-        await harness.call("revoke_email_invite", BAS, "bob@example.com") == "Revoked the invite for bob@example.com."
+        await harness.call("email_invite_write", BAS, "revoke", "bob@example.com")
+        == "Revoked the invite for bob@example.com."
     )
 
 
@@ -359,11 +369,11 @@ async def test_revoke_rules(harness: Harness) -> None:
 async def test_revoke_after_use_reports_claimant(harness: Harness) -> None:
     """A used invite is not changed, and the account that used it is named."""
     harness.smtp = False
-    code = _code_from(await harness.call("invite_by_email", BAS, "alice@example.com"))
+    code = _code_from(await harness.call("email_invite_write", BAS, "invite", "alice@example.com"))
     (row,) = harness.rows()
     assert store.bind_claim(harness.paths, row.id, "@alice:example.org")
     store.mark_invited(harness.paths, row.id)
-    result = await harness.call("revoke_email_invite", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "revoke", "alice@example.com")
     assert result == "The invite for alice@example.com was already used by @alice:example.org; nothing was changed."
     used = store.find_by_code(harness.paths, code)
     assert used is not None
@@ -374,8 +384,8 @@ async def test_revoke_after_use_reports_claimant(harness: Harness) -> None:
 async def test_resend_at_cap_keeps_old_link(harness: Harness) -> None:
     """A resend that a cap refuses leaves the link already sent working."""
     harness.smtp = False
-    codes = [_code_from(await harness.call("invite_by_email", BAS, "alice@example.com")) for _ in range(3)]
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    codes = [_code_from(await harness.call("email_invite_write", BAS, "invite", "alice@example.com")) for _ in range(3)]
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == "Error: limit reached: at most 3 mails per address per day."
     assert store.find_by_code(harness.paths, codes[-1]) is not None
     assert len(harness.rows()) == 1
@@ -387,7 +397,7 @@ async def test_unbuildable_mail_cancels_the_invite(harness: Harness) -> None:
     real = tool_module.build_invite_mail
     bad_sender = {"sender": "a@example.org\nBcc: x@example.org"}
     harness.monkeypatch.setattr(tool_module, "build_invite_mail", lambda **kwargs: real(**{**kwargs, **bad_sender}))
-    result = await harness.call("invite_by_email", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     assert result == "Error: the mail could not be sent (the sender address is invalid). The invite was cancelled."
     assert harness.rows() == []
 
@@ -396,11 +406,11 @@ async def test_unbuildable_mail_cancels_the_invite(harness: Harness) -> None:
 async def test_revoke_losing_to_a_claim_reports_the_claimant(harness: Harness) -> None:
     """A revoke after the invite was used changes nothing and names the account."""
     harness.smtp = False
-    await harness.call("invite_by_email", BAS, "alice@example.com")
+    await harness.call("email_invite_write", BAS, "invite", "alice@example.com")
     (row,) = harness.rows()
     assert store.bind_claim(harness.paths, row.id, "@alice:example.org")
     assert store.mark_invited(harness.paths, row.id)
-    result = await harness.call("revoke_email_invite", BAS, "alice@example.com")
+    result = await harness.call("email_invite_write", BAS, "revoke", "alice@example.com")
     assert result == "The invite for alice@example.com was already used by @alice:example.org; nothing was changed."
     used = store.used_invite(harness.paths, room_id=ROOM, email="alice@example.com")
     assert used is not None

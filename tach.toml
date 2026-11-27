@@ -4396,6 +4396,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.delegation.personas",
     "mindroom.config.tailnet_ssh",
+    "mindroom.config.tool_aliases",
 ]
 
 [[modules]]

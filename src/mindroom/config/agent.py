@@ -457,7 +457,7 @@ class AgentConfig(BaseModel):
     created_agents_per_owner: int = Field(
         default=0,
         ge=0,
-        description="How many agents each person may create through this agent with create_agent; 0 turns create_agent off",
+        description='How many agents each person may create through this agent with agent_manager_write(action="create", ...); 0 turns agent creation off',
     )
     automations: AutomationList | None = Field(
         default=None,

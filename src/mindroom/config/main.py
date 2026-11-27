@@ -114,6 +114,7 @@ from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.slack import SlackConfig
 from mindroom.config.tailnet_ssh import TailnetSshConfig
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -1338,7 +1339,7 @@ class Config(BaseModel):
                     agents.pop(agent_name)
                 elif info.created:
                     # A created agent lives only in the roster, so saving a change made here would lose it.
-                    msg = f"agents.{agent_name} was created by another agent; its owners change it with update_agent"
+                    msg = f'agents.{agent_name} was created by another agent; its owners change it with agent_manager_write(action="update", ...)'
                     raise ConfigRuntimeValidationError(msg)
                 # An edited personal agent stays, so saving it collides with its roster entry.
             if not agents and self._personal_agents_added_agents_section:
@@ -1709,8 +1710,42 @@ class Config(BaseModel):
         from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
 
         enabled_toolkits = set(self.expand_tool_names(list(authored_tool_names)))
+        if self.personal_agents:
+            enabled_toolkits.add("agent_manager")
         for template in self.personal_agents.values():
             enabled_toolkits.update(self.expand_tool_names([entry.name for entry in template.agent.tools]))
+            overrides = tuple(template.users.values())
+            if template.agent.contacts is not None or any(
+                override.get("contacts") is not None for override in overrides
+            ):
+                enabled_toolkits.update(("contacts", "matrix_message"))
+            template_graph = (
+                template.agent.knowledge_graph
+                if template.agent.knowledge_graph is not None
+                else self.defaults.knowledge_graph
+            )
+            if template_graph or any(
+                (
+                    override["knowledge_graph"]
+                    if override["knowledge_graph"] is not None
+                    else self.defaults.knowledge_graph
+                )
+                is True
+                for override in overrides
+                if "knowledge_graph" in override
+            ):
+                enabled_toolkits.add("knowledge_graph")
+            for override in overrides:
+                raw_tools = override.get("tools")
+                if isinstance(raw_tools, list):
+                    override_tool_names: list[str] = []
+                    for item in raw_tools:
+                        try:
+                            override_tool_names.append(canonical_tool_name(ToolConfigEntry.model_validate(item).name))
+                        except ValueError:
+                            # Let the generated-agent template validator report malformed entries with their exact path.
+                            continue
+                    enabled_toolkits.update(self.expand_tool_names(override_tool_names))
         for agent_name in self.agents:
             enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
         return enabled_toolkits

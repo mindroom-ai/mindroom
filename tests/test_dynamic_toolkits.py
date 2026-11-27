@@ -2105,13 +2105,13 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
 
 
 def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) -> None:
-    """A creator is offered create_agent, a generated agent its own settings, a created one delete, an authored one none."""
+    """A creator gets write(create), a generated agent settings+write(update,set_avatar), a created one delete too, an authored one none."""
     config = _load(tmp_path, _with_template(), entries=[_personal()], created=[_created()])
     config.agents["code"] = config.agents["creator"].model_copy(update={"created_agents_per_owner": 0})
     paths = test_runtime_paths(tmp_path)
     persist_entity_accounts(config, paths)
 
-    def offered(agent_name: str) -> set[str]:
+    def offered(agent_name: str) -> tuple[set[str], tuple[str, ...]]:
         build = create_agent(
             agent_name,
             config,
@@ -2122,15 +2122,20 @@ def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) ->
             supports_native_tool_approval=True,
             plugins=config_plugins(config, paths),
         )
-        return {
-            function.name
+        functions = {
+            function.name: function
             for toolkit in build.spec.toolkits
             if toolkit.name == "agent_manager"
             for function in toolkit.functions
         }
+        write_fn = functions.get("agent_manager_write")
+        actions = tuple(write_fn.parameters["properties"]["action"]["enum"]) if write_fn is not None else ()
+        return set(functions), actions
 
-    managed = {"agent_settings", "update_agent", "set_avatar"}
-    assert offered("creator") == {"create_agent"}
-    assert offered("creator_research") == managed | {"delete_agent"}
-    assert offered("mind_alice") == managed
-    assert offered("code") == set()
+    assert offered("creator") == ({"agent_manager_write"}, ("create",))
+    assert offered("creator_research") == (
+        {"agent_settings", "agent_manager_write"},
+        ("update", "set_avatar", "delete"),
+    )
+    assert offered("mind_alice") == ({"agent_settings", "agent_manager_write"}, ("update", "set_avatar"))
+    assert offered("code") == (set(), ())
