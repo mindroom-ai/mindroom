@@ -176,3 +176,45 @@ async def test_paused_startup_maintenance_reports_interruption_during_orphaned_b
 
     start.assert_called_once()
     release_cleanup.set()
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_waits_for_first_syncs_before_cleanup_and_replays_on_pause() -> None:
+    """First-sync gating runs before orphaned-bot cleanup and replays cleanly if interrupted."""
+    call_order: list[str] = []
+    wait_started = asyncio.Event()
+    release_wait = asyncio.Event()
+
+    async def wait_for_first_syncs(_: list[object]) -> None:
+        call_order.append("wait_for_first_syncs")
+        wait_started.set()
+        await release_wait.wait()
+
+    async def cleanup_orphaned_bots(_: object) -> None:
+        call_order.append("orphaned_bots")
+
+    async def setup_rooms(_: list[object]) -> None:
+        call_order.append("setup")
+
+    controller = StartupMaintenanceController(
+        setup_rooms_and_memberships=setup_rooms,
+        sync_runtime_support=AsyncMock(),
+        mark_runtime_support_ready=AsyncMock(),
+        cleanup_orphaned_bots=cleanup_orphaned_bots,
+        wait_for_first_syncs=wait_for_first_syncs,
+    )
+    controller.start([MagicMock()], MagicMock())
+    await asyncio.wait_for(wait_started.wait(), timeout=1.0)
+    assert call_order == ["wait_for_first_syncs"]
+
+    with patch.object(controller, "start") as replay_start:
+        async with controller.paused(config_provider=MagicMock, running_bots=lambda: [MagicMock()]) as interrupted:
+            assert interrupted is True
+
+    replay_start.assert_called_once()
+    assert call_order == ["wait_for_first_syncs"]
+
+    release_wait.set()
+    controller.start([MagicMock()], MagicMock())
+    await _wait_for_controller(controller)
+    assert call_order == ["wait_for_first_syncs", "wait_for_first_syncs", "orphaned_bots", "setup"]

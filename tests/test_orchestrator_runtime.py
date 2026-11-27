@@ -6183,6 +6183,66 @@ async def test_startup_maintenance_starts_after_first_syncs_and_before_runtime_r
     assert events == ["wait_for_first_syncs", "startup_maintenance_start", "set_runtime_ready"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ended_by", ["first_sync", "stop", "timeout"])
+async def test_startup_maintenance_waits_for_first_syncs_when_membership_refresh_skipped(
+    tmp_path: Path,
+    ended_by: str,
+) -> None:
+    """When membership refresh is skipped, runtime readiness does not block yet maintenance waits for first sync."""
+    orchestrator, _config, slow = _startup_waiting_for_first_sync(tmp_path)
+    events: list[str] = []
+    ready = asyncio.Event()
+    cleanup_called = asyncio.Event()
+
+    def mark_ready() -> None:
+        events.append("set_runtime_ready")
+        ready.set()
+
+    async def tracked_cleanup(_cfg: Config) -> None:
+        events.append("cleanup_orphaned_bots")
+        cleanup_called.set()
+
+    async def tracked_setup(_bots: list[Any]) -> None:
+        events.append("setup_rooms")
+
+    timeout_seconds = 0.15 if ended_by == "timeout" else 10.0
+    with (
+        _matrix_free_startup(orchestrator),
+        patch.object(orchestrator.agent_reply_memberships, "needs_refresh", return_value=False),
+        patch("mindroom.orchestrator.matrix_sync_startup_timeout_seconds", return_value=timeout_seconds),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
+        patch.object(orchestrator._startup_maintenance, "cleanup_orphaned_bots", side_effect=tracked_cleanup),
+        patch.object(orchestrator._startup_maintenance, "setup_rooms_and_memberships", side_effect=tracked_setup),
+    ):
+        runtime_task = asyncio.create_task(orchestrator.start())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            # Runtime is ready immediately without waiting for the unsynced bot,
+            # while startup maintenance is still gated on the bot's initial sync.
+            await asyncio.sleep(0.05)
+            assert not cleanup_called.is_set()
+            assert events == ["set_runtime_ready"]
+
+            if ended_by == "first_sync":
+                slow.first_sync_complete = True
+            elif ended_by == "stop":
+                slow.running = False
+
+            maintenance_task = orchestrator._startup_maintenance.task
+            assert maintenance_task is not None
+            await asyncio.wait_for(maintenance_task, timeout=SETTLE_TIMEOUT_SECONDS)
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
+
+    assert events == ["set_runtime_ready", "cleanup_orphaned_bots", "setup_rooms"]
+
+
 def _startup_waiting_for_first_sync(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, MagicMock]:
     """Return a runtime whose one bot has not synced, so its startup waits, with the config it starts on."""
     startup_config = _runtime_bound_config(Config(server_emoji={"enabled": True}), tmp_path)

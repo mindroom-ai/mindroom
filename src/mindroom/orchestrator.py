@@ -534,6 +534,7 @@ class _MultiAgentOrchestrator:
             sync_runtime_support=lambda config: self._sync_runtime_support_services(config),
             mark_runtime_support_ready=lambda: self._approval_recovery.mark_startup_runtime_support_ready(),
             cleanup_orphaned_bots=self._cleanup_orphaned_bots,
+            wait_for_first_syncs=self._wait_for_bots_first_sync,
         )
 
     @property
@@ -1208,8 +1209,7 @@ class _MultiAgentOrchestrator:
                 if runtime_shutdown_event.is_set():
                     return
                 self.config_reload.startup_published(config)
-                maintenance_bots = self._running_bots_for_entities(self.agent_bots) if self.agent_bots else started_bots
-                self._startup_maintenance.start(maintenance_bots, self.config)
+                self._startup_maintenance.start(self._running_bots_for_entities(self.agent_bots), self.config)
                 set_runtime_ready()
                 self._runtime_ready_event.set()
                 self.turn_recovery.schedule()
@@ -1221,20 +1221,24 @@ class _MultiAgentOrchestrator:
             await emit_service_bot_ready()
         await runtime_shutdown_event.wait()
 
+    async def _wait_for_bots_first_sync(self, bots: list[AgentBot]) -> None:
+        """Wait until every running bot in *bots* synced once, stopped, or reached the first-sync deadline."""
+        deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
+        # Polled, because a bot's stop has no event to await.
+        while time.monotonic() < deadline and any(  # noqa: ASYNC110
+            bot.running and not bot.first_sync_complete for bot in bots
+        ):
+            await asyncio.sleep(_FIRST_SYNC_POLL_SECONDS)
+
     async def _wait_for_first_syncs(self, runtime_shutdown_event: asyncio.Event, started_bots: list[AgentBot]) -> bool:
         """Keep semantic dispatch parked until every started bot synced once or stopped; False when shutdown wins.
 
         A bot still unsynced at the first-sync deadline, however often its receive loop restarted, is left behind,
         not observing: its rooms' grants stay closed until its own loop syncs.
         """
-        deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
 
         async def bots_synced_and_grants_rebuilt() -> None:
-            # Polled, because a bot's stop has no event to await.
-            while time.monotonic() < deadline and any(  # noqa: ASYNC110
-                bot.running and not bot.first_sync_complete for bot in started_bots
-            ):
-                await asyncio.sleep(_FIRST_SYNC_POLL_SECONDS)
+            await self._wait_for_bots_first_sync(started_bots)
             # Sync frames only request the rebuild; startup publication alone waits for it, at most 10 s.
             await self.agent_reply_membership_sync.refresh_if_needed(self.config, self.refresh_agent_reply_memberships)
 

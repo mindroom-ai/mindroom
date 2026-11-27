@@ -28,6 +28,7 @@ type _SetupRooms = Callable[[list[AgentBot]], Awaitable[None]]
 type _SyncRuntimeSupport = Callable[[Config], Awaitable[None]]
 type _MarkRuntimeSupportReady = Callable[[], Awaitable[None]]
 type _CleanupOrphanedBots = Callable[[Config], Awaitable[None]]
+type _WaitForFirstSyncs = Callable[[list[AgentBot]], Awaitable[None]]
 type _RunningBots = Callable[[], list[AgentBot]]
 
 
@@ -39,6 +40,7 @@ class StartupMaintenanceController:
     sync_runtime_support: _SyncRuntimeSupport
     mark_runtime_support_ready: _MarkRuntimeSupportReady
     cleanup_orphaned_bots: _CleanupOrphanedBots | None = None
+    wait_for_first_syncs: _WaitForFirstSyncs | None = None
     task: asyncio.Task[None] | None = field(default=None, init=False)
 
     def start(self, bots: list[AgentBot], config: Config) -> None:
@@ -82,6 +84,13 @@ class StartupMaintenanceController:
                     self.start(bots, config)
 
     async def _run(self, bots: list[AgentBot], config: Config) -> None:
+        if self.wait_for_first_syncs is not None:
+            wait = self.wait_for_first_syncs
+            await self._run_phase(
+                "startup_maintenance.wait_for_first_syncs",
+                lambda: wait(bots),
+                failure_message="Startup wait for initial syncs failed",
+            )
         if self.cleanup_orphaned_bots is not None:
             cleanup = self.cleanup_orphaned_bots
             await self._run_phase(
