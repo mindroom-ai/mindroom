@@ -2095,11 +2095,8 @@ def _validate_source_update_field_compatibility(source: TriggerSourceSpec, args:
     if args["match"] is not None and not isinstance(source, ExternalEventSourceSpec):
         msg = "match is only valid for external_event triggers."
         raise ValueError(msg)
-    if args["poll_interval_seconds"] is not None and not isinstance(
-        source,
-        (ScriptCheckSourceSpec, GitHubPRSourceSpec),
-    ):
-        msg = "poll_interval_seconds is only valid for script_check and github_pr triggers."
+    if args["poll_interval_seconds"] is not None and not isinstance(source, ScriptCheckSourceSpec):
+        msg = "poll_interval_seconds is only valid for script_check triggers."
         raise ValueError(msg)
 
 
@@ -2116,12 +2113,6 @@ async def _resolve_updated_source(
         poll_s = clamp_script_check_poll_interval(
             args["poll_interval_seconds"],
             min_seconds=policy.min_script_check_poll_interval_seconds,
-        )
-        return existing.source.model_copy(update={"poll_interval_seconds": poll_s})
-    if isinstance(existing.source, GitHubPRSourceSpec) and args["poll_interval_seconds"] is not None:
-        poll_s = clamp_script_check_poll_interval(
-            args["poll_interval_seconds"],
-            min_seconds=policy.min_github_pr_poll_interval_seconds,
         )
         return existing.source.model_copy(update={"poll_interval_seconds": poll_s})
 

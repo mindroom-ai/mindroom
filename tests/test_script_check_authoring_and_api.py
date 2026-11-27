@@ -36,6 +36,7 @@ from mindroom.journal_dispatch import _route_as_message
 from mindroom.matrix_rtc.call_tools import _TEXT_CHAT_REQUIRED_MESSAGE, _refuse_text_chat_functions
 from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers.models import (
+    GitHubPRSourceSpec,
     ReactiveTriggerRecord,
     ScriptCheckCheckpoint,
     ScriptCheckSourceSpec,
@@ -480,6 +481,26 @@ async def test_metadata_only_update_list_redaction_history_and_test(tmp_path: Pa
     ctx_left, _ = _make_ctx(tmp_path, joined_users=())
     denied_hist = await _call(tool, ctx_left, action="history", trigger_id="sc_u")
     assert (denied_hist["status"], "no longer have access" in denied_hist["message"]) == ("error", True)
+
+    store.create_trigger(
+        ReactiveTriggerRecord(
+            trigger_id="gh_u",
+            owner_user_id=_OWNER,
+            source=GitHubPRSourceSpec(repo="org/repo", number=7, poll_interval_seconds=300),
+            target=TriggerTargetSpec(room_id=_ROOM, agent="coder", prompt="PR update"),
+            created_at=1000.0,
+            updated_at=1000.0,
+        ),
+    )
+    bad_gh_poll = await _call(tool, ctx, action="update", trigger_id="gh_u", poll_interval_seconds=120)
+    assert (
+        bad_gh_poll["status"],
+        "only valid for script_check triggers" in bad_gh_poll["message"],
+    ) == ("error", True)
+    gh_after = store.get_trigger("gh_u")
+    assert gh_after is not None
+    assert isinstance(gh_after.source, GitHubPRSourceSpec)
+    assert gh_after.source.poll_interval_seconds == 300
 
 
 @pytest.mark.asyncio

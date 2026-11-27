@@ -112,7 +112,6 @@ class ToolRuntimeContext:
     membership: PrincipalStore | None = None
     membership_turn_id: str | None = None
     source_kind: str | None = None
-    automation_origin: str | None = None
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
     # What posted this turn's message when a hook did; a resumed approval turn restores it.
@@ -128,6 +127,7 @@ class ToolRuntimeContext:
     parent_turn_id: str | None = None
     # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
     fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
+    automation_origin: str | None = None
 
     @property
     def current_config(self) -> Config:
