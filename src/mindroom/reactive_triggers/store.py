@@ -327,6 +327,8 @@ class ReactiveTriggerStore:
         max_per_owner: int | None = None,
         max_github_pr_per_owner: int | None = None,
         max_script_check_per_owner: int | None = None,
+        updated_script_check_checkpoint: ScriptCheckCheckpoint | None = None,
+        expected_script_check_revision: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints.
 
@@ -371,6 +373,13 @@ class ReactiveTriggerStore:
                 _check_pr_quota(conn, owner, max_github_pr_per_owner, ts, persisted.trigger_id)
             if str(existing["source_type"]) == "script_check" and not was_on and now_on:
                 _check_script_check_quota(conn, owner, max_script_check_per_owner, ts, persisted.trigger_id)
+            if updated_script_check_checkpoint is not None or expected_script_check_revision is not None:
+                _validate_script_check_checkpoint_update(
+                    conn,
+                    trigger_id=persisted.trigger_id,
+                    source_type=str(existing["source_type"]),
+                    expected_revision=expected_script_check_revision,
+                )
             cursor = conn.execute(
                 """
                 UPDATE reactive_triggers
@@ -399,6 +408,8 @@ class ReactiveTriggerStore:
             )
             if cursor.rowcount == 0:
                 return None
+            if updated_script_check_checkpoint is not None:
+                _upsert_script_check_checkpoint(conn, persisted.trigger_id, updated_script_check_checkpoint)
             row = conn.execute(
                 "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (persisted.trigger_id,),
@@ -1528,6 +1539,27 @@ def _check_script_check_quota(
     if limit is not None and int(conn.execute(sql, (owner, now, skip)).fetchone()[0]) >= limit:
         msg = f"Owner {owner} reached script_check trigger limit ({limit})"
         raise ReactiveTriggerLimitError(msg)
+
+
+def _validate_script_check_checkpoint_update(
+    conn: sqlite3.Connection,
+    *,
+    trigger_id: str,
+    source_type: str,
+    expected_revision: int | None,
+) -> None:
+    if source_type != "script_check":
+        msg = f"Script check checkpoint update requires a script_check trigger: {trigger_id}"
+        raise ReactiveTriggerStoreError(msg)
+    if expected_revision is None:
+        return
+    cp_row = conn.execute(
+        "SELECT revision FROM script_check_checkpoints WHERE trigger_id = ?",
+        (trigger_id,),
+    ).fetchone()
+    if cp_row is None or int(cp_row["revision"]) != expected_revision:
+        msg = f"Script check checkpoint revision conflict for trigger: {trigger_id}"
+        raise ReactiveTriggerStoreError(msg)
 
 
 def _upsert_script_check_checkpoint(conn: sqlite3.Connection, trigger_id: str, cp: ScriptCheckCheckpoint) -> None:

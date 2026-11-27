@@ -925,14 +925,17 @@ async def test_watch_pr_action_governed_by_triggers_approval_rules(tmp_path: Pat
     registry = builtin_tool_registry()
     meta = registry.entries["triggers"]
     assert meta.function_names == ("triggers",)
-    assert meta.approval_aliases == {}
+    assert set(meta.approval_aliases) == {"triggers"}
+    triggers_alias = meta.approval_aliases["triggers"]
+    assert triggers_alias.judged_as == "start_script"
     assert toolkit_approval_alias(req_cfg, registry, "triggers", "watch_pr") is None
 
     args: dict[str, object] = {"action": "watch_pr", "repo": "org/owned", "number": 40}
+    assert triggers_alias.judge(args) == []
     assert tool_may_require_approval(req_cfg, "triggers") is True
-    assert (await evaluate_tool_approval(req_cfg, paths, "triggers", args, "dev", None))[0] is True
+    assert (await evaluate_tool_approval(req_cfg, paths, "triggers", args, "dev", triggers_alias))[0] is True
     assert tool_may_require_approval(auto_cfg, "triggers") is False
-    assert (await evaluate_tool_approval(auto_cfg, paths, "triggers", args, "dev", None))[0] is False
+    assert (await evaluate_tool_approval(auto_cfg, paths, "triggers", args, "dev", triggers_alias))[0] is False
 
     watch_pr_op = grant_operation(req_cfg, "triggers", args)
     list_op = grant_operation(req_cfg, "triggers", {"action": "list"})

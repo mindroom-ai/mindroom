@@ -11,18 +11,19 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
 from mindroom.logging_config import get_logger
+from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers.models import ReactiveTriggerRecord, ScriptCheckCheckpoint, ScriptCheckSourceSpec
 from mindroom.reactive_triggers.script_check import (
     ScriptCheckTickOutcome,
     ScriptCheckTickRunner,
     check_script_check_source_access,
+    is_owner_joined_in_state,
 )
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
     ScriptRuntimeNotReadyError,
-    workflow_placement,
 )
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
 from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED, OWNER_CANCELLATION, RUNTIME_SHUTDOWN
@@ -52,7 +53,7 @@ import hashlib, hmac, json, sys, traceback
 from mindroom.script_runs.transport import ScriptGatewayTransport
 from mindroom.script_sdk import MindRoomTools
 
-_MAX_STATE_BYTES, _MAX_RESULT_BYTES, _MAX_ERROR_CHARS, _MISSING = 32 * 1024, 96 * 1024, 8000, object()
+_MAX_STATE_BYTES, _MAX_RESULT_BYTES, _MAX_ERROR_CHARS, _MISSING = 32 * 1024, 64 * 1024, 8000, object()
 
 def _check_str_keys(value, label):
     if isinstance(value, dict):
@@ -327,7 +328,44 @@ class _ScriptCheckRunner:
             return ScriptCheckTickOutcome(status="unauthorized", error_code="identity_mismatch")
         return context
 
-    def _prepare(
+    async def _check_live_room_authorization(
+        self,
+        rule: ReactiveTriggerRecord,
+        source_spec: ScriptCheckSourceSpec,
+        bot: AgentBot,
+        config: Config,
+    ) -> ScriptCheckTickOutcome | None:
+        observed_room = _observed_room_for_bot(bot, source_spec.room_id)
+        room_state = (
+            None
+            if observed_room is None or bot.client is None
+            else await read_room_state(bot.client, source_spec.room_id)
+        )
+        if room_state is None:
+            return ScriptCheckTickOutcome(status="deferred", error_code="source_room_state_unreadable")
+        if not is_owner_joined_in_state(
+            room_state,
+            owner_user_id=rule.owner_user_id,
+            config=config,
+            runtime_paths=self.runtime_paths,
+        ):
+            return ScriptCheckTickOutcome(status="unauthorized", error_code="source_room_not_joined")
+        try:
+            allowed = is_sender_allowed_for_agent_reply_in_room(
+                rule.owner_user_id,
+                source_spec.agent,
+                config,
+                source_spec.room_id,
+                self.runtime_paths,
+                self.memberships,
+                require_resolved_membership=True,
+                observed_room=observed_room,
+            )
+        except ReplyMembershipPendingError:
+            return ScriptCheckTickOutcome(status="deferred", error_code="runtime_unavailable")
+        return None if allowed else ScriptCheckTickOutcome(status="unauthorized", error_code="owner_not_authorized")
+
+    async def _prepare(
         self,
         rule: ReactiveTriggerRecord,
         checkpoint: ScriptCheckCheckpoint,
@@ -342,29 +380,15 @@ class _ScriptCheckRunner:
             source_spec=source_spec,
             config=config,
             runtime_paths=self.runtime_paths,
-        ) or (
-            None if workflow_placement(config, self.runtime_paths) in {"worker", "local"} else "placement_unavailable"
+            require_placement=True,
         )
         if unauth_err is not None:
             return ScriptCheckTickOutcome(status="unauthorized", error_code=unauth_err)
         manager, bot = self.manager_provider(), self.bots().get(source_spec.agent)
-        if manager is None or bot is None or not bot.running:
+        if manager is None or bot is None or not bot.running or bot.client is None:
             return ScriptCheckTickOutcome(status="deferred", error_code="runtime_unavailable")
-        try:
-            allowed = is_sender_allowed_for_agent_reply_in_room(
-                rule.owner_user_id,
-                source_spec.agent,
-                config,
-                source_spec.room_id,
-                self.runtime_paths,
-                self.memberships,
-                require_resolved_membership=True,
-                observed_room=_observed_room_for_bot(bot, source_spec.room_id),
-            )
-        except ReplyMembershipPendingError:
-            return ScriptCheckTickOutcome(status="deferred", error_code="runtime_unavailable")
-        if not allowed:
-            return ScriptCheckTickOutcome(status="unauthorized", error_code="owner_not_authorized")
+        if room_err := await self._check_live_room_authorization(rule, source_spec, bot, config):
+            return room_err
         rebuilt = self._rebuild_context(rule, source_spec, checkpoint, bot, run_id)
         return rebuilt if isinstance(rebuilt, ScriptCheckTickOutcome) else (manager, rebuilt, source_spec)
 
@@ -376,7 +400,7 @@ class _ScriptCheckRunner:
         _now: float,
     ) -> ScriptCheckTickOutcome:
         run_id = f"script-{uuid.uuid4().hex}"
-        prepared = self._prepare(rule, checkpoint, config, run_id)
+        prepared = await self._prepare(rule, checkpoint, config, run_id)
         if isinstance(prepared, ScriptCheckTickOutcome):
             return prepared
         manager, context, source_spec = prepared

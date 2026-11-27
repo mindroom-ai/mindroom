@@ -13,6 +13,23 @@ if TYPE_CHECKING:
     from mindroom.custom_tools.triggers import TriggersTools
 
 
+_NON_CODE_TRIGGER_ACTIONS = frozenset(
+    {
+        "watch_room",
+        "watch_thread",
+        "watch_pr",
+        "subscribe_event",
+        "create",
+        "list",
+        "set_enabled",
+        "delete",
+        "rotate_key",
+        "history",
+        "test",
+    },
+)
+
+
 def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[str, object]] | None:
     action = arguments.get("action")
     if not isinstance(action, str) or not action.strip():
@@ -26,15 +43,19 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
                 "name": arguments.get("trigger_id") or arguments.get("description"),
             },
         ]
-    if normalized == "update" and (arguments.get("source") is not None or arguments.get("path") is not None):
-        return [
-            {
-                "source": arguments.get("source"),
-                "path": arguments.get("path"),
-                "name": arguments.get("trigger_id"),
-            },
-        ]
-    return []
+    if normalized == "update":
+        if arguments.get("source") is not None or arguments.get("path") is not None:
+            return [
+                {
+                    "source": arguments.get("source"),
+                    "path": arguments.get("path"),
+                    "name": arguments.get("trigger_id"),
+                },
+            ]
+        return []
+    if normalized in _NON_CODE_TRIGGER_ACTIONS:
+        return []
+    return None
 
 
 @register_tool_with_metadata(

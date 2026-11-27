@@ -20,13 +20,15 @@ from mindroom.reactive_triggers.models import (
     ScriptCheckSourceSpec,
     TriggerEvent,
 )
-from mindroom.requester_identity import is_human_requester_id
+from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.script_runs.manager import workflow_placement
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.reactive_triggers.store import ReactiveTriggerStore
 
 logger = get_logger(__name__)
@@ -229,14 +231,53 @@ def agent_supports_script_check(config: Config, agent_name: str) -> bool:
     return "triggers" in resolved and bool({"script", "workflow"} & resolved)
 
 
+def check_script_check_availability(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> tuple[Literal["policy", "agent", "placement"], str] | None:
+    """Verify shared policy, executing-agent capability, and placement for script_check triggers."""
+    pol = config.external_trigger_policy
+    if not pol.enabled:
+        return ("policy", "External triggers are disabled by configuration.")
+    if not pol.reactive_enabled:
+        return ("policy", "Reactive triggers are disabled by configuration.")
+    if not pol.script_check_enabled:
+        return ("policy", "Scheduled script_check triggers are disabled by policy.")
+    if not agent_supports_script_check(config, agent_name):
+        return (
+            "agent",
+            f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
+        )
+    placement = workflow_placement(config, runtime_paths)
+    if placement not in {"worker", "local"}:
+        return ("placement", placement)
+    return None
+
+
+def is_owner_joined_in_state(
+    room_state: RoomStateSnapshot,
+    *,
+    owner_user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether any equivalent Matrix ID for ``owner_user_id`` is joined in ``room_state``."""
+    return any(
+        room_state.events.get(("m.room.member", user_id), {}).get("membership") == "join"
+        for user_id in equivalent_requester_ids(owner_user_id, config, runtime_paths)
+    )
+
+
 def check_script_check_source_access(
     *,
     owner_user_id: str,
     source_spec: ScriptCheckSourceSpec,
     config: Config,
     runtime_paths: RuntimePaths,
+    require_placement: bool = False,
 ) -> str | None:
-    """Verify current policy, human owner, and executing-agent capability for a script_check rule."""
+    """Verify current policy, human owner, executing-agent capability, and optional placement."""
     pol = config.external_trigger_policy
     if not pol.enabled:
         return "external_triggers_disabled"
@@ -248,7 +289,11 @@ def check_script_check_source_access(
         return "owner_not_human"
     if not agent_supports_script_check(config, source_spec.agent):
         return "agent_script_check_unavailable"
-    return None
+    return (
+        "placement_unavailable"
+        if require_placement and workflow_placement(config, runtime_paths) not in {"worker", "local"}
+        else None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +391,28 @@ class ScriptCheckPoller:
             self._on_enqueued()
         return enqueued
 
+    def _load_live_rule_and_checkpoint(
+        self,
+        rule: ReactiveTriggerRecord,
+        cp: ScriptCheckCheckpoint,
+        check_now: float,
+    ) -> tuple[ReactiveTriggerRecord, ScriptCheckCheckpoint] | None:
+        fresh_rule = self._store.get_trigger(rule.trigger_id)
+        fresh_cp = self._store.get_script_check_checkpoint(rule.trigger_id)
+        if (
+            fresh_rule is None
+            or fresh_cp is None
+            or not fresh_rule.enabled
+            or (fresh_rule.expires_at is not None and fresh_rule.expires_at <= check_now)
+            or fresh_rule.rule_uid != rule.rule_uid
+            or fresh_cp.revision != cp.revision
+            or fresh_cp.next_poll_at is None
+            or fresh_cp.next_poll_at > check_now
+            or not isinstance(fresh_rule.source, ScriptCheckSourceSpec)
+        ):
+            return None
+        return fresh_rule, fresh_cp
+
     async def _poll_rule(
         self,
         rule: ReactiveTriggerRecord,
@@ -356,7 +423,12 @@ class ScriptCheckPoller:
     ) -> bool:
         try:
             async with self._owner_slot(rule.owner_user_id), self._semaphore:
-                return await self._execute_rule(rule, cp, now, fixed_now=fixed_now)
+                check_now = now if fixed_now else time.time()
+                live = await asyncio.to_thread(self._load_live_rule_and_checkpoint, rule, cp, check_now)
+                if live is None:
+                    return False
+                fresh_rule, fresh_cp = live
+                return await self._execute_rule(fresh_rule, fresh_cp, check_now, fixed_now=fixed_now)
         finally:
             self._in_flight_trigger_ids.discard(rule.trigger_id)
 
@@ -372,7 +444,7 @@ class ScriptCheckPoller:
         config = self._config_provider()
         min_poll = float(config.external_trigger_policy.min_script_check_poll_interval_seconds)
         effective_interval = max(min_poll, float(rule.source.poll_interval_seconds))
-        if check_script_check_source_access(
+        if unauth_code := check_script_check_source_access(
             owner_user_id=rule.owner_user_id,
             source_spec=rule.source,
             config=config,
@@ -381,6 +453,7 @@ class ScriptCheckPoller:
             await self._save_non_ok(
                 rule,
                 cp,
+                last_error_code=unauth_code,
                 next_poll_at=now + min(_UNAUTHORIZED_RECHECK_CAP_SECONDS, effective_interval),
                 updated_at=now,
             )
@@ -411,6 +484,7 @@ class ScriptCheckPoller:
             await self._save_non_ok(
                 rule,
                 cp,
+                last_error_code=outcome.error_code,
                 next_poll_at=now + min(_UNAUTHORIZED_RECHECK_CAP_SECONDS, effective_interval),
                 updated_at=now,
             )

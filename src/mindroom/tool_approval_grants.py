@@ -144,7 +144,16 @@ def grant_operation(
         dispatch_value = arguments.get(dispatch_arg)
         if not isinstance(dispatch_value, str) or not dispatch_value.strip():
             return None
-        return ApprovalOperation(approval_binding(config), tool_name, scope_owner, dispatch_value.strip())
+        normalized_dispatch = dispatch_value.strip()
+        if tool_name == "triggers" and (
+            normalized_dispatch == "watch_script"
+            or (
+                normalized_dispatch == "update"
+                and (arguments.get("source") is not None or arguments.get("path") is not None)
+            )
+        ):
+            return None
+        return ApprovalOperation(approval_binding(config), tool_name, scope_owner, normalized_dispatch)
     return ApprovalOperation(approval_binding(config), tool_name)
 
 

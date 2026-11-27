@@ -74,8 +74,8 @@ from mindroom.reactive_triggers.models import (
     generate_trigger_id,
 )
 from mindroom.reactive_triggers.script_check import (
-    agent_supports_script_check,
     build_script_check_dry_run_event,
+    check_script_check_availability,
     check_script_check_source_access,
     clamp_script_check_poll_interval,
     script_check_health_summary,
@@ -93,9 +93,9 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     managed_entity_user_ids,
 )
-from mindroom.script_runs.manager import ScriptRunManager, workflow_placement
 from mindroom.thread_tags import ThreadTagsError, normalize_tag_name
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID, current_tool_call
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -536,14 +537,10 @@ class TriggersTools(Toolkit):
         if isinstance(rule.source, GitHubPRSourceSpec):
             return _gh_pr_allowed(context, context.requester_id, rule.source)
         if isinstance(rule.source, ScriptCheckSourceSpec):
-            return (
-                check_script_check_source_access(
-                    owner_user_id=context.requester_id,
-                    source_spec=rule.source,
-                    config=context.config,
-                    runtime_paths=context.runtime_paths,
-                )
-                is None
+            return await cls._has_script_check_source_access_for_history(
+                context,
+                rule.source,
+                room_access_cache=room_access_cache,
             )
         cfg = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
         allowed = cfg is not None and is_source_subscriber_allowed(
@@ -559,8 +556,68 @@ class TriggersTools(Toolkit):
                 allowed = False
         return allowed
 
-    @staticmethod
+    @classmethod
+    async def _has_script_check_source_access_for_history(
+        cls,
+        context: ToolRuntimeContext,
+        source: ScriptCheckSourceSpec,
+        *,
+        room_access_cache: dict[str, bool],
+    ) -> bool:
+        if (
+            check_script_check_source_access(
+                owner_user_id=context.requester_id,
+                source_spec=source,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+            )
+            is not None
+        ):
+            return False
+        resolved_room_id = resolve_room_id(source.room_id, context.runtime_paths)
+        cache_key = f"script_check:{source.agent}:{resolved_room_id}"
+        cached = room_access_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            await _verify_owner_joined_room(
+                context,
+                room_id=resolved_room_id,
+                preferred_agent=source.agent,
+                require_live=True,
+            )
+            allowed = cls._script_check_reply_allowed_for_history(context, context.requester_id, source)
+        except ReactiveTriggerStoreError:
+            allowed = False
+        room_access_cache[cache_key] = allowed
+        return allowed
+
+    @classmethod
+    def _script_check_reply_allowed_for_history(
+        cls,
+        context: ToolRuntimeContext,
+        user_id: str,
+        source: ScriptCheckSourceSpec,
+    ) -> bool:
+        resolved_room_id = resolve_room_id(source.room_id, context.runtime_paths)
+        observed_room = _observed_room_for(context, resolved_room_id, preferred_agent=source.agent)
+        try:
+            return is_sender_allowed_for_agent_reply_in_room(
+                user_id,
+                source.agent,
+                context.config,
+                resolved_room_id,
+                context.runtime_paths,
+                cls._memberships(context),
+                require_resolved_membership=True,
+                observed_room=observed_room,
+            )
+        except ReplyMembershipPendingError:
+            return False
+
+    @classmethod
     def _firing_allowed_for_history(
+        cls,
         context: ToolRuntimeContext,
         rule: ReactiveTriggerRecord,
         firing: FiringRecord,
@@ -570,15 +627,12 @@ class TriggersTools(Toolkit):
         if isinstance(rule.source, GitHubPRSourceSpec):
             return _gh_pr_allowed(context, rule.owner_user_id, rule.source)
         if isinstance(rule.source, ScriptCheckSourceSpec):
-            return (
-                check_script_check_source_access(
-                    owner_user_id=rule.owner_user_id,
-                    source_spec=rule.source,
-                    config=context.config,
-                    runtime_paths=context.runtime_paths,
-                )
-                is None
-            )
+            return check_script_check_source_access(
+                owner_user_id=rule.owner_user_id,
+                source_spec=rule.source,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+            ) is None and cls._script_check_reply_allowed_for_history(context, rule.owner_user_id, rule.source)
         if not isinstance(rule.source, ExternalEventSourceSpec):
             return True
         return (
@@ -1024,7 +1078,7 @@ class TriggersTools(Toolkit):
     async def _watch_script(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_prompt = _require_non_empty_arg(args["prompt"], "prompt", "watch_script")
         policy = self._require_reactive_policy(context)
-        script_manager = _require_script_check_authoring(context, policy=policy)
+        script_manager = _require_script_check_authoring(context)
         now = time.time()
         common = self._validate_reactive_common(context, args, policy=policy, now=now)
         poll_s = clamp_script_check_poll_interval(
@@ -1242,7 +1296,26 @@ class TriggersTools(Toolkit):
         refreshed_tag_present = await _read_reenable_tag_state(context, existing, enabling=reenabling)
 
         def _persist() -> ReactiveTriggerRecord:
-            if reenabling and not isinstance(existing.source, ScriptCheckSourceSpec):
+            updated_sc_cp: ScriptCheckCheckpoint | None = None
+            expected_sc_rev: int | None = None
+            if isinstance(existing.source, ScriptCheckSourceSpec) and (new_source_text is not None or reenabling):
+                existing_cp = reactive_store.get_script_check_checkpoint(existing.trigger_id)
+                if existing_cp is None:
+                    msg = f"Script check checkpoint not found: {resolved_trigger_id}"
+                    raise ReactiveTriggerStoreError(msg)
+                expected_sc_rev = existing_cp.revision
+                cp_updates: dict[str, object] = {
+                    "revision": existing_cp.revision + 1,
+                    "consecutive_errors": 0,
+                    "last_error_code": None,
+                    "next_poll_at": now,
+                    "updated_at": now,
+                }
+                if new_source_text is not None:
+                    cp_updates["source_utf8"] = new_source_text
+                    cp_updates["state"] = {}
+                updated_sc_cp = existing_cp.model_copy(update=cp_updates)
+            elif reenabling:
                 refresh_reactive_state_on_reenable(
                     reactive_store,
                     existing,
@@ -1257,17 +1330,12 @@ class TriggersTools(Toolkit):
                 max_per_owner=pol.max_reactive_triggers_per_owner,
                 max_github_pr_per_owner=pol.max_github_pr_watches_per_owner,
                 max_script_check_per_owner=pol.max_script_checks_per_owner,
+                updated_script_check_checkpoint=updated_sc_cp,
+                expected_script_check_revision=expected_sc_rev,
             )
             if updated is None:
                 msg = f"Reactive trigger not found: {resolved_trigger_id}"
                 raise ReactiveTriggerStoreError(msg)
-            _sync_script_check_checkpoint_on_update(
-                reactive_store,
-                existing,
-                new_source_text=new_source_text,
-                reenabling=reenabling,
-                now=now,
-            )
             return updated
 
         updated = await run_blocking_until_complete(_persist)
@@ -2472,34 +2540,30 @@ async def _read_initial_room_cursor(
     return started
 
 
-def _require_script_check_authoring(
-    context: ToolRuntimeContext,
-    *,
-    policy: ExternalTriggerPolicyConfig,
-) -> ScriptRunManager:
-    if not policy.script_check_enabled:
-        msg = "Scheduled script_check triggers are disabled by policy."
-        raise ReactiveTriggerStoreError(msg)
-    if not agent_supports_script_check(context.config, context.agent_name):
-        msg = f"Agent {context.agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools to author script_check triggers."
-        raise ReactiveTriggerStoreError(msg)
+def _require_script_check_authoring(context: ToolRuntimeContext) -> ScriptRunManager:
+    if failure := check_script_check_availability(context.config, context.runtime_paths, context.agent_name):
+        raise ReactiveTriggerStoreError(failure[1])
     if context.tool_function_filter is not None:
         msg = "script_check authoring is not allowed during a tool-filtered turn."
         raise ReactiveTriggerStoreError(msg)
-    if (
-        context.persona is not None
-        and context.persona.tools is not None
-        and not ({"script", "workflow"} & set(context.persona.tools))
-    ):
-        msg = "script_check authoring is not allowed for a persona without script or workflow tools."
+    if context.persona is not None and context.persona.tools is not None:
+        msg = "script_check authoring is not allowed for a tool-restricted persona."
         raise ReactiveTriggerStoreError(msg)
+    if (context.correlation_id or "").startswith(("background-script:", "workflow:", "script-check:")):
+        msg = "script_check authoring is not allowed from background script or workflow contexts."
+        raise ReactiveTriggerStoreError(msg)
+    current_call = current_tool_call()
     identity = context.execution_identity
+    if DETACHED_SESSION_ID in {
+        context.session_id,
+        identity.session_id,
+        None if current_call is None else current_call.context.session_id,
+    }:
+        msg = "script_check authoring is not allowed from detached tool contexts."
+        raise ReactiveTriggerStoreError(msg)
     if identity.channel != "matrix" or identity.session_id is None:
         msg = "script_check triggers require a Matrix room turn with an active session identity."
         raise ReactiveTriggerStoreError(msg)
-    placement = workflow_placement(context.config, context.runtime_paths)
-    if placement not in {"worker", "local"}:
-        raise ReactiveTriggerStoreError(placement)
     script_runtime = None if context.orchestrator is None else getattr(context.orchestrator, "script_runtime", None)
     script_manager = None if script_runtime is None else script_runtime.tool_manager
     if script_manager is None:
@@ -2509,16 +2573,8 @@ def _require_script_check_authoring(
 
 
 def _require_script_check_reenable(context: ToolRuntimeContext, source: ScriptCheckSourceSpec) -> None:
-    pol = context.config.external_trigger_policy
-    if not (pol.enabled and pol.reactive_enabled and pol.script_check_enabled):
-        msg = "Scheduled script_check triggers are disabled by policy."
-        raise ReactiveTriggerStoreError(msg)
-    if not agent_supports_script_check(context.config, source.agent):
-        msg = f"Executing agent {source.agent!r} no longer supports script_check triggers."
-        raise ReactiveTriggerStoreError(msg)
-    placement = workflow_placement(context.config, context.runtime_paths)
-    if placement not in {"worker", "local"}:
-        raise ReactiveTriggerStoreError(placement)
+    if failure := check_script_check_availability(context.config, context.runtime_paths, source.agent):
+        raise ReactiveTriggerStoreError(failure[1])
 
 
 async def _resolve_script_check_code_update(
@@ -2534,41 +2590,15 @@ async def _resolve_script_check_code_update(
         msg = "source and path are only valid for script_check triggers."
         raise ValueError(msg)
     assert isinstance(existing.source, ScriptCheckSourceSpec)
-    policy = require_policy(context)
-    script_manager = _require_script_check_authoring(context, policy=policy)
-    if not agent_supports_script_check(context.config, existing.source.agent):
-        msg = f"Executing agent {existing.source.agent!r} no longer supports script_check triggers."
+    require_policy(context)
+    current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
+    existing_room_id = resolve_room_id(existing.source.room_id, context.runtime_paths)
+    if context.agent_name != existing.source.agent or current_room_id != existing_room_id:
+        msg = (
+            f"script_check code can only be updated by its executing agent {existing.source.agent!r} "
+            f"in its source room {existing_room_id}."
+        )
         raise ReactiveTriggerStoreError(msg)
+    script_manager = _require_script_check_authoring(context)
     source_bytes = await script_manager.resolve_source(context, source=args["source"], path=args["path"])
     return validate_script_check_source(source_bytes)
-
-
-def _sync_script_check_checkpoint_on_update(
-    reactive_store: ReactiveTriggerStore,
-    existing: ReactiveTriggerRecord,
-    *,
-    new_source_text: str | None,
-    reenabling: bool,
-    now: float,
-) -> None:
-    if new_source_text is not None:
-        existing_cp = reactive_store.get_script_check_checkpoint(existing.trigger_id)
-        if existing_cp is not None:
-            reactive_store.upsert_script_check_checkpoint(
-                existing.trigger_id,
-                existing_cp.model_copy(
-                    update={
-                        "revision": existing_cp.revision + 1,
-                        "source_utf8": new_source_text,
-                        "state": {},
-                        "consecutive_errors": 0,
-                        "last_error_code": None,
-                        "next_poll_at": now,
-                        "updated_at": now,
-                    },
-                ),
-                expected_rule_uid=existing.rule_uid,
-                expected_revision=existing_cp.revision,
-            )
-    elif reenabling and isinstance(existing.source, ScriptCheckSourceSpec):
-        refresh_reactive_state_on_reenable(reactive_store, existing, now=now, refreshed_tag_present=None)

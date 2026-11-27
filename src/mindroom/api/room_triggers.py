@@ -32,14 +32,13 @@ from mindroom.reactive_triggers.models import (
     SourceType,
     ThreadTagSourceSpec,
 )
-from mindroom.reactive_triggers.script_check import agent_supports_script_check
+from mindroom.reactive_triggers.script_check import check_script_check_availability
 from mindroom.reactive_triggers.store import (
     ReactiveTriggerLimitError,
     ReactiveTriggerStore,
     ReactiveTriggerStoreError,
 )
 from mindroom.requester_identity import equivalent_requester_ids
-from mindroom.script_runs.manager import workflow_placement
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -159,23 +158,11 @@ async def update_room_trigger(
                 lambda client: read_thread_tag_present(client, source),
                 "Watched thread tags could not be read; try again.",
             )
-        elif isinstance(source, ScriptCheckSourceSpec):
-            pol = config.external_trigger_policy
-            if not (
-                pol.enabled and pol.reactive_enabled and pol.script_check_enabled
-            ) or not agent_supports_script_check(
-                config,
-                source.agent,
-            ):
-                raise HTTPException(
-                    403,
-                    "Scheduled script_check trigger cannot be re-enabled because policy or agent capability is disabled.",
-                )
-            if workflow_placement(config, runtime_paths) not in {"worker", "local"}:
-                raise HTTPException(
-                    409,
-                    "Scheduled script_check trigger cannot be re-enabled because script execution placement is unavailable.",
-                )
+        elif isinstance(source, ScriptCheckSourceSpec) and (
+            failure := check_script_check_availability(config, runtime_paths, source.agent)
+        ):
+            kind, message = failure
+            raise HTTPException(409 if kind == "placement" else 403, message)
 
     updated = await _run_store(
         lambda: set_trigger_enabled_sync(

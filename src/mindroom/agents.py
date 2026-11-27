@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import functools
+import inspect
+from collections.abc import Buffer, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import mindroom.tools  # noqa: F401
 from mindroom import constants
@@ -22,13 +24,20 @@ from mindroom.agent_loop.prompt import (
 )
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
-from mindroom.approval.tool_approval import approval_policy_names, tool_may_require_approval
+from mindroom.approval.tool_approval import (
+    ToolApprovalScriptError,
+    approval_policy_names,
+    evaluate_tool_approval,
+    tool_may_require_approval,
+    toolkit_approval_alias,
+)
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
@@ -78,10 +87,11 @@ from mindroom.tool_system.construction import (
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, current_tool_workdir
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_sync_tool_entrypoint
 from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
@@ -93,7 +103,7 @@ from mindroom.workers.named import named_workers_refusal
 from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -106,6 +116,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.declarations import ApprovalAlias
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.registry import ToolRegistry
@@ -902,6 +913,81 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
     )
 
 
+def _wrap_non_resumable_alias_entrypoint(
+    function: ToolFunction,
+    *,
+    config: Config,
+    alias: ApprovalAlias,
+) -> ToolFunction:
+    """Guard an alias-gated function on a non-resumable surface, refusing only calls needing approval."""
+    original = function.entrypoint
+    injected_names = frozenset(function.injected_params)
+
+    @functools.wraps(original)
+    async def guarded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        if args:
+            try:
+                bound = inspect.signature(original).bind_partial(*args, **kwargs)
+            except TypeError:
+                return custom_tool_payload(
+                    function.name,
+                    "error",
+                    message=(
+                        f"{function.name} call requires approval under {alias.judged_as!r} rules "
+                        "and cannot run in this non-resumable context."
+                    ),
+                )
+            call_args = {k: v for k, v in bound.arguments.items() if k not in injected_names}
+        else:
+            call_args = {k: v for k, v in kwargs.items() if k not in injected_names}
+
+        context = get_tool_runtime_context()
+        if context is not None:
+            try:
+                requires_approval, _ = await evaluate_tool_approval(
+                    config,
+                    context.runtime_paths,
+                    function.name,
+                    call_args,
+                    context.agent_name,
+                    alias,
+                )
+            except ToolApprovalScriptError as exc:
+                return custom_tool_payload(
+                    function.name,
+                    "error",
+                    message=(
+                        f"{function.name} call refused because approval evaluation failed "
+                        f"in this non-resumable context: {exc}"
+                    ),
+                )
+        else:
+            try:
+                judged = await asyncio.to_thread(alias.judge, call_args)
+            except Exception:
+                requires_approval = True
+            else:
+                requires_approval = not (
+                    isinstance(judged, Sequence) and not isinstance(judged, str | Buffer) and len(judged) == 0
+                )
+
+        if requires_approval:
+            return custom_tool_payload(
+                function.name,
+                "error",
+                message=(
+                    f"{function.name} call requires approval under {alias.judged_as!r} rules "
+                    "and cannot run in this non-resumable context."
+                ),
+            )
+        if inspect.iscoroutinefunction(original) or inspect.isasyncgenfunction(original):
+            result = original(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+        return await run_sync_tool_entrypoint(partial(original, *args, **kwargs))
+
+    return replace(function, entrypoint=guarded)
+
+
 def apply_tool_approval_capability(
     adapted: AdaptedToolkit,
     toolkit: AnyToolkit,
@@ -914,18 +1000,30 @@ def apply_tool_approval_capability(
 ) -> AdaptedToolkit:
     """Apply the approval rules to the functions of ``adapted``, the toolkit ``toolkit`` was adapted to.
 
-    A caller that cannot resume a paused run (``resumable`` False) is offered none of the functions that ask for
-    approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
-    ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one. Without
-    ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns the policy gate and the
-    exact child wait; with it they are ordinary calls whose subagents run as jobs. ``tools`` is the registry the toolkit
-    was built from, whose approval aliases let another function's rules gate its functions too.
+    A caller that cannot resume a paused run (``resumable`` False) hides functions whose own rules or native
+    confirmation may ask, while keeping functions gated solely by an approval alias wrapped so only calls that
+    trigger the alias's approval rules are refused. Otherwise each function an approval rule gates pauses the run
+    for its approval, or, with ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call
+    can become one. Without ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns
+    the policy gate and the exact child wait; with it they are ordinary calls whose subagents run as jobs. ``tools``
+    is the registry the toolkit was built from, whose approval aliases let another function's rules gate its functions
+    too.
     """
 
+    def offered_non_resumable(function: ToolFunction, *, own_may_gate: bool, may_gate: bool) -> ToolFunction | None:
+        if function.gate is ToolGate.CONFIRM or own_may_gate:
+            return None
+        if not may_gate:
+            return function
+        alias = toolkit_approval_alias(config, tools, registered_tool_name, function.name)
+        return None if alias is None else _wrap_non_resumable_alias_entrypoint(function, config=config, alias=alias)
+
     def offered(function: ToolFunction) -> ToolFunction | None:
-        may_gate = _approval_may_gate(config, tools, function.name, registered_tool_name)
+        policy_names = approval_policy_names(config, tools, registered_tool_name, function.name)
+        own_may_gate = function.name in policy_names and tool_may_require_approval(config, function.name)
+        may_gate = any(tool_may_require_approval(config, name) for name in policy_names)
         if not resumable:
-            return None if function.gate is ToolGate.CONFIRM or may_gate else function
+            return offered_non_resumable(function, own_may_gate=own_may_gate, may_gate=may_gate)
         delegation = is_delegation_function(function)
         if delegation and not approvals_as_jobs:
             return replace(function, gate=ToolGate.DELEGATION)
