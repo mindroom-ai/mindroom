@@ -979,7 +979,7 @@
             },
             "targetId": {
               "type": "string",
-              "description": "Host tab ID (rejected by desktop)."
+              "description": "Host tab ID (rejected by desktop; omit for active tab or all-tab console)."
             },
             "limit": {
               "type": "integer",
@@ -987,7 +987,7 @@
             },
             "maxChars": {
               "type": "integer",
-              "description": "Snapshot text char limit."
+              "description": "Snapshot text char limit (0 = no limit)."
             },
             "snapshotFormat": {
               "type": "string",
@@ -1031,7 +1031,7 @@
             },
             "returnAttachment": {
               "type": "boolean",
-              "description": "Desktop screenshot: return att_* handle for matrix_message without saving to disk."
+              "description": "Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk."
             },
             "level": {
               "type": "string",
@@ -1058,7 +1058,7 @@
       },
       {
         "name": "browser_control",
-        "description": "Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.\nExamples: {\"action\":\"open\",\"targetUrl\":\"https://example.org\"} | {\"action\":\"open\",\"paths\":[\"page.html\"]} (omit targetUrl, incl. about:blank) | {\"action\":\"act\",\"request\":{\"kind\":\"click\",\"ref\":\"e1\"}}.\nopen takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.",
+        "description": "Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.\nExamples: {\"action\":\"open\",\"targetUrl\":\"https://example.org\"} | {\"action\":\"open\",\"target\":\"host\",\"paths\":[\"page.html\"]} (omit targetUrl, incl. about:blank) | {\"action\":\"act\",\"target\":\"host\",\"request\":{\"kind\":\"click\",\"ref\":\"e1\"}}.\nopen takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -1096,14 +1096,14 @@
             },
             "targetId": {
               "type": "string",
-              "description": "Host tab ID (rejected by desktop)."
+              "description": "Host tab ID (rejected by desktop; required for focus)."
             },
             "paths": {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local subresources)."
+              "description": "upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local files; relative links don't resolve)."
             },
             "ref": {
               "type": "string",

@@ -442,15 +442,15 @@ class ChatUITools(Toolkit):
         Vars (--mr-*, e.g. var(--mr-bg)): bg, surface, surface-raised, border, text, text-muted, accent, accent-text, success, warning, danger, radius, font; window.mindroom.colorScheme (light|dark).
 
         Submit & state: nothing reaches you until commit via window.mindroom.submit(data, {label: "short summary"}) (<512KB JSON; decimals as text) or <form data-mindroom-label="...">. User confirms before Canvas response (<canvas_event_id>, revision <event_id>): <label> + JSON (older = earlier) or Canvas error (<canvas_event_id>, revision <event_id>): + lines.
-        Auto-persist inputs/selects/textareas via stable id/name (not type=password/hidden/autocomplete="off"; rename id if meaning changes; redraw on restored input). window.mindroom.saveState(v) (<=256K chars JSON; larger throws); read window.mindroom.state defensively (undefined if unset). Device-local (100 recent) unless share_state=true (at creation; user notified; room-readable via read_canvas_state without submit; no secrets).
+        Auto-persist inputs/selects/textareas via stable id/name (not type=password/hidden/autocomplete="off"; rename id if meaning changes; redraw on restored input). Other state: call window.mindroom.saveState(v) on change (<=256K chars JSON; larger throws); restore from window.mindroom.state on load (undefined if unset; read defensively). Device-local (100 recent) unless share_state=true (at creation; user notified; room-readable via read_canvas_state without submit; no secrets).
 
         path reads immediately: call ONLY after file writes finish, never in parallel. Success = request sent, not opened/answered.
 
         Args:
             title: Required on create (1 line <=120 chars); omit on update to keep original.
-            html: Inline HTML; pass html or path, never both (required on update).
-            path: Workspace HTML path instead of html; finish writes first (required on update).
-            canvas_event_id: Original $ID to replace in place; still needs html/path, cannot reopen unchanged.
+            html: Inline HTML; pass html or path, never both (one required on update).
+            path: Workspace HTML path instead of html; finish writes first (one required on update).
+            canvas_event_id: Original $ID in this conversation to replace in place; still needs html or path, cannot reopen unchanged.
             share_state: Expose state to read_canvas_state (on create; kept on update).
             inline: Show inline vs side panel (on create; kept on update).
             raw: Omit Chat styles/vars (per revision; re-pass on update).

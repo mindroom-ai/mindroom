@@ -128,6 +128,20 @@ def test_show_canvas_guidance_places_new_canvases_below_the_reply() -> None:
     assert "below your reply text" in description
 
 
+def test_show_canvas_schema_documents_state_lifecycle_and_update_inputs() -> None:
+    """Canvas schema tells models when to save/restore state and that updates still require html or path."""
+    function = toolkit_offers(ChatUITools(enable_show_canvas=True), "show_canvas")
+    description = function.description or ""
+    props = function.parameters["properties"]
+
+    assert "saveState(v) on change" in description
+    assert "restore from window.mindroom.state on load" in description
+    assert "(one required on update)" in props["html"]["description"]
+    assert "(one required on update)" in props["path"]["description"]
+    assert "in this conversation" in props["canvas_event_id"]["description"]
+    assert "still needs html or path, cannot reopen unchanged" in props["canvas_event_id"]["description"]
+
+
 def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
     """``show_canvas`` is declared but off by default, so excluding it keeps the toolkit and its other functions."""
     context = _context(tmp_path)

@@ -485,6 +485,8 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "screenshot" in (host_read.description or "").lower()
     assert '{"action":"snapshot"}' in (host_read.description or "")
     assert host_read_props["ref"]["description"] == "Element ref or CSS selector (for element screenshot)."
+    assert host_read_props["targetId"]["description"] == "Tab ID (defaults to active tab; omit for all-tab console)."
+    assert host_read_props["maxChars"]["description"] == "Snapshot text char limit (0 = no limit)."
     for field_name in ("compact", "interactive", "limit", "profile", "saveOnly", "snapshotFormat", "targetId"):
         assert "Host-target" not in host_read_props[field_name]["description"]
         assert "desktop" not in host_read_props[field_name]["description"].lower()
@@ -492,9 +494,12 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "act" in host_control_props["action"]["enum"]
     assert "help" not in host_control_props["action"]["enum"]
     assert '{"action":"open","paths":["page.html"]}' in (host_control.description or "")
+    assert '"target":"host"' not in (host_control.description or "")
     assert "action='act' with request.kind" in host_control_props["action"]["description"]
+    assert host_control_props["targetId"]["description"] == "Tab ID (required for focus; defaults to active tab)."
     assert host_control_props["ref"]["description"] == "Element ref or CSS selector (required for upload)."
     assert "upload (requires ref):" in host_control_props["paths"]["description"]
+    assert "relative links don't resolve" in host_control_props["paths"]["description"]
     assert set(host_control_props["request"]) == {"type", "description"}
     request_description = host_control_props["request"]["description"]
     assert "click" in request_description
@@ -505,14 +510,25 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
         assert "Host-target" not in host_control_props[field_name]["description"]
         assert "desktop" not in host_control_props[field_name]["description"].lower()
 
+
+def test_browser_desktop_schema_documents_desktop_fields_and_host_examples() -> None:
+    """Desktop-capable schemas keep target/attachment fields and qualify host-only examples."""
+    read_always_hidden = {"node", "frame", "labels", "refs", "mode"}
+    read_desktop_only = {"target", "returnAttachment", "element"}
+    control_always_hidden = {"node", "inputRef", "element"}
+    control_desktop_only = {"target"}
+
+    host_control_props = toolkit_offers(BrowserTools(TEST_RUNTIME_PATHS), "browser_control").parameters["properties"]
     desktop_tool = BrowserTools(
         TEST_RUNTIME_PATHS,
         device_user_id="@alice:example.org",
         device_id="DEVICE",
         device_ed25519="ed25519-key",
     )
-    desktop_read_props = toolkit_offers(desktop_tool, "browser_read").parameters["properties"]
-    desktop_control_props = toolkit_offers(desktop_tool, "browser_control").parameters["properties"]
+    desktop_read = toolkit_offers(desktop_tool, "browser_read")
+    desktop_control = toolkit_offers(desktop_tool, "browser_control")
+    desktop_read_props = desktop_read.parameters["properties"]
+    desktop_control_props = desktop_control.parameters["properties"]
 
     assert read_always_hidden.isdisjoint(desktop_read_props)
     assert read_desktop_only <= set(desktop_read_props)
@@ -520,9 +536,17 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert control_desktop_only <= set(desktop_control_props)
     assert desktop_read_props["target"]["enum"] == ["host", "desktop"]
     assert desktop_control_props["target"]["enum"] == ["host", "desktop"]
+    assert "omit for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
+    assert "turn-scoped" in desktop_read_props["returnAttachment"]["description"]
+    assert "required for focus" in desktop_control_props["targetId"]["description"]
+    assert '{"action":"open","target":"host","paths":["page.html"]}' in (desktop_control.description or "")
+    assert '{"action":"act","target":"host","request":{"kind":"click","ref":"e1"}}' in (
+        desktop_control.description or ""
+    )
+    assert "relative links don't resolve" in desktop_control_props["paths"]["description"]
     assert "start, stop, open" in desktop_control_props["target"]["description"]
     assert "stable targeting" in desktop_control_props["target"]["description"]
-    assert desktop_control_props["request"]["description"] == request_description
+    assert desktop_control_props["request"]["description"] == host_control_props["request"]["description"]
     for field_name in ("compact", "interactive", "limit", "snapshotFormat"):
         assert "Host-target" in desktop_read_props[field_name]["description"]
 
@@ -572,11 +596,21 @@ def test_browser_offered_schema_follows_desktop_pairing_and_worker_binding(tmp_p
     assert "target" in toolkit_offers(scoped, "browser_read").parameters["properties"]
     assert "target" in toolkit_offers(scoped, "browser_control").parameters["properties"]
 
-    # Worker-bound browser instances never offer desktop routing.
-    worker_browser = BrowserTools(paths, credentials_manager=credentials_manager, worker_target=worker_target)
-    worker_browser.bind_worker_headless(tmp_path / "workspace", {})
-    assert "target" not in toolkit_offers(worker_browser, "browser_read").parameters["properties"]
-    assert "target" not in toolkit_offers(worker_browser, "browser_control").parameters["properties"]
+    # Worker-bound browser instances never offer desktop routing, even with static desktop config or default_target.
+    worker_cases = [
+        BrowserTools(paths, credentials_manager=credentials_manager, worker_target=worker_target),
+        BrowserTools(
+            paths,
+            device_user_id="@desktop:example.org",
+            device_id="DEV1",
+            device_ed25519="ed25519-key",
+        ),
+        BrowserTools(paths, default_target="desktop", credentials_manager=credentials_manager),
+    ]
+    for index, worker_browser in enumerate(worker_cases):
+        worker_browser.bind_worker_headless(tmp_path / f"workspace-{index}", {})
+        assert "target" not in toolkit_offers(worker_browser, "browser_read").parameters["properties"]
+        assert "target" not in toolkit_offers(worker_browser, "browser_control").parameters["properties"]
 
 
 @pytest.mark.asyncio

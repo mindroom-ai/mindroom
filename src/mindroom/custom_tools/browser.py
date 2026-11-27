@@ -175,14 +175,18 @@ _HOST_BROWSER_CONTROL_DESCRIPTION = (
     "open takes targetUrl OR one local HTML file in paths, never both. First call auto-shows the Computer panel "
     "if chat_ui is present (open_panel(panel='computer') only reopens it)."
 )
-_HOST_PARAM_DESCRIPTIONS: dict[str, str] = {
+_HOST_READ_PARAM_DESCRIPTIONS: dict[str, str] = {
     "profile": "Profile name (default mindroom).",
-    "targetId": "Tab ID (defaults to active tab).",
+    "targetId": "Tab ID (defaults to active tab; omit for all-tab console).",
     "limit": "Snapshot item limit.",
     "snapshotFormat": "Snapshot format (ai/aria).",
     "interactive": "Interactive-only snapshot filter.",
     "compact": "Compact snapshot output.",
     "saveOnly": "Screenshot metadata only (omit image bytes).",
+}
+_HOST_CONTROL_PARAM_DESCRIPTIONS: dict[str, str] = {
+    "profile": "Profile name (default mindroom).",
+    "targetId": "Tab ID (required for focus; defaults to active tab).",
     "timeoutMs": "Upload/dialog timeout (ms).",
 }
 
@@ -764,9 +768,11 @@ class BrowserTools(Toolkit):
 
     def _offers_desktop_target(self) -> bool:
         """Return whether this toolkit should offer target=desktop parameters and guidance."""
+        if self._worker_workspace is not None:
+            return False
         if self._default_target == "desktop" or self._desktop_target is not None:
             return True
-        if self._worker_workspace is not None or self._credentials_manager is None:
+        if self._credentials_manager is None:
             return False
         scope = desktop_credential_scope(get_tool_runtime_context(), self._worker_target)
         if scope is None:
@@ -786,10 +792,12 @@ class BrowserTools(Toolkit):
             always_hidden = _OMITTED_READ_PROPERTIES
             desktop_only = _DESKTOP_ONLY_READ_PROPERTIES
             host_description = _HOST_BROWSER_READ_DESCRIPTION
+            host_param_descriptions = _HOST_READ_PARAM_DESCRIPTIONS
         elif function.name == "browser_control":
             always_hidden = _OMITTED_CONTROL_PROPERTIES
             desktop_only = _DESKTOP_ONLY_CONTROL_PROPERTIES
             host_description = _HOST_BROWSER_CONTROL_DESCRIPTION
+            host_param_descriptions = _HOST_CONTROL_PARAM_DESCRIPTIONS
         else:
             return function
         offers_desktop = self._offers_desktop_target()
@@ -801,8 +809,8 @@ class BrowserTools(Toolkit):
             if function.name == "browser_control" and name == "request":
                 properties[name] = {"type": "object", "description": _ACT_REQUEST_DESCRIPTION}
                 continue
-            if not offers_desktop and name in _HOST_PARAM_DESCRIPTIONS:
-                properties[name] = {**schema, "description": _HOST_PARAM_DESCRIPTIONS[name]}
+            if not offers_desktop and name in host_param_descriptions:
+                properties[name] = {**schema, "description": host_param_descriptions[name]}
                 continue
             properties[name] = schema
         return replace(
@@ -958,9 +966,9 @@ class BrowserTools(Toolkit):
             target: host (worker browser) or desktop (user's browser).
             node: Unsupported compatibility field.
             profile: Host-target profile (default mindroom).
-            targetId: Host tab ID (rejected by desktop).
+            targetId: Host tab ID (rejected by desktop; omit for active tab or all-tab console).
             limit: Host-target snapshot item limit.
-            maxChars: Snapshot text char limit.
+            maxChars: Snapshot text char limit (0 = no limit).
             mode: Host-target snapshot mode.
             snapshotFormat: Host-target snapshot format (ai/aria).
             refs: Host-target snapshot refs mode.
@@ -975,7 +983,7 @@ class BrowserTools(Toolkit):
             element: CSS selector for element screenshot.
             type: Screenshot format (png/jpeg).
             saveOnly: Host screenshot: metadata only (omit image bytes).
-            returnAttachment: Desktop screenshot: return att_* handle for matrix_message without saving to disk.
+            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving to disk.
             level: Console log level filter.
 
         Returns:
@@ -1032,7 +1040,7 @@ class BrowserTools(Toolkit):
     ) -> str | ToolValue:
         """Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.
 
-        Examples: {"action":"open","targetUrl":"https://example.org"} | {"action":"open","paths":["page.html"]} (omit targetUrl, incl. about:blank) | {"action":"act","request":{"kind":"click","ref":"e1"}}.
+        Examples: {"action":"open","targetUrl":"https://example.org"} | {"action":"open","target":"host","paths":["page.html"]} (omit targetUrl, incl. about:blank) | {"action":"act","target":"host","request":{"kind":"click","ref":"e1"}}.
         open takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.
 
         Args:
@@ -1041,8 +1049,8 @@ class BrowserTools(Toolkit):
             node: Unsupported compatibility field.
             profile: Host-target profile (default mindroom).
             targetUrl: URL for open/navigate (omit when using paths).
-            targetId: Host tab ID (rejected by desktop).
-            paths: upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local subresources).
+            targetId: Host tab ID (rejected by desktop; required for focus).
+            paths: upload (requires ref): workspace/artifact paths or att_* IDs (./att_* for literal name). open: 1 local HTML file instead of targetUrl (no local files; relative links don't resolve).
             ref: Element ref or CSS selector (required for upload).
             inputRef: Host-target upload input selector/ref.
             element: CSS selector for element upload.
