@@ -3475,10 +3475,90 @@ def test_outlook_mail_send_and_reply_migration_rules_fail_closed(
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)
-    data: dict[str, object] = {
+    base_data: dict[str, object] = {
         "models": {"default": {"provider": "openai", "id": "x"}},
         "agents": {"a": {"display_name": "A", "tools": ["outlook_mail"], "include_default_tools": False}},
-        "tool_approval": tool_approval,
     }
     with pytest.raises(ConfigRuntimeValidationError, match="outlook_mail_send_message"):
-        Config.validate_with_runtime(data, runtime_paths)
+        Config.validate_with_runtime({**base_data, "tool_approval": tool_approval}, runtime_paths)
+
+    migrated = Config.validate_with_runtime(
+        {
+            **base_data,
+            "tool_approval": {
+                "default": "require_approval",
+                "rules": [
+                    {"match": "outlook_mail_send_message", "action": "auto_approve"},
+                    {"match": "outlook_mail_reply", "action": "require_approval"},
+                ],
+            },
+        },
+        runtime_paths,
+    )
+    assert migrated.tool_approval.rules[0].match == "outlook_mail_send_message"
+
+
+@pytest.mark.parametrize(
+    ("toolkit_name", "matches", "error_pattern"),
+    [
+        ("outlook_mail", ["outlook_mail_*"], r"check_m365\.py.*outlook_mail_"),
+        ("outlook_mail", ["outlook_mail_send*"], r"check_m365\.py.*outlook_mail_send_message"),
+        (
+            "outlook_mail",
+            ["outlook_mail_send*", "outlook_mail_send_message"],
+            r"check_m365\.py.*outlook_mail_send_message",
+        ),
+        ("outlook_mail", ["outlook_mail_send_message", "outlook_mail_send*"], None),
+        (
+            "outlook_mail",
+            ["outlook_mail_read", "outlook_mail_send_message", "outlook_mail_manage", "outlook_mail_*"],
+            None,
+        ),
+        ("outlook_calendar", ["outlook_calendar_*"], r"check_m365\.py.*outlook_calendar_"),
+        ("outlook_calendar", ["outlook_calendar_read", "outlook_calendar_write", "outlook_calendar_*"], None),
+        ("microsoft_teams", ["microsoft_teams_*"], r"check_m365\.py.*microsoft_teams_"),
+        ("microsoft_teams", ["microsoft_teams_read", "microsoft_teams_send", "microsoft_teams_*"], None),
+        ("microsoft_files", ["microsoft_files_*"], r"check_m365\.py.*microsoft_files_"),
+        ("microsoft_files", ["microsoft_files_read", "microsoft_files_write", "microsoft_files_*"], None),
+        ("microsoft_sharepoint", ["microsoft_sharepoint_*"], r"check_m365\.py.*microsoft_sharepoint_"),
+        (
+            "microsoft_sharepoint",
+            ["microsoft_sharepoint_read", "microsoft_sharepoint_write", "microsoft_sharepoint_*"],
+            None,
+        ),
+        ("microsoft_onenote", ["microsoft_onenote_*"], r"check_m365\.py.*microsoft_onenote_"),
+        ("microsoft_onenote", ["microsoft_onenote_read", "microsoft_onenote_write", "microsoft_onenote_*"], None),
+        ("microsoft_todo", ["microsoft_todo_*"], r"check_m365\.py.*microsoft_todo_"),
+        ("microsoft_todo", ["microsoft_todo_read", "microsoft_todo_write", "microsoft_todo_*"], None),
+        ("microsoft_meetings", ["microsoft_meetings_*"], r"check_m365\.py.*microsoft_meetings_read"),
+        ("microsoft_meetings", ["microsoft_meetings_read", "microsoft_meetings_*"], None),
+        ("microsoft_people", ["microsoft_people_*"], r"check_m365\.py.*microsoft_people_read"),
+        ("microsoft_people", ["microsoft_people_read", "microsoft_people_*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names(
+    tmp_path: Path,
+    toolkit_name: str,
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired Microsoft 365 names until explicit rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check_m365.py").write_text(
+        "def check(tool_name, arguments, agent_name): return True\n",
+        encoding="utf-8",
+    )
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check_m365.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches

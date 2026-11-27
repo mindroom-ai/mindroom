@@ -360,21 +360,26 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
 #   (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch,
-#   mem0, zep), skills, and attachments previously exposed individual per-operation function names that could appear in
+#   mem0, zep), Microsoft 365 toolkits (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files,
+#   microsoft_sharepoint, microsoft_onenote, microsoft_todo, microsoft_meetings, microsoft_people), skills, and
+#   attachments previously exposed individual per-operation function names that could appear in
 #   tool_approval.rules[].match globs.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657);
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657);
 #   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
-#   retired function's effective decision differs from the replacement's effective decision (regardless of other
-#   toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments entry,
-#   directing operators to `attachment` / `view_file` and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired skills/attachments/Microsoft 365 function is decided by an approval
+#   script or any retired function's effective decision differs from the replacement's effective decision (regardless of
+#   other toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments
+#   entry, directing operators to `attachment` / `view_file` and `tool_approval.rules`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_microsoft_365_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_outlook_mail_send_and_reply_migration_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
@@ -975,7 +980,21 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "inline_image": "attachment",
     },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
+    {
+        "skills",
+        "attachments",
+        "outlook_mail",
+        "outlook_calendar",
+        "microsoft_teams",
+        "microsoft_files",
+        "microsoft_sharepoint",
+        "microsoft_onenote",
+        "microsoft_todo",
+        "microsoft_meetings",
+        "microsoft_people",
+    },
+)
 
 
 def _effective_approval_decision(
