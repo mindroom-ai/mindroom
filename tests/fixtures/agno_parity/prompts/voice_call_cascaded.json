@@ -1,7 +1,7 @@
 {
   "description": "Cascaded voice call: the Live model's system prompt and one transcript answered by the call's reused agent.",
   "exported": {
-    "system_prompt": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>"
+    "system_prompt": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `skill(action=\"instructions\", name=...)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tool, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>"
   },
   "input": {
     "call": {
@@ -55,7 +55,7 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n\n- Load skills via `skill(action=\"instructions\", name=...)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n\nFor user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):\n```interactive\n{\"question\": \"How to proceed?\", \"options\": [\n  {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n  {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n]}\n```\n\n<skills_system>\nAvailable skills (load via skill tool, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>",
           "role": "system"
         },
         {
@@ -192,112 +192,6 @@
             },
             "required": [
               "n"
-            ]
-          }
-        },
-        {
-          "name": "get_skill_instructions",
-          "description": "Load the full instructions for a skill. Use this when you need to follow a skill's guidance.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill to get instructions for."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "skill_name"
-            ]
-          }
-        },
-        {
-          "name": "get_skill_reference",
-          "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill."
-              },
-              "reference_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The filename of the reference document."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "skill_name"
-            ]
-          }
-        },
-        {
-          "name": "get_skill_script",
-          "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill."
-              },
-              "script_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "The filename of the script."
-              },
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
-              }
-            },
-            "required": [
-              "skill_name"
             ]
           }
         },
@@ -518,6 +412,55 @@
             },
             "required": [
               "action"
+            ]
+          }
+        },
+        {
+          "name": "skill",
+          "description": "Load a skill's instructions, reference document, or script without running it.\n- `instructions`: load a skill's `SKILL.md` instructions and list its available `references/` and `scripts/` files (`path` must be omitted).\n- `reference`: load one listed reference document (`path` required).\n- `script`: read one listed script without running it; run scripts with shell if available (`path` required).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "instructions",
+                  "reference",
+                  "script"
+                ],
+                "description": "What to load (`instructions`, `reference`, or `script`)."
+              },
+              "name": {
+                "type": "string",
+                "description": "The skill name."
+              },
+              "path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Listed filename under `references/` or `scripts/` (required for `reference` and `script`; omit for `instructions`)."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+              }
+            },
+            "required": [
+              "action",
+              "name"
             ]
           }
         },

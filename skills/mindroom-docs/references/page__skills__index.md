@@ -116,11 +116,11 @@ Skills without `metadata.openclaw` are always eligible.
 
 Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
-- `get_skill_reference(skill_name, reference_path)` reads a reference document, and lists the skill's references when called without a path
-- `get_skill_script(skill_name, script_path)` reads a script, and lists the skill's scripts when called without a path
+- `skill(action="instructions", name=...)` loads the full instructions for a skill and lists its references and scripts (`path` must be omitted)
+- `skill(action="reference", name=..., path=...)` reads a listed reference document, and lists the skill's references when called without `path`
+- `skill(action="script", name=..., path=...)` reads a listed script, and lists the skill's scripts when called without `path`
 
-`get_skill_script` never runs a script, whichever skill it comes from.
+`skill(action="script", ...)` never runs a script, whichever skill it comes from.
 Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
@@ -195,7 +195,8 @@ Override it through the `SKILL_REVIEW_PROMPT` [built-in prompt override](https:/
 ### The skill_manage tool
 
 Agents with skill learning enabled get a `skill_manage` tool, and the review writes skills with the same tool.
-Other agents can list `skill_manage` in `tools` to save skills from chat.
+When an agent with skill learning also has active tool search (at least one other deferred toolkit), auto-injected `skill_manage` is automatically deferred behind tool search while still preserving forked review prompt-cache reuse.
+Other agents can list `skill_manage` in `tools` (inline or with `defer: true`) to save skills from chat.
 Its actions are `create` a skill from a full `SKILL.md`, `patch` text in `SKILL.md` or a support file, `edit` to replace `SKILL.md`, and `write_file` or `remove_file` for one support file directly under `references/` or `scripts/`.
 It cannot delete a skill; unused learned skills are archived, and you remove any skill by deleting its directory.
 

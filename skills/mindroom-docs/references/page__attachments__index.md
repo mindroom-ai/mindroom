@@ -80,19 +80,20 @@ agents:
 
 | Function | What it does |
 |----------|--------------|
-| `list_attachments(target=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; `target` returns one attachment |
-| `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
+| `attachment(action="list", attachment_id=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; pass `attachment_id` to filter to one |
+| `attachment(action="get", attachment_id=..., mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
+| `attachment(action="register", path=...)` | Turn a local file into a new attachment ID for this conversation |
+| `attachment(action="inline_image", attachment_id=...|path=..., alt=None)` | Upload an image (by context `attachment_id` or local `path`) and return Markdown to embed it in a reply |
 | `view_file(path)` | Show an image from the workspace to the model |
-| `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
-| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply |
 
 ```python
-list_attachments()
-get_attachment("att_abc123")
-get_attachment("att_abc123", view=True)
-get_attachment("att_abc123", mindroom_output_path="incoming/plan.pdf")
+attachment(action="list")
+attachment(action="get", attachment_id="att_abc123")
+attachment(action="get", attachment_id="att_abc123", view=True)
+attachment(action="get", attachment_id="att_abc123", mindroom_output_path="incoming/plan.pdf")
 view_file(path="plots/result.png")
-register_attachment("exports/report.csv")
+attachment(action="register", path="exports/report.csv")
+attachment(action="inline_image", path="plots/result.png", alt="Result")
 matrix_message(message="Here is the report.", attachments=["att_abc123", "exports/report.csv"])
 ```
 
@@ -103,24 +104,24 @@ To post files into Matrix, pass attachment IDs or file paths to `matrix_message`
 
 ### Viewing Content
 
-`get_attachment(attachment_id, view=True)` sends an image, audio, video, or document (including PDF and plain text) to the model, up to 20 MiB.
+`attachment(action="get", attachment_id=..., view=True)` sends an image, audio, video, or document (including PDF and plain text) to the model, up to 20 MiB.
 The model and its provider must support that media type and may have stricter limits.
 `view=True` cannot be combined with `mindroom_output_path`.
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
-`view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
+`view_file` shows one image to the calling model in one call; to view an attachment, use `attachment(action="get", attachment_id=..., view=True)`, and use `read_file` for ordinary text and code.
 Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace, or in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, inside that directory.
 Turns without a Matrix room, in [headless runs](https://docs.mindroom.chat/headless/) and through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), offer `view_file` alone of the `attachments` functions.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
-Image viewing through `get_attachment(view=True)` follows the same limits.
+Image viewing through `attachment(action="get", attachment_id=..., view=True)` follows the same limits.
 Viewing does not post anything to Matrix; to share the image, pass the returned attachment ID to `matrix_message`.
 That ID works within the same tool run; in later turns, view the original path again.
 Conversation history keeps up to four recently viewed images within 10 MiB in total, and older ones are replaced by a notice.
 
 ### Saving Files to the Workspace
 
-`get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
+`attachment(action="get", attachment_id=..., mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
 Save attachments this way before processing them with `filesystem` or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
@@ -128,8 +129,8 @@ See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for ho
 
 ### Inline Images
 
-`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
-using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment(action="inline_image", attachment_id=...|path=..., alt=None)` accepts either a context attachment ID (`attachment_id`) or a local file path (`path`),
+using the same path rules as registering attachments. It uploads the image to Matrix and returns
 `attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
 Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
 The alt text defaults to the filename.
@@ -138,11 +139,11 @@ Only images with an `image/*` MIME type and a recognized image byte signature ar
 up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
 In encrypted rooms, MindRoom encrypts the upload (or reuses turn-scoped encrypted image media)
 and attaches decryption keys under `io.mindroom.inline_media` for each embedded image.
-When `inline_image` refuses, send the image through `matrix_message(attachments=[reference])` instead.
+When `attachment(action="inline_image", ...)` refuses, send the image through `matrix_message(attachments=[...])` instead.
 
 ### Registering Local Files
 
-`register_attachment(file_path)` copies a local file into attachment storage and returns a new attachment ID for the current room and thread, usable by later calls in the same run.
+`attachment(action="register", path=...)` copies a local file into attachment storage and returns a new attachment ID for the current room and thread, usable by later calls in the same run.
 Later changes to the source file do not change the attachment.
 Registered files are limited to 64 MiB.
 Paths, including the targets of symbolic links, follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access) setting:
@@ -162,6 +163,6 @@ Pruning never deletes workspace files, the source files of registered attachment
 - **Incoming media size**: received files must be at most 64 MiB (67,108,864 bytes), including after decryption; send a smaller file if one is rejected.
   Homeservers and model providers may set lower limits.
 - **Auto-inlined files per turn**: incoming text files are included inline automatically up to 50 KiB (51,200 bytes) per turn (matching the inline tool-output threshold), and all incoming files (text, PDFs, and other documents) share a cap of half the remaining context headroom when a context or replay window applies; PDFs are sized by page count rather than byte size.
-  Larger files are omitted from the inline prompt with a note telling the agent to save or inspect them with `get_attachment` instead.
+  Larger files are omitted from the inline prompt with a note telling the agent to save or inspect them with `attachment(action="get", ...)` instead.
 - **Earlier media per turn**: a turn fetches at most 10 earlier files, images, or videos that are not stored yet, newest first, and leaves the rest for later turns.
   An earlier file that fails to download is not tried again for an hour.

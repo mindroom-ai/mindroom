@@ -7810,10 +7810,7 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "get_attachment",
-        "inline_image",
-        "list_attachments",
-        "register_attachment",
+        "attachment",
         "view_file"
       ],
       "helper_text": null,

@@ -34,7 +34,7 @@
     "message": {
       "content": "Pack a light rain jacket and comfortable shoes.",
       "provider_data": {
-        "mindroom_conversation_sha256": "d90c82140af68caa54b14526c9659d8bbe0b5efc64321c0c13dd5da421dd424d",
+        "mindroom_conversation_sha256": "5d3e51e1622965a770adf746520e44ffda2d342445c88ec7e7cb6dbe8dbf0312",
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI"
@@ -87,7 +87,7 @@
         },
         {
           "role": "user",
-          "content": "Use the attached audio to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
+          "content": "Use the attached audio to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat attachment(action=\"get\", ..., view=True) for it on this model. Use attachment(action=\"get\", ...) without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
         }
       ],
       "reasoning": {},
