@@ -262,10 +262,10 @@ react("$event_id", "👍")
 
 ## [`email_invite`]
 
-`invite_by_email(email)` invites one address to the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for it is recommended.
-When the person asking may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
 `list_email_invites()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
-`revoke_email_invite(email)` revokes the open invite for an address; its asker, its approver, or anyone who may invite can do so, and an invite already used is reported with the account that used it.
+`email_invite_write(action, email)` invites (`action="invite"`) or revokes (`action="revoke"`) one address in the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for `email_invite_write` is recommended (timed grants are scoped per `action`).
+When `action="invite"` is called for a person who may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
+With `action="revoke"`, its asker, its approver, or anyone who may invite can revoke an open invite, and an invite already used is reported with the account that used it.
 No function takes a room, a Matrix ID, or text, so the mail is always the fixed one for the current room.
 Set-up, the approval rule, and the limits are on [Email Invites](https://docs.mindroom.chat/email-invites/).
 

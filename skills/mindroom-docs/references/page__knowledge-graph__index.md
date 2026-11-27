@@ -87,7 +87,7 @@ A Matrix ID or agent key in an entry gives that person or agent the entry's name
 Someone else whose display name is the name of an entry with a Matrix ID or agent key goes by their username, so the two stay apart.
 A speaker whose display name is the name of an entry without one shares that entry's entity and its other names, so an entry named after your own display name needs no Matrix ID.
 A username that an entry with a Matrix ID or agent key, or an agent, is already named gets its homeserver added, such as `alice work.example`.
-Every other alias is a plain name that extraction maps to the entry's name and that `graph_entity` finds the entity by.
+Every other alias is a plain name that extraction maps to the entry's name and that `knowledge_graph_read(action="entity", ...)` finds the entity by.
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
@@ -96,14 +96,14 @@ Entities extracted earlier under other names, such as a Matrix ID, stay separate
 ## The `knowledge_graph` Tool
 
 ```python
-search_graph("who owns Project Atlas", limit=10)   # limit 1 to 50
-graph_entity("Project Atlas")
+knowledge_graph_read(action="search", query="who owns Project Atlas", limit=10)  # limit 1 to 50
+knowledge_graph_read(action="entity", query="Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
-`graph_entity` returns the entity whose name equals the given name in any letter case, and the one with the most facts when several do.
+`knowledge_graph_read(action="entity", ...)` returns the entity whose name equals the given `query` in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reaches only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
@@ -112,20 +112,20 @@ An agent reaches only its own graph; a [private agent](https://docs.mindroom.cha
 
 An agent with a graph can correct it.
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
-With edits on, its lookups show each fact's and entity's id, `graph_entity` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains four functions:
+With edits on, its lookups show each fact's and entity's id, `knowledge_graph_read(action="entity", ...)` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains `knowledge_graph_write` with four actions:
 
 ```python
-delete_graph_fact("<fact id>")                       # a fact that never held, or names the wrong person or thing
-delete_graph_entity("<entity id>")                   # a file path, URL, or other non-entity, with every fact that touches it
-merge_graph_entities("<duplicate id>", "<kept id>")  # the duplicate's facts and their sources move to the kept entity
-update_graph_entity_summary("<entity id>", "...")    # a summary that still states a deleted fact
+knowledge_graph_write(action="delete_fact", fact_id="<fact id>")                            # a fact that never held, or names the wrong person or thing
+knowledge_graph_write(action="delete_entity", entity_id="<entity id>")                      # a file path, URL, or other non-entity, with every fact that touches it
+knowledge_graph_write(action="merge", duplicate_id="<duplicate id>", into_id="<kept id>")   # the duplicate's facts and their sources move to the kept entity
+knowledge_graph_write(action="update_summary", entity_id="<entity id>", summary="...")      # a summary that still states a deleted fact
 ```
 
 The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
 An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
 Ask the agent to fix what it finds wrong, or let an [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
 Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
-To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `delete_graph_*`, `merge_graph_entities`, and `update_graph_entity_summary`.
+To approve each edit before it happens, add a [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `knowledge_graph_write` (timed grants are scoped per `action`).
 To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy

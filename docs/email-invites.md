@@ -26,11 +26,11 @@ email_invites:
 
 tool_approval:
   rules:
-    - match: invite_by_email
-      action: require_approval             # recommended: an invitation needs approval, like any gated tool
+    - match: email_invite_write
+      action: require_approval             # recommended: email invite writes need approval, like any gated tool
 ```
 
-`invite_by_email` is an ordinary tool for [tool approval](tool-approval.md): whether a call asks first is up to your config, and the rule above is recommended.
+`email_invite_write` is an ordinary tool for [tool approval](tool-approval.md): whether a call asks first is up to your config, and the rule above is recommended. Timed grants are scoped per `action` (`invite` vs. `revoke`).
 
 To send mail, set two environment variables:
 
@@ -51,7 +51,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 
 Asking again for an address that was already sent replaces the old link, which stops working.
 
-`list_email_invites()` shows the room's open invites, and `revoke_email_invite(email)` revokes one; the asker, the approver, or anyone who may invite can revoke.
+`list_email_invites()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
 ## Without a Mail Server
 
@@ -87,9 +87,9 @@ The counts are kept on disk, so a restart does not reset them.
 
 Known limits:
 
-- Without a `tool_approval` rule that requires approval for `invite_by_email` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (timed card approval, `!auto_approve`) covers it like any tool.
+- Without a `tool_approval` rule that requires approval for `email_invite_write` (and with `tool_approval.default: auto_approve`), an agent can send invite mail without a card, within the caps; the asker must still have the invite right. Auto-approval (action-scoped timed card approval, `!auto_approve`) covers it like any tool.
 
 - The Matrix sync store of the agent that sent the link keeps the claim event, code included, in plain text on the agent's own disk. The code works once and is bound to the first account that uses it.
 - A claim that arrives just before the agent crashes, or while it is not running, may get no answer; the person clicks Join again.
 - A revoke that lands while a claim's Matrix invite is already on its way does not stop that invite; the thread is then told the outcome.
-Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `revoke_email_invite`.
+Members who may not invite can fill a room's 20 open requests; someone who may invite clears them with `email_invite_write(action="revoke", email=...)`.

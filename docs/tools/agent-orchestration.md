@@ -592,27 +592,28 @@ Which functions an agent gets depends on what it is:
 
 | Function | Offered to | What it does |
 | --- | --- | --- |
-| `create_agent(name, display_name, role, instructions=None, tools=None)` | Agents with `created_agents_per_owner` above 0 | Creates an agent for the person asking, with some of the creator's tools, and returns its Matrix ID |
 | `agent_settings()` | Every generated agent | Shows the agent's editable settings, its owners if it was created, and the toolkit names `tools` may use as `allowed_tools` |
-| `update_agent(changes)` | Every generated agent | Changes its `display_name`, `role`, `instructions`, or `tools`; for a created agent, its owner may also change `co_owners` |
-| `set_avatar(attachment_id)` | Every generated agent | Sets its Matrix profile picture to an image attached in the conversation, cropped to its center square |
-| `delete_agent()` | Created agents | Deletes the agent for its owner; its Matrix account stays, so the name stays taken |
+| `agent_manager_write(action, ...)` | Creators and generated agents (schema narrowed to enabled actions) | Runs an enabled write action: `create` (for agents with `created_agents_per_owner` above 0), `update` and `set_avatar` (for every generated agent), and `delete` (for created agents) |
 
 Only an agent's owners may read or change it, and only a created agent's owner may delete it or change its co-owners.
-`create_agent`, `update_agent`, `set_avatar`, and `delete_agent` always show an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
+`agent_manager_write` always shows an [approval card](../tool-approval.md#approving-and-denying) to the person asking, even when `tool_approval.default` is `auto_approve`, and only that person's [`!auto_approve`](../tool-approval.md#auto-approve-everything) window skips it.
 Background scripts cannot call it, and it cannot be deferred.
 
 ```python
-create_agent(
+agent_manager_write(
+    action="create",
     name="research",
     display_name="Research Helper",
     role="Find and summarize sources for the owner.",
     tools=["duckduckgo", "wikipedia"],
 )
-update_agent({"role": "Answer in two sentences.", "instructions": None})
+agent_manager_write(
+    action="update",
+    changes={"role": "Answer in two sentences.", "instructions": None},
+)
 ```
 
-`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `update_agent` replaces the whole field, with `None` restoring the base agent's value.
+`tools` are toolkit names such as `duckduckgo`, never function names, and each value in `changes` replaces the whole field, with `None` restoring the base agent's value.
 [Created Agents and Self-Updates](../personal-agents.md#created-agents-and-self-updates) covers naming, the cap, owners and co-owners, and what happens when the creator changes.
 
 ## [`claude_agent`]
