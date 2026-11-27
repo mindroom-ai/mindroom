@@ -4,7 +4,7 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Reactive triggers**, created with `triggers(action=...)` (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, watch GitHub PRs, run zero-LLM-while-idle scheduled Python/tool checks, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
 - **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
@@ -60,7 +60,7 @@ external_trigger_policy:
 | Field | Type | Default | Valid values | Meaning |
 | --- | --- | --- | --- | --- |
 | `enabled` | bool | `true` | | Master switch. When `false`, every direct trigger, callback, and shared event-source endpoint answers not found, `callback_manager` refuses to mint callbacks, and reactive trigger delivery is disabled. |
-| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
+| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
 | `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new direct signed triggers that do not set their own window. |
 | `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any direct trigger's replay window. |
 | `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new direct triggers that do not set their own. |
@@ -70,6 +70,11 @@ external_trigger_policy:
 | `max_fires_per_hour` | int | `60` | 1 to 600 | Cap on the per-rule `max_fires_per_hour` rate limit for reactive triggers. |
 | `admin_users` | list of Matrix IDs | `[]` | | Trigger-only administrators. |
 | `event_sources` | mapping | `{}` | Keys matching `^[A-Za-z0-9_-]{1,64}$` | Named [shared external event sources](#shared-external-event-sources) served at `POST /api/event-sources/{source_id}`. |
+| `script_check_enabled` | bool | `true` | | Enables or disables scheduled `script_check` triggers (`watch_script`). |
+| `min_script_check_poll_interval_seconds` | int | `60` | 30 to 3600 | Minimum allowed `poll_interval_seconds` for `script_check` triggers. |
+| `max_script_checks_per_owner` | int | `10` | 1 to 200 | Maximum active `script_check` triggers one owner may hold (within `max_reactive_triggers_per_owner`). |
+| `script_check_timeout_seconds` | int | `30` | 5 to 120 | Maximum wall-clock runtime per `script_check` tick. |
+| `script_check_allowed_tools` | list of str or null | `null` | Non-empty toolkit names when set | Optional toolkit allowlist restricting which toolkits `script_check` ticks may call (in addition to the built-in restricted toolkit blocklist). |
 
 Each default must not exceed its matching cap.
 Lowering a cap also limits existing triggers.
@@ -81,12 +86,13 @@ Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
 To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers`.
+`watch_script` and code-bearing `update` calls (those passing `source` or `path`) are also judged under `start_script` approval rules via `ApprovalAlias(judged_as="start_script")`, without prompting for other `triggers` actions.
 
 ## Reactive Triggers
 
 Reactive triggers run inside the primary runtime's unified pipeline:
 
-1. **Source adapter** observes new Matrix room messages, `com.mindroom.thread.tags` state transitions, or incoming shared external events.
+1. **Source adapter** observes new Matrix room messages, `com.mindroom.thread.tags` state transitions, GitHub PR polls/webhooks, scheduled `script_check` ticks, or incoming shared external events.
 2. **Deterministic filter** checks room, thread, sender aliases, regex pattern, tag transition, or structured event fields with zero LLM cost.
 3. **Optional tool-less triage** evaluates plain-English criteria using a cheap classifier or model before waking any agent.
 4. **Atomic SQLite claim** enforces `UNIQUE(trigger_id, dedupe_key)` idempotency, cooldown, hourly rate limit, expiry, and `once=True` disablement inside `<control_state>/reactive_triggers.db`.
@@ -179,9 +185,69 @@ The requester must be listed in that source's `subscribers` (or be a trigger/pla
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
+### Scheduled Python checks (`action="watch_script"`)
+
+`triggers(action="watch_script", ...)` registers a durable, restart-surviving Python `check()` function on a poll interval.
+On each due tick, MindRoom runs a fresh short-lived `script_runs` process that calls permitted owner-scoped tools directly with persisted JSON `state` across ticks.
+When `check()` returns `None`, updated `state` is saved and **zero LLM tokens** are spent; when `check()` returns a `dict`, it enters the reactive trigger pipeline (optional cheap triage, deduplication, rate limits, cooldown, expiry, `once`, and `reopen_on_fire`).
+
+```python
+import json
+
+
+def check():
+    page = json.loads(tool("gmail", "gmail_read", action="search_emails", query="from:alice is:unread"))
+    msgs = page["emails"]
+    seen = set(state.get("seen_ids", []))
+    new = [m["id"] for m in msgs if m["id"] not in seen]
+    state.set("seen_ids", [m["id"] for m in msgs])
+    return {"items": new} if new else None  # None = 0 LLM tokens
+```
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `prompt` | required | Instruction delivered to the woken agent when `check()` returns an event dict (max 4,000 chars). |
+| `source` | none | Inline Python source defining top-level synchronous `def check():` (mutually exclusive with `path`; UTF-8, max 64 KiB). |
+| `path` | none | Workspace file path to snapshot once at create/update time (mutually exclusive with `source`; max 64 KiB, never re-read from disk on ticks). |
+| `poll_interval_seconds` | `300` | Seconds between ticks, clamped to `[external_trigger_policy.min_script_check_poll_interval_seconds, 86400]`. |
+| `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage) (max 1,000 chars). |
+| `triage_model` | none | Configured model alias from `models` when `triage_provider="llm"`. |
+| `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
+| `triage_threshold` | none (`0.8` for classifiers) | Confidence threshold for `"typesafe"` or `"openai_decisions"`. |
+| `target_agent` | current agent | Agent or team to wake (does not change which agent's credentials run `check()`). |
+| `target_room_id` | current room | Room where the wake message is posted. |
+| `target_thread_id` | current thread in current room, else timeline | Fixed thread root ID, `"room"` for the current room timeline, or omitted (mutually exclusive with `new_thread`). |
+| `new_thread` | `false` | Open a fresh thread per firing (or per `thread_key`). |
+| `thread_key` | none | Optional grouping key (requires `new_thread=True`). |
+| `reopen_on_fire` | `false` | When `true`, removes the `resolved` thread tag before delivering the wake message. |
+| `once` | `false` | Disable automatically after one firing. |
+| `max_fires_per_hour` | `10` | Per-rule hourly cap, bounded by `external_trigger_policy.max_fires_per_hour`. |
+| `cooldown_seconds` | `0` | Minimum seconds between consecutive firings. |
+| `expires_in_hours` | none | Optional lifetime in hours (positive, up to `8760`). |
+| `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
+| `description` | `""` | Human-readable purpose. |
+
+#### `check()` authoring contract
+
+- **Entry point:** Provide exactly one of `source` or `path` (`<= 64 KiB` UTF-8). The module must parse cleanly and define a top-level synchronous `def check():` taking no required or positional arguments (`async def check()` is rejected).
+- **Pre-bound globals:**
+  - `tool(toolkit_name, function_name, **arguments)` invokes an owner-scoped MindRoom tool through the script gateway. Calls during module import/load outside `check()` are rejected.
+  - `state` persists a strict finite-JSON object (`<= 32 KiB` UTF-8, string keys) across ticks via `state.get(key, default=None)`, `state.set(key, value)`, `state.delete(key)`, `state.pop(key, default=...)`, `state.clear()`, and `state.keys()`. Mutations during module load outside `check()` are rejected.
+  - `agent(...)` is blocked and raises `RuntimeError`; return a `dict` from `check()` to wake the target agent (or attach optional cheap triage).
+- **Return values:**
+  - `None` — quiet tick (**0 LLM tokens**); commits any updated `state`.
+  - `dict` — emits one event with fixed `kind="script_check.match"` (strict finite JSON, `<= 64 KiB` serialized) and commits updated `state`. Optional envelope keys are `title` (`<= 500` chars), `summary` (`<= 2,000` chars), `text` (`<= 8,000` chars), `actor` (`<= 256` chars), `dedupe_key` (`<= 256` chars; hashed into a stable deduplication ID across ticks), and `data` (`dict`). Plain dicts become `event.data`; combining an explicit `data` key with extra non-envelope keys is rejected.
+  - Any other return type (`bool`, `int`, `str`, `list`) or uncaught exception fails the tick without committing `state` and applies exponential backoff (capped at 1 hour).
+
+#### Guardrails and security
+
+- **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger or replacing `source`/`path` via `update` requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a live Matrix room turn (refusing tool-filtered turns and personas without `script`/`workflow`), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). Both `watch_script` and code-bearing `update` are evaluated under `start_script` approval rules via `ApprovalAlias(judged_as="start_script")`.
+- **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows, and an approval denial fails the tick without committing `state` or firing even if user code catches the error.
+- **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. Replacing `source` or `path` via `action="update"` resets `state` and error counters and bumps the checkpoint revision so in-flight ticks cannot overwrite newer state; disabling and re-enabling preserves `state`, resets error counters, and rechecks policy, capability, placement, and quota.
+
 ### Cheap tool-less triage
 
-When `triage_instructions` is set on `watch_room` or `subscribe_event`, MindRoom evaluates the event through the judgment subsystem before claiming or firing the rule:
+When `triage_instructions` is set on `watch_room`, `subscribe_event`, or `watch_script`, MindRoom evaluates the event through the judgment subsystem before claiming or firing the rule:
 
 - **`llm`**: calls a configured model alias (`triage_model`) with no tools attached. `triage_threshold` is not used.
 - **`typesafe`**: calls the TypeSafe classifier with `triage_threshold` (default `0.8`). `triage_model` must be omitted.
@@ -427,12 +493,12 @@ Triggers never create rooms or make agents join rooms.
 The `triggers(action=...)` tool provides unified lifecycle, observability, and testing actions available to the trigger owner (and administrators where noted below; `update` is owner-only):
 
 - `triggers(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
-- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
+- `triggers(action="update", trigger_id=..., ...)` is **owner-only** and updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `source`, `path`, `poll_interval_seconds`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `reopen_on_fire`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. For `script_check` triggers, replacing `source` or `path` requires `start_script` approval, resets persisted `state` and error counters, and bumps the checkpoint revision. Administrators can use `set_enabled` or `delete`, not edit another owner's rule. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
 - `triggers(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
 - `triggers(action="delete", trigger_id=...)` removes a direct or reactive trigger.
 - `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 - `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with operational metadata (`status`, `triage_reason`, `error_message`, `matrix_event_id`, timestamps) and a compact event preview (text truncated to 240 chars). For a non-owner administrator, `history` returns operational metadata with `event: null` (redacted).
-- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
+- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, executing `script_check` Python code or tools, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
 ### Watching GitHub Pull Requests (`action="watch_pr"`)
 
@@ -529,6 +595,7 @@ A trigger delivers only when all of these hold:
 - The target agent or team is running and joined to the target room.
 - For reactive `room_message` watches, the owner is also still joined to the watched source room and permitted to hear the sender.
 - For reactive `external_event` subscriptions, the owner is still authorized in the source's `subscribers` (or is an administrator).
+- For reactive `script_check` triggers, `external_trigger_policy.script_check_enabled` is true, the executing agent still has `triggers` plus `script` or `workflow`, `workflow_placement` permits execution, and the owner is still authorized for the executing agent in the source room.
 
 The triggered turn runs on behalf of the trigger owner.
 For a private agent (`private.per`), the trigger wakes the owner's private instance, so a trigger created by `@alice:example.org` uses Alice's private state.

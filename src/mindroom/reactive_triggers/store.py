@@ -673,14 +673,16 @@ class ReactiveTriggerStore:
         with self._write_transaction() as conn:
             if expected_rule_uid is not None or require_enabled:
                 row = conn.execute(
-                    "SELECT rule_uid, enabled FROM reactive_triggers WHERE trigger_id=?", (trigger_id,),
+                    "SELECT rule_uid, enabled FROM reactive_triggers WHERE trigger_id=?",
+                    (trigger_id,),
                 ).fetchone()
                 uid_bad = expected_rule_uid is not None and str(row["rule_uid"]) != expected_rule_uid if row else True
                 if row is None or uid_bad or (require_enabled and not bool(row["enabled"])):
                     return False
             if expected_revision is not None:
                 cp = conn.execute(
-                    "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?", (trigger_id,),
+                    "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?",
+                    (trigger_id,),
                 ).fetchone()
                 if cp is None or int(cp["revision"]) != expected_revision:
                     return False
@@ -727,7 +729,8 @@ class ReactiveTriggerStore:
         ts = checkpoint.updated_at
         with self._write_transaction() as conn:
             tr = conn.execute(
-                "SELECT rule_uid, enabled, expires_at FROM reactive_triggers WHERE trigger_id=?", (trigger_id,),
+                "SELECT rule_uid, enabled, expires_at FROM reactive_triggers WHERE trigger_id=?",
+                (trigger_id,),
             ).fetchone()
             if tr is None:
                 if expected_rule_uid is not None:
@@ -736,7 +739,8 @@ class ReactiveTriggerStore:
                 raise ReactiveTriggerStoreError(msg)
             uid, exp = str(tr["rule_uid"]), tr["expires_at"]
             cp = conn.execute(
-                "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?", (trigger_id,),
+                "SELECT revision FROM script_check_checkpoints WHERE trigger_id=?",
+                (trigger_id,),
             ).fetchone()
             ok = (
                 bool(tr["enabled"])
@@ -751,7 +755,12 @@ class ReactiveTriggerStore:
             if event is None:
                 return False
             return _insert_pending_firing(
-                conn, trigger_id=trigger_id, rule_uid=uid, dedupe_key=event.event_id, event=event, now=ts,
+                conn,
+                trigger_id=trigger_id,
+                rule_uid=uid,
+                dedupe_key=event.event_id,
+                event=event,
+                now=ts,
             )
 
     def enqueue_firing(

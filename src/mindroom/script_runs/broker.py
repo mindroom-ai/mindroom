@@ -235,7 +235,6 @@ class ScriptCheckTickSlot:
     state_changed: bool = False
     error: str | None = None
     approval_denied: bool = False
-    approval_denied_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -984,7 +983,6 @@ async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: 
 def _deny_script_check_approval(tick_slot: ScriptCheckTickSlot | None, reason: str) -> ToolApprovalDecision:
     if tick_slot is not None:
         tick_slot.approval_denied = True
-        tick_slot.approval_denied_reason = reason
     return ToolApprovalDecision(approved=False, reason=reason)
 
 

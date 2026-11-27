@@ -18,8 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import nio
 import pytest
-from agno.tools import Toolkit
-from agno.tools.function import Function
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import ASGITransport
@@ -56,17 +54,17 @@ from mindroom.reactive_triggers.dispatch import check_reactive_source_access
 from mindroom.reactive_triggers.management import refresh_reactive_state_on_reenable, set_trigger_enabled_sync
 from mindroom.reactive_triggers.models import TriageSpec, TriggerEvent
 from mindroom.reactive_triggers.script_check import (
-    MAX_SCRIPT_CHECK_RESULT_BYTES,
-    MAX_SCRIPT_CHECK_SOURCE_BYTES,
-    MAX_SCRIPT_CHECK_STATE_BYTES,
-    SCRIPT_CHECK_EVENT_KIND,
+    _MAX_SCRIPT_CHECK_RESULT_BYTES,
+    _MAX_SCRIPT_CHECK_SOURCE_BYTES,
+    _MAX_SCRIPT_CHECK_STATE_BYTES,
+    _SCRIPT_CHECK_EVENT_KIND,
     ScriptCheckPoller,
     ScriptCheckTickOutcome,
+    _normalize_script_check_event,
+    _validate_script_check_state,
     agent_supports_script_check,
     check_script_check_source_access,
-    normalize_script_check_event,
     validate_script_check_source,
-    validate_script_check_state,
 )
 from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.triage import TriageOutcome
@@ -77,8 +75,10 @@ from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.shell.supervisor import _ShellSupervisorManager
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.access_schema_support import joined_members_response
 from tests.api.test_plugin_room_readers import _bound, _client
@@ -247,27 +247,27 @@ def test_validate_source_state_and_normalize_event() -> None:
         (b"def check(state):\n    return None\n", "no required or positional"),
         (b"def check(state=None):\n    return None\n", "no required or positional"),
         (b"def check(*, req):\n    return None\n", "no required or positional"),
-        (b"#" * (MAX_SCRIPT_CHECK_SOURCE_BYTES + 1), "maximum size"),
+        (b"#" * (_MAX_SCRIPT_CHECK_SOURCE_BYTES + 1), "maximum size"),
     ):
         with pytest.raises(ValueError, match=match):
             validate_script_check_source(bad_src)
 
-    assert validate_script_check_state({"seen": [1, "a"]}) == {"seen": [1, "a"]}
+    assert _validate_script_check_state({"seen": [1, "a"]}) == {"seen": [1, "a"]}
     for bad_state, match in (
         (["x"], "must be a dict"),
         ({1: "a"}, "string keys"),
         ({"x": math.nan}, "strict finite JSON"),
-        ({"big": "a" * (MAX_SCRIPT_CHECK_STATE_BYTES + 1)}, "maximum size"),
+        ({"big": "a" * (_MAX_SCRIPT_CHECK_STATE_BYTES + 1)}, "maximum size"),
     ):
         with pytest.raises(ValueError, match=match):
-            validate_script_check_state(bad_state)
+            _validate_script_check_state(bad_state)
 
-    assert normalize_script_check_event("t1", "r1", None, now=2000.0) is None
-    plain = normalize_script_check_event("t1", "r1", {"items": [1]}, now=2000.0)
+    assert _normalize_script_check_event("t1", "r1", None, now=2000.0) is None
+    plain = _normalize_script_check_event("t1", "r1", {"items": [1]}, now=2000.0)
     assert plain is not None
-    assert (plain.kind, plain.event_id, plain.data) == (SCRIPT_CHECK_EVENT_KIND, "sc:tick:r1", {"items": [1]})
+    assert (plain.kind, plain.event_id, plain.data) == (_SCRIPT_CHECK_EVENT_KIND, "sc:tick:r1", {"items": [1]})
 
-    env = normalize_script_check_event(
+    env = _normalize_script_check_event(
         "t1",
         "r2",
         {"title": "Alert", "summary": "S", "text": "T", "actor": "alice", "dedupe_key": "k1", "data": {"id": 1}},
@@ -286,10 +286,10 @@ def test_validate_source_state_and_normalize_event() -> None:
         ({"title": "x" * 501}, "field 'title' exceeds"),
         ({"dedupe_key": "  "}, "must not be empty"),
         ({"x": math.inf}, "strict finite JSON"),
-        ({"blob": "a" * (MAX_SCRIPT_CHECK_RESULT_BYTES + 1)}, "maximum size"),
+        ({"blob": "a" * (_MAX_SCRIPT_CHECK_RESULT_BYTES + 1)}, "maximum size"),
     ):
         with pytest.raises(ValueError, match=match):
-            normalize_script_check_event("t1", "r3", bad_res, now=2000.0)
+            _normalize_script_check_event("t1", "r3", bad_res, now=2000.0)
 
 
 @pytest.mark.parametrize("legacy_version", [1, 2])
@@ -361,7 +361,7 @@ def test_store_script_check_quotas_atomic_revision_and_reenable(tmp_path: Path) 
             max_script_check_per_owner=1,
         )
 
-    ev = normalize_script_check_event("sc_1", "r1", {"items": ["b"]}, now=1100.0)
+    ev = _normalize_script_check_event("sc_1", "r1", {"items": ["b"]}, now=1100.0)
     nxt = cp1.model_copy(update={"state": {"seen": ["a", "b"]}, "next_poll_at": 1400.0, "updated_at": 1100.0})
     assert (
         store.update_script_check_checkpoint_and_enqueue(
@@ -378,7 +378,7 @@ def test_store_script_check_quotas_atomic_revision_and_reenable(tmp_path: Path) 
     assert len(store.list_due_firings(now=1200.0)) == 1
 
     # Stale revision rejected without mutating state or enqueueing
-    ev2 = normalize_script_check_event("sc_1", "r2", {"items": ["c"]}, now=1150.0)
+    ev2 = _normalize_script_check_event("sc_1", "r2", {"items": ["c"]}, now=1150.0)
     assert (
         store.update_script_check_checkpoint_and_enqueue(
             "sc_1",
@@ -524,9 +524,12 @@ class _CheckProbeToolkit(Toolkit):
     """Test toolkit with one read function and one ToolGate.CONFIRM function."""
 
     def __init__(self) -> None:
-        super().__init__(name="check_probe")
-        self.register(Function(name="read_item", entrypoint=self.read_item))
-        self.register(Function(name="confirm_action", entrypoint=self.confirm_action, requires_confirmation=True))
+        super().__init__(name="check_probe", tools=[self.read_item, self.confirm_action])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        if function.name == "confirm_action":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     def read_item(self) -> str:
         return "ok-value"
@@ -945,9 +948,12 @@ class _LiveFeedToolkit(Toolkit):
     items: ClassVar[list[str]] = ["a"]
 
     def __init__(self) -> None:
-        super().__init__(name="live_feed")
-        self.register(Function(name="fetch_items", entrypoint=self.fetch_items))
-        self.register(Function(name="confirm_op", entrypoint=self.confirm_op, requires_confirmation=True))
+        super().__init__(name="live_feed", tools=[self.fetch_items, self.confirm_op])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        if function.name == "confirm_op":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     def fetch_items(self) -> str:
         return json.dumps({"items": list(self.items)})
@@ -1691,7 +1697,7 @@ async def test_triggers_tool_script_check_list_owner_health_and_admin_redaction(
     ev = TriggerEvent(
         source_type="script_check",
         source_id="sc_u",
-        kind=SCRIPT_CHECK_EVENT_KIND,
+        kind=_SCRIPT_CHECK_EVENT_KIND,
         event_id="sc:tick:r1",
         timestamp=1234.0,
         title="Alert",
@@ -1752,7 +1758,7 @@ async def test_triggers_tool_script_check_update_reenable_history_and_test(tmp_p
     ev = TriggerEvent(
         source_type="script_check",
         source_id="sc_u",
-        kind=SCRIPT_CHECK_EVENT_KIND,
+        kind=_SCRIPT_CHECK_EVENT_KIND,
         event_id="sc:tick:r1",
         timestamp=1234.0,
         title="Alert",

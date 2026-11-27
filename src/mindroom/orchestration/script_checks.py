@@ -47,7 +47,7 @@ _EXIT_GRACE_SECONDS = 2.0
 _EXIT_GRACE_POLL_SECONDS = 0.05
 _CANCEL_CLEANUP_TIMEOUT_SECONDS = 5.0
 
-SCRIPT_CHECK_BOOTSTRAP_SOURCE = """\
+_SCRIPT_CHECK_BOOTSTRAP_SOURCE = """\
 import hashlib, hmac, json, sys, traceback
 from mindroom.script_runs.transport import ScriptGatewayTransport
 from mindroom.script_sdk import MindRoomTools
@@ -392,7 +392,7 @@ class _ScriptCheckRunner:
                     await asyncio.wait_for(
                         manager.run(
                             context,
-                            source=SCRIPT_CHECK_BOOTSTRAP_SOURCE,
+                            source=_SCRIPT_CHECK_BOOTSTRAP_SOURCE,
                             run_id=run_id,
                             script_check_rule_uid=rule.rule_uid,
                             max_runtime_seconds=timeout_seconds,

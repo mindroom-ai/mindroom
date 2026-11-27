@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.config.schema_hints import dashboard_hint
+
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -467,16 +469,27 @@ class ExternalTriggerPolicyConfig(BaseModel):
     max_github_pr_watches_per_owner: int = Field(default=20, ge=1, le=200, description="Max github_pr watches/owner")
     script_check_enabled: bool = Field(default=True, description="Enable scheduled script_check triggers")
     min_script_check_poll_interval_seconds: int = Field(
-        default=60, ge=30, le=3600, description="Min script_check poll (s)",
+        default=60,
+        ge=30,
+        le=3600,
+        description="Min script_check poll (s)",
     )
     max_script_checks_per_owner: int = Field(
-        default=10, ge=1, le=200, description="Max active script_check triggers/owner",
+        default=10,
+        ge=1,
+        le=200,
+        description="Max active script_check triggers/owner",
     )
     script_check_timeout_seconds: int = Field(
-        default=30, ge=5, le=120, description="Max runtime per script_check tick (s)",
+        default=30,
+        ge=5,
+        le=120,
+        description="Max runtime per script_check tick (s)",
     )
     script_check_allowed_tools: list[str] | None = Field(
-        default=None, description="Optional toolkit allowlist for ticks",
+        default=None,
+        description="Optional toolkit allowlist for ticks",
+        json_schema_extra=dashboard_hint(reference="tool"),
     )
 
     @field_validator("script_check_allowed_tools")

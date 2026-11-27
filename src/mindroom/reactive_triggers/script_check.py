@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-MAX_SCRIPT_CHECK_SOURCE_BYTES = 64 * 1024
-MAX_SCRIPT_CHECK_STATE_BYTES = 32 * 1024
-MAX_SCRIPT_CHECK_RESULT_BYTES = 64 * 1024
-SCRIPT_CHECK_EVENT_KIND = "script_check.match"
+_MAX_SCRIPT_CHECK_SOURCE_BYTES = 64 * 1024
+_MAX_SCRIPT_CHECK_STATE_BYTES = 32 * 1024
+_MAX_SCRIPT_CHECK_RESULT_BYTES = 64 * 1024
+_SCRIPT_CHECK_EVENT_KIND = "script_check.match"
 
 _MAX_BACKOFF_SECONDS = 3600.0
 _DEFERRED_RETRY_SECONDS = 30.0
@@ -49,8 +49,8 @@ def _reject(msg: str) -> NoReturn:
 
 def validate_script_check_source(source_bytes: bytes) -> tuple[str, str]:
     """Validate script_check Python bytes and return ``(source_text, sha256_hex)``."""
-    if len(source_bytes) > MAX_SCRIPT_CHECK_SOURCE_BYTES:
-        _reject(f"script_check source exceeds maximum size of {MAX_SCRIPT_CHECK_SOURCE_BYTES} bytes")
+    if len(source_bytes) > _MAX_SCRIPT_CHECK_SOURCE_BYTES:
+        _reject(f"script_check source exceeds maximum size of {_MAX_SCRIPT_CHECK_SOURCE_BYTES} bytes")
     try:
         source_text = source_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -109,9 +109,9 @@ def _validate_json_object(value: object, *, label: str, max_bytes: int) -> dict[
     return parsed
 
 
-def validate_script_check_state(state: object) -> dict[str, Any]:
-    """Validate strict finite JSON state object within MAX_SCRIPT_CHECK_STATE_BYTES."""
-    return _validate_json_object(state, label="state", max_bytes=MAX_SCRIPT_CHECK_STATE_BYTES)
+def _validate_script_check_state(state: object) -> dict[str, Any]:
+    """Validate strict finite JSON state object within _MAX_SCRIPT_CHECK_STATE_BYTES."""
+    return _validate_json_object(state, label="state", max_bytes=_MAX_SCRIPT_CHECK_STATE_BYTES)
 
 
 def _extract_envelope_strings(payload: dict[str, Any]) -> dict[str, str | None]:
@@ -144,7 +144,7 @@ def _extract_event_data(payload: dict[str, Any]) -> dict[str, Any]:
     return {} if raw_data is None else raw_data
 
 
-def normalize_script_check_event(
+def _normalize_script_check_event(
     trigger_id: str,
     run_id: str,
     raw_result: object,
@@ -154,7 +154,7 @@ def normalize_script_check_event(
     """Normalize a check() return value into a TriggerEvent or None."""
     if raw_result is None:
         return None
-    payload = _validate_json_object(raw_result, label="result", max_bytes=MAX_SCRIPT_CHECK_RESULT_BYTES)
+    payload = _validate_json_object(raw_result, label="result", max_bytes=_MAX_SCRIPT_CHECK_RESULT_BYTES)
     env = _extract_envelope_strings(payload)
     event_data = _extract_event_data(payload)
     dedupe_key = env["dedupe_key"]
@@ -165,7 +165,7 @@ def normalize_script_check_event(
     return TriggerEvent(
         source_type="script_check",
         source_id=trigger_id,
-        kind=SCRIPT_CHECK_EVENT_KIND,
+        kind=_SCRIPT_CHECK_EVENT_KIND,
         event_id=event_id,
         timestamp=now,
         actor=env["actor"],
@@ -210,7 +210,7 @@ def build_script_check_dry_run_event(
     return TriggerEvent(
         source_type="script_check",
         source_id=trigger_id,
-        kind=SCRIPT_CHECK_EVENT_KIND,
+        kind=_SCRIPT_CHECK_EVENT_KIND,
         event_id="dry_run",
         timestamp=now,
         actor=actor,
@@ -419,13 +419,13 @@ class ScriptCheckPoller:
             await self._record_error(rule, cp, effective_interval, outcome.error_code or "tick_error", now)
             return False
         try:
-            next_state = cp.state if outcome.state is None else validate_script_check_state(outcome.state)
+            next_state = cp.state if outcome.state is None else _validate_script_check_state(outcome.state)
         except ValueError as exc:
             logger.warning("Invalid script_check state", trigger_id=rule.trigger_id, error=str(exc))
             await self._record_error(rule, cp, effective_interval, "invalid_state", now)
             return False
         try:
-            event = normalize_script_check_event(
+            event = _normalize_script_check_event(
                 rule.trigger_id,
                 outcome.run_id or f"tick_{uuid4().hex[:12]}",
                 outcome.result,
