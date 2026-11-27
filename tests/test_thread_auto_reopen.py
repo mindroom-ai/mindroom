@@ -69,6 +69,10 @@ _QUALIFYING = [
         "pending-secret",
         _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "pending"}})),
     ),
+    (
+        "open-workflow-question",
+        _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.workflow_question": {"status": "open"}})),
+    ),
     ("approval", _reply(event_type="io.mindroom.tool_approval", sender=BOT, content={"m.relates_to": THREAD_REL})),
     ("human-spoof-resolved", _reply(sender=HUMAN, content=_msg(**{RESOLVED_IN_TURN_KEY: True}))),
     ("human-spoof-snooze", _reply(sender=HUMAN, content=_msg(**{THREAD_SNOOZE_CONTENT_KEY: {"event": "ended"}}))),
@@ -93,8 +97,16 @@ _IGNORED = [
         _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "saved"}})),
     ),
     (
+        "answered-workflow-question",
+        _reply(sender=BOT, content=_msg("m.notice", **{"io.mindroom.workflow_question": {"status": "answered"}})),
+    ),
+    (
         "human-secret",
         _reply(sender=HUMAN, content=_msg("m.notice", **{"io.mindroom.secret_request": {"status": "pending"}})),
+    ),
+    (
+        "human-workflow-question",
+        _reply(sender=HUMAN, content=_msg("m.notice", **{"io.mindroom.workflow_question": {"status": "open"}})),
     ),
     ("human-streaming", _reply(sender=HUMAN, content=_msg("m.notice", **{STREAM_STATUS_KEY: STREAM_STATUS_STREAMING}))),
     (

@@ -17,7 +17,11 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 _TOOL_APPROVAL_EVENT_TYPE = "io.mindroom.tool_approval"
-_SECRET_REQUEST_CONTENT_KEY = "io.mindroom.secret_request"  # noqa: S105 - Matrix content key, not a secret
+# Mirrors SECRET_REQUEST_CONTENT_KEY (secret_requests.py) and WORKFLOW_QUESTION_CONTENT_KEY (matrix/event_types.py).
+_ACTIONABLE_NOTICE_CARD_STATUSES = (
+    ("io.mindroom.secret_request", "pending"),
+    ("io.mindroom.workflow_question", "open"),
+)
 _QUALIFYING_MESSAGE_TYPES = frozenset({"m.text", "m.emote", "m.image", "m.audio", "m.video", "m.file", "m.location"})
 
 __all__ = ["event_origin_server_ts", "extract_auto_reopen_reply"]
@@ -36,10 +40,12 @@ def _qualifies_event_kind(event_type: object, content: Mapping[str, object], is_
             return True
         if msgtype == "m.notice":
             status = content.get(STREAM_STATUS_KEY)
-            secret_request = content.get(_SECRET_REQUEST_CONTENT_KEY)
-            is_pending_secret = isinstance(secret_request, dict) and secret_request.get("status") == "pending"
+            is_actionable_card = any(
+                isinstance(card := content.get(key), dict) and card.get("status") == expected_status
+                for key, expected_status in _ACTIONABLE_NOTICE_CARD_STATUSES
+            )
             return (
-                (isinstance(status, str) and status in NONTERMINAL_STREAM_STATUSES) or is_pending_secret
+                (isinstance(status, str) and status in NONTERMINAL_STREAM_STATUSES) or is_actionable_card
             ) and is_managed()
         return False
     return event_type == "m.sticker" or (event_type == _TOOL_APPROVAL_EVENT_TYPE and is_managed())
