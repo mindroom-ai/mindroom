@@ -61,6 +61,7 @@ from mindroom.config.legacy_fields import (
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_action_argument_approval_error,
     retired_consolidated_approval_error,
     retired_dynamic_workflow_approval_error,
     retired_slack_watch_approval_error,
@@ -1781,9 +1782,18 @@ class Config(BaseModel):
         ):
             raise ToolConfigOverrideError(slack_watch_error)
 
+        if (
+            action_arg_error := retired_action_argument_approval_error(
+                enabled_toolkits,
+                self.tool_approval.rules,
+            )
+        ) is not None:
+            raise ToolConfigOverrideError(action_arg_error)
+
         # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
         for toolkit_name in sorted(enabled_toolkits | {"skills"}):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+            strict_toolkit = toolkit_name
             metadata = tools.entries.get(toolkit_name)
             if (
                 builtin_renames is None
@@ -1795,13 +1805,14 @@ class Config(BaseModel):
                 prefix = toolkit_name.removesuffix(f"_{metadata.dependency_extra}")
                 if all(f"{prefix}_{new}" in metadata.function_names for new in set(base_renames.values())):
                     builtin_renames = {f"{prefix}_{old}": f"{prefix}_{new}" for old, new in base_renames.items()}
+                    strict_toolkit = metadata.dependency_extra
             declared_renames = metadata.retired_functions if metadata is not None else None
             if not builtin_renames and not declared_renames:
                 continue
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
             if (
                 consolidated_error := retired_consolidated_approval_error(
-                    toolkit_name,
+                    strict_toolkit,
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,

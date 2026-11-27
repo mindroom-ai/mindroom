@@ -115,7 +115,7 @@ class MatrixUserWrite:
     attachment: str | None = None
     name: str | None = None
 
-    def problem(self) -> str | None:
+    def problem(self) -> str | None:  # noqa: PLR0911 - one guard per action group
         """Return what the arguments lack, or why they are refused, without asking the homeserver anything."""
         if self.action not in _WRITE_ACTIONS:
             return f"Unsupported action {self.action!r}. Expected one of: {', '.join(sorted(_WRITE_ACTIONS))}."
@@ -134,14 +134,10 @@ class MatrixUserWrite:
         missing = next((name for name, value in needed.items() if value is None), None)
         if missing is not None:
             return f"{self.action} needs {missing}."
-        # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
-        return (
-            reaction_key_error(str(self.emoji).strip())
-            if self.action == "react"
-            else _user_problem(self.user_id)
-            if self.action == "invite"
-            else None
-        )
+        if self.action == "react":
+            # The `react` tool's rule: a reaction acknowledges a message, so it is never a sentence.
+            return reaction_key_error(str(self.emoji).strip())
+        return _user_problem(self.user_id) if self.action == "invite" else None
 
     def _create_room_problem(self) -> str | None:
         if self.name is None:

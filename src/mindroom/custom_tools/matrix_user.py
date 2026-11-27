@@ -63,7 +63,13 @@ def _non_blank(value: str | None) -> str | None:
     return value if value is not None and value.strip() else None
 
 
-def _read_problem(action: str, *, room_id: str | None, event_id: str | None, query: str | None) -> str | None:
+def _read_problem(  # noqa: PLR0911 - one guard per action group
+    action: str,
+    *,
+    room_id: str | None,
+    event_id: str | None,
+    query: str | None,
+) -> str | None:
     """Return which argument the read ``action`` is missing, without asking the homeserver anything."""
     if action not in _READ_ACTIONS:
         return f"Unsupported action {action!r}. Expected one of: {', '.join(sorted(_READ_ACTIONS))}."
@@ -72,7 +78,10 @@ def _read_problem(action: str, *, room_id: str | None, event_id: str | None, que
             return room_needed(action)
         if action == "download":
             # A call without a turn, such as the MCP gateway's, has no conversation whose tools could take the file.
-            return _TURN_NEEDED if get_tool_runtime_context() is None else _EVENT_NEEDED if event_id is None else None
+            if get_tool_runtime_context() is None:
+                return _TURN_NEEDED
+            if event_id is None:
+                return _EVENT_NEEDED
         return None
     if action == "rooms" or query is not None:
         return None

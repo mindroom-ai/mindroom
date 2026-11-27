@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         def agent_patterns(self) -> tuple[str, ...] | None: ...
         def matches_tool(self, tool_name: str) -> bool: ...
         def matches_agent(self, agent_name: str) -> bool: ...
+        def fixed_arguments_match(self, fixed_arguments: Mapping[str, Any]) -> str: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -1498,6 +1499,43 @@ def retired_slack_watch_approval_error(
     )
 
 
+def retired_action_argument_approval_error(
+    enabled_toolkits: Collection[str],
+    rules: Sequence[_ApprovalRule],
+) -> str | None:
+    """Return a migration error when approval rules target moved or renamed action argument values."""
+    check_matrix_user = "matrix_user" in enabled_toolkits
+    check_matrix_room = "matrix_room" in enabled_toolkits
+    if not (check_matrix_user or check_matrix_room):
+        return None
+    for index, rule in enumerate(rules):
+        if rule.arguments is None or "action" not in rule.arguments:
+            continue
+        if (
+            check_matrix_user
+            and rule.matches_tool("matrix_user_read")
+            and not rule.matches_tool("matrix_user_write")
+            and rule.fixed_arguments_match({"action": "mark_read"}) != "no"
+        ):
+            return (
+                f"tool_approval.rules[{index}] matches matrix_user_read with action 'mark_read'; "
+                "mark_read moved from matrix_user_read to matrix_user_write; "
+                "rewrite the rule for matrix_user_write."
+            )
+        if (
+            check_matrix_room
+            and rule.matches_tool("matrix_room")
+            and rule.fixed_arguments_match({"action": "room-info"}) != "no"
+            and rule.fixed_arguments_match({"action": "room_info"}) == "no"
+        ):
+            return (
+                f"tool_approval.rules[{index}] matches matrix_room with retired action 'room-info'; "
+                "action 'room-info' was renamed to 'room_info'; "
+                "update the rule's arguments.action to 'room_info'."
+            )
+    return None
+
+
 def retired_consolidated_approval_error(
     toolkit_name: str,
     rules: Sequence[_ApprovalRule],
@@ -1656,8 +1694,6 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
             "knowledge_graph",
             "agent_manager",
             "email_invite",
-            "google_docs",
-            "twilio",
             "terminal",
             "claude_agent",
             "thread_model",
@@ -1670,26 +1706,15 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
 def retired_stored_tool_setting(
     tool_name: str,
     settings: Mapping[str, object],
+    *,
+    has_enable_toggles: bool = False,
 ) -> tuple[str, str] | None:
     """Return the first retired stored setting or function filter for ``tool_name``, and its replacement guidance."""
     if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None:
         return checker(settings)
-    return None
-
-
-def retired_tool_override(
-    tool_name: str,
-    overrides: Mapping[str, object],
-    *,
-    retired_functions: Mapping[str, str] | None = None,
-    has_enable_toggles: bool = False,
-) -> tuple[str, str] | None:
-    """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
-    if (retired := retired_stored_tool_setting(tool_name, overrides)) is not None:
-        return retired
-    if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
-        retired := _retired_function_filter(
-            overrides,
+    if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None:
+        return _retired_function_filter(
+            settings,
             renames,
             guidance_for=(
                 (
@@ -1708,6 +1733,23 @@ def retired_tool_override(
                     )
                 )
             ),
+        )
+    return None
+
+
+def retired_tool_override(
+    tool_name: str,
+    overrides: Mapping[str, object],
+    *,
+    retired_functions: Mapping[str, str] | None = None,
+    has_enable_toggles: bool = False,
+) -> tuple[str, str] | None:
+    """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
+    if (
+        retired := retired_stored_tool_setting(
+            tool_name,
+            overrides,
+            has_enable_toggles=has_enable_toggles,
         )
     ) is not None:
         return retired

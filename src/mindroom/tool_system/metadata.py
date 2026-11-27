@@ -136,6 +136,10 @@ def _sanitize_safe_tool_init_override_value(
     return value
 
 
+def _has_enable_toggles(metadata: ToolMetadata | ToolValidationInfo) -> bool:
+    return any(field.name.startswith("enable_") and field.authored_override for field in (metadata.config_fields or ()))
+
+
 def _override_path(
     tool_name: str,
     field_name: str,
@@ -290,14 +294,11 @@ def validate_authored_tool_entry_overrides(
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    has_enable_toggles = any(
-        field.name.startswith("enable_") and field.authored_override for field in (metadata.config_fields or ())
-    )
     retired = retired_tool_override(
         tool_name,
         overrides,
         retired_functions=getattr(metadata, "retired_functions", None),
-        has_enable_toggles=has_enable_toggles,
+        has_enable_toggles=_has_enable_toggles(metadata),
     )
     if retired is not None:
         field_name, guidance = retired
@@ -807,7 +808,13 @@ def resolve_tool_settings(
                 f"delete them, and save any you still want under '{tool_name}'."
             )
             raise ToolConfigOverrideError(msg)
-    if (retired := retired_stored_tool_setting(tool_name, stored_credentials or {})) is not None:
+    if (
+        retired := retired_stored_tool_setting(
+            tool_name,
+            stored_credentials or {},
+            has_enable_toggles=_has_enable_toggles(metadata),
+        )
+    ) is not None:
         msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
         raise ToolConfigOverrideError(msg)
     credentials = {**(stored_credentials or {}), **(credential_overrides or {})}

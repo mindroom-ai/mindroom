@@ -3245,6 +3245,31 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
                 runtime_paths,
             )
 
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py.*work_google_docs_read"):
+        Config.validate_with_runtime(
+            {**base_data, "tool_approval": {"rules": [{"match": "work_google_docs_*", "script": "check.py"}]}},
+            runtime_paths,
+        )
+    with_explicit_script = Config.validate_with_runtime(
+        {
+            **base_data,
+            "tool_approval": {
+                "rules": [
+                    {"match": "work_google_docs_read", "script": "check.py"},
+                    {"match": "work_google_docs_write", "script": "check.py"},
+                    {"match": "work_google_docs_*", "script": "check.py"},
+                ],
+            },
+        },
+        runtime_paths,
+    )
+    assert [rule.match for rule in with_explicit_script.tool_approval.rules] == [
+        "work_google_docs_read",
+        "work_google_docs_write",
+        "work_google_docs_*",
+    ]
+
     loaded = Config.validate_with_runtime(
         {**base_data, "tool_approval": {"rules": [{"match": "work_gmail_send", "action": "require_approval"}]}},
         runtime_paths,
@@ -3722,8 +3747,6 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
         ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_read"),
         ("claude_agent", {"include_tools": ["claude_agent_status"]}, "claude_agent_read"),
-        ("google_docs", {"exclude_tools": ["google_docs_get_document"]}, "google_docs_read"),
-        ("twilio", {"include_tools": ["send_sms"]}, "twilio_send"),
         ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
         ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
     )
@@ -3739,6 +3762,24 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
             ConfigRuntimeValidationError,
             match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}.*{expected_verb} all of `{replacement}`'s actions",
         ):
+            Config.validate_with_runtime(bad, runtime_paths)
+
+    # Twilio preserves its enable_* toggle migration hint; google_docs also fails closed.
+    for toolkit_name, overrides, expected_pattern in (
+        ("twilio", {"include_tools": ["send_sms"]}, r"twilio\.include_tools:.*twilio_send.*enable_\*"),
+        (
+            "google_docs",
+            {"exclude_tools": ["google_docs_get_document"]},
+            r"google_docs\.exclude_tools:.*google_docs_read",
+        ),
+    ):
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
             Config.validate_with_runtime(bad, runtime_paths)
 
     # Kept name `terminal_read` in terminal include_tools still loads cleanly.
@@ -4655,3 +4696,99 @@ def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_
     assert expected_effect in message
     assert f"approval `script` matching `{new}`" in message
     assert f"[{new}]" not in message
+
+
+@pytest.mark.parametrize(
+    ("tools", "rules", "error_pattern"),
+    [
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_read", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            r"mark_read moved from matrix_user_read to matrix_user_write",
+        ),
+        (
+            ["matrix_user"],
+            [
+                {
+                    "match": "matrix_user_read",
+                    "arguments": {"action": ["messages", "mark_read"]},
+                    "action": "require_approval",
+                },
+            ],
+            r"mark_read moved from matrix_user_read to matrix_user_write",
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_write", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "*", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user"],
+            [{"match": "matrix_user_*", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_user", "gmail"],
+            [{"match": "gmail_manage", "arguments": {"action": "mark_read"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room-info"}, "action": "require_approval"}],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [
+                {
+                    "match": "matrix_room",
+                    "arguments": {"action": ["members", "room-info"]},
+                    "action": "require_approval",
+                },
+            ],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "*", "arguments": {"action": "room-info"}, "action": "require_approval"}],
+            r"room-info.*room_info",
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room_info"}, "action": "require_approval"}],
+            None,
+        ),
+        (
+            ["matrix_room"],
+            [{"match": "matrix_room", "arguments": {"action": "room*"}, "action": "require_approval"}],
+            None,
+        ),
+    ],
+)
+def test_retired_action_argument_approval_rules_fail_closed(
+    tmp_path: Path,
+    tools: list[str],
+    rules: list[dict[str, object]],
+    error_pattern: str | None,
+) -> None:
+    """Approval rules targeting moved mark_read or renamed room-info action values fail closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": rules},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+    else:
+        loaded = Config.validate_with_runtime(data, runtime_paths)
+        assert len(loaded.tool_approval.rules) == len(rules)
