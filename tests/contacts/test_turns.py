@@ -736,7 +736,7 @@ async def test_a_contact_turn_shows_only_eyes_and_offers_only_its_contacts_tools
         "sleep",
         "run_shell_command",
         "scheduler",
-        "list_contacts",
+        "contacts_read",
         "contacts_write",
         "matrix_room",
         "attachment",

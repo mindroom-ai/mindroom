@@ -83,7 +83,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_contacts",
+        "contacts_read",
         "contacts_write"
       ],
       "helper_text": null,
@@ -244,7 +244,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_email_invites",
+        "email_invite_read",
         "email_invite_write"
       ],
       "helper_text": null,
@@ -625,7 +625,7 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "slack_inspect",
+        "slack_read",
         "slack_send",
         "slack_manage"
       ],
@@ -1231,7 +1231,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "send_sms",
+        "twilio_send",
         "twilio_read"
       ],
       "helper_text": null,
@@ -2445,7 +2445,7 @@
       "executes_code": true,
       "file_access": "unconfined",
       "function_names": [
-        "claude_agent_status",
+        "claude_agent_read",
         "claude_agent_write"
       ],
       "helper_text": null,
@@ -8250,7 +8250,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "google_docs_get_document",
+        "google_docs_read",
         "google_docs_write"
       ],
       "helper_text": null,
@@ -9279,7 +9279,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_shared_directories",
+        "shared_directories_read",
         "shared_directories_write"
       ],
       "helper_text": null,

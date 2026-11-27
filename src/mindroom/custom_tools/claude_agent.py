@@ -407,14 +407,14 @@ class ClaudeAgentTools(Toolkit):
         super().__init__(
             name="claude_agent",
             tools=[
-                self.claude_agent_status,
+                self.claude_agent_read,
                 self.claude_agent_write,
             ],
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Omit unused meta-schema fields on the instant in-memory session status lookup."""
-        if function.name == "claude_agent_status":
+        if function.name == "claude_agent_read":
             return replace(function, offer_background_after=False, offer_output_path=False)
         return function
 
@@ -740,7 +740,7 @@ class ClaudeAgentTools(Toolkit):
             lines.append(f"[Claude tools used: {unique_tools}]")
         return "\n\n".join(line for line in lines if line)
 
-    async def claude_agent_status(
+    async def claude_agent_read(
         self,
         session_label: str | None = None,
     ) -> str:

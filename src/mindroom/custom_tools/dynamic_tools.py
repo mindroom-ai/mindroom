@@ -141,7 +141,7 @@ class DynamicToolsToolkit(Toolkit):
 
         Resolvable calls never reach this method: they run the named function directly.
         """
-        return self._payload("error", message=_call_tool_error(name, arguments))
+        return self._payload("error", message=_call_tool_error(name, arguments, self._deferred_toolkits()))
 
 
 def _argument_keys(arguments: object) -> frozenset[str] | None:
@@ -152,7 +152,32 @@ def _argument_keys(arguments: object) -> frozenset[str] | None:
     return None
 
 
-def _call_tool_error(name: object, arguments: object) -> str:
+def _dotted_name_hint(name: str, deferred_toolkits: Sequence[DeferredToolkit]) -> str | None:
+    if "." not in name:
+        return None
+    prefix, _, candidate = name.rpartition(".")
+    if not prefix or not candidate:
+        return None
+    for deferred in deferred_toolkits:
+        if any(function.name == candidate for function in deferred.functions):
+            owner = deferred.deferral.domain_name
+            if prefix == owner:
+                return (
+                    f"'{name}' was not called. Use the exact unprefixed function name '{candidate}' from tool_search "
+                    "and pass arguments as a JSON object."
+                )
+            return (
+                f"'{name}' was not called ('{candidate}' belongs to toolkit '{owner}', not '{prefix}'). "
+                "Use an exact function name from tool_search and pass arguments as a JSON object."
+            )
+    return None
+
+
+def _call_tool_error(
+    name: object,
+    arguments: object,
+    deferred_toolkits: Sequence[DeferredToolkit] = (),
+) -> str:
     if name is None or name == "" or (isinstance(name, str) and not name.strip()):
         arg_keys = _argument_keys(arguments)
         if arg_keys is not None and {"name", "arguments"} <= arg_keys:
@@ -188,6 +213,8 @@ def _call_tool_error(name: object, arguments: object) -> str:
             f"'{name}' was not called: 'arguments' must be a JSON object. "
             "Use an exact function name from tool_search and pass arguments as a JSON object."
         )
+    if isinstance(name, str) and (dotted_hint := _dotted_name_hint(name, deferred_toolkits)) is not None:
+        return dotted_hint
     return f"'{name}' was not called. Use an exact function name from tool_search and pass arguments as a JSON object."
 
 

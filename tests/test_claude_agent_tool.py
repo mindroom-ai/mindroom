@@ -591,7 +591,7 @@ def test_claude_agent_tool_registered_in_metadata() -> None:
 @pytest.mark.parametrize(
     ("method_name", "expected_params"),
     [
-        ("claude_agent_status", ("session_label",)),
+        ("claude_agent_read", ("session_label",)),
         ("claude_agent_write", ("action", "prompt", "session_label", "resume", "fork_session")),
     ],
 )
@@ -994,7 +994,7 @@ async def test_session_status_interrupt_and_end(fake_manager: claude_agent_modul
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
     await _in_call(run_context, tools.claude_agent_write(action="send", prompt="status check"))
-    status = await _in_call(run_context, tools.claude_agent_status())
+    status = await _in_call(run_context, tools.claude_agent_read())
     interrupt = await _in_call(run_context, tools.claude_agent_write(action="interrupt"))
     end = await _in_call(run_context, tools.claude_agent_write(action="end"))
 
@@ -2183,8 +2183,8 @@ async def test_claude_agent_write_validates_action_and_params_before_side_effect
 
     offered = {fn.name: fn for fn in adapt_toolkit(tools).functions}
     assert (
-        offered["claude_agent_status"].offer_background_after,
-        offered["claude_agent_status"].offer_output_path,
+        offered["claude_agent_read"].offer_background_after,
+        offered["claude_agent_read"].offer_output_path,
     ) == (
         False,
         False,

@@ -4690,7 +4690,7 @@
     "guidance": null,
     "functions": [
       {
-        "name": "send_sms",
+        "name": "twilio_send",
         "description": "Send an SMS via Twilio.",
         "parameters": {
           "type": "object",

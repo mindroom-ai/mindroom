@@ -390,7 +390,7 @@ agents:
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
-It provides `list_shared_directories()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
+It provides `shared_directories_read()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
 
 ### Setup
 
@@ -419,7 +419,7 @@ agents:
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
 It calls `shared_directories_write(action="create", name="report")` and `shared_directories_write(action="invite", name="report", agent_name="writer")`, and from then on both agents see the directory's path in their prompts.
-`list_shared_directories()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
+`shared_directories_read()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
 
 ### Sharing between personal agents
 
@@ -445,7 +445,7 @@ agents:
 ```
 
 Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
-Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `list_shared_directories()` also shows who asked and when.
+Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `shared_directories_read()` also shows who asked and when.
 When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `shared_directories_write(action="accept", owner="ann_assistant", name="notes")` and reads the files from then on.
 The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 

@@ -133,7 +133,7 @@ class SharedDirectoryTools(Toolkit):
     def __init__(self, agent_name: str | None = None) -> None:
         # The calling agent, bound when the tool is built, so a team member shares as itself rather than as the team.
         self._agent_name = agent_name
-        super().__init__(name="shared_directories", tools=[self.list_shared_directories, self.shared_directories_write])
+        super().__init__(name="shared_directories", tools=[self.shared_directories_read, self.shared_directories_write])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Keep wait budgets on shared directory writes while omitting them from listing."""
@@ -261,7 +261,7 @@ class SharedDirectoryTools(Toolkit):
             message=_changed_message(context, [directory.owner, *directory.members], "Deleted."),
         )
 
-    def list_shared_directories(self) -> str:
+    def shared_directories_read(self) -> str:
         """List the shared directories you own or joined, with their paths and your access, and your pending invitations.
 
         Takes no arguments.

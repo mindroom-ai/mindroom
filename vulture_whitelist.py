@@ -432,7 +432,7 @@ _.smtp_send_email  # Toolkit function its @tool mark offers (src/mindroom/tools/
 _.telegram_manage  # Toolkit function its @tool mark offers (src/mindroom/tools/telegram.py)
 _.telegram_read  # Toolkit function its @tool mark offers (src/mindroom/tools/telegram.py)
 _.telegram_send  # Toolkit function its @tool mark offers (src/mindroom/tools/telegram.py)
-_.send_sms  # Toolkit function its @tool mark offers (src/mindroom/tools/twilio.py)
+_.twilio_send  # Toolkit function its @tool mark offers (src/mindroom/tools/twilio.py)
 _.twilio_read  # Toolkit function its @tool mark offers (src/mindroom/tools/twilio.py)
 _.webex_read  # Toolkit function its @tool mark offers (src/mindroom/tools/webex.py)
 _.webex_send  # Toolkit function its @tool mark offers (src/mindroom/tools/webex.py)

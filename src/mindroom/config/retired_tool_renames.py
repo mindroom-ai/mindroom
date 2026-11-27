@@ -219,6 +219,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "google_drive_trash_file": "google_drive_write",
     },
     "google_docs": {
+        "google_docs_get_document": "google_docs_read",
         "google_docs_create_document": "google_docs_write",
         "google_docs_insert_text": "google_docs_write",
         "google_docs_replace_text": "google_docs_write",
@@ -444,7 +445,11 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "download_photo": "unsplash",
     },
     "email": {"email_user": "smtp_send_email"},
-    "twilio": {"get_call_details": "twilio_read", "list_messages": "twilio_read"},
+    "twilio": {
+        "send_sms": "twilio_send",
+        "get_call_details": "twilio_read",
+        "list_messages": "twilio_read",
+    },
     "discord": {
         "get_channel_messages": "discord_read",
         "get_channel_info": "discord_read",
@@ -734,10 +739,10 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "confluence_add_comment": "confluence_write",
     },
     "slack": {
-        "slack_search": "slack_inspect",
-        "slack_recent": "slack_inspect",
-        "slack_read": "slack_inspect",
-        "slack_download": "slack_inspect",
+        "slack_inspect": "slack_read",
+        "slack_search": "slack_read",
+        "slack_recent": "slack_read",
+        "slack_download": "slack_read",
         "slack_post": "slack_send",
         "slack_upload": "slack_send",
         "slack_react": "slack_manage",
@@ -746,9 +751,9 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
     # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
     # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
-    #   naming any of the 23 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
-    #   and email_invite (the 4 kept zero-arg reads remain list_shared_directories, list_contacts, agent_settings,
-    #   and list_email_invites).
+    #   naming any of the 26 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
+    #   and email_invite (including the renamed single-verb reads shared_directories_read, contacts_read, and
+    #   email_invite_read; agent_settings remains the kept zero-arg read).
     # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
     #   functions with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
@@ -758,6 +763,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
     #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
     "shared_directories": {
+        "list_shared_directories": "shared_directories_read",
         "create_shared_directory": "shared_directories_write",
         "invite_to_shared_directory": "shared_directories_write",
         "remove_from_shared_directory": "shared_directories_write",
@@ -766,6 +772,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "decline_shared_directory": "shared_directories_write",
     },
     "contacts": {
+        "list_contacts": "contacts_read",
         "request_contact": "contacts_write",
         "accept_contact": "contacts_write",
         "decline_contact": "contacts_write",
@@ -787,6 +794,7 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "delete_agent": "agent_manager_write",
     },
     "email_invite": {
+        "list_email_invites": "email_invite_read",
         "invite_by_email": "email_invite_write",
         "revoke_email_invite": "email_invite_write",
     },
@@ -804,7 +812,8 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "terminal_list": "terminal_read",
     },
     "claude_agent": {
-        "claude_session_status": "claude_agent_status",
+        "claude_session_status": "claude_agent_read",
+        "claude_agent_status": "claude_agent_read",
         "claude_start_session": "claude_agent_write",
         "claude_send": "claude_agent_write",
         "claude_interrupt": "claude_agent_write",
@@ -834,6 +843,8 @@ STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
         "knowledge_graph",
         "agent_manager",
         "email_invite",
+        "google_docs",
+        "twilio",
         "calculator",
         "duckduckgo",
         "googlesearch",

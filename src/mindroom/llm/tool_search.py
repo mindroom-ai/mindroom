@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import ast
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
 from mindroom.llm.provider import DeferredTools
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Container, Mapping
+    from collections.abc import AsyncIterator, Container
 
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
@@ -106,6 +107,28 @@ def resolve_call_tool_calls(tool_calls: list[dict[str, Any]], callable_names: Co
     return [_resolved_call(call, callable_names) for call in tool_calls]
 
 
+def _resolve_function_name(name: object, callable_names: Container[str]) -> str | None:
+    """Return the callable function name targeted by ``call_tool``, accepting ``<toolkit>.<function>``."""
+    if not isinstance(name, str) or name == _CALL_TOOL_NAME:
+        return None
+    if name in callable_names:
+        return name
+    if not isinstance(callable_names, Mapping) or "." not in name:
+        return None
+    prefix, _, candidate = name.rpartition(".")
+    if not prefix or not candidate or candidate == _CALL_TOOL_NAME:
+        return None
+    target = callable_names.get(candidate)
+    if target is None:
+        return None
+    owners = {
+        owner
+        for owner in (getattr(target, "toolkit", None), getattr(target, "registered_toolkit", None))
+        if isinstance(owner, str) and owner
+    }
+    return candidate if prefix in owners else None
+
+
 def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict[str, Any]:
     function = call.get("function")
     if not isinstance(function, dict) or function.get("name") != _CALL_TOOL_NAME:
@@ -113,8 +136,8 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     payload = arguments_object(function.get("arguments") or "{}")
     if payload is None:
         return call
-    name = payload.get("name")
-    if not isinstance(name, str) or name == _CALL_TOOL_NAME or name not in callable_names:
+    name = _resolve_function_name(payload.get("name"), callable_names)
+    if name is None:
         return call
     # Weaker models sometimes send the nested arguments as a JSON string.
     raw_arguments = payload.get("arguments")

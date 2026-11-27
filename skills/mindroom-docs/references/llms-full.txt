@@ -8812,7 +8812,7 @@ Only personal agents built from a `personal_agents` template can be contacts; ag
 
 | Function | Approval card | What it does |
 | --- | --- | --- |
-| `list_contacts()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
+| `contacts_read()` | No | Lists your contacts with their ID, status, the room of an active contact, which side you are on, the other party, the reason, and the rules and tools your agent has there, plus other owners' personal agents that you can ask |
 | `contacts_write(action, contact_id=None, target=None, reason=None, rules=None, tools=None, party=None)` | Yes | Runs one contact write: `request` (asks `target` with `reason`, optional `rules`, `tools`, and `party="agent"\|"me"`), `accept` (accepts `contact_id` with optional `rules` and `tools` and opens the contact room), `decline` (declines `contact_id`), `update` (changes your side's `rules` or `tools` on `contact_id`; blank `rules` clear them), or `remove` (ends `contact_id` and leaves its room) |
 
 Only the agent's owner can use these tools; anyone else, administrators included, gets `Only <owner> may use the contacts of <agent>`.
@@ -8898,7 +8898,7 @@ The judge is never given a message that looks like it contains a secret such as 
 
 - People without a personal agent on this deployment cannot be contacted and cannot ask, while agents of other deployments can (see [Contacts With Other Deployments](#contacts-with-other-deployments)).
 - In a thread that another deployment's agent wrote in, an unmentioned message from an owner gets no reply, as that agent counts as a second person there, so mention your agent.
-- A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `list_contacts`.
+- A request from another deployment whose notice could not be posted, for example because your personal-room agent was stopped, shows only on the Contacts page and in `contacts_read`.
 - In [minimal mode](https://docs.mindroom.chat/tools/agent-cli/), an agent can answer in contact turns only when the contact's tools include `shell`.
 - After a config reload removes `contacts` from one agent, or removes the agent, the other agent of each of its contacts stays in the contact room until it restarts, and does nothing there.
 - Removing a template while MindRoom is stopped leaves its agents' contacts active: the other side's agent keeps writing into their rooms with no reply, and bringing the template back restores them; the other owner can end such a contact with `contacts_write(action="remove", ...)`.
@@ -8911,7 +8911,7 @@ The contacts tools return errors to the agent as `Error: <message>`, and `matrix
 | --- | --- |
 | `<target> cannot be contacted: contacts are not enabled for it` | The target's template has no `contacts`; an administrator adds it |
 | `<target> cannot be contacted: only personal agents and people can be contacted` | The target is an authored or created agent; use its `access` instead |
-| `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `list_contacts` shows the agents that can be asked |
+| `<target> cannot be contacted: it is neither a personal agent nor a Matrix user ID` | The name is wrong; `contacts_read` shows the agents that can be asked |
 | `<agent> is not a personal agent; only personal agents can have contacts` | `contacts` is set on an authored agent; set it on a `personal_agents` template instead |
 | `<owner>'s personal agent <agent> does not take contact requests` | The agent of the target owner's personal room has no `contacts`; add `contacts` to the template `personal_rooms.agent` names |
 | `<owner> has no personal agent here, so a request cannot reach them; ...` | The target person is not onboarded on this deployment, or the target is another deployment's agent that `remote_agents` does not name; onboard the person, or add the agent's Matrix ID to `remote_agents` |
@@ -12036,7 +12036,7 @@ agents:
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
-It provides `list_shared_directories()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
+It provides `shared_directories_read()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
 
 ### Setup
 
@@ -12065,7 +12065,7 @@ agents:
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
 It calls `shared_directories_write(action="create", name="report")` and `shared_directories_write(action="invite", name="report", agent_name="writer")`, and from then on both agents see the directory's path in their prompts.
-`list_shared_directories()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
+`shared_directories_read()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
 
 ### Sharing between personal agents
 
@@ -12091,7 +12091,7 @@ agents:
 ```
 
 Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
-Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `list_shared_directories()` also shows who asked and when.
+Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `shared_directories_read()` also shows who asked and when.
 When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `shared_directories_write(action="accept", owner="ann_assistant", name="notes")` and reads the files from then on.
 The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 
@@ -12580,8 +12580,8 @@ tool_approval:
 
 | Function | Actions | What it does |
 | --- | --- | --- |
-| `google_docs_get_document(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
-| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
+| `google_docs_read(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
+| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_read` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -12591,7 +12591,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `create_document` | `boolean` | `true` | Enable `google_docs_write(action="create")`. |
-| `read_document` | `boolean` | `true` | Enable `google_docs_get_document()`. |
+| `read_document` | `boolean` | `true` | Enable `google_docs_read()`. |
 | `edit_document` | `boolean` | `true` | Enable `google_docs_write()` `insert_text`, `replace_text`, and `batch_update` actions. |
 
 ## [`google_sheets`]
@@ -14076,12 +14076,12 @@ Attachment IDs (`att_*`) are limited to the current conversation and IDs registe
 
 ## [`matrix_room`]
 
-`matrix_room(action="room-info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
+`matrix_room(action="room_info", room_id=None, limit=None, event_type=None, state_key=None, page_token=None, include_summaries=False, workflow=None)` reads room data and never writes.
 Use `matrix_message` or `matrix_api` for writes.
 
 | Action | Returns |
 |--------|---------|
-| `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
+| `room_info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
 | `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads, unless a foreground approval asked after the resolve still waits), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
@@ -14302,7 +14302,7 @@ react("$event_id", "👍")
 
 ## [`email_invite`]
 
-`list_email_invites()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
+`email_invite_read()` lists the room's open invites with their state (`waiting` or `sent`), asker, approver and expiry.
 `email_invite_write(action, email)` invites (`action="invite"`) or revokes (`action="revoke"`) one address in the current room; whether it asks for approval first follows your [approval rules](https://docs.mindroom.chat/tool-approval/), and a `require_approval` rule for `email_invite_write` is recommended (timed grants are scoped per `action`).
 When `action="invite"` is called for a person who may invite, it mails a single-use link, or returns the link to forward by hand when no mail server is configured; otherwise the request waits until someone who may invite asks an agent in the room to "approve the invite for" that address.
 With `action="revoke"`, its asker, its approver, or anyone who may invite can revoke an open invite, and an invite already used is reported with the account that used it.
@@ -14365,7 +14365,7 @@ matrix_api(
 `matrix_user` lets a [personal agent](https://docs.mindroom.chat/personal-agents/) use Matrix as its owner, with no sign-in: it reads the owner's own rooms and DMs, including rooms the agent is not in, and writes as the owner when they ask.
 It acts only for the agent's owner, in any turn that runs for them, such as a chat with the agent or one of their scheduled tasks, or, for reads, through the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/), and refuses, saying why, anyone else, any other agent, and a [contact conversation](https://docs.mindroom.chat/agent-contacts/).
 
-`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` sends nothing as the owner, and only `mark_read` changes anything: the owner's own read state.
+`matrix_user_read(action, room_id=None, event_id=None, thread_id=None, query=None, page_token=None, limit=None)` reads as the owner and changes nothing.
 
 | Action | Returns |
 |--------|---------|
@@ -14375,7 +14375,6 @@ It acts only for the agent's owner, in any turn that runs for them, such as a ch
 | `room` | The name, topic, encryption, whether it is a DM, the joined member count, and up to `limit` members (default 50, at most 200) of the room `room_id` names |
 | `people` | With a full Matrix ID as `query`, that person's profile; otherwise people the user directory finds, `limit` defaulting to 10 (at most 50) |
 | `download` | The file, at most 64 MiB, of the message `event_id` in `room_id`, as an `attachment_id` the agent's other tools accept in the current conversation, so not through the MCP gateway |
-| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 Messages in encrypted rooms are not readable: each shows as `[encrypted, not readable]`, several in a row as one line such as `[3 encrypted messages, not readable]`, and search does not find them.
 
@@ -14401,6 +14400,7 @@ A rule with `arguments` (or a `script` rule) can decide per call from the argume
 | `join`, `leave` | Joins or leaves `room_id` |
 | `invite` | Invites `user_id` into `room_id` |
 | `create_room` | Creates a private room called `name` and invites nobody; `invite` adds people |
+| `mark_read` | Marks `room_id` read up to `event_id`, or up to its newest message, with a private read receipt that others do not see, and clears the owner's marked-unread flag |
 
 What it sends shows as the owner's to everyone, but MindRoom never takes it as the owner speaking: it starts no reply, runs no command, and approves or denies nothing, so the agent talks to other agents as itself.
 Nothing is sent, reacted, or edited into an encrypted room.
@@ -14896,9 +14896,9 @@ agents:
 
 ## [`twilio`]
 
-`twilio` sends SMS with `send_sms` and reads call details or recent messages with `twilio_read`.
+`twilio` sends SMS with `twilio_send` and reads call details or recent messages with `twilio_read`.
 Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `api_secret` pair; the pair wins when both are set.
-`send_sms()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
+`twilio_send()` rejects sender and recipient numbers that are not in E.164 format, such as `+15551234567`, and the sender must be a number on the Twilio account.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -14909,7 +14909,7 @@ Authenticate with `account_sid` plus either `auth_token` or the `api_key` and `a
 | `region` | `text` | `null` | Twilio region, such as `au1`, or `TWILIO_REGION`. |
 | `edge` | `text` | `null` | Twilio edge location, such as `sydney`, or `TWILIO_EDGE`. |
 | `debug` | `boolean` | `false` | Log Twilio HTTP requests. |
-| `enable_send_sms` | `boolean` | `true` | Enable `send_sms()`. |
+| `enable_send_sms` | `boolean` | `true` | Enable `twilio_send()`. |
 | `enable_get_call_details` | `boolean` | `true` | Read call details. |
 | `enable_list_messages` | `boolean` | `true` | List recent SMS. |
 | `all` | `boolean` | `false` | Enable all actions. |
@@ -15739,7 +15739,7 @@ An agent works in one of two modes, chosen by whether its `slack` entry lists `c
 
 | Function | Actions | Personal | Project |
 | --- | --- | --- | --- |
-| `slack_inspect` | `search` (messages, conversations, or people), `recent` (newest-first DMs or channels within `days`), `read` (latest messages or a thread), and `download` (up to 50 MB into `slack-downloads/`) | all actions; `search` supports `messages`, `conversations`, and `people`; `recent` lists `dms` or `channels` | `search` (`conversations` only), `read`, and `download` within the agent's channels (`recent` is hidden) |
+| `slack_read` | `search` (messages, conversations, or people), `recent` (newest-first DMs or channels within `days`), `read` (latest messages or a thread), and `download` (up to 50 MB into `slack-downloads/`) | all actions; `search` supports `messages`, `conversations`, and `people`; `recent` lists `dms` or `channels` | `search` (`conversations` only), `read`, and `download` within the agent's channels (`recent` is hidden) |
 | `slack_send` | `post` (message or thread reply) and `upload` (workspace file up to 50 MB with optional `title` and `comment`) | as the person; a user ID opens a direct message | as the app, in the agent's channels |
 | `slack_manage` | `edit` (replace message text), `delete` (delete a message), and `react` (add an emoji reaction) | as the person (only messages Slack allows them to edit/delete) | as the app, in the agent's channels |
 
@@ -15996,7 +15996,7 @@ tool_approval:
       action: require_approval
 ```
 
-Timed approval grants for `slack_inspect`, `slack_send`, and `slack_manage` are scoped per `action` (for example, approving `slack_manage(action="react")` does not auto-approve `slack_manage(action="delete")`).
+Timed approval grants for `slack_read`, `slack_send`, and `slack_manage` are scoped per `action` (for example, approving `slack_manage(action="react")` does not auto-approve `slack_manage(action="delete")`).
 
 The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool calls, so these rules do not gate them.
 
@@ -16006,7 +16006,7 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 - If MindRoom is unreachable for more than a few minutes, Slack stops resending, and those messages never reach agents.
 - Messages sent directly to the app in Slack are not answered.
 - While anyone's watch takes direct messages, every direct message that a connected person sends or receives costs one Slack request to check who can see it, which counts against Slack's rate limits.
-- `slack_inspect(action="recent")` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
+- `slack_read(action="recent")` makes one Slack request per conversation, so for a person in many conversations Slack's rate limit, or more than 1,000 conversations, ends a call early.
   The call then answers with the conversations it read, `complete: false`, and a `next_cursor`; the agent waits `retry_after` seconds, calls again with that cursor to read the next conversations, and merges the batches.
 
 ## Troubleshooting
@@ -16017,12 +16017,12 @@ The 👀 reaction and the reply MindRoom posts to a Slack mention are not tool c
 | `Invite the MindRoom app to <#C0123ABCD>` | The app has not joined that listed channel. Invite it. |
 | `Not one of this agent's Slack channels` | The conversation is not in the agent's `channels`, or it is a direct message. |
 | `This file is not in one of this agent's Slack channels` | A project agent downloads only files shared in its channels. |
-| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_inspect(action="download")` takes files, not canvases or posts. |
+| `Slack canvases and posts can't be downloaded as files; open them in Slack` | `slack_read(action="download")` takes files, not canvases or posts. |
 | `Message and people search need a personal Slack connection` | A project agent searches only conversations. |
 | `Slack needs the <scope> permission; reconnect Slack to grant it` | A personal connection lacks a user scope. Reconnect Slack. |
 | `Slack needs the <scope> permission; add it to the MindRoom Slack app` | A project call needs a bot scope. Add it in the app and reinstall the app. |
 | `Slack rate limit, retry after 30s` | Slack asked to wait; the agent can retry then. |
-| `Slack did not answer; the message may have been sent, so check with slack_inspect(action="read") before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
+| `Slack did not answer; the message may have been sent, so check with slack_read(action="read") before retrying` | A post, edit, delete, or upload may have gone through; check before trying again. |
 | `Slack refused the request: <code>` | Slack's own error code: for example, `channel_not_found` means the account cannot see that conversation, `not_in_channel` means it is not a member, so join it or invite the app, and `cant_update_message` or `cant_delete_message` means the account may not change that message. |
 | `path '<path>' must be an existing file inside the agent workspace` | `slack_send(action="upload")` reads only workspace files under the default `file_access`; save the file in the workspace first. |
 | `<path> is <size> bytes; the limit is 52428800 bytes.` | `slack_send(action="upload")` takes files of up to 50 MB. |
@@ -17257,13 +17257,13 @@ agent_manager_write(
 It runs code in the primary runtime and cannot run in a worker, so enable it only for agents trusted with everything the primary runtime can reach; see [Security Posture](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 To make Claude on a Claude subscription the agent's own model, with MindRoom's tools instead of Claude Code's, use the [`claude_code` model provider](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) instead.
 
-The tool exposes `claude_agent_status()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
+The tool exposes `claude_agent_read()` and `claude_agent_write(action=...)` (`start`, `send`, `interrupt`, and `end`).
 `claude_agent_write(action="send")` creates the session if needed, so `claude_agent_write(action="start")` is optional.
 Each agent gets one session per conversation, and a `session_label` opens additional independent sessions in the same conversation.
 Calls to the same session run one after another.
 When Claude Code reports on its own between calls, such as when a background task finishes, that report starts the next `claude_agent_write(action="send")` reply.
 `resume` (a Claude session ID) and `fork_session=True` apply only when a session is created; `fork_session` requires `resume`, and passing either for an existing session returns an error asking for another `session_label` or `claude_agent_write(action="end")` first.
-`claude_agent_status()` reports age, idle time, and the Claude session ID once Claude has returned a result.
+`claude_agent_read()` reports age, idle time, and the Claude session ID once Claude has returned a result.
 When Claude fails while processing a prompt, `claude_agent_write(action="send")` returns the error with the last lines of Claude CLI stderr, to help debug gateway or CLI problems, and closes that session, so the next call starts a new one.
 Through the OpenAI-compatible API, keep the same `X-Session-Id` across requests to reuse one Claude session; see [Session continuity](https://docs.mindroom.chat/openai-api/#session-continuity).
 
@@ -17320,7 +17320,7 @@ claude_agent_write(
     prompt="Refactor the failing test and explain the diff.",
     session_label="bugfix",
 )
-claude_agent_status(session_label="bugfix")
+claude_agent_read(session_label="bugfix")
 claude_agent_write(action="interrupt", session_label="bugfix")
 claude_agent_write(action="end", session_label="bugfix")
 ```
@@ -18135,7 +18135,7 @@ A person *may invite* when they are joined to the room with a power level at or 
 
 Asking again for an address that was already sent replaces the old link, which stops working.
 
-`list_email_invites()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
+`email_invite_read()` shows the room's open invites, `email_invite_write(action="invite", email=...)` invites an address, and `email_invite_write(action="revoke", email=...)` revokes one; the asker, the approver, or anyone who may invite can revoke.
 
 ## Without a Mail Server
 
@@ -19241,7 +19241,7 @@ Do not report or "fix" these; they are deliberate.
 - An `exploration` run is an ordinary turn started by an automation prompt, with the agent's own tools and approval rules, so content it reads can steer it as it could any turn that reads untrusted content; approval rules, not the prompt's instruction to only read, stop writes.
 - A shared agent's exploration follows tool calls from every requester's conversations with that agent's own credentials, so one requester can lead it to read something their own access cannot and then query the result in the shared graph; use a private agent when requesters must stay apart.
 - Knowledge graph extraction reads tool results that worker code produced, so a crafted result can add wrong facts to the graph, each attributed to its source; it runs nothing in the primary.
-- A personal `slack_inspect(action="download")` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
+- A personal `slack_read(action="download")` saves a file the requester can see in Slack into the agent's workspace, so on a non-private agent every requester of that agent can read it; personal Slack belongs on `private` agents.
 - `google_drive_read(action="download")`, on by default, saves a file the connected Google account can see into the agent's workspace, so on a non-private agent with requester-owned Google Drive connections every requester of that agent can read another requester's downloads; such connections belong on `private` agents.
 - A non-private agent's workspace is shared by every requester's runtime for that agent, including `user` and `user_agent` workers, so files one requester leaves there (such as `.mindroom/worker-env.sh`, `.pth` files, or Git config) can run in another requester's runtime; use `private` agents when requesters need isolation from each other.
 - Likewise, a non-private agent's primary-process `browser` profiles and default artifacts live in that agent's state root and are shared by all of its requesters, as is a started profile's running browser with its open tabs, so one requester can use web sessions another signed in, read pages another left open, and upload screenshots another took; they never cross agents or the requesters of a private agent.

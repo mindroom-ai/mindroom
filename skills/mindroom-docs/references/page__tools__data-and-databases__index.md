@@ -294,8 +294,8 @@ tool_approval:
 
 | Function | Actions | What it does |
 | --- | --- | --- |
-| `google_docs_get_document(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
-| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
+| `google_docs_read(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
+| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_read` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -305,7 +305,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `create_document` | `boolean` | `true` | Enable `google_docs_write(action="create")`. |
-| `read_document` | `boolean` | `true` | Enable `google_docs_get_document()`. |
+| `read_document` | `boolean` | `true` | Enable `google_docs_read()`. |
 | `edit_document` | `boolean` | `true` | Enable `google_docs_write()` `insert_text`, `replace_text`, and `batch_update` actions. |
 
 ## [`google_sheets`]

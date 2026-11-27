@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     icon="FolderOpen",
     icon_color="text-amber-500",
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
-    function_names=("list_shared_directories", "shared_directories_write"),
+    function_names=("shared_directories_read", "shared_directories_write"),
     action_scoped_grants=("shared_directories_write",),
 )
 def shared_directories_tools() -> type[SharedDirectoryTools]:

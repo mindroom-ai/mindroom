@@ -226,7 +226,7 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
         "gmail": ("secondary_gmail_read", {"action": "latest"}),
         "google_calendar": ("secondary_google_calendar_read", {"action": "list_calendars"}),
         "google_drive": ("secondary_google_drive_read", {"action": "list"}),
-        "google_docs": ("secondary_google_docs_get_document", {"document_id": "test"}),
+        "google_docs": ("secondary_google_docs_read", {"document_id": "test"}),
         "google_sheets": ("secondary_google_sheets_read", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
         "google_tasks": ("secondary_google_tasks_read", {"action": "list_tasks"}),
     }[service]

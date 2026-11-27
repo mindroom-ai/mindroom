@@ -61,6 +61,7 @@ from mindroom.config.legacy_fields import (
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
     rename_legacy_knowledge_reranker,
+    retired_action_argument_approval_error,
     retired_builtin_approval_error,
     retired_consolidated_approval_error,
     retired_tool_message,
@@ -1782,18 +1783,31 @@ class Config(BaseModel):
         ):
             raise ToolConfigOverrideError(slack_watch_error)
 
+        if (
+            action_arg_error := retired_action_argument_approval_error(
+                enabled_toolkits,
+                self.tool_approval.rules,
+            )
+        ) is not None:
+            raise ToolConfigOverrideError(action_arg_error)
+
         # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
         for toolkit_name in sorted(enabled_toolkits | {"skills"}):
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
+            strict_toolkit = toolkit_name
             metadata = tools.entries.get(toolkit_name)
+            prefixed_builtin = False
             if (
                 builtin_renames is None
                 and metadata is not None
-                and metadata.dependency_extra in RETIRED_CONSOLIDATED_FUNCTIONS
-                and toolkit_name.endswith(f"_{metadata.dependency_extra}")
+                and (base_service := metadata.dependency_extra) is not None
+                and base_service in RETIRED_CONSOLIDATED_FUNCTIONS
+                and toolkit_name.endswith(f"_{base_service}")
             ):
-                base_renames = RETIRED_CONSOLIDATED_FUNCTIONS[metadata.dependency_extra]
-                prefix = toolkit_name.removesuffix(f"_{metadata.dependency_extra}")
+                prefixed_builtin = True
+                strict_toolkit = base_service
+                base_renames = RETIRED_CONSOLIDATED_FUNCTIONS[base_service]
+                prefix = toolkit_name.removesuffix(f"_{base_service}")
                 if all(f"{prefix}_{new}" in metadata.function_names for new in set(base_renames.values())):
                     builtin_renames = {f"{prefix}_{old}": f"{prefix}_{new}" for old, new in base_renames.items()}
             declared_renames = metadata.retired_functions if metadata is not None else None
@@ -1802,12 +1816,12 @@ class Config(BaseModel):
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
             if (
                 consolidated_error := retired_consolidated_approval_error(
-                    toolkit_name,
+                    strict_toolkit,
                     self.tool_approval.rules,
                     self.tool_approval.default,
                     self.tool_approval.timeout_days,
                     renames=renames,
-                    reject_wildcard_scripts=True if declared_renames else None,
+                    reject_wildcard_scripts=True if declared_renames and not prefixed_builtin else None,
                     agent_names=self.agents.keys(),
                 )
             ) is not None:
