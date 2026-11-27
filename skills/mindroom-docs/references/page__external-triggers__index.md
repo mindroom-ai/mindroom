@@ -243,7 +243,6 @@ Users normally describe what they want in plain language in chat and let the age
   def check():
       reading = json.loads(tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door"))
       if reading.get("state") != "open" or not reading.get("last_changed"):
-          state.delete("alerted_for")
           return None
       last_changed = reading["last_changed"]
       opened_at = datetime.fromisoformat(last_changed.replace("Z", "+00:00"))
