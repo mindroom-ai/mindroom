@@ -12,12 +12,13 @@ from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_SPLIT_FUNCTIONS,
     SINGLE_VERB_RENAMED_TARGETS,
+    SPLIT_APPROVAL_ONLY_FUNCTIONS,
     STRICT_WILDCARD_SCRIPT_RENAMES,
     STRICT_WILDCARD_SCRIPT_TOOLKITS,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from typing import Protocol
 
     class _ApprovalRule(Protocol):
@@ -340,10 +341,23 @@ def _probe_agents(rules: Sequence[_ApprovalRule], agent_names: Collection[str] =
     return tuple(dict.fromkeys(probes))
 
 
-def _agent_rule_indices(rules: Sequence[_ApprovalRule], name: str, agent_name: str) -> tuple[int, ...]:
+def _agent_rule_indices(
+    rules: Sequence[_ApprovalRule],
+    name: str,
+    agent_name: str,
+    *,
+    moved_actions: Collection[str] | None = None,
+) -> tuple[int, ...]:
     indices: list[int] = []
     for index, rule in enumerate(rules):
         if not rule.matches_tool(name) or not rule.matches_agent(agent_name):
+            continue
+        if (
+            moved_actions is not None
+            and rule.script is None
+            and rule.arguments is not None
+            and all(rule.fixed_arguments_match({"action": action}) == "no" for action in moved_actions)
+        ):
             continue
         indices.append(index)
         if rule.arguments is None:
@@ -369,29 +383,6 @@ def approval_rule_a_file_rename_escapes(
                 return f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; {old} is now {new}"
     return None
 
-
-# LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
-# Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
-#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key) and
-#   later a separate watch_pr function, which could appear in tool_approval.rules[].match globs or
-#   include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.480 (original 8) and v2026.11.633 (watch_pr); replacement: unreleased; all 9 were
-#   collapsed into a single `triggers` function taking an `action` parameter.
-# Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
-#   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
-#   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
-#   also reject include_tools or exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
-# Coverage:
-#   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
-#   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
-#   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load,
-#   tests/test_triggers_tool.py::test_retired_trigger_approval_check_skips_configs_without_triggers,
-#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
-#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_changing_timeout_days_fails,
-#   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
-_SPLIT_APPROVAL_ONLY_FUNCTIONS: dict[str, dict[str, tuple[str, ...]]] = {
-    "browser": {"browser_control": ("browser_read",)},
-}
 
 # LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
 # Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
@@ -639,8 +630,9 @@ def _retired_approval_pair_failure_for_agent(
     default_timeout_days: float,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
+    moved_actions: Collection[str] | None = None,
 ) -> tuple[_RetiredApprovalFailureKind, int] | None:
-    old_indices = _agent_rule_indices(rules, old, agent)
+    old_indices = _agent_rule_indices(rules, old, agent, moved_actions=moved_actions)
     new_indices = _agent_rule_indices(rules, new, agent)
     shared_prefix_len = 0
     for old_index, new_index in zip(old_indices, new_indices, strict=False):
@@ -728,6 +720,7 @@ def _retired_approval_pair_error_for_agent(
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
     split_from_active: bool = False,
+    moved_actions: Collection[str] | None = None,
     all_replacements: tuple[str, ...] | None = None,
 ) -> str | None:
     failure = _retired_approval_pair_failure_for_agent(
@@ -739,6 +732,7 @@ def _retired_approval_pair_error_for_agent(
         default_timeout_days=default_timeout_days,
         reject_wildcard_scripts=reject_wildcard_scripts,
         broad_probe=broad_probe,
+        moved_actions=moved_actions,
     )
     if failure is None:
         return None
@@ -764,11 +758,13 @@ def _first_retired_approval_error(
     broad_probe: str | None = None,
     agent_names: Collection[str] = (),
     split_from_active: bool = False,
+    moved_actions_by_pair: Mapping[tuple[str, str], Collection[str]] | None = None,
     split_replacements: Mapping[str, tuple[str, ...]] | None = None,
 ) -> str | None:
     probes = _probe_agents(rules, agent_names)
     for old, new in pairs:
         all_replacements = split_replacements.get(old) if split_replacements is not None else None
+        moved_actions = moved_actions_by_pair.get((old, new)) if moved_actions_by_pair is not None else None
         for agent in probes:
             if (
                 error := _retired_approval_pair_error_for_agent(
@@ -781,6 +777,7 @@ def _first_retired_approval_error(
                     reject_wildcard_scripts=reject_wildcard_scripts,
                     broad_probe=broad_probe,
                     split_from_active=split_from_active,
+                    moved_actions=moved_actions,
                     all_replacements=all_replacements,
                 )
             ) is not None:
@@ -862,9 +859,14 @@ def retired_action_argument_approval_error(
 
 def _collect_consolidated_approval_targets(
     toolkit_checks: Sequence[tuple[str, Mapping[str, str], bool | None]],
-) -> tuple[dict[str, dict[str, bool]], list[tuple[Mapping[str, tuple[str, ...]], bool]]]:
+) -> tuple[
+    dict[str, dict[str, bool]],
+    list[tuple[Mapping[str, tuple[str, ...]], bool]],
+    list[tuple[Mapping[str, Mapping[str, frozenset[str]]], bool]],
+]:
     targets_by_old: dict[str, dict[str, bool]] = {}
     split_checks: list[tuple[Mapping[str, tuple[str, ...]], bool]] = []
+    split_only_checks: list[tuple[Mapping[str, Mapping[str, frozenset[str]]], bool]] = []
     for toolkit_name, renames, reject_wildcard_scripts in toolkit_checks:
         toolkit_strict = (
             toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS
@@ -882,7 +884,9 @@ def _collect_consolidated_approval_targets(
             targets[new] = targets.get(new, False) or reject_wildcards
         if (split_renames := RETIRED_SPLIT_FUNCTIONS.get(toolkit_name)) is not None:
             split_checks.append((split_renames, toolkit_strict))
-    return targets_by_old, split_checks
+        if (split_only := SPLIT_APPROVAL_ONLY_FUNCTIONS.get(toolkit_name)) is not None:
+            split_only_checks.append((split_only, toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS))
+    return targets_by_old, split_checks, split_only_checks
 
 
 def _normalize_consolidated_toolkit_checks(
@@ -893,9 +897,55 @@ def _normalize_consolidated_toolkit_checks(
     if not isinstance(toolkit_or_checks, str):
         return toolkit_or_checks
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_or_checks) if renames is None else renames
-    if not effective_renames and toolkit_or_checks not in RETIRED_SPLIT_FUNCTIONS:
+    if (
+        not effective_renames
+        and toolkit_or_checks not in RETIRED_SPLIT_FUNCTIONS
+        and toolkit_or_checks not in SPLIT_APPROVAL_ONLY_FUNCTIONS
+    ):
         return ()
     return [(toolkit_or_checks, effective_renames or {}, reject_wildcard_scripts)]
+
+
+def _first_split_approval_error(
+    split_checks: Sequence[tuple[Mapping[str, tuple[str, ...]], bool]],
+    split_only_checks: Sequence[tuple[Mapping[str, Mapping[str, frozenset[str]]], bool]],
+    *,
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float,
+    agent_names: Collection[str],
+) -> str | None:
+    for split_renames, toolkit_strict in split_checks:
+        if (
+            split_error := _first_retired_approval_error(
+                ((old, new) for old, replacements in split_renames.items() for new in replacements),
+                rules=rules,
+                default=default,
+                default_timeout_days=default_timeout_days,
+                reject_wildcard_scripts=toolkit_strict,
+                agent_names=agent_names,
+                split_replacements=split_renames,
+            )
+        ) is not None:
+            return split_error
+    for split_only, toolkit_strict in split_only_checks:
+        moved_by_pair = {
+            (old, new): moved_actions for old, targets in split_only.items() for new, moved_actions in targets.items()
+        }
+        if (
+            split_only_error := _first_retired_approval_error(
+                moved_by_pair,
+                rules=rules,
+                default=default,
+                default_timeout_days=default_timeout_days,
+                reject_wildcard_scripts=toolkit_strict,
+                agent_names=agent_names,
+                split_from_active=True,
+                moved_actions_by_pair=moved_by_pair,
+            )
+        ) is not None:
+            return split_only_error
+    return None
 
 
 def retired_consolidated_approval_error(
@@ -913,10 +963,11 @@ def retired_consolidated_approval_error(
     Accepts either a single toolkit name (with optional ``renames``/``reject_wildcard_scripts`` for direct callers and
     plugins) or a sequence of ``(toolkit_name, renames, reject_wildcard_scripts)`` checks grouped across enabled
     toolkits so shared bare names (such as ``run_query`` across ``postgres`` and ``redshift``) name every failing
-    replacement at once, and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS``.
+    replacement at once, and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS`` and
+    ``SPLIT_APPROVAL_ONLY_FUNCTIONS``.
     """
     toolkit_checks = _normalize_consolidated_toolkit_checks(toolkit_name, renames, reject_wildcard_scripts)
-    targets_by_old, split_checks = _collect_consolidated_approval_targets(toolkit_checks)
+    targets_by_old, split_checks, split_only_checks = _collect_consolidated_approval_targets(toolkit_checks)
 
     probes = _probe_agents(rules, agent_names)
     for old, targets in targets_by_old.items():
@@ -955,56 +1006,36 @@ def retired_consolidated_approval_error(
                 kept_news=kept_news,
             )
 
-    for split_renames, toolkit_strict in split_checks:
-        if (
-            split_error := _first_retired_approval_error(
-                ((old, new) for old, replacements in split_renames.items() for new in replacements),
-                rules=rules,
-                default=default,
-                default_timeout_days=default_timeout_days,
-                reject_wildcard_scripts=toolkit_strict,
-                agent_names=agent_names,
-                split_replacements=split_renames,
-            )
-        ) is not None:
-            return split_error
-    return None
-
-
-def retired_split_approval_only_error(
-    toolkit_name: str,
-    rules: Sequence[_ApprovalRule],
-    default: str,
-    default_timeout_days: float = 7.0,
-    agent_names: Collection[str] = (),
-) -> str | None:
-    """Return a migration error when read actions moved out of an active function lack explicit approval rules."""
-    split_renames = _SPLIT_APPROVAL_ONLY_FUNCTIONS.get(toolkit_name)
-    if not split_renames:
-        return None
-    return _first_retired_approval_error(
-        ((old, new) for old, replacements in split_renames.items() for new in replacements),
+    return _first_split_approval_error(
+        split_checks,
+        split_only_checks,
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
-        reject_wildcard_scripts=toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS,
         agent_names=agent_names,
-        split_from_active=True,
     )
 
 
-def _retired_function_filter(
+def _iter_filter_names(settings: Mapping[str, object], key: str) -> Iterator[str]:
+    value = settings.get(key)
+    raw = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    if not isinstance(raw, list):
+        return
+    for name in raw:
+        if isinstance(name, str) and (stripped := name.strip()):
+            yield stripped
+
+
+def _retired_function_filter[T](
     settings: Mapping[str, object],
-    renames: Mapping[str, str],
+    renames: Mapping[str, T],
     *,
-    guidance_for: Callable[[str, str, str], str],
+    guidance_for: Callable[[str, str, T], str],
 ) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
-        value = settings.get(key)
-        names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
-        for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (new := renames.get(old := name.strip())):
-                return f"{key}: {old}", guidance_for(key, old, new)
+        for old in _iter_filter_names(settings, key):
+            if (target := renames.get(old)) is not None:
+                return f"{key}: {old}", guidance_for(key, old, target)
     return None
 
 
@@ -1081,21 +1112,6 @@ def _retired_fallback_filter_guidance(
     )
 
 
-def _retired_split_function_filter(
-    settings: Mapping[str, object],
-    split_renames: Mapping[str, tuple[str, ...]],
-    *,
-    guidance_for: Callable[[str, str, tuple[str, ...]], str],
-) -> tuple[str, str] | None:
-    for key in ("include_tools", "exclude_tools"):
-        value = settings.get(key)
-        names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
-        for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (replacements := split_renames.get(old := name.strip())):
-                return f"{key}: {old}", guidance_for(key, old, replacements)
-    return None
-
-
 def _retired_split_filter_guidance(tool_name: str, key: str, old: str, replacements: tuple[str, ...]) -> str:
     joined = ", ".join(f"`{name}`" for name in replacements)
     if tool_name == "workflow":
@@ -1110,17 +1126,9 @@ def _retired_split_filter_guidance(tool_name: str, key: str, old: str, replaceme
     )
 
 
-def _tool_filter_names(settings: Mapping[str, object], key: str) -> set[str]:
-    value = settings.get(key)
-    raw = value.replace("\n", ",").split(",") if isinstance(value, str) else value
-    if not isinstance(raw, list):
-        return set()
-    return {name.strip() for name in raw if isinstance(name, str) and name.strip()}
-
-
 def _retired_browser_filter(settings: Mapping[str, object]) -> tuple[str, str] | None:
-    excluded = _tool_filter_names(settings, "exclude_tools")
-    included = _tool_filter_names(settings, "include_tools")
+    excluded = set(_iter_filter_names(settings, "exclude_tools"))
+    included = set(_iter_filter_names(settings, "include_tools"))
     if "browser_control" in excluded and "browser_read" not in excluded and "browser_read" not in included:
         return (
             "exclude_tools: browser_control",
@@ -1233,7 +1241,7 @@ def retired_stored_tool_setting(
     if (retired := _retired_custom_tool_setting(tool_name, settings)) is not None:
         return retired
     if (split_renames := RETIRED_SPLIT_FUNCTIONS.get(tool_name)) is not None and (
-        retired := _retired_split_function_filter(
+        retired := _retired_function_filter(
             settings,
             split_renames,
             guidance_for=partial(_retired_split_filter_guidance, tool_name),

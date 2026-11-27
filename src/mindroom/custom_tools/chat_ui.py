@@ -412,7 +412,7 @@ class ChatUITools(Toolkit):
     async def open_panel(self, panel: _SidePanel = "members") -> str:
         """Show a MindRoom Chat side panel: 'computer' or 'members'.
 
-        'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first worker browser call (`browser_read`/`browser_control` target='host' or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.
+        'computer' shows a live view of your worker browser (`browser_read`/`browser_control` target='host'). The user watches and can take control (e.g. to log in), which blocks your browser calls until handed back. Never navigates, takes control, or opens the user's local browser. Your first live worker browser call (`browser_control` or `browser_read` snapshot/screenshot with target='host', or `browser_mcp`) auto-shows it; call this only to reopen it in a later reply (max once/reply). 'members' lists room people/agents. Success means request sent, not opened.
 
         Args:
             panel: 'computer' (worker browser) or 'members' (default; room members).

@@ -31,7 +31,7 @@ from mindroom.tool_jobs.runtime import (
     workflow_job_standing,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
-from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.metadata import resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
@@ -75,13 +75,12 @@ _WORKFLOW_WRITE_DESCRIPTION = """\
 Start, cancel, resume, or save durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs). Use `workflow_read(action="list"|"get")` to list runs/saved workflows or inspect run status.
 
 Actions (only pass parameters for the chosen action):
-- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.
+- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile`, `max_cost_usd`.
 - `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).
 - `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=["n4"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).
 - `save`: save a run's script as `workflows/<name>.py` for `action="start", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {"arg": "meaning"}`.
 
 Script authoring (`action="start"`):
-Use when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.
 Define `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.
 
     from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
@@ -114,7 +113,7 @@ SDK:
 Durability & execution:
 - Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
 - `action="resume"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.
-- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `workflow_read(action="get")` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
+- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; top-level calls require `background_tool_jobs.enabled: true`, while nested calls wait inline; reports with failed calls note it on line 1). `workflow_read(action="get")` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
@@ -138,6 +137,10 @@ _ALLOWED_BY_FUNCTION: dict[str, dict[str, frozenset[str]]] = {
     _WORKFLOW_READ: _READ_ALLOWED,
     _WORKFLOW_WRITE: _WRITE_ALLOWED,
 }
+_SIBLING_BY_FUNCTION: dict[str, tuple[str, dict[str, frozenset[str]]]] = {
+    _WORKFLOW_READ: (_WORKFLOW_WRITE, _WRITE_ALLOWED),
+    _WORKFLOW_WRITE: (_WORKFLOW_READ, _READ_ALLOWED),
+}
 _REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "get": ("run_id",),
     "cancel": ("run_id",),
@@ -152,16 +155,17 @@ def _validate_workflow_params(
     arguments: Mapping[str, Any],
 ) -> str:
     """Validate workflow action and action-specific parameters, or raise WorkflowRunStoreError."""
-    allowed_by_action = _ALLOWED_BY_FUNCTION[function_name]
-    action_str = action if isinstance(action, str) else repr(action)
     if (
-        not isinstance(action, str)
-        or (error := validate_action_params(function_name, action_str, allowed_by_action, arguments)) is not None
-    ):
-        if not isinstance(action, str):
-            expected = ", ".join(allowed_by_action)
-            error = f"Unsupported {function_name} action {action!r}. Expected one of: {expected}."
+        error := validate_action_params(
+            function_name,
+            action,
+            _ALLOWED_BY_FUNCTION[function_name],
+            arguments,
+            sibling=_SIBLING_BY_FUNCTION[function_name],
+        )
+    ) is not None:
         raise WorkflowRunStoreError(error)
+    assert isinstance(action, str)
     for key in _REQUIRED_PARAMS.get(action, ()):
         value = arguments.get(key)
         if not isinstance(value, str) or not value.strip():
@@ -207,21 +211,15 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             others += [name for name in rooms if name not in (agent_name, *others) and current_room_id in rooms[name]]
         if others:
             self._write_description += f"\nAgents you can run with agent=: {', '.join(others)}."
-        super().__init__(name="workflow", tools=[self.workflow_read, self.workflow_write])
+        super().__init__(name="workflow")
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Keep `workflow_read` lean and attach the full SDK guide and model list to `workflow_write`."""
-        if function.name == _WORKFLOW_READ:
-            return replace(function, offer_background_after=False, offer_output_path=True)
+        """Attach the full SDK guide and model list to `workflow_write`."""
         if function.name == _WORKFLOW_WRITE:
-            return replace(
-                function,
-                description=self._write_description,
-                offer_background_after=True,
-                offer_output_path=False,
-            )
+            return replace(function, description=self._write_description)
         return function
 
+    @tool(offer_background_after=False, offer_output_path=True)
     async def workflow_read(
         self,
         action: Literal["list", "get"],
@@ -232,14 +230,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         """Inspect workflow runs and saved workflows.
 
         - `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`).
-        - `get`: run status, cost, open questions, failed calls, and nodes (`run_id`).
-
-        Args:
-            action: Read action (`list` or `get`).
-            run_id: Run ID (get).
-            nodes: Node filter: `"active"` (default), `"failed"`, or `"all"` (get).
-            messages: Include peer messages and shared state (get, default false).
-
+        - `get`: run status, cost, open questions, failed calls, and nodes (`run_id`; optional `nodes` default `active`, `messages` default false).
         """
         params: dict[str, Any] = {"run_id": run_id, "nodes": nodes, "messages": messages}
         validated = _validate_workflow_params(_WORKFLOW_READ, action, params)
@@ -252,6 +243,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             messages=False if messages is None else messages,
         )
 
+    @tool(offer_background_after=True, offer_output_path=False)
     async def workflow_write(
         self,
         action: Literal["start", "cancel", "resume", "save"],

@@ -124,6 +124,16 @@ _CONSOLIDATED_TOOLKIT_RENAMES: dict[str, dict[str, str]] = {
         "apply_template": "todo",
         "list_templates": "todo",
     },
+    # LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
+    # Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
+    #   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key) and
+    #   later a separate watch_pr function, which could appear in tool_approval.rules[].match globs or
+    #   include_tools/exclude_tools overrides.
+    # Last legacy release: v2026.11.480 (original 8) and v2026.11.633 (watch_pr); replacement: consolidated into
+    #   `triggers`, then split into `triggers_read` and `triggers_write`.
+    # Handling: Reject retired trigger function names in include_tools/exclude_tools and fail closed in
+    #   tool_approval.rules when a retired function's effective decision differs from its replacement function.
+    # Coverage: tests/test_triggers_tool.py, tests/test_tool_approval_grants.py.
     "triggers": {
         "watch_room": "triggers_write",
         "watch_thread": "triggers_write",
@@ -1066,10 +1076,11 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = _merge_toolkit_renam
 # Legacy format: `triggers`, `desktop`, `workflow`, and `matrix_api` were previously single multi-action functions,
 #   and `browser_control` previously served both read and control actions (read actions moved to `browser_read` while
 #   `browser_control` remains active for control actions).
-# Last legacy release: v2026.11.664; replacement: unreleased; split into read vs. write/control functions.
+# Last legacy release: v2026.11.680; replacement: unreleased; split into read vs. write/control functions.
 # Handling: Reject `triggers`, `desktop`, `workflow`, and `matrix_api` in `include_tools`/`exclude_tools` (both authored
 #   overrides and stored dashboard settings) and fail closed in `tool_approval.rules` unless rules explicitly cover every
-#   replacement function; for `browser`, validate `browser_control` -> `browser_read` in `tool_approval.rules` only while
+#   replacement function; for `browser`, validate `browser_control` -> `browser_read` in `tool_approval.rules` only
+#   (skipping non-script `browser_control` rules whose `arguments.action` cannot match any moved read action) while
 #   keeping `browser_control` valid in `include_tools`/`exclude_tools`.
 # Coverage:
 #   tests/test_triggers_tool.py, tests/test_desktop_tool.py, tests/test_browser_tool.py,
@@ -1079,6 +1090,16 @@ RETIRED_SPLIT_FUNCTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "desktop": {"desktop": ("desktop_read", "desktop_control")},
     "workflow": {"workflow": ("workflow_read", "workflow_write")},
     "matrix_api": {"matrix_api": ("matrix_api_read", "matrix_api_write")},
+}
+
+SPLIT_APPROVAL_ONLY_FUNCTIONS: dict[str, dict[str, dict[str, frozenset[str]]]] = {
+    "browser": {
+        "browser_control": {
+            "browser_read": frozenset(
+                {"actions", "console", "help", "profiles", "screenshot", "snapshot", "status", "tabs"},
+            ),
+        },
+    },
 }
 
 STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(

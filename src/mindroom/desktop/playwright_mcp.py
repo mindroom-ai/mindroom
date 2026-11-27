@@ -207,7 +207,7 @@ class PlaywrightMCPBrowserProvider:
                 if not may_start:
                     msg = (
                         "Playwright browser observation requires an active local connection. "
-                        "Run browser(action='start', target='desktop') while the desktop control lease is active."
+                        "Run browser_control(action='start', target='desktop') while the desktop control lease is active."
                     )
                     raise PlaywrightBrowserError(msg)
                 self._session = self._new_session()

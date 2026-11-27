@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.browser.call_limit import BROWSER_READ_PAGE_ACTIONS
 from mindroom.custom_tools.chat_ui import show_computer_once
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.computer_runtime import worker_computer_provider
@@ -42,24 +43,29 @@ def computer_announcement_middleware(
 
     async def announce_computer(call: ToolCall, call_next: ToolNext) -> object:
         name = call.function.name
-        try:
-            if _runs_as(agent_name) and _uses_computer(name, call.arguments, placement):
-                await show_computer_once()
-        except Exception:
-            logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
-        return await call_next(call.arguments)
+        should_announce = _runs_as(agent_name) and _uses_computer(name, call.arguments, placement)
+        if should_announce and name != "browser_read":
+            await _announce(name)
+        result = await call_next(call.arguments)
+        # browser_read page views fail when Chromium is stopped, so announce only after one succeeds.
+        if should_announce and name == "browser_read":
+            await _announce(name)
+        return result
 
     return announce_computer
 
 
-def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
-    if name in {"browser_read", "browser_control"}:
-        # Imported here, not at module level, so that loading agents does not load Playwright.
-        from mindroom.custom_tools.browser import is_reference_action  # noqa: PLC0415
+async def _announce(name: str) -> None:
+    try:
+        await show_computer_once()
+    except Exception:
+        logger.warning("Could not announce the worker computer in MindRoom Chat", tool=name, exc_info=True)
 
-        # help and actions on browser_read only return reference data, so they must not use up the announcement.
-        if name == "browser_read" and is_reference_action(args.get("action")):
-            return False
+
+def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
+    # Non-page browser_read queries (status, profiles, tabs, console, help, actions) never launch or show a page.
+    if name == "browser_read" and str(args.get("action")).strip().lower() not in BROWSER_READ_PAGE_ACTIONS:
+        return False
     # Desktop browser calls stay on the primary and drive the user's own browser, not the computer.
     return placement is None or not placement.runs_on_primary(name, args)
 
