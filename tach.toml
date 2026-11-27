@@ -8244,6 +8244,7 @@ expose = [
     "member_tool_scope",
     "require_tool_runtime_context",
     "scope_hook_context_kwargs",
+    "scope_workspace_root",
     "tool_runtime_context",
     "tool_runtime_model_context",
     "worker_progress_pump_scope",

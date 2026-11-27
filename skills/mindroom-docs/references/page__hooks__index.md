@@ -234,8 +234,8 @@ async def keep_prices_private(ctx):
 | `bot:ready` | Observer | `AgentLifecycleContext` | After the bot finishes room joins and initial sync | None | 5000 |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
 | `session:started` | Observer | `SessionHookContext` | Once per new persisted session, when the reply that created it ends, even a failed or stopped one, and before that reply's `message:after_response` or `message:cancelled` | None | 5000 |
-| `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
+| `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved or a run-local rewrite is applied (not emitted for provider-native checkpoints) | None | 15000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, applied run-locally, or checkpointed natively by the provider, with token counts and the summary (`None` for encrypted native checkpoints); the counts size the conversation history for `pre_reply` compactions and the whole model request for `mid_turn`, `run_local`, and `native` compactions | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | Once per join, after a human joins a room | None | 3000 |
@@ -554,7 +554,7 @@ All contexts include these fields:
 | `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
-| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |
+| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary`, `workspace_root` (agent workspace path or `None` for teams), `kind` (`"pre_reply"`, `"mid_turn"`, `"run_local"`, or `"native"`), `mode` (`"auto"` or `"manual"`), `summary_model`, `compacted_at`, `compacted_run_count`, `requester_id` |
 | `ScheduleFiredContext` | `task_id`, `workflow`, `room_id`, `thread_id`, `created_by`, `message_text`, `suppress` |
 | `ReactionReceivedContext` | `room_id`, `event_id`, `sender_id`, `reaction_key`, `target_event_id`, `thread_id` |
 | `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |

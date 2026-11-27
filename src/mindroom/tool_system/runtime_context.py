@@ -19,6 +19,7 @@ from mindroom.hooks import (
     emit,
     validate_event_name,
 )
+from mindroom.logging_config import get_logger
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.context_scope import (
     current_budget_monitor,  # noqa: F401
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
+logger = get_logger(__name__)
 _StreamChunk = TypeVar("_StreamChunk")
 
 
@@ -557,7 +559,8 @@ def scope_hook_context_kwargs(
 ) -> dict[str, Any]:
     """Return the fields of a session or compaction hook context about ``scope``, emitted from ``context``.
 
-    A team scope's hooks name the team as ``agent_name``; an agent scope's name the agent ``context`` runs.
+    Both team and agent scopes name ``scope.scope_id`` as ``agent_name``, so a team member's hooks still attribute
+    to that member even when ``context`` names the team or transport agent.
     """
     return {
         **context.hooks.context_kwargs(
@@ -568,12 +571,33 @@ def scope_hook_context_kwargs(
         ),
         "turn_id": context.turn_id,
         "parent_turn_id": context.parent_turn_id,
-        "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
+        "agent_name": scope.scope_id,
         "scope": scope,
         "session_id": session_id,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
     }
+
+
+def scope_workspace_root(context: ToolRuntimeContext, scope: HistoryScope) -> Path | None:
+    """Return the workspace root for ``scope`` under ``context``, or None for teams or unresolvable scopes."""
+    if scope.kind != "agent" or scope.scope_id not in context.config.agents:
+        return None
+    resolved = (
+        replace(context, agent_name=scope.scope_id, transport_agent_name=context.recipient)
+        if context.agent_name != scope.scope_id
+        else context
+    )
+    try:
+        return resolved.agent_workspace_root(create=True)
+    except (ValueError, OSError) as exc:
+        logger.warning(
+            "Failed to resolve workspace root for scope",
+            scope=scope.key,
+            agent_name=scope.scope_id,
+            error=str(exc),
+        )
+        return None
 
 
 def _matrix_execution_identity(
