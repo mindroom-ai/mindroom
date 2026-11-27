@@ -240,7 +240,7 @@ async def _call_add(
     live_rules: tuple[ApprovalRuleConfig, ...] = (),
     decision: ToolApprovalDecision | None = None,
 ) -> tuple[ScriptCallRecord, list[str]]:
-    """Launch one run under the operator's *default*, call `calculator.add` and return the receipt and the asks."""
+    """Launch one run under the operator's *default*, call `calculator.calculate` and return the receipt and the asks."""
     manager, _backend, worker_client = _manager(tmp_path)
     manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "calculate"),)
     context = _context(tmp_path)

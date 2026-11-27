@@ -368,15 +368,17 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments function is decided by an approval script or any
-#   retired function's effective decision differs from the replacement's effective decision (regardless of other
-#   toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments entry,
-#   directing operators to `attachment` / `view_file` and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired skills/attachments/Wave-2/Wave-4 function is decided by a wildcard
+#   approval script or any retired function's effective decision differs from the replacement's effective decision
+#   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
+#   consolidated toolkit entry, directing operators to the replacement function alongside per-action `enable_*`
+#   settings or `tool_approval.rules` so permissions are not broadened.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
@@ -960,7 +962,23 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "inline_image": "attachment",
     },
 }
-_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset({"skills", "attachments"})
+_STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
+    {
+        "skills",
+        "attachments",
+        "calculator",
+        "duckduckgo",
+        "googlesearch",
+        "serper",
+        "youtube",
+        "exa",
+        "trafilatura",
+        "brightdata",
+        "oxylabs",
+        "browserbase",
+        "spider",
+    },
+)
 
 
 def _effective_approval_decision(
@@ -1193,7 +1211,11 @@ def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tu
         retired := _retired_function_filter(
             overrides,
             renames,
-            guidance_for=lambda key, new: f"use `{tool_name}: {{{key}: [{new}]}}`",
+            guidance_for=lambda _key, new: (
+                f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+                f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
+                f"matching `{new}`) so permissions are not broadened"
+            ),
         )
     ) is not None:
         return retired

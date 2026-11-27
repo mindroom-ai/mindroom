@@ -583,7 +583,7 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
                 },
                 runtime_paths,
             )
-        with pytest.raises(ConfigRuntimeValidationError, match=replacement):
+        with pytest.raises(ConfigRuntimeValidationError, match=replacement) as exc_info:
             Config.validate_with_runtime(
                 {
                     "models": {"default": {"provider": "openai", "id": "test-model"}},
@@ -596,3 +596,7 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
                 },
                 runtime_paths,
             )
+        override_error = str(exc_info.value)
+        assert "enable_*" in override_error
+        assert "tool_approval.rules" in override_error
+        assert f"include_tools: [{replacement}]" not in override_error

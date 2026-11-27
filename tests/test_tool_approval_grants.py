@@ -3305,6 +3305,40 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
 
 
 @pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        (["serper"], ["skill", "*"], r"check\.py.*serper_search"),
+        (["serper"], ["serper_search", "skill", "*"], None),
+        (["browserbase"], ["skill", "*"], r"check\.py.*browserbase"),
+        (["browserbase"], ["browserbase", "skill", "*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired Wave 2/4 function names until explicit rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"exclude_tools": ["register_attachment"]},

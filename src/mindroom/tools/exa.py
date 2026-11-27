@@ -222,8 +222,7 @@ class _ExaTools(Toolkit):
     ) -> str:
         """Query the Exa API and return JSON results.
 
-        - `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper,
-          news, pdf, github, tweet, personal site, linkedin profile, financial report).
+        - `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).
         - `contents`: Fetch content for `urls`.
         - `similar`: Find pages similar to `url` (optional `num_results`, default 5).
         - `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).

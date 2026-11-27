@@ -1716,7 +1716,7 @@
     "functions": [
       {
         "name": "exa_lookup",
-        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper,\n  news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).",
+        "description": "Query the Exa API and return JSON results.\n- `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper, news, pdf, github, tweet, personal site, linkedin profile, financial report).\n- `contents`: Fetch content for `urls`.\n- `similar`: Find pages similar to `url` (optional `num_results`, default 5).\n- `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5129,7 +5129,7 @@
     "functions": [
       {
         "name": "trafilatura_extract",
-        "description": "Extract readable text or metadata from web page URL(s) via Trafilatura.\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
+        "description": "Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).\n- `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).\n- `metadata`: Extract metadata only from `url` (optional `as_json`, default True).\n- `batch`: Extract main content from up to 10 `urls` and return JSON results.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5198,7 +5198,7 @@
       },
       {
         "name": "html_to_text",
-        "description": "Convert `html_content` to plain text (optional `clean`, default True).",
+        "description": "Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5229,7 +5229,7 @@
       },
       {
         "name": "crawl_website",
-        "description": "Crawl a website from `homepage_url` and optionally extract discovered pages (`extract_content`).",
+        "description": "Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`).",
         "parameters": {
           "type": "object",
           "properties": {

@@ -331,7 +331,7 @@ class _TrafilaturaTools(Toolkit):
         output_format: str | None = None,
         as_json: bool = True,
     ) -> str:
-        """Extract readable text or metadata from web page URL(s) via Trafilatura.
+        """Extract from URL(s) with Trafilatura (for raw HTML strings use `html_to_text`; to crawl a site use `crawl_website`).
 
         - `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).
         - `metadata`: Extract metadata only from `url` (optional `as_json`, default True).
@@ -390,7 +390,10 @@ class _TrafilaturaTools(Toolkit):
 
     def _extract_batch(self, urls: list[str]) -> str:
         if len(urls) > _MAX_BATCH_URLS:
-            return f"Error: extract_batch takes at most {_MAX_BATCH_URLS} URLs per call; split the list into several calls."
+            return (
+                f"Error: trafilatura_extract(action='batch') takes at most {_MAX_BATCH_URLS} URLs per call; "
+                "split the list into several calls."
+            )
         trafilatura = _require_trafilatura()
         with _time_limit():
             try:
@@ -423,7 +426,7 @@ class _TrafilaturaTools(Toolkit):
                 return f"Error in batch extraction: {exc}"
 
     def html_to_text(self, html_content: str, clean: bool = True) -> str:
-        """Convert `html_content` to plain text (optional `clean`, default True)."""
+        """Convert raw HTML strings (not URLs) to clean text with Trafilatura (`html_content`, optional `clean`, default True)."""
         trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_html_to_text")
@@ -436,7 +439,7 @@ class _TrafilaturaTools(Toolkit):
             return result or "Error: Could not extract text from HTML content"
 
     def crawl_website(self, homepage_url: str, extract_content: bool = False) -> str:
-        """Crawl a website from `homepage_url` and optionally extract discovered pages (`extract_content`)."""
+        """Crawl a website from its `homepage_url` with Trafilatura and optionally extract page content (`extract_content`)."""
         trafilatura_spider = _load_spider()
         if trafilatura_spider is None:
             return "Error: Web crawling functionality not available. Trafilatura spider module could not be imported."

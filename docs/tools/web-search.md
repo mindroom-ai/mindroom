@@ -42,7 +42,7 @@ Every toolkit that has an `all` option enables all of its functions when `all: t
 ## [`duckduckgo`]
 
 `duckduckgo` searches the web and news through DuckDuckGo with no API key.
-It provides `duckduckgo_search(query, action="web", max_results=None)` with actions `web` and `news`, returning DDGS results as JSON.
+It provides `duckduckgo_search(query, action=None, max_results=None)` with actions `web` and `news` (omitting `action` defaults to the first enabled action: `web` when `enable_search: true`, otherwise `news`), returning DDGS results as JSON.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ agents:
 
 ## [`googlesearch`]
 
-`googlesearch` provides `google_search(query, action="web", max_results=None)` with the same `web` and `news` actions, options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
+`googlesearch` provides `google_search(query, action=None, max_results=None)` with the same `web` and `news` actions (omitting `action` defaults to the first enabled action), options, and output as [`duckduckgo`], except that it has no `backend` option and requests the Google engine.
 It is not an official Google API.
 DDGS currently falls back to automatic engine selection for Google requests, so results and ranking are not guaranteed to come from Google.
 Use [`serper`] or [`serpapi`] when you need real Google results.
@@ -231,7 +231,7 @@ agents:
 
 ## [`serper`]
 
-`serper` provides `serper_search(query, action="web", num_results=None)` (`web`, `news`, `scholar`) and `scrape_webpage(url, markdown=False)` through the Serper API.
+`serper` provides `serper_search(query, action=None, num_results=None)` (`web`, `news`, `scholar`; omitting `action` defaults to the first enabled action) and `scrape_webpage(url, markdown=False)` through the Serper API.
 All functions return Serper's raw JSON, and `scrape_webpage(markdown=True)` also requests the page as Markdown.
 
 | Option | Type | Default | Notes |

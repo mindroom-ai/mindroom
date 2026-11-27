@@ -361,7 +361,9 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
         urls=[f"https://example.com/{index}" for index in range(11)],
     )
 
-    assert result == "Error: extract_batch takes at most 10 URLs per call; split the list into several calls."
+    assert result == (
+        "Error: trafilatura_extract(action='batch') takes at most 10 URLs per call; split the list into several calls."
+    )
     assert requests == []
 
 

@@ -253,6 +253,7 @@ def test_exa_lookup_actions_option_whitelists_and_toggle_narrowing(monkeypatch: 
     assert offered.parameters["properties"]["action"]["enum"] == ["contents"]
     assert set(offered.parameters["properties"]) == {"action", "urls"}
     assert "`search`" not in (offered.description or "")
+    assert "linkedin profile" not in (offered.description or "")
     assert "disabled" in only_contents.exa_lookup("search", query="x").lower()
 
     none_enabled = exa_module.exa_tools()(
