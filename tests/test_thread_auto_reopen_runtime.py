@@ -19,6 +19,7 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RESOLVED_IN_TURN_KEY, STREAM_STATUS_KEY, STREAM_STATUS_STREAMING
+from mindroom.custom_tools.thread_move import _mark_source_moved
 from mindroom.custom_tools.thread_resolution import ThreadResolutionTools
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome
@@ -124,11 +125,14 @@ def _coordinators(
     bots: dict[str, Any],
     *,
     retry_delays: tuple[float, ...] = (0.0, 0.0),
+    wire_restore: bool = False,
 ) -> tuple[ThreadSnoozeRuntimeCoordinator, ThreadAutoReopenCoordinator]:
     config = _config(tmp_path)
     paths = runtime_paths_for(config)
     auto_reopen = ThreadAutoReopenCoordinator(paths, lambda: config, lambda: bots, retry_delays=retry_delays)
     snooze = ThreadSnoozeRuntimeCoordinator(paths, lambda: config, lambda: bots, room_state_observer=auto_reopen)
+    if wire_restore:
+        auto_reopen.restore_room = snooze.restore_room
     return snooze, auto_reopen
 
 
@@ -466,6 +470,7 @@ async def test_resolve_and_reopen_tools_and_streaming_stamping_prevent_self_reop
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=config)
     assert orchestrator.thread_auto_reopen in orchestrator._services
     assert orchestrator.thread_snooze.room_state_observer is orchestrator.thread_auto_reopen
+    assert orchestrator.thread_auto_reopen.restore_room is not None
 
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = "@mindroom_code:localhost"
@@ -602,3 +607,75 @@ async def test_response_runner_stamps_resolved_in_turn_for_collected_and_streame
         assert stream_req.resolved_in_turn() is False
         context.resolved_thread_ids.add(ROOT)
         assert stream_req.resolved_in_turn() is True
+
+
+@pytest.mark.asyncio
+async def test_unseeded_joined_room_reply_triggers_restore_and_buffers_during_active_restore(tmp_path: Path) -> None:
+    """A reply in an unseeded joined room triggers restore_room once, buffers mid-restore replies, and drains to reopen."""
+    bot = _bot(ROOM, name="code")
+    gate, entered = asyncio.Event(), asyncio.Event()
+
+    async def slow_state(room_id: str) -> nio.RoomGetStateResponse:
+        entered.set()
+        await gate.wait()
+        return nio.RoomGetStateResponse(
+            events=[_resolved_event(root=ROOT, ts=1_000, event_id="$s1")],
+            room_id=room_id,
+        )
+
+    bot.client.room_get_state = AsyncMock(side_effect=slow_state)
+    _snooze, auto_reopen = _coordinators(tmp_path, {"code": bot}, wire_restore=True)
+
+    reopen_mock = AsyncMock(return_value=True)
+    with patch(_REOPEN_FN, new=reopen_mock):
+        # First reply in unseeded room schedules restore_room automatically.
+        auto_reopen.observe_timeline_event(ROOM, _reply_event(root=ROOT, ts=2_000, event_id="$r1"))
+        await entered.wait()
+
+        # While restore is in progress, a live resolved state + reply in another thread buffers rather than racing.
+        auto_reopen.observe_state_event(ROOM, _resolved_event(root="$t-mid", ts=1_500, event_id="$s2"))
+        auto_reopen.observe_timeline_event(ROOM, _reply_event(root="$t-mid", ts=2_500, event_id="$r2"))
+        await asyncio.sleep(0)
+        reopen_mock.assert_not_awaited()
+
+        gate.set()
+        await _drain_tasks(auto_reopen)
+
+    bot.client.room_get_state.assert_awaited_once_with(ROOM)
+    reopened_roots = {call.args[2] for call in reopen_mock.await_args_list}
+    assert reopened_roots == {ROOT, "$t-mid"}
+
+
+@pytest.mark.asyncio
+async def test_thread_move_records_resolved_source_thread_and_notifies_coordinator(tmp_path: Path) -> None:
+    """Moving a thread adds source_root_id to resolved_thread_ids and notifies thread_auto_reopen."""
+    config = _config(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=config)
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_code:localhost"
+    record = ThreadTagRecord(set_by=HUMAN, set_at=SET_AT)
+    resolved_state = ThreadTagsState(room_id=ROOM, thread_root_id=ROOT, tags={RESOLVED_THREAD_TAG: record})
+    context = ToolRuntimeContext(
+        agent_name="code",
+        target=MessageTarget.resolve(ROOM, ROOT, None),
+        requester_id=HUMAN,
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        plugins=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(client=client),
+        orchestrator=orchestrator,
+    )
+    prepared = MagicMock(root_id=ROOT, last_event_id="$last")
+    warnings: list[str] = []
+
+    with (
+        patch("mindroom.custom_tools.thread_move.send_message_result", new=AsyncMock(return_value="$notice")),
+        patch("mindroom.custom_tools.thread_move.set_thread_tag", new=AsyncMock(return_value=resolved_state)),
+    ):
+        await _mark_source_moved(context, prepared, "https://matrix.to/#/$dest", warnings)
+
+    assert warnings == []
+    assert ROOT in context.resolved_thread_ids
+    assert ROOT in orchestrator.thread_auto_reopen._resolved[ROOM]

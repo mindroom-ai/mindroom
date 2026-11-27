@@ -23,7 +23,7 @@ from mindroom.thread_tags import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 
     import nio
 
@@ -47,11 +47,13 @@ class ThreadAutoReopenCoordinator:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config]
     bots: Callable[[], Mapping[str, AgentBot]]
+    restore_room: Callable[[AgentBot, str], Awaitable[None]] | None = None
     retry_delays: tuple[float, ...] = (1.0, 3.0)
     _resolved: dict[str, dict[str, ResolvedThread]] = field(default_factory=dict, init=False)
     _restored_rooms: set[str] = field(default_factory=set, init=False)
     _live_during_restore: dict[str, set[str]] = field(default_factory=dict, init=False)
     _pending_before_restore: dict[str, dict[str, int]] = field(default_factory=dict, init=False)
+    _restore_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
     _in_flight: dict[_ThreadKey, tuple[ThreadTagRecord, asyncio.Task[None]]] = field(default_factory=dict, init=False)
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
     _permission_warned_rooms: set[str] = field(default_factory=set, init=False)
@@ -67,6 +69,7 @@ class ThreadAutoReopenCoordinator:
         tasks = list(self._tasks)
         self._tasks.clear()
         self._in_flight.clear()
+        self._restore_tasks.clear()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -104,6 +107,12 @@ class ThreadAutoReopenCoordinator:
         self._resolved.pop(room_id, None)
         self._pending_before_restore.pop(room_id, None)
         self._permission_warned_rooms.discard(room_id)
+        if (
+            (restore_task := self._restore_tasks.get(room_id)) is not None
+            and restore_task is not asyncio.current_task()
+            and not restore_task.done()
+        ):
+            restore_task.cancel()
         for key, (_record, task) in list(self._in_flight.items()):
             if key[0] == room_id and task is not asyncio.current_task() and not task.done():
                 task.cancel()
@@ -148,11 +157,12 @@ class ThreadAutoReopenCoordinator:
         if reply is None:
             return
         thread_root_id, _event_id, origin_server_ts = reply
-        if thread_root_id in self._resolved.get(room_id, ()):
+        if room_id not in self._live_during_restore and thread_root_id in self._resolved.get(room_id, ()):
             self._maybe_schedule_reopen(room_id, thread_root_id, origin_server_ts)
             return
         if not restored:
             self._buffer_pending(room_id, thread_root_id, origin_server_ts)
+            self._ensure_room_restore(room_id)
 
     def _mark_live(self, room_id: str, thread_root_id: str) -> None:
         if (live_roots := self._live_during_restore.get(room_id)) is not None:
@@ -204,6 +214,43 @@ class ThreadAutoReopenCoordinator:
         if len(pending) >= _MAX_PENDING_THREADS_PER_ROOM:
             del pending[next(iter(pending))]
         pending[thread_root_id] = origin_server_ts
+
+    def _ensure_room_restore(self, room_id: str) -> None:
+        if self._stopped or self.restore_room is None or room_id in self._live_during_restore:
+            return
+        existing = self._restore_tasks.get(room_id)
+        if existing is not None and not existing.done():
+            return
+        joined = next(self._joined_bots(room_id), None)
+        if joined is None:
+            return
+        task = asyncio.create_task(
+            self._run_room_restore(joined[0], room_id),
+            name=f"thread_auto_reopen_restore:{room_id}",
+        )
+        self._restore_tasks[room_id] = task
+        self._tasks.add(task)
+        task.add_done_callback(lambda done: self._finish_restore_task(room_id, done))
+
+    async def _run_room_restore(self, bot: AgentBot, room_id: str) -> None:
+        if (
+            self._stopped
+            or self.restore_room is None
+            or room_id in self._restored_rooms
+            or room_id in self._live_during_restore
+        ):
+            return
+        try:
+            await self.restore_room(bot, room_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("thread_auto_reopen_restore_failed", agent=bot.agent_name, room_id=room_id)
+
+    def _finish_restore_task(self, room_id: str, done: asyncio.Task[None]) -> None:
+        self._tasks.discard(done)
+        if self._restore_tasks.get(room_id) is done:
+            del self._restore_tasks[room_id]
 
     def _maybe_schedule_reopen(self, room_id: str, thread_root_id: str, origin_server_ts: int) -> None:
         entry = self._resolved.get(room_id, {}).get(thread_root_id)

@@ -1198,7 +1198,7 @@ CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 # Marks a finalized reply or handoff that should not trigger push while work continues.
 SUPPRESS_PUSH_KEY = "io.mindroom.suppress_push"
-# Marks a managed reply sent by a turn that resolved its thread (or continuing an edit), so it never auto-reopens it.
+# Marks a managed reply sent by a turn that resolved its thread (or continuing a segmented reply), so it never auto-reopens it.
 RESOLVED_IN_TURN_KEY = "io.mindroom.resolved_in_turn"
 # The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
 REASONING_CONTENT_KEY = "io.mindroom.reasoning"

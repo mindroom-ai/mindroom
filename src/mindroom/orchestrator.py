@@ -368,6 +368,7 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bots=lambda: self.agent_bots,
+            restore_room=lambda bot, room_id: self.thread_snooze.restore_room(bot, room_id),
         )
         self.thread_snooze = ThreadSnoozeRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
