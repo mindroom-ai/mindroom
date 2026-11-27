@@ -17,7 +17,7 @@ from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
 from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
@@ -32,7 +32,7 @@ from mindroom.tool_system.dependencies import (
     optional_dependency_environment,
 )
 from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.registry import ToolMetadataValidationError, ToolRegistry
+from mindroom.tool_system.registry import ToolMetadataValidationError, ToolRegistry, factory_origin
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings, tool_placement, worker_stand_ins
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -918,10 +918,10 @@ def get_tool_by_name(
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
         )
-        construction = ToolConstruction.from_factory(
+        construction = ToolConstruction(
             tool_name,
-            factory,
-            tool_config_overrides=settings.tool_config_overrides,
+            factory_origin(factory),
+            tool_config_signature(settings.tool_config_overrides),
         )
         tool_class = load_toolkit_class(factory)
         init_kwargs = dict(settings.values)
@@ -990,7 +990,8 @@ def get_tool_by_name(
             if routed
             else None,
         )
-        return bind_toolkit_construction(toolkit, construction)
+        toolkit.tool_construction = construction
+        return toolkit
 
     return _build_with_tool_dependencies(tool_name, metadata, runtime_paths, build)
 

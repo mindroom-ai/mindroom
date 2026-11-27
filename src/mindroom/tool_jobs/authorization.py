@@ -9,7 +9,7 @@ from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
-from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
 
 def toolkit_authority(snapshot: Mapping[str, Any], toolkit: Toolkit) -> dict[str, Any]:
     """Return the evidence a toolkit's calls are granted by: the actor's snapshot and the toolkit's construction."""
-    construction = get_toolkit_construction(toolkit)
+    construction = toolkit.tool_construction
     return {
         **snapshot,
         "construction": (

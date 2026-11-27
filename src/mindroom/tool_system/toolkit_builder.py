@@ -8,7 +8,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
 from mindroom.tool_system.catalog import get_tool_by_name
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.toolkits import configure_toolkit_functions
@@ -181,10 +181,8 @@ def build_agent_toolkit(
                 auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
             )
             configure_toolkit_functions(toolkit, output_files=policy)
-        return bind_toolkit_construction(
-            toolkit,
-            ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides)),
-        )
+        toolkit.tool_construction = ToolConstruction(tool_name, None, tool_config_signature(tool_config_overrides))
+        return toolkit
 
     worker_scope = agent_runtime.execution.execution_scope
     return get_tool_by_name(

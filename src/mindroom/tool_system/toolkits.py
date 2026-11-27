@@ -182,14 +182,16 @@ def _adapt_function(toolkit: Toolkit, name: str) -> ToolFunction:
             " read the call through current_call() instead"
         )
         raise ValueError(msg)
-    authored = authoring.passthrough_parameters(function)
+    mark = authoring.tool_mark(function)
+    authored = None if mark is None else mark.parameters
     derived = authored is None
-    offer_background_after = authoring.authored_offer_background_after(function)
-    offer_output_path = authoring.authored_offer_output_path(function)
+    description = None if mark is None else mark.description
+    offer_background_after = None if mark is None else mark.offer_background_after
+    offer_output_path = None if mark is None else mark.offer_output_path
     offered = toolkit.offered_function(
         ToolFunction(
             name=name,
-            description=authoring.authored_description(function) or (tool_description(function) if derived else None),
+            description=description or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
             nullable_optional_parameters=nullable_optional_parameters(function) if authored is None else frozenset(),
             offer_background_after=toolkit.offer_background_after

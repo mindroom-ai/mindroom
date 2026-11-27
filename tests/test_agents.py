@@ -79,7 +79,6 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, tool_workdir
@@ -1394,7 +1393,7 @@ def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name
     )
 
     assert toolkit is not None
-    construction = get_toolkit_construction(toolkit)
+    construction = toolkit.tool_construction
     assert construction is not None
     assert construction.name == tool_name
 

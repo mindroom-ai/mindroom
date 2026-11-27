@@ -23,9 +23,9 @@ from mindroom.tool_jobs.authorization import (
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, factory_origin
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import toolkit_function_names
@@ -188,9 +188,9 @@ def _calculator_authority(config: Config) -> dict[str, object]:
         return None
 
     toolkit = Toolkit(name="calculator", tools=[calculate])
-    bind_toolkit_construction(
-        toolkit,
-        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    toolkit.tool_construction = ToolConstruction(
+        "calculator",
+        factory_origin(builtin_tool_registry().factory("calculator")),
     )
     return toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
@@ -515,9 +515,9 @@ def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_or
         return None
 
     toolkit = Toolkit(name="calculator", tools=[calculate])
-    bind_toolkit_construction(
-        toolkit,
-        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    toolkit.tool_construction = ToolConstruction(
+        "calculator",
+        factory_origin(builtin_tool_registry().factory("calculator")),
     )
     snapshot = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 

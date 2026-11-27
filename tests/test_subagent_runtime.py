@@ -40,11 +40,11 @@ from mindroom.tool_jobs.runtime import (
     register_background_runtime,
 )
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.construction import ToolConstruction, tool_config_signature
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry, factory_origin
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.conftest import replace_test_tool_factory, test_runtime_paths
@@ -410,9 +410,9 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
         return None
 
     toolkit = Toolkit(name="calculator", tools=[calculate])
-    bind_toolkit_construction(
-        toolkit,
-        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    toolkit.tool_construction = ToolConstruction(
+        "calculator",
+        factory_origin(builtin_tool_registry().factory("calculator")),
     )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))[
         "calculate"
@@ -463,9 +463,9 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
         return None
 
     toolkit = Toolkit(name="calculator", tools=[calculate])
-    bind_toolkit_construction(
-        toolkit,
-        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    toolkit.tool_construction = ToolConstruction(
+        "calculator",
+        factory_origin(builtin_tool_registry().factory("calculator")),
     )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))[
         "calculate"
@@ -503,7 +503,7 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
         server_config=config.mcp_servers["demo"],
     )
     mcp_factory = config_plugins(config, coordinator.runtime_paths).tools.factory("mcp_demo")
-    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", mcp_factory))
+    toolkit.tool_construction = ToolConstruction("mcp_demo", factory_origin(mcp_factory))
     tools = toolkit_job_tools(toolkit, authored_name="mcp_demo", snapshot=authority_snapshot(config, "lead"))
     tool = next(item for name, item in tools.items() if name.endswith("_call_tool"))
     call = JobCall(
