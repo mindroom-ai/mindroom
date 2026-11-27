@@ -249,11 +249,13 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
     return project_definitions(definitions, managed)
 
 
-def _default_wait(function: ToolFunction) -> float | None:
+def _default_wait(function: ToolFunction, *, job_kind: str | None = None) -> float | None:
     """Return how long a managed call of ``function`` that sets no budget waits, None until completion."""
-    if function.registered_toolkit == "workflow" and function.name in ("start_workflow", "resume_workflow"):
-        # A workflow run takes as long as its agents do, so the call that starts or resumes one returns its handle at once.
-        return 0.0
+    if function.registered_toolkit == "workflow" and function.name == "workflow":
+        # Workflow runs take as long as their agents do, so start/resume jobs return their handle at once,
+        # while synchronous control actions (get/cancel/list/save) run as regular tool jobs and wait to finish.
+        # Schema projection (job_kind=None) omits an unconditional 0s default since it depends on action.
+        return 0.0 if job_kind == "workflow" else None
     return shell_job_wait_seconds(function.registered_toolkit, function.name)
 
 
@@ -507,7 +509,7 @@ async def _run_managed_call(
             # while the job waits for it.
             approval_timeout=current_approval_wait_timeout(),
             # Without a budget of its own, a call waits its function's default for its work, approvals aside.
-            work_timeout=_default_wait(function) if background_after is None else None,
+            work_timeout=_default_wait(function, job_kind=job.kind) if background_after is None else None,
             pause_on_human_wait=pause_current_active_run,
         )
         if waited.claim is None:

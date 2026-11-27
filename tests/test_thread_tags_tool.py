@@ -6,7 +6,7 @@ import json
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -119,7 +119,7 @@ def test_thread_tags_tool_registered_and_instantiates() -> None:
 @pytest.mark.asyncio
 async def test_thread_tags_tool_requires_runtime_context() -> None:
     """Tool calls should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadTagsTools().tag_thread("topic"))
+    payload = json.loads(await ThreadTagsTools().thread_tags("tag", tag="topic"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_tags"
@@ -129,7 +129,7 @@ async def test_thread_tags_tool_requires_runtime_context() -> None:
 @pytest.mark.asyncio
 async def test_untag_thread_requires_runtime_context() -> None:
     """Untag should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadTagsTools().untag_thread("topic"))
+    payload = json.loads(await ThreadTagsTools().thread_tags("untag", tag="topic"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_tags"
@@ -139,7 +139,7 @@ async def test_untag_thread_requires_runtime_context() -> None:
 @pytest.mark.asyncio
 async def test_list_thread_tags_requires_runtime_context() -> None:
     """List should fail clearly outside Matrix runtime context."""
-    payload = json.loads(await ThreadTagsTools().list_thread_tags())
+    payload = json.loads(await ThreadTagsTools().thread_tags("list"))
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_tags"
@@ -165,7 +165,7 @@ async def test_tag_thread_defaults_to_context_thread_id(repeat_room_id: bool) ->
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic", **room_kwargs))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic", **room_kwargs))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "tag"
@@ -206,7 +206,7 @@ async def test_tag_thread_preserves_bridge_actor_across_general_tool_identity() 
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic"))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic"))
 
     assert payload["status"] == "ok"
     mock_set.assert_awaited_once_with(
@@ -237,7 +237,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic", thread_id="$explicit-event:localhost"))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic", thread_id="$explicit-event:localhost"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
@@ -278,7 +278,7 @@ async def test_untag_thread_defaults_to_context_thread_id(repeat_room_id: bool) 
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("topic", **room_kwargs))
+        payload = json.loads(await tool.thread_tags("untag", tag="topic", **room_kwargs))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "untag"
@@ -317,7 +317,7 @@ async def test_untag_thread_coerces_free_form_tag_input() -> None:
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("Follow Up"))
+        payload = json.loads(await tool.thread_tags("untag", tag="Follow Up"))
 
     assert payload["status"] == "ok"
     assert payload["tag"] == "follow-up"
@@ -349,7 +349,7 @@ async def test_untag_thread_preserves_long_canonical_tag_beside_prefix_sibling()
         ) as remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread(long_tag))
+        payload = json.loads(await tool.thread_tags("untag", tag=long_tag))
 
     assert payload["status"] == "ok"
     assert payload["tag"] == long_tag
@@ -379,7 +379,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         ) as mock_remove,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.untag_thread("topic", thread_id="$explicit-event:localhost"))
+        payload = json.loads(await tool.thread_tags("untag", tag="topic", thread_id="$explicit-event:localhost"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
@@ -420,7 +420,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags())
+        payload = json.loads(await tool.thread_tags("list"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "list"
@@ -463,7 +463,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(thread_id="$explicit-event:localhost"))
+        payload = json.loads(await tool.thread_tags("list", thread_id="$explicit-event:localhost"))
 
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$explicit-thread:localhost"
@@ -485,20 +485,16 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method_name", ["tag_thread", "untag_thread", "list_thread_tags"])
+@pytest.mark.parametrize("action", ["tag", "untag", "list"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_thread_tags_explicit_room_target_requires_authorization(method_name: str) -> None:
+async def test_thread_tags_explicit_room_target_requires_authorization(action: Literal["tag", "untag", "list"]) -> None:
     """Explicit room targeting should enforce the same room access checks as matrix_message."""
     tool = ThreadTagsTools()
     context = _make_context()
 
     with tool_runtime_context(context):
-        if method_name == "tag_thread":
-            payload = json.loads(await tool.tag_thread("topic", room_id="!other:localhost"))
-        elif method_name == "untag_thread":
-            payload = json.loads(await tool.untag_thread("topic", room_id="!other:localhost"))
-        else:
-            payload = json.loads(await tool.list_thread_tags(room_id="!other:localhost"))
+        tag = None if action == "list" else "topic"
+        payload = json.loads(await tool.thread_tags(action, tag=tag, room_id="!other:localhost"))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == "!other:localhost"
@@ -507,28 +503,23 @@ async def test_thread_tags_explicit_room_target_requires_authorization(method_na
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method_name", "args"),
+    ("action", "tag"),
     [
-        ("tag_thread", ("topic",)),
-        ("untag_thread", ("topic",)),
-        ("list_thread_tags", ()),
+        ("tag", "topic"),
+        ("untag", "topic"),
+        ("list", None),
     ],
 )
 async def test_thread_tags_reject_blank_explicit_room_id(
-    method_name: str,
-    args: tuple[str, ...],
+    action: Literal["tag", "untag", "list"],
+    tag: str | None,
 ) -> None:
     """Explicit blank room IDs should not fall back to the current room."""
     tool = ThreadTagsTools()
     context = _make_context()
 
     with tool_runtime_context(context):
-        if method_name == "tag_thread":
-            payload = json.loads(await tool.tag_thread(*args, room_id=""))
-        elif method_name == "untag_thread":
-            payload = json.loads(await tool.untag_thread(*args, room_id=""))
-        else:
-            payload = json.loads(await tool.list_thread_tags(room_id=""))
+        payload = json.loads(await tool.thread_tags(action, tag=tag, room_id=""))
 
     assert payload["status"] == "error"
     assert payload["room_id"] == ""
@@ -537,16 +528,16 @@ async def test_thread_tags_reject_blank_explicit_room_id(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method_name", "arguments"),
+    "arguments",
     [
-        ("tag_thread", {"tag": "topic", "room_id": 123}),
-        ("untag_thread", {"tag": "topic", "room_id": 123}),
-        ("list_thread_tags", {"room_id": 123}),
+        {"action": "tag", "tag": "topic", "room_id": 123},
+        {"action": "untag", "tag": "topic", "room_id": 123},
+        {"action": "list", "room_id": 123},
     ],
 )
-async def test_thread_tags_reject_non_string_room_id(method_name: str, arguments: dict[str, object]) -> None:
+async def test_thread_tags_reject_non_string_room_id(arguments: dict[str, object]) -> None:
     """Explicit non-string room IDs fail call validation before the tool body runs."""
-    entrypoint = toolkit_offers(ThreadTagsTools(), method_name).entrypoint
+    entrypoint = toolkit_offers(ThreadTagsTools(), "thread_tags").entrypoint
     context = _make_context()
 
     with tool_runtime_context(context), pytest.raises(ValidationError):
@@ -563,7 +554,7 @@ async def test_thread_tags_cross_room_does_not_inherit_context_thread() -> None:
         patch("mindroom.custom_tools.thread_tags.room_access_allowed", return_value=True),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic", room_id="!other:localhost"))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic", room_id="!other:localhost"))
 
     assert payload["status"] == "error"
     assert payload["action"] == "tag"
@@ -593,8 +584,9 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.tag_thread(
-                "blocked",
+            await tool.thread_tags(
+                "tag",
+                tag="blocked",
                 thread_id="$reply-event:localhost",
                 data={"blocked_by": ["$other:localhost"]},
             ),
@@ -633,7 +625,7 @@ async def test_tag_thread_returns_error_when_normalization_fails() -> None:
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic"))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic"))
 
     assert payload["status"] == "error"
     assert payload["action"] == "tag"
@@ -658,7 +650,7 @@ async def test_tag_thread_surfaces_write_failures() -> None:
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("topic"))
+        payload = json.loads(await tool.thread_tags("tag", tag="topic"))
 
     assert payload["status"] == "error"
     assert payload["thread_id"] == "$thread:localhost"
@@ -683,7 +675,7 @@ async def test_list_thread_tags_uses_room_wide_listing_without_thread_context() 
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags())
+        payload = json.loads(await tool.thread_tags("list"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -723,7 +715,7 @@ async def test_list_thread_tags_lists_room_wide_when_no_thread_is_available() ->
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(tag="blocked"))
+        payload = json.loads(await tool.thread_tags("list", tag="blocked"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -770,7 +762,7 @@ async def test_list_thread_tags_room_wide_filters_by_include_tag_only() -> None:
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_tag="blocked"))
+        payload = json.loads(await tool.thread_tags("list", include_tag="blocked"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -812,7 +804,7 @@ async def test_list_thread_tags_room_wide_requires_tag_and_include_tag_together(
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(tag="blocked", include_tag="waiting"))
+        payload = json.loads(await tool.thread_tags("list", tag="blocked", include_tag="waiting"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -852,7 +844,7 @@ async def test_list_thread_tags_room_wide_requires_tag_without_excluded_tag() ->
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(tag="blocked", exclude_tag="resolved"))
+        payload = json.loads(await tool.thread_tags("list", tag="blocked", exclude_tag="resolved"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -885,7 +877,7 @@ async def test_list_thread_tags_room_wide_returns_empty_when_include_tag_matches
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_tag="nonexistent"))
+        payload = json.loads(await tool.thread_tags("list", include_tag="nonexistent"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -916,7 +908,7 @@ async def test_list_thread_tags_room_wide_returns_empty_when_exclude_tag_filters
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved"))
+        payload = json.loads(await tool.thread_tags("list", exclude_tag="resolved"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -954,7 +946,7 @@ async def test_list_thread_tags_room_wide_normalizes_mixed_case_include_and_excl
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_tag="BloCked", exclude_tag="ReSoLved"))
+        payload = json.loads(await tool.thread_tags("list", include_tag="BloCked", exclude_tag="ReSoLved"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -985,7 +977,8 @@ async def test_list_thread_tags_coerces_all_free_form_tag_filters() -> None:
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.list_thread_tags(
+            await tool.thread_tags(
+                "list",
                 tag="Follow Up",
                 include_tag=" Needs Review ",
                 exclude_tag="Already_Resolved",
@@ -1022,7 +1015,8 @@ async def test_list_thread_tags_preserves_long_canonical_filter_beside_prefix_si
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.list_thread_tags(
+            await tool.thread_tags(
+                "list",
                 tag=long_tag,
                 include_tag=long_tag,
                 exclude_tag=short_sibling,
@@ -1069,7 +1063,7 @@ async def test_list_thread_tags_explicit_same_room_target_can_list_room_wide_fro
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(room_id=context.room_id, tag="blocked"))
+        payload = json.loads(await tool.thread_tags("list", room_id=context.room_id, tag="blocked"))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -1100,7 +1094,7 @@ async def test_list_thread_tags_room_wide_returns_error_on_room_state_failure() 
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.list_thread_tags(include_tag="blocked", exclude_tag="resolved", include_untagged=True),
+            await tool.thread_tags("list", include_tag="blocked", exclude_tag="resolved", include_untagged=True),
         )
 
     assert payload["status"] == "error"
@@ -1137,7 +1131,7 @@ async def test_list_thread_tags_include_untagged_headline_query_from_runtime_con
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved", include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", exclude_tag="resolved", include_untagged=True))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -1175,7 +1169,7 @@ async def test_list_thread_tags_include_untagged_preserves_matrix_thread_order_i
         patch("mindroom.custom_tools.thread_tags.list_tagged_threads", new=AsyncMock(return_value=listing)),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", include_untagged=True))
 
     assert list(payload["threads"]) == ["$z_thread:localhost", "$m_thread:localhost", "$a_thread:localhost"]
     assert "tag_state" not in payload
@@ -1189,7 +1183,7 @@ async def test_list_thread_tags_rejects_thread_id_with_include_untagged() -> Non
 
     with tool_runtime_context(context):
         payload = json.loads(
-            await tool.list_thread_tags(thread_id="$thread:localhost", include_untagged=True),
+            await tool.thread_tags("list", thread_id="$thread:localhost", include_untagged=True),
         )
 
     assert payload["status"] == "error"
@@ -1220,7 +1214,7 @@ async def test_list_thread_tags_include_untagged_suppresses_in_thread_context_fa
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", include_untagged=True))
 
     assert payload["status"] == "ok"
     assert payload["room_wide"] is True
@@ -1254,7 +1248,7 @@ async def test_list_thread_tags_include_untagged_tag_filter_excludes_untagged_th
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(tag="resolved", include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", tag="resolved", include_untagged=True))
 
     assert payload["status"] == "ok"
     assert list(payload["threads"]) == ["$resolved-thread:localhost"]
@@ -1288,7 +1282,7 @@ async def test_list_thread_tags_include_untagged_surfaces_enumeration_error_fiel
         ),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(exclude_tag="resolved", include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", exclude_tag="resolved", include_untagged=True))
 
     assert payload["status"] == "error"
     assert payload["action"] == "list"
@@ -1315,7 +1309,7 @@ async def test_list_thread_tags_include_untagged_returns_truncated_flag() -> Non
         patch("mindroom.custom_tools.thread_tags.list_tagged_threads", new=AsyncMock(return_value=listing)),
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(include_untagged=True))
+        payload = json.loads(await tool.thread_tags("list", include_untagged=True))
 
     assert payload["status"] == "ok"
     assert payload["include_untagged"] is True
@@ -1324,15 +1318,17 @@ async def test_list_thread_tags_include_untagged_returns_truncated_flag() -> Non
 
 
 def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
-    """The model-visible schema should expose include_untagged."""
-    function = toolkit_offers(ThreadTagsTools(), "list_thread_tags")
+    """The model-visible schema should expose include_untagged and mindroom_output_path on thread_tags."""
+    function = toolkit_offers(ThreadTagsTools(), "thread_tags")
 
     schema = function.parameters["properties"]["include_untagged"]
 
     assert schema["type"] == "boolean"
-    assert "include_untagged" not in function.parameters["required"]
-    assert "enumerate every thread root" in schema["description"]
-    assert "Defaults to False" in schema["description"]
+    assert function.parameters["required"] == ["action"]
+    assert function.offer_output_path is True
+    assert function.description is not None
+    assert "enumerate every thread root" in function.description
+    assert "defaults to False" in function.description
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1371,7 @@ async def test_list_thread_tags_tag_filters_query_room_wide_inside_thread(
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.list_thread_tags(tag=tag, include_tag=include_tag, exclude_tag=exclude_tag),
+            await tool.thread_tags("list", tag=tag, include_tag=include_tag, exclude_tag=exclude_tag),
         )
 
     assert payload["status"] == "ok"
@@ -1419,7 +1415,7 @@ async def test_list_thread_tags_filters_thread_specific_payload() -> None:
         ) as mock_list,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", tag="blocked"))
+        payload = json.loads(await tool.thread_tags("list", thread_id="$ctx-thread:localhost", tag="blocked"))
 
     assert payload["status"] == "ok"
     assert "room_wide" not in payload
@@ -1469,19 +1465,20 @@ async def test_list_thread_tags_thread_specific_include_exclude_filters() -> Non
         tool_runtime_context(context),
     ):
         # include_tag matches → thread returned with all tags
-        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", include_tag="blocked"))
+        payload = json.loads(await tool.thread_tags("list", thread_id="$ctx-thread:localhost", include_tag="blocked"))
         assert payload["status"] == "ok"
         assert "blocked" in payload["tags"]
         assert "resolved" in payload["tags"]
 
         # exclude_tag matches → thread excluded (empty tags)
-        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", exclude_tag="resolved"))
+        payload = json.loads(await tool.thread_tags("list", thread_id="$ctx-thread:localhost", exclude_tag="resolved"))
         assert payload["status"] == "ok"
         assert payload["tags"] == {}
 
         # include_tag matches but exclude_tag also matches → excluded
         payload = json.loads(
-            await tool.list_thread_tags(
+            await tool.thread_tags(
+                "list",
                 thread_id="$ctx-thread:localhost",
                 include_tag="blocked",
                 exclude_tag="resolved",
@@ -1491,7 +1488,9 @@ async def test_list_thread_tags_thread_specific_include_exclude_filters() -> Non
         assert payload["tags"] == {}
 
         # include_tag doesn't match → excluded
-        payload = json.loads(await tool.list_thread_tags(thread_id="$ctx-thread:localhost", include_tag="nonexistent"))
+        payload = json.loads(
+            await tool.thread_tags("list", thread_id="$ctx-thread:localhost", include_tag="nonexistent"),
+        )
         assert payload["status"] == "ok"
         assert payload["tags"] == {}
 
@@ -1514,7 +1513,7 @@ async def test_untag_thread_canonical_skips_normalization() -> None:
         tool_runtime_context(context),
     ):
         payload = json.loads(
-            await tool.untag_thread("topic", thread_id="$orphaned-root:localhost", canonical=True),
+            await tool.thread_tags("untag", tag="topic", thread_id="$orphaned-root:localhost", canonical=True),
         )
 
     assert payload["status"] == "ok"
@@ -1557,7 +1556,7 @@ def _vocabulary_runtime_paths(
 
 
 def test_tag_thread_description_embeds_ranked_room_vocabulary(tmp_path: Path) -> None:
-    """The tag_thread description lists the top tags ranked, without counts."""
+    """The thread_tags description lists the top tags ranked, without counts."""
     room_id = "!room-a:localhost"
     runtime_paths = _vocabulary_runtime_paths(
         tmp_path,
@@ -1568,7 +1567,7 @@ def test_tag_thread_description_embeds_ranked_room_vocabulary(tmp_path: Path) ->
         current_room_id=room_id,
     )
 
-    description = toolkit_offers(tool, "tag_thread").description
+    description = toolkit_offers(tool, "thread_tags").description
 
     assert description is not None
     assert "rebuilt once a day" in description
@@ -1591,7 +1590,7 @@ def test_tag_thread_description_never_leaks_another_room_vocabulary(tmp_path: Pa
         current_room_id=room_a,
     )
 
-    description = toolkit_offers(tool, "tag_thread").description
+    description = toolkit_offers(tool, "thread_tags").description
 
     assert description is not None
     assert "alpha" in description
@@ -1606,7 +1605,7 @@ def test_tag_thread_description_without_snapshot_keeps_guidance(tmp_path: Path) 
         current_room_id=room_id,
     )
 
-    description = toolkit_offers(tool, "tag_thread").description
+    description = toolkit_offers(tool, "thread_tags").description
 
     assert description is not None
     assert "Prefer existing tags" in description
@@ -1618,7 +1617,7 @@ def test_tag_thread_description_untouched_without_room_identity(tmp_path: Path) 
     """Construction without Matrix room identity exposes no vocabulary snapshot."""
     tool = ThreadTagsTools(runtime_paths=_vocabulary_runtime_paths(tmp_path, {}))
 
-    assert toolkit_offers(tool, "tag_thread").description == tool_description(tool.tag_thread)
+    assert toolkit_offers(tool, "thread_tags").description == tool_description(tool.thread_tags)
 
 
 @pytest.mark.asyncio
@@ -1638,7 +1637,7 @@ async def test_tag_thread_coerces_free_form_tag_input() -> None:
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("Follow Up"))
+        payload = json.loads(await tool.thread_tags("tag", tag="Follow Up"))
 
     assert payload["status"] == "ok"
     assert payload["tag"] == "follow-up"
@@ -1671,7 +1670,7 @@ async def test_tag_thread_preserves_long_canonical_tag() -> None:
         ) as set_tag,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread(long_tag))
+        payload = json.loads(await tool.thread_tags("tag", tag=long_tag))
 
     assert payload["tag"] == long_tag
     set_tag.assert_awaited_once_with(
@@ -1698,7 +1697,7 @@ async def test_tag_thread_rejects_tag_with_no_valid_characters() -> None:
         ) as mock_set,
         tool_runtime_context(context),
     ):
-        payload = json.loads(await tool.tag_thread("!!!"))
+        payload = json.loads(await tool.thread_tags("tag", tag="!!!"))
 
     assert payload["status"] == "error"
     assert "at least one letter" in payload["message"]
@@ -1719,9 +1718,9 @@ async def test_thread_tag_mutations_reject_resolved_before_matrix_io(method_name
         tool_runtime_context(context),
     ):
         if method_name == "tag":
-            payload = json.loads(await tool.tag_thread(tag))
+            payload = json.loads(await tool.thread_tags("tag", tag=tag))
         else:
-            payload = json.loads(await tool.untag_thread(tag))
+            payload = json.loads(await tool.thread_tags("untag", tag=tag))
 
     assert payload["status"] == "error"
     assert payload["action"] == method_name
@@ -1742,8 +1741,7 @@ async def test_tag_thread_refuses_snoozed(method_name: str) -> None:
         patch("mindroom.custom_tools.thread_tags.remove_thread_tag", new=AsyncMock()) as mock_remove,
         tool_runtime_context(context),
     ):
-        method = tool.tag_thread if method_name == "tag" else tool.untag_thread
-        payload = json.loads(await method("snoozed"))
+        payload = json.loads(await tool.thread_tags(method_name, tag="snoozed"))
 
     assert payload["status"] == "error"
     assert payload["message"] == (
@@ -1752,3 +1750,32 @@ async def test_tag_thread_refuses_snoozed(method_name: str) -> None:
     )
     mock_set.assert_not_awaited()
     mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_error"),
+    [
+        ({"action": "tag"}, "`tag` is required for action='tag'."),
+        ({"action": "tag", "tag": "   "}, "`tag` is required for action='tag'."),
+        ({"action": "untag"}, "`tag` is required for action='untag'."),
+        ({"action": "tag", "tag": "topic", "exclude_tag": "resolved"}, "cannot be used with action='tag'."),
+        ({"action": "tag", "tag": "topic", "canonical": True}, "cannot be used with action='tag'."),
+        ({"action": "untag", "tag": "topic", "note": "nope"}, "cannot be used with action='untag'."),
+        ({"action": "untag", "tag": "topic", "include_untagged": True}, "cannot be used with action='untag'."),
+        ({"action": "list", "note": "nope"}, "cannot be used with action='list'."),
+        ({"action": "list", "data": {"k": 1}}, "cannot be used with action='list'."),
+        ({"action": "list", "canonical": True}, "cannot be used with action='list'."),
+        ({"action": "bogus"}, "Unsupported thread_tags action 'bogus'."),
+    ],
+)
+async def test_thread_tags_validates_action_specific_parameters(
+    kwargs: dict[str, object],
+    expected_error: str,
+) -> None:
+    """Action-specific required and disallowed parameters fail cleanly before Matrix I/O."""
+    tool = ThreadTagsTools()
+    payload = json.loads(await tool.thread_tags(**kwargs))  # type: ignore[arg-type]
+
+    assert payload["status"] == "error"
+    assert expected_error in payload["message"]

@@ -1059,9 +1059,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "list_thread_tags",
-        "tag_thread",
-        "untag_thread"
+        "thread_tags"
       ],
       "helper_text": null,
       "icon": "Tags",
@@ -6462,12 +6460,7 @@
       "executes_code": true,
       "file_access": "none",
       "function_names": [
-        "start_workflow",
-        "get_workflow",
-        "cancel_workflow",
-        "resume_workflow",
-        "list_workflow_runs",
-        "save_workflow"
+        "workflow"
       ],
       "helper_text": null,
       "icon": "Workflow",

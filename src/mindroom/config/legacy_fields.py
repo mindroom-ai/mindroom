@@ -361,15 +361,16 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify,
 #   reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits (outlook_mail, outlook_calendar,
 #   microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote, microsoft_todo, microsoft_meetings,
-#   microsoft_people), skills, attachments, and Google Docs / Google Tasks (google_docs, google_tasks, including
-#   prefixed secondary Google Workspace plugin copies for all Google Workspace toolkits) previously exposed
-#   individual per-operation function names that could appear in tool_approval.rules[].match globs.
+#   microsoft_people), skills, attachments, workflow, thread_tags, and Google Docs / Google Tasks (google_docs,
+#   google_tasks, including prefixed secondary Google Workspace plugin copies for all Google Workspace toolkits)
+#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
-#   google_docs/google_tasks: v2026.11.659); replacement: unreleased; consolidated into action-dispatched and
-#   risk-scoped functions.
+#   workflow/thread_tags: v2026.11.658; google_docs/google_tasks: v2026.11.659); replacement: unreleased; consolidated
+#   into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired skills/attachments/Microsoft 365 function is decided by an approval
+#   reject tool_approval.rules when a retired skills/attachments/Microsoft 365/workflow/thread_tags function is decided
+#   by an approval
 #   script or any retired function's effective decision differs from the replacement's effective decision (regardless of
 #   other toolkits); also reject include_tools or exclude_tools naming a retired attachment function on an attachments
 #   entry, directing operators to `attachment` / `view_file` and `tool_approval.rules`.
@@ -380,6 +381,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_tool_approval_grants.py::test_microsoft_365_retired_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_outlook_mail_send_and_reply_migration_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
@@ -429,6 +431,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "workflow": {
+        "start_workflow": "workflow",
+        "get_workflow": "workflow",
+        "cancel_workflow": "workflow",
+        "resume_workflow": "workflow",
+        "list_workflow_runs": "workflow",
+        "save_workflow": "workflow",
+    },
+    "thread_tags": {
+        "tag_thread": "thread_tags",
+        "untag_thread": "thread_tags",
+        "list_thread_tags": "thread_tags",
     },
     "gmail": {
         "get_latest_emails": "gmail_read",
@@ -998,6 +1013,8 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
     {
         "skills",
         "attachments",
+        "workflow",
+        "thread_tags",
         "outlook_mail",
         "outlook_calendar",
         "microsoft_teams",
@@ -1306,19 +1323,20 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
-#   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
-# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
-#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
-#   differs from its replacement's effective decision.
+#   unified function is `workflow`.
+# Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function is decided by an approval script or
+#   its effective approval decision differs from `workflow`'s effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
-    "run_workflow": ("start_workflow", "resume_workflow"),
-    "create_workflow": ("save_workflow",),
-    "update_workflow": ("save_workflow",),
-    "get_workflow_run": ("get_workflow",),
-    "list_workflows": ("list_workflow_runs",),
+    "run_workflow": ("workflow",),
+    "create_workflow": ("workflow",),
+    "update_workflow": ("workflow",),
+    "get_workflow_run": ("workflow",),
+    "list_workflows": ("workflow",),
 }
 
 
@@ -1333,4 +1351,5 @@ def retired_dynamic_workflow_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=True,
     )

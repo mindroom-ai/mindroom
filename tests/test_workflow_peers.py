@@ -650,7 +650,7 @@ async def test_workflow_children_get_the_peer_tools_and_other_children_do_not(st
 
 @pytest.mark.asyncio
 async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(stack: WorkflowStack) -> None:
-    """Frames and cards carry redacted bounded message previews and never shared_state; get_workflow(messages=True) is owner-checked."""
+    """Frames and cards carry redacted bounded message previews and never shared_state; workflow(action="get", ..., messages=True) is owner-checked."""
     views = stack.show()
     payload_text = "contract api_key=sk-inventedinventedinvented1234 " + "p" * 240
     secret_state = {"token": "SUPER-SECRET-STATE-VALUE"}
@@ -707,13 +707,13 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
     assert "second message" in {preview["text"] for preview in graph.messages}
     assert any(preview["text"].startswith("contract ") for preview in graph.messages)
 
-    # get_workflow(messages=True) returns full uncapped text and state to owner.
+    # workflow(action="get", ..., messages=True) returns full uncapped text and state to owner.
     tools = WorkflowTools()
     with tool_runtime_context(stack.context):
-        without_msgs = json.loads(await tools.get_workflow(stack.run_id))
+        without_msgs = json.loads(await tools.workflow("get", run_id=stack.run_id))
         assert "messages" not in without_msgs
         assert "shared_state" not in without_msgs
-        with_msgs = json.loads(await tools.get_workflow(stack.run_id, messages=True))
+        with_msgs = json.loads(await tools.workflow("get", run_id=stack.run_id, messages=True))
     assert {m["text"] for m in with_msgs["messages"]} == {payload_text, "second message"}
     assert len(with_msgs["messages"]) == 2
     assert with_msgs["shared_state"] == {"contract": secret_state}
@@ -721,7 +721,7 @@ async def test_message_edges_carry_counts_and_the_full_history_is_owner_checked(
     # Another requester gets WorkflowRunNotFoundError (reads as unknown).
     other = stack.context.__class__(**{**stack.context.__dict__, "requester_id": "@mallory:example.test"})
     with tool_runtime_context(other), pytest.raises(WorkflowRunNotFoundError):
-        await tools.get_workflow(stack.run_id, messages=True)
+        await tools.workflow("get", run_id=stack.run_id, messages=True)
 
 
 @pytest.mark.asyncio
@@ -1097,7 +1097,7 @@ async def test_blind_authoring_harness_smoke_without_live_models(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Astra blocker: blind_authoring loads real config, uses adapted start_workflow description, markers, ended_run, and checks peer exchange."""
+    """Astra blocker: blind_authoring loads real config, uses adapted workflow description, markers, ended_run, and checks peer exchange."""
     slot_dir = tmp_path / "slot-9"
     storage_dir = slot_dir / "storage"
     (storage_dir / "agents" / "helper" / "workspace").mkdir(parents=True)
@@ -1140,7 +1140,7 @@ agents:
 
     class _FakeProvider:
         async def stream(self, request: ModelRequest) -> AsyncIterator[TurnCompleted]:
-            assert "start_workflow" in str(request.messages[-1].content)
+            assert "workflow" in str(request.messages[-1].content)
             yield TurnCompleted(
                 message=Message(
                     role="assistant",
