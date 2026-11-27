@@ -68,11 +68,17 @@ def is_queued_notice_message(message: Message) -> bool:
 
 
 MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+PRUNED_MEDIA_FOLLOW_UP_TEXT = "[Earlier tool media omitted to keep context bounded.]"
+_MEDIA_FOLLOW_UP_PREFIXES = (MEDIA_FOLLOW_UP_TEXT, PRUNED_MEDIA_FOLLOW_UP_TEXT)
 
 
 def is_media_follow_up(message: Message) -> bool:
     """Return whether a stored message is a media follow-up the agent loop wrote, which no person said."""
-    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
+    if message.role != "user" or not isinstance(message.content, str):
+        return False
+    return any(
+        message.content == prefix or message.content.startswith(f"{prefix}\n\n") for prefix in _MEDIA_FOLLOW_UP_PREFIXES
+    )
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -377,6 +383,7 @@ def stored_tool_call(call_id: str, name: str | None, arguments: str) -> dict[str
 __all__ = [
     "EMPTY_META",
     "MEDIA_FOLLOW_UP_TEXT",
+    "PRUNED_MEDIA_FOLLOW_UP_TEXT",
     "UNSET",
     "InvalidStamp",
     "Message",

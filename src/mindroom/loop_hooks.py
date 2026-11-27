@@ -29,6 +29,7 @@ from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.tools import failed_answer
 from mindroom.approval.receipt import approval_receipt_hook
 from mindroom.delegation.lifecycle import child_usage_hook
+from mindroom.history.message_content import prune_in_turn_tool_images
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.native_compaction_hook import native_compaction_after_turn_hook
 from mindroom.history.run_checkpoint import checkpoint_hooks
@@ -206,6 +207,7 @@ def _loop_hooks(
     if participation is not None:
         before_request.append(participation_hook(participation, model))
     before_request.append(approval_receipt_hook)
+    before_request.append(prune_in_turn_tool_images_hook)
     before_request.append(
         mid_turn_compaction_hook(
             config=turn.config,
@@ -255,6 +257,12 @@ def _loop_hooks(
             else None
         ),
     )
+
+
+async def prune_in_turn_tool_images_hook(state: LoopState) -> SendRequest:
+    """Batch-prune older seen in-turn tool images before compaction sizing and checkpointing."""
+    prune_in_turn_tool_images(state.messages)
+    return SendRequest()
 
 
 _PAUSED_TOOL_CALL_RESULT = "Not run: a newer message arrived while you worked, so this turn ended before this call ran."
