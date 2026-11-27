@@ -102,8 +102,6 @@ _CORE_BARE_FUNCTION_TOOLKITS = frozenset(
         "stop_reply",
         "temporary_secrets",
         "thread_move",
-        "thread_resolution",
-        "thread_snooze",
         "thread_summary",
         "update_awareness",
         "visualization",
@@ -159,13 +157,22 @@ def test_catalog_function_names_follow_toolkit_scoping_rules() -> None:
     assert _CORE_BARE_FUNCTION_TOOLKITS.isdisjoint(_PREFIX_EXCEPTIONS)
 
     violations: list[tuple[str, str, str, str]] = []
+    bare_toolkits_in_use: set[str] = set()
+    prefix_exceptions_in_use: set[str] = set()
     for catalog_name, toolkit_name, function_name in _catalog_functions():
+        is_default_scoped = function_name == toolkit_name or function_name.startswith(f"{toolkit_name}_")
         if toolkit_name in _CORE_BARE_FUNCTION_TOOLKITS:
+            if not is_default_scoped:
+                bare_toolkits_in_use.add(toolkit_name)
             continue
         expected_prefix = _PREFIX_EXCEPTIONS.get(toolkit_name, f"{toolkit_name}_")
         if function_name != toolkit_name and not function_name.startswith(expected_prefix):
             violations.append((catalog_name, toolkit_name, function_name, expected_prefix))
+        elif toolkit_name in _PREFIX_EXCEPTIONS and not is_default_scoped:
+            prefix_exceptions_in_use.add(toolkit_name)
     assert violations == []
+    assert _CORE_BARE_FUNCTION_TOOLKITS - bare_toolkits_in_use == set()
+    assert set(_PREFIX_EXCEPTIONS) - prefix_exceptions_in_use == set()
 
 
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))

@@ -399,7 +399,7 @@ def build_ai_run_metadata_content(
 
     `model_name` is the configured model name resolved at run preparation time.
     It must not be re-resolved here: the per-thread override store can change
-    mid-run (for example via `thread_model_write(action="switch")`), and this metadata must
+    mid-run (for example via `thread_model(action="switch")`), and this metadata must
     describe the model that actually produced the response.
     `metrics` is the final run's usage and `prior_usage` that of the turn's spent attempts, such as an empty reply that
     was retried or a run a model switch continued; the reply's usage and cost cover them all. Everything else

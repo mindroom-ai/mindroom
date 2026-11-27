@@ -103,14 +103,14 @@ agents:
 ## [`hackernews`]
 
 `hackernews` reads the public Hacker News API.
-`hackernews_top_stories(num_stories=10)` returns the current top story items, including title, URL, score, and author.
-`hackernews_user_details(username)` returns the user's karma, about text, and number of submitted items.
+`hackernews(action="top_stories", num_stories=10)` returns the current top story items, including title, URL, score, and author.
+`hackernews(action="user", username=...)` returns the user's karma, about text, and number of submitted items.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_get_top_stories` | `boolean` | `true` | Enable `hackernews_top_stories()`. |
-| `enable_get_user_details` | `boolean` | `true` | Enable `hackernews_user_details()`. |
-| `all` | `boolean` | `false` | Enable both functions. |
+| `enable_get_top_stories` | `boolean` | `true` | Enable `hackernews(action="top_stories")`. |
+| `enable_get_user_details` | `boolean` | `true` | Enable `hackernews(action="user")`. |
+| `all` | `boolean` | `false` | Enable both actions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 The tool returns story metadata only; pair it with [Web Scraping & Browser](web-scraping-and-browser.md) to read the linked pages.

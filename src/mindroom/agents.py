@@ -146,6 +146,7 @@ _NO_OUTPUT_REDIRECT_TOOLKITS = frozenset(
         "sleep",
         "stop_reply",
         "temporary_secrets",
+        "thread_model",
         "thread_move",
         "thread_resolution",
         "thread_snooze",
@@ -2154,7 +2155,7 @@ def create_agent(
         )
     )
     prompt_skills = None if skill_hidden else skills
-    # The graph is one more source of the knowledge search, which agents call far more than knowledge_graph_read.
+    # The graph is one more source of the knowledge search, which agents call far more than knowledge_graph.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
     if agent.knowledge_graph and kept_knowledge is None:
         from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415

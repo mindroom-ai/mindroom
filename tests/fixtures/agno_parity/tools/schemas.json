@@ -6296,37 +6296,20 @@
     "guidance": null,
     "functions": [
       {
-        "name": "google_bigquery_list_tables",
-        "description": "List table names in the configured dataset.",
+        "name": "google_bigquery_inspect",
+        "description": "Inspect tables and schemas in the configured BigQuery dataset as JSON.\n- `list_tables`: List table IDs in the dataset.\n- `describe_table`: Describe `table_id` (table description and column names, types, modes, descriptions).",
         "parameters": {
           "type": "object",
           "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "google_bigquery_describe_table",
-        "description": "Describe one table in the configured dataset.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "table_id": {
+            "action": {
               "type": "string",
-              "description": "Table name inside the configured dataset."
+              "enum": [
+                "list_tables",
+                "describe_table"
+              ]
+            },
+            "table_id": {
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -6340,7 +6323,7 @@
             }
           },
           "required": [
-            "table_id"
+            "action"
           ]
         },
         "strict": false,
@@ -7289,41 +7272,23 @@
     "guidance": null,
     "functions": [
       {
-        "name": "hackernews_top_stories",
-        "description": "Use this function to get top stories from Hacker News.",
+        "name": "hackernews",
+        "description": "Fetch top stories or user details from Hacker News as JSON.\n- `top_stories`: Top Hacker News stories (optional `num_stories`, default 10).\n- `user`: User details for `username`.",
         "parameters": {
           "type": "object",
           "properties": {
-            "num_stories": {
-              "type": "integer",
-              "description": "(int) Number of stories to return. Defaults to 10."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "hackernews_user_details",
-        "description": "Use this function to get the details of a Hacker News user using their username.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "username": {
+            "action": {
               "type": "string",
-              "description": "(str) Username of the user to get details for."
+              "enum": [
+                "top_stories",
+                "user"
+              ]
+            },
+            "num_stories": {
+              "type": "integer"
+            },
+            "username": {
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -7337,7 +7302,7 @@
             }
           },
           "required": [
-            "username"
+            "action"
           ]
         },
         "strict": false,
@@ -7535,8 +7500,8 @@
     "guidance": null,
     "functions": [
       {
-        "name": "knowledge_graph_read",
-        "description": "Read facts or entities from your knowledge graph, with when each held and its sources.\nActions:\n- `search`: Find facts matching `query` (up to `limit`, from 1 to 50); \"conversation\" means someone said it, \"tool_results\" means a tool returned it, and superseded facts held before later evidence replaced them.\n- `entity`: Show the summary and facts for one person, organization, project, or other entity named `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise the closest match plus other close matches).",
+        "name": "knowledge_graph",
+        "description": "Access facts and entities in your knowledge graph.\n- `search`: Find facts matching `query` (optional `limit`, 1..50, default 10) with validity and sources (\"conversation\" = said, \"tool_results\" = tool output, superseded = replaced by later evidence).\n- `entity`: Show summary and facts for `query` (exact case-insensitive name, alias, agent key, Matrix ID, or entity ID when edits are enabled; otherwise closest match plus other close matches).\n- `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right.\n- `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between them, and deleting the duplicate.\n- `delete_fact`: Delete a wrong `fact_id` that never held or recorded your own lookup; keep historical superseded facts.\n- `delete_entity`: Delete a non-entity `entity_id` (e.g. path, URL, setting) and every fact touching it; use `merge` for duplicates.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -7544,73 +7509,33 @@
               "type": "string",
               "enum": [
                 "search",
-                "entity"
-              ],
-              "description": "Lookup mode (`search` or `entity`)."
-            },
-            "query": {
-              "type": "string",
-              "description": "Search query for `search`, or entity name/alias/Matrix ID/ID for `entity`."
-            },
-            "limit": {
-              "type": "integer",
-              "description": "Maximum facts to return for `search`, from 1 to 50."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "knowledge_graph_write",
-        "description": "Edit mistakes in your knowledge graph (available when knowledge_graph_edits is enabled).\nActions:\n- `update_summary`: Replace `entity_id`'s summary with `summary`, keeping everything still right (e.g. after deleting a fact).\n- `merge`: Merge `duplicate_id` into `into_id`, moving its facts onto `into_id`, dropping facts between the two, and deleting the duplicate.\n- `delete_fact`: Delete a wrong fact (`fact_id`) that never held or recorded your own lookup; keep historical superseded facts.\n- `delete_entity`: Delete a non-entity (`entity_id`, such as a path, URL, or setting) with every fact that touches it; use `merge` for duplicates.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
+                "entity",
                 "update_summary",
                 "merge",
                 "delete_fact",
                 "delete_entity"
-              ],
-              "description": "Edit operation to perform."
+              ]
+            },
+            "query": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
             },
             "fact_id": {
-              "type": "string",
-              "description": "Fact ID from `knowledge_graph_read` (required for `delete_fact`)."
+              "type": "string"
             },
             "entity_id": {
-              "type": "string",
-              "description": "Entity ID from `knowledge_graph_read` (required for `update_summary` and `delete_entity`)."
+              "type": "string"
             },
             "duplicate_id": {
-              "type": "string",
-              "description": "Entity ID to merge away (required for `merge`)."
+              "type": "string"
             },
             "into_id": {
-              "type": "string",
-              "description": "Entity ID to keep (required for `merge`)."
+              "type": "string"
             },
             "summary": {
-              "type": "string",
-              "description": "New entity summary (required for `update_summary`)."
+              "type": "string"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11475,58 +11400,31 @@
     "guidance": null,
     "functions": [
       {
-        "name": "serper_search",
-        "description": "Search Google via Serper for `query` (optional `num_results`).\n- `web`: Web search.\n- `news`: Recent news articles.\n- `scholar`: Google Scholar academic papers.",
+        "name": "serper",
+        "description": "Search Google or scrape a webpage via Serper and return raw JSON.\n- `web`: Google web search for `query` (optional `num_results`).\n- `news`: Recent news search for `query` (optional `num_results`).\n- `scholar`: Google Scholar search for `query` (optional `num_results`).\n- `scrape`: Scrape `url` (optional `markdown=True` for Markdown output).",
         "parameters": {
           "type": "object",
           "properties": {
-            "query": {
-              "type": "string"
-            },
             "action": {
               "type": "string",
               "enum": [
                 "web",
                 "news",
-                "scholar"
+                "scholar",
+                "scrape"
               ]
+            },
+            "query": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
             },
             "num_results": {
               "type": "integer"
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "query",
-            "action"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "serper_scrape_webpage",
-        "description": "Scrapes and extracts content from a webpage using the Serper scraping API.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "url": {
-              "type": "string",
-              "description": "(str) The URL of the webpage to scrape."
-            },
             "markdown": {
-              "type": "boolean",
-              "description": "(bool) Return content in markdown format (default: False)."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -11540,7 +11438,7 @@
             }
           },
           "required": [
-            "url"
+            "action"
           ]
         },
         "strict": false,
@@ -12554,8 +12452,8 @@
     "guidance": null,
     "functions": [
       {
-        "name": "thread_model_read",
-        "description": "List configured models or inspect this thread's model override.\n- `list`: list configured models, providers, and reasoning levels (works outside a thread).\n- `get`: inspect this thread's current active/stale model override.",
+        "name": "thread_model",
+        "description": "List models or inspect, switch, or reset this thread's model override.\n- `list`: list configured models, providers, and reasoning levels (works outside a thread).\n- `get`: inspect this thread's active/stale model override.\n- `switch`: set thread model to `model_name` (`name` or `name@level`) until reset; `when` is `next-turn` (default) or `after-toolcall` to continue this reply now.\n- `reset`: clear override, restoring room selection.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -12563,53 +12461,20 @@
               "type": "string",
               "enum": [
                 "list",
-                "get"
-              ]
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "thread_model_write",
-        "description": "Switch or reset this thread's model override.\n- `switch`: set thread model to `model_name` until reset.\n- `reset`: clear override, restoring room selection.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "action": {
-              "type": "string",
-              "enum": [
+                "get",
                 "switch",
                 "reset"
-              ],
-              "description": "Action."
+              ]
             },
             "model_name": {
-              "type": "string",
-              "description": "Model name or `name@level` (switch)."
+              "type": "string"
             },
             "when": {
               "type": "string",
               "enum": [
                 "after-toolcall",
                 "next-turn"
-              ],
-              "description": "`next-turn` (default) or `after-toolcall` to continue now (switch)."
+              ]
             }
           },
           "required": [
@@ -12656,34 +12521,25 @@
     "guidance": null,
     "functions": [
       {
-        "name": "resolve_thread",
-        "description": "Mark the current or specified Matrix thread in the current room as resolved.",
+        "name": "thread_resolution",
+        "description": "Resolve or reopen the current or specified Matrix thread in the current room.\n- `resolve`: mark `thread_id` (omit for active thread) as resolved and end any active snooze.\n- `reopen`: remove resolved state from `thread_id` (omit for active thread).",
         "parameters": {
           "type": "object",
           "properties": {
-            "thread_id": {
+            "action": {
               "type": "string",
-              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
+              "enum": [
+                "resolve",
+                "reopen"
+              ]
+            },
+            "thread_id": {
+              "type": "string"
             }
           },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "reopen_thread",
-        "description": "Remove resolved state from the current or specified Matrix thread in the current room.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "thread_id": {
-              "type": "string",
-              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
-            }
-          },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -12696,44 +12552,31 @@
     "guidance": null,
     "functions": [
       {
-        "name": "snooze_thread",
-        "description": "Snooze the current or specified Matrix thread until a time, then bring it back with a message.",
+        "name": "thread_snooze",
+        "description": "Snooze or unsnooze the current or specified Matrix thread in the current room.\n- `snooze`: snooze until `until` (required future ISO-8601 datetime with time; naive = UTC) and wake it with a message; optional `note` quoted on wake, `thread_id` (omit for active thread).\n- `unsnooze`: cancel the snooze of `thread_id` (omit for active thread).",
         "parameters": {
           "type": "object",
           "properties": {
-            "until": {
+            "action": {
               "type": "string",
-              "description": "When to wake the thread, as an ISO-8601 datetime with a time part,\nfor example 2026-11-14T09:00:00+01:00. A value without an offset is UTC.\nIt must be in the future."
+              "enum": [
+                "snooze",
+                "unsnooze"
+              ]
+            },
+            "until": {
+              "type": "string"
             },
             "note": {
-              "type": "string",
-              "description": "Optional reminder that the wake message quotes."
+              "type": "string"
             },
             "thread_id": {
-              "type": "string",
-              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
+              "type": "string"
             }
           },
           "required": [
-            "until"
+            "action"
           ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "unsnooze_thread",
-        "description": "Cancel the snooze of the current or specified Matrix thread.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "thread_id": {
-              "type": "string",
-              "description": "Thread root or reply event ID in the current room.\nOmit to use the active thread."
-            }
-          },
-          "required": []
         },
         "strict": false,
         "gate": null,

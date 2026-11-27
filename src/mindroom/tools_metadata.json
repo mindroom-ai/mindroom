@@ -971,8 +971,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "reopen_thread",
-        "resolve_thread"
+        "thread_resolution"
       ],
       "helper_text": null,
       "icon": "CircleCheckBig",
@@ -997,8 +996,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "snooze_thread",
-        "unsnooze_thread"
+        "thread_snooze"
       ],
       "helper_text": null,
       "icon": "AlarmClock",
@@ -3967,8 +3965,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "google_bigquery_describe_table",
-        "google_bigquery_list_tables",
+        "google_bigquery_inspect",
         "google_bigquery_run_sql_query"
       ],
       "helper_text": "Connect Google Cloud, then set the project, dataset, and location. Queries run as the connected account with read-only access.",
@@ -8461,8 +8458,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "knowledge_graph_read",
-        "knowledge_graph_write"
+        "knowledge_graph"
       ],
       "helper_text": null,
       "icon": "Network",
@@ -9504,8 +9500,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "thread_model_read",
-        "thread_model_write"
+        "thread_model"
       ],
       "helper_text": null,
       "icon": "Cpu",
@@ -12011,8 +12006,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "hackernews_top_stories",
-        "hackernews_user_details"
+        "hackernews"
       ],
       "helper_text": null,
       "icon": "FaHackerNews",
@@ -12999,8 +12993,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "serper_scrape_webpage",
-        "serper_search"
+        "serper"
       ],
       "helper_text": null,
       "icon": "FaSearch",

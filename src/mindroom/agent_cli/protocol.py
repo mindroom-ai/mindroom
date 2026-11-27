@@ -57,7 +57,7 @@ class ToolDescribeOperation(_Operation):
 
     operation: Literal["tools.describe"]
     toolkit: _TOOLKIT
-    function: _SELECTOR
+    function: _SELECTOR | None = None
 
 
 class ToolCallOperation(_Operation):

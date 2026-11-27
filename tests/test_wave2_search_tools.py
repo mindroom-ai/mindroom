@@ -64,7 +64,7 @@ def _build_env_configured_tool(
         (duckduckgo_tools, "websearch", ["duckduckgo_search"]),
         (googlesearch_tools, "websearch", ["google_search"]),
         (baidusearch_tools, "baidusearch", ["baidu_search"]),
-        (serper_tools, "serper_tools", ["serper_search", "serper_scrape_webpage"]),
+        (serper_tools, "serper_tools", ["serper"]),
         (serpapi_tools, "serpapi_tools", ["serpapi_search_google"]),
     ],
 )
@@ -102,14 +102,11 @@ def test_wave2_search_tools_preserve_derived_descriptions_and_schemas() -> None:
     assert set(baidu_schema["properties"]) == {"query", "max_results", "language"}
 
     serper = serper_tools()()
-    schema = tool_parameters(serper.functions["serper_search"])
-    assert schema["required"] == ["query", "action"]
-    assert schema["properties"]["action"]["enum"] == ["web", "news", "scholar"]
+    schema = tool_parameters(serper.functions["serper"])
+    assert schema["required"] == ["action"]
+    assert schema["properties"]["action"]["enum"] == ["web", "news", "scholar", "scrape"]
     assert schema["properties"]["num_results"]["type"] == "integer"
-
-    scrape_schema = tool_parameters(serper.functions["serper_scrape_webpage"])
-    assert scrape_schema["required"] == ["url"]
-    assert scrape_schema["properties"]["markdown"]["type"] == "boolean"
+    assert schema["properties"]["markdown"]["type"] == "boolean"
 
     serpapi_toolkit = serpapi_tools()(all=True)
     assert tool_parameters(serpapi_toolkit.functions["serpapi_search_google"])["required"] == ["query"]
@@ -349,10 +346,10 @@ def test_serper_all_endpoints_headers_payload_and_env_fallback(
             overrides={"location": "nl", "language": "nl", "num_results": 7, "date_range": "qdr:w", "timeout": 15},
         )
 
-        web = json.loads(toolkit.serper_search("python", "web"))
-        news = json.loads(toolkit.serper_search("ai", "news", num_results=3))
-        scholar = json.loads(toolkit.serper_search("transformers", "scholar"))
-        scraped = json.loads(toolkit.serper_scrape_webpage("https://example.com", markdown=True))
+        web = json.loads(toolkit.serper("web", query="python"))
+        news = json.loads(toolkit.serper("news", query="ai", num_results=3))
+        scholar = json.loads(toolkit.serper("scholar", query="transformers"))
+        scraped = json.loads(toolkit.serper("scrape", url="https://example.com", markdown=True))
 
     assert web["endpoint"] == "/search"
     assert news["endpoint"] == "/news"
@@ -383,15 +380,24 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.delenv("SERPER_API_KEY", raising=False)
     no_key_toolkit = serper_tools()()
 
-    assert json.loads(no_key_toolkit.serper_search("", "web")) == {"error": "Please provide a query to search for"}
-    assert json.loads(no_key_toolkit.serper_search("", "news")) == {
+    assert json.loads(no_key_toolkit.serper("web", query="")) == {"error": "Please provide a query to search for"}
+    assert json.loads(no_key_toolkit.serper("news", query="")) == {
         "error": "Please provide a query to search for news",
     }
-    assert json.loads(no_key_toolkit.serper_search("", "scholar")) == {
+    assert json.loads(no_key_toolkit.serper("scholar", query="")) == {
         "error": "Please provide a query to search for academic papers",
     }
-    assert json.loads(no_key_toolkit.serper_scrape_webpage("")) == {"error": "Please provide a URL to scrape"}
-    assert json.loads(no_key_toolkit.serper_search("python", "web")) == {"error": "Please provide a Serper API key"}
+    assert json.loads(no_key_toolkit.serper("scrape", url="")) == {"error": "Please provide a URL to scrape"}
+    assert json.loads(no_key_toolkit.serper("web", query="python")) == {"error": "Please provide a Serper API key"}
+    assert "cannot be used" in json.loads(no_key_toolkit.serper("web", query="q", markdown=True))["error"]
+    assert "cannot be used" in json.loads(no_key_toolkit.serper("web", query="q", url="https://example.com"))["error"]
+    assert (
+        "cannot be used" in json.loads(no_key_toolkit.serper("scrape", url="https://example.com", query="q"))["error"]
+    )
+    assert (
+        "cannot be used"
+        in json.loads(no_key_toolkit.serper("scrape", url="https://example.com", num_results=5))["error"]
+    )
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/news":
@@ -402,23 +408,37 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
         monkeypatch.setattr(httpx, "post", client.post)
         toolkit = serper_tools()(api_key="serper-key")
 
-        assert "error" in json.loads(toolkit.serper_search("outage", "news"))
-        assert "error" in json.loads(toolkit.serper_search("bad-json", "web"))
+        assert "error" in json.loads(toolkit.serper("news", query="outage"))
+        assert "error" in json.loads(toolkit.serper("web", query="bad-json"))
 
     tool_class = serper_tools()
     only_scrape = tool_class(enable_search=False, enable_search_news=False, enable_search_scholar=False)
-    assert list(only_scrape.functions) == ["serper_scrape_webpage"]
+    assert list(only_scrape.functions) == ["serper"]
+    offered_scrape = adapt_toolkit(only_scrape).functions[0]
+    assert offered_scrape.parameters["properties"]["action"]["enum"] == ["scrape"]
+    assert set(offered_scrape.parameters["properties"]) == {"action", "url", "markdown"}
+    assert "`web`" not in (offered_scrape.description or "")
 
     only_scholar = tool_class(enable_search=False, enable_search_news=False, enable_scrape_webpage=False)
     offered_scholar = adapt_toolkit(only_scholar).functions[0]
-    assert offered_scholar.name == "serper_search"
+    assert offered_scholar.name == "serper"
     assert offered_scholar.parameters["properties"]["action"]["enum"] == ["scholar"]
+    assert set(offered_scholar.parameters["properties"]) == {"action", "query", "num_results"}
     assert "action" in offered_scholar.parameters.get("required", [])
     assert "`web`" not in (offered_scholar.description or "")
-    assert "disabled" in json.loads(only_scholar.serper_search("q", "web"))["error"].lower()
-    assert json.loads(only_scholar.serper_search("", "scholar")) == {
+    assert "`scrape`" not in (offered_scholar.description or "")
+    assert "disabled" in json.loads(only_scholar.serper("web", query="q"))["error"].lower()
+    assert json.loads(only_scholar.serper("scholar", query="")) == {
         "error": "Please provide a query to search for academic papers",
     }
+
+    none_enabled = tool_class(
+        enable_search=False,
+        enable_search_news=False,
+        enable_search_scholar=False,
+        enable_scrape_webpage=False,
+    )
+    assert list(none_enabled.functions) == []
 
     all_enabled = tool_class(
         enable_search=False,
@@ -427,7 +447,7 @@ def test_serper_error_paths_and_toggles(monkeypatch: pytest.MonkeyPatch) -> None
         enable_scrape_webpage=False,
         all=True,
     )
-    assert list(all_enabled.functions) == ["serper_search", "serper_scrape_webpage"]
+    assert list(all_enabled.functions) == ["serper"]
 
 
 def test_serpapi_google_youtube_env_fallback_and_key_redaction(
@@ -542,7 +562,7 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
         ("calculator", "calculate", "add", "factorial"),
         ("duckduckgo", "duckduckgo_search", "web", "news"),
         ("googlesearch", "google_search", "web", "news"),
-        ("serper", "serper_search", "web", "scholar"),
+        ("serper", "serper", "web", "scrape"),
         ("youtube", "youtube_video", "captions", "data"),
     ):
         op_a = grant_operation(config, fn_name, {"action": first_action}, tools=registry, toolkit_name=toolkit_name)
@@ -552,10 +572,10 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
         assert op_a != op_b
         assert grant_operation(config, fn_name, {"query": "x"}, tools=registry, toolkit_name=toolkit_name) is None
 
-    # Explicit required action binds timed approval grants for serper_search.
+    # Explicit required action binds timed approval grants for serper (both search and scrape).
     serper_news_op = grant_operation(
         config,
-        "serper_search",
+        "serper",
         {"query": "weather", "action": "news"},
         tools=registry,
         toolkit_name="serper",
@@ -563,23 +583,24 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
     assert serper_news_op is not None
     assert serper_news_op.mcp_tool_name == "news"
 
-    # serper_scrape_webpage stays non-action-scoped on serper.
     scrape_op = grant_operation(
         config,
-        "serper_scrape_webpage",
-        {"url": "https://example.com"},
+        "serper",
+        {"action": "scrape", "url": "https://example.com"},
         tools=registry,
         toolkit_name="serper",
     )
     assert scrape_op is not None
-    assert scrape_op.mcp_tool_name is None
+    assert scrape_op.mcp_tool_name == "scrape"
 
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
     for toolkit, retired, replacement in (
         ("calculator", "multiply", "calculate"),
         ("duckduckgo", "web_search", "duckduckgo_search"),
         ("googlesearch", "search_news", "google_search"),
-        ("serper", "search_scholar", "serper_search"),
+        ("serper", "search_scholar", "serper"),
+        ("serper", "serper_search", "serper"),
+        ("serper", "scrape_webpage", "serper"),
         ("youtube", "get_youtube_video_captions", "youtube_video"),
     ):
         with pytest.raises(ConfigRuntimeValidationError, match=replacement):

@@ -134,25 +134,42 @@ def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> 
         execution_identity=_OWNER,
     )
     assert toolkit is not None
-    assert "knowledge_graph_write" in toolkit_function_names(toolkit)
+    assert "knowledge_graph" in toolkit_function_names(toolkit)
+    job_tools = toolkit_job_tools(toolkit, authored_name="knowledge_graph")
+    assert function_provenance(job_tools["knowledge_graph"], {"action": "delete_fact", "fact_id": "f1"}) == {
+        "action": "delete_fact",
+    }
+    assert function_provenance(job_tools["knowledge_graph"], {"action": "search", "query": "Atlas"}) == {
+        "action": "search",
+    }
+    assert function_provenance(job_tools["knowledge_graph"], {}) == {}
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
-    def allowed(tool_name: str) -> bool:
+    def allowed(tool_name: str, origin: dict[str, object]) -> bool:
         return locally_allowed(
             config,
             _OWNER,
             tool_name=tool_name,
             toolkit_name="knowledge_graph",
-            origin={},
+            origin=origin,
             depth=0,
             authority=authority,
             tools=builtin_tool_registry(),
         )
 
-    assert allowed("knowledge_graph_write")
+    assert allowed("knowledge_graph", {"action": "delete_fact"})
+    assert allowed("knowledge_graph", {"action": "search"})
     config.agents["lead"].knowledge_graph_edits = False
-    assert not allowed("knowledge_graph_write")
-    assert allowed("knowledge_graph_read")
+    assert not allowed("knowledge_graph", {"action": "delete_fact"})
+    assert not allowed("knowledge_graph", {"action": "update_summary"})
+    assert not allowed("knowledge_graph", {})
+    assert not allowed("knowledge_graph_write", {})
+    assert not allowed("delete_graph_fact", {})
+    assert allowed("knowledge_graph", {"action": "search"})
+    assert allowed("knowledge_graph", {"action": "entity"})
+    assert allowed("knowledge_graph_read", {})
+    assert allowed("search_graph", {})
+    assert allowed("graph_entity", {})
 
 
 def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:
@@ -197,8 +214,8 @@ def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
         pytest.param({}, True, id="absent"),
         pytest.param({"include_tools": None}, True, id="null"),
         pytest.param({"include_tools": []}, False, id="empty"),
-        pytest.param({"include_tools": ["hackernews_top_stories"]}, True, id="allowed"),
-        pytest.param({"include_tools": ["hackernews_user_details"]}, False, id="denied"),
+        pytest.param({"include_tools": ["think"]}, True, id="allowed"),
+        pytest.param({"include_tools": ["analyze"]}, False, id="denied"),
     ],
 )
 def test_authored_include_policy_matches_real_toolkit_surface(
@@ -211,7 +228,7 @@ def test_authored_include_policy_matches_real_toolkit_surface(
         agents={
             "lead": AgentConfig(
                 display_name="Lead",
-                tools=[ToolConfigEntry(name="hackernews", defer=True, overrides=overrides)],
+                tools=[ToolConfigEntry(name="reasoning", defer=True, overrides=overrides)],
             ),
         },
     )
@@ -219,7 +236,7 @@ def test_authored_include_policy_matches_real_toolkit_surface(
         entry for entry in resolve_agent_tools(config, "lead", builtin_tool_registry()).facts.authored if entry.defer
     )
     toolkit = get_tool_by_name(
-        "hackernews",
+        "reasoning",
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         tool_config_overrides=effective.tool_config_overrides,
         runs_in_worker=False,
@@ -228,13 +245,13 @@ def test_authored_include_policy_matches_real_toolkit_surface(
     )
     authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
 
-    assert ("hackernews_top_stories" in toolkit_function_names(toolkit)) is expected_allowed
+    assert ("think" in toolkit_function_names(toolkit)) is expected_allowed
     assert (
         locally_allowed(
             config,
             _OWNER,
-            tool_name="hackernews_top_stories",
-            toolkit_name="hackernews",
+            tool_name="think",
+            toolkit_name="reasoning",
             origin={},
             depth=0,
             authority=authority,

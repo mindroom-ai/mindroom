@@ -10,17 +10,25 @@ from mindroom.contacts import flow
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from mindroom.contacts.store import ContactRecord
     from mindroom.tool_system.tool_function import ToolFunction
 
-_WRITE_ACTIONS: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
-    "request": (("target", "reason"), frozenset({"target", "reason", "rules", "tools", "party"})),
-    "accept": (("contact_id",), frozenset({"contact_id", "rules", "tools"})),
-    "decline": (("contact_id",), frozenset({"contact_id"})),
-    "update": (("contact_id",), frozenset({"contact_id", "rules", "tools"})),
-    "remove": (("contact_id",), frozenset({"contact_id"})),
+_WRITE_ALLOWED: dict[str, str] = {
+    "request": "target reason rules tools party",
+    "accept": "contact_id rules tools",
+    "decline": "contact_id",
+    "update": "contact_id rules tools",
+    "remove": "contact_id",
+}
+_WRITE_REQUIRED: dict[str, str] = {
+    "request": "target reason",
+    "accept": "contact_id",
+    "decline": "contact_id",
+    "update": "contact_id",
+    "remove": "contact_id",
 }
 
 
@@ -44,22 +52,6 @@ def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
     other = record.target if record.requester.owner == owner else record.requester
     room = f" in the contact room {record.room_id}" if record.status == "active" else ""
     return f"Contact {record.id} with {other.id} already exists and is {record.status}{room}; it is returned unchanged."
-
-
-def _validate_write_params(action: str, params: dict[str, object]) -> str | None:
-    spec = _WRITE_ACTIONS.get(action)
-    if spec is None:
-        return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
-    required, allowed = spec
-    unexpected = [field for field, value in params.items() if value is not None and field not in allowed]
-    if unexpected:
-        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
-    missing = [field for field in required if params[field] is None]
-    if missing:
-        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
-    if params["party"] not in (None, "agent", "me"):
-        return f"Error: Invalid party {params['party']!r}. Expected 'agent' or 'me'."
-    return None
 
 
 class ContactsTools(Toolkit):
@@ -162,8 +154,10 @@ class ContactsTools(Toolkit):
             "tools": tools,
             "party": party,
         }
-        if (error := _validate_write_params(action, params)) is not None:
-            return error
+        if error := validate_action_params(None, action, _WRITE_ALLOWED, params, required_by_action=_WRITE_REQUIRED):
+            return f"Error: {error}"
+        if party not in (None, "agent", "me"):
+            return f"Error: Invalid party {party!r}. Expected 'agent' or 'me'."
         try:
             return await self._dispatch_write(
                 action,

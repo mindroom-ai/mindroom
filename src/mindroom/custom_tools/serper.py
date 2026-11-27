@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
@@ -21,8 +19,14 @@ logger = get_logger(__name__)
 _SERPER_SEARCH_BASE_URL = "https://google.serper.dev"
 _SERPER_SCRAPE_URL = "https://scrape.serper.dev"
 
-_SearchAction = Literal["web", "news", "scholar"]
-_SEARCH_SPECS: dict[_SearchAction, tuple[str, str]] = {
+_SerperAction = Literal["web", "news", "scholar", "scrape"]
+_ACTION_FIELDS: dict[str, str] = {
+    "web": "query num_results",
+    "news": "query num_results",
+    "scholar": "query num_results",
+    "scrape": "url markdown",
+}
+_SEARCH_SPECS: dict[str, tuple[str, str]] = {
     "web": ("search", "Please provide a query to search for"),
     "news": ("news", "Please provide a query to search for news"),
     "scholar": ("scholar", "Please provide a query to search for academic papers"),
@@ -63,24 +67,21 @@ class SerperTools(Toolkit):
         self.date_range = date_range
         self.timeout = timeout
 
-        toggles: dict[_SearchAction, bool] = {
+        toggles: dict[_SerperAction, bool] = {
             "web": all or enable_search,
             "news": all or enable_search_news,
             "scholar": all or enable_search_scholar,
+            "scrape": all or enable_scrape_webpage,
         }
-        self._search_actions: tuple[_SearchAction, ...] = tuple(action for action in _SEARCH_SPECS if toggles[action])
-
-        tools: list[Callable[..., Any]] = []
-        if self._search_actions:
-            tools.append(self.serper_search)
-        if all or enable_scrape_webpage:
-            tools.append(self.serper_scrape_webpage)
-        super().__init__(name="serper_tools", tools=tools)
+        self._enabled_actions: tuple[_SerperAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+        super().__init__(name="serper_tools", tools=[self.serper] if self._enabled_actions else [])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Narrow ``serper_search`` schema to enabled search actions."""
-        if function.name == "serper_search":
-            return restrict_actions(function, self._search_actions)
+        """Narrow ``serper`` schema and parameters to enabled actions."""
+        if function.name == "serper":
+            return restrict_actions(function, self._enabled_actions, action_fields=_ACTION_FIELDS)
         return function
 
     def _post(self, endpoint: str, params: dict[str, Any]) -> str:
@@ -109,39 +110,43 @@ class SerperTools(Toolkit):
             return _error_json(str(exc))
         return response.text
 
-    def serper_search(
+    def serper(
         self,
-        query: str,
-        action: _SearchAction,
-        num_results: Optional[int] = None,  # noqa: UP045 - Optional keeps null out of the tool schema.
+        action: _SerperAction,
+        query: str | None = None,
+        url: str | None = None,
+        num_results: int | None = None,
+        markdown: bool | None = None,
     ) -> str:
-        """Search Google via Serper for `query` (optional `num_results`).
+        """Search Google or scrape a webpage via Serper and return raw JSON.
 
-        - `web`: Web search.
-        - `news`: Recent news articles.
-        - `scholar`: Google Scholar academic papers.
+        - `web`: Google web search for `query` (optional `num_results`).
+        - `news`: Recent news search for `query` (optional `num_results`).
+        - `scholar`: Google Scholar search for `query` (optional `num_results`).
+        - `scrape`: Scrape `url` (optional `markdown=True` for Markdown output).
         """
-        if (disabled := require_enabled_action(action, self._search_actions)) is not None:
-            return _error_json(disabled)
+        if (
+            error := require_enabled_action(action, self._enabled_actions)
+            or reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {
+                    "query": query is not None,
+                    "url": url is not None,
+                    "num_results": num_results is not None,
+                    "markdown": markdown is not None,
+                },
+            )
+        ) is not None:
+            return _error_json(error)
+        if action == "scrape":
+            if not url:
+                logger.warning("No URL provided to scrape")
+                return _error_json("Please provide a URL to scrape")
+            logger.debug("Scraping webpage via Serper", url=url)
+            return self._post("scrape", {"url": url, "includeMarkdown": bool(markdown)})
         endpoint, empty_error = _SEARCH_SPECS[action]
         if not query:
             return _error_json(empty_error)
         logger.debug("Searching via Serper", endpoint=endpoint, query=query)
         return self._post(endpoint, {"q": query, "num": num_results or self.num_results})
-
-    def serper_scrape_webpage(self, url: str, markdown: bool = False) -> str:
-        """Scrapes and extracts content from a webpage using the Serper scraping API.
-
-        Args:
-            url (str): The URL of the webpage to scrape.
-            markdown (bool, optional): Return content in markdown format (default: False).
-
-        Returns:
-            str: A JSON-formatted string containing the scraped webpage content or an error message.
-
-        """
-        if not url:
-            logger.warning("No URL provided to scrape")
-            return _error_json("Please provide a URL to scrape")
-        logger.debug("Scraping webpage via Serper", url=url)
-        return self._post("scrape", {"url": url, "includeMarkdown": markdown})

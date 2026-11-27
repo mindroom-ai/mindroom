@@ -14,11 +14,12 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.protocol import ToolCallOperation, ToolCallReceipt, parse_operation
+from mindroom.agent_cli.protocol import ToolCallOperation, ToolCallReceipt, ToolDescribeOperation, parse_operation
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.session import (
     CONFIG_RELOAD_CALL,
     CliAuthenticationError,
+    CliCatalogReloadedError,
     TurnToolBridge,
     cli_turn_owner,
 )
@@ -31,8 +32,10 @@ from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.toolkits import adapt_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -53,6 +56,7 @@ if TYPE_CHECKING:
     from mindroom.agent_cli.lifetime import CliTurnLifetime
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.toolkits import AdaptedToolkit
 
 
 def _runtime_context(tmp_path: Path) -> ToolRuntimeContext:
@@ -427,3 +431,152 @@ def test_receipt_model_forbids_identity_and_routing_fields() -> None:
     assert ToolCallReceipt.model_validate(receipt).status == "queued"
     with pytest.raises(ValidationError):
         ToolCallReceipt.model_validate({**receipt, "requester_id": "@mallory:example.test"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize(
+    ("change", "should_refuse"),
+    [
+        ("tool_approval_rule", True),
+        ("tool_approval_bool_to_int", True),
+        ("catalog_tools", True),
+        ("prompt_and_model", False),
+    ],
+)
+async def test_reload_refuses_shorthand_describe_before_materializing_deferred_toolkit(
+    tmp_path: Path,
+    change: str,
+    should_refuse: bool,
+) -> None:
+    runtime = _runtime_context(tmp_path)
+    if change == "tool_approval_bool_to_int":
+        runtime.config.tool_approval.rules = [
+            ApprovalRuleConfig(match="other", arguments={"flag": True}, action="require_approval"),
+        ]
+    current = runtime.config.model_copy(deep=True)
+    if change == "tool_approval_rule":
+        current.tool_approval.rules = [ApprovalRuleConfig(match="other", action="require_approval")]
+    elif change == "tool_approval_bool_to_int":
+        current.tool_approval.rules = [
+            ApprovalRuleConfig(match="other", arguments={"flag": 1}, action="require_approval"),
+        ]
+    elif change == "catalog_tools":
+        current.agents["helper"].tools = ["calculator"]
+    else:
+        current.agents["helper"].role = "Updated role"
+        current.agents["helper"].model = "other"
+
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current,
+    )
+    catalog = _catalog(runtime)
+    factory_calls = 0
+
+    def pull_requests() -> str:
+        return "ok"
+
+    async def factory() -> AdaptedToolkit:
+        nonlocal factory_calls
+        factory_calls += 1
+        return adapt_toolkit(Toolkit(name="pull_requests", tools=[pull_requests]))
+
+    catalog.add_deferred(DeferredAgentToolkit("pull_requests", "PRs", factory))
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=True)
+        async with owner._window("bash"):
+            op = ToolDescribeOperation(operation="tools.describe", toolkit="pull_requests")
+            if should_refuse:
+                with pytest.raises(CliCatalogReloadedError, match="configuration was reloaded"):
+                    await owner.operation(window="bash", operation=op)
+            else:
+                described = await owner.operation(window="bash", operation=op)
+                assert (described["toolkit"], described["function"]) == ("pull_requests", "pull_requests")
+
+    if should_refuse:
+        assert factory_calls == 0
+        assert [call.tool_name for call in owner.control_calls] == [CONFIG_RELOAD_CALL]
+    else:
+        assert factory_calls == 1
+        assert owner.control_calls == []
+
+
+def test_protocol_allows_omitted_describe_function_and_still_requires_call_function() -> None:
+    parsed = parse_operation({"operation": "tools.describe", "toolkit": "pull_requests"})
+    assert isinstance(parsed, ToolDescribeOperation)
+    assert (parsed.toolkit, parsed.function) == ("pull_requests", None)
+    assert ToolDescribeOperation(operation="tools.describe", toolkit="pull_requests").function is None
+
+    with pytest.raises(ValidationError):
+        parse_operation({"operation": "tools.describe", "toolkit": "pull_requests", "function": ""})
+    base_call = {
+        "operation": "tools.call",
+        "call_id": "12345678-1234-4234-8234-123456789abc",
+        "toolkit": "pull_requests",
+        "arguments": {},
+    }
+    with pytest.raises(ValidationError):
+        parse_operation(base_call)
+    with pytest.raises(ValidationError):
+        parse_operation({**base_call, "function": None})
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_unrelated_approval_reload_allows_prepared_singleton_shorthand_but_refuses_deferred(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_context(tmp_path)
+    current = runtime.config.model_copy(deep=True)
+    current.tool_approval.rules = [
+        ApprovalRuleConfig(match="google_drive_*", agents="other_agent", action="require_approval"),
+    ]
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current,
+    )
+    catalog = _catalog(runtime)
+
+    def attachment() -> str:
+        return "ok"
+
+    await catalog.prepare([adapt_toolkit(Toolkit(name="attachments", tools=[attachment]), key="attachments")])
+
+    factory_calls = 0
+
+    async def deferred_factory() -> AdaptedToolkit:
+        nonlocal factory_calls
+        factory_calls += 1
+        return adapt_toolkit(Toolkit(name="pull_requests", tools=[attachment]))
+
+    catalog.add_deferred(DeferredAgentToolkit("pull_requests", "PRs", deferred_factory))
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=True)
+        async with owner._window("bash"):
+            explicit = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(
+                    operation="tools.describe",
+                    toolkit="attachments",
+                    function="attachment",
+                ),
+            )
+            shorthand = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="attachments"),
+            )
+            assert (explicit["toolkit"], explicit["function"]) == ("attachments", "attachment")
+            assert (shorthand["toolkit"], shorthand["function"]) == ("attachments", "attachment")
+            assert owner.control_calls == []
+
+            with pytest.raises(CliCatalogReloadedError, match="configuration was reloaded"):
+                await owner.operation(
+                    window="bash",
+                    operation=ToolDescribeOperation(operation="tools.describe", toolkit="pull_requests"),
+                )
+
+    assert factory_calls == 0
+    assert [call.tool_name for call in owner.control_calls] == [CONFIG_RELOAD_CALL]

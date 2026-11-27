@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from google.api_core.exceptions import BadRequest, GoogleAPIError
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
-from mindroom.custom_tools.google_service import GoogleCloudToolkit
+from mindroom.custom_tools.google_service import GoogleCloudToolkit, matches_google_function
 from mindroom.oauth.google import google_cloud_oauth_provider
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _SERVICE_NAME = "Google BigQuery"
+_BigQueryInspectAction = Literal["list_tables", "describe_table"]
+_INSPECT_ACTION_FIELDS: dict[str, str] = {
+    "list_tables": "",
+    "describe_table": "table_id",
+}
 _READ_ONLY_ERROR = "Only a single read-only SELECT query is allowed"
 _MAX_ERROR_DETAIL = 500
 _DEFAULT_MAX_ROWS = 100
@@ -134,11 +141,16 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             msg = f"Google BigQuery max_rows must be a whole number between 1 and {_MAX_ROWS_LIMIT}"
             raise ValueError(msg)
         self.max_rows = max_rows
-        tools = []
+        inspect_actions: list[_BigQueryInspectAction] = []
         if all or list_tables:
-            tools.append(self.google_bigquery_list_tables)
+            inspect_actions.append("list_tables")
         if all or describe_table:
-            tools.append(self.google_bigquery_describe_table)
+            inspect_actions.append("describe_table")
+        self._inspect_actions: tuple[_BigQueryInspectAction, ...] = tuple(inspect_actions)
+
+        tools: list[Any] = []
+        if self._inspect_actions:
+            tools.append(self.google_bigquery_inspect)
         if all or run_sql_query:
             tools.append(self.google_bigquery_run_sql_query)
         super().__init__(
@@ -151,6 +163,12 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             **kwargs,
         )
 
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Restrict ``google_bigquery_inspect`` actions and parameters to enabled actions."""
+        if matches_google_function(function.name, "google_bigquery_inspect"):
+            return restrict_actions(function, self._inspect_actions, action_fields=_INSPECT_ACTION_FIELDS)
+        return function
+
     def _client(self) -> Any:  # noqa: ANN401
         from google.cloud import bigquery  # noqa: PLC0415
 
@@ -159,29 +177,35 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             lambda credentials: bigquery.Client(project=self.project, credentials=credentials, location=self.location),
         )
 
-    def google_bigquery_list_tables(self) -> str:
-        """List table names in the configured dataset.
+    def google_bigquery_inspect(
+        self,
+        action: _BigQueryInspectAction,
+        table_id: str | None = None,
+    ) -> str:
+        """Inspect tables and schemas in the configured BigQuery dataset as JSON.
 
-        Returns:
-            JSON with the table IDs in the dataset.
-
+        - `list_tables`: List table IDs in the dataset.
+        - `describe_table`: Describe `table_id` (table description and column names, types, modes, descriptions).
         """
+        if (
+            error := require_enabled_action(action, self._inspect_actions)
+            or reject_unexpected_args(action, _INSPECT_ACTION_FIELDS, {"table_id": table_id is not None})
+        ) is not None:
+            return json.dumps({"error": error})
+        if action == "list_tables":
+            return self._list_tables()
+        return self._describe_table(table_id)
+
+    def _list_tables(self) -> str:
         try:
             tables = self._client().list_tables(f"{self.project}.{self.dataset}")
             return json.dumps({"tables": [table.table_id for table in tables]})
         except GoogleAPIError as exc:
             return self._google_cloud_error_result(_SERVICE_NAME, "list_tables", exc)
 
-    def google_bigquery_describe_table(self, table_id: str) -> str:
-        """Describe one table in the configured dataset.
-
-        Args:
-            table_id: Table name inside the configured dataset.
-
-        Returns:
-            JSON with the table description and each column's name, type, mode and description.
-
-        """
+    def _describe_table(self, table_id: str | None) -> str:
+        if not table_id or not table_id.strip():
+            return json.dumps({"error": "table_id is required for action='describe_table'."})
         # google-cloud-bigquery 3.47 reads `project.dataset.a.b` as dataset `dataset.a`, so a dotted name is refused here.
         if "." in table_id:
             return json.dumps({"error": "Invalid table_id"})

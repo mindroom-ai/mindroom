@@ -231,8 +231,8 @@ agents:
 
 ## [`serper`]
 
-`serper` provides `serper_search(query, action, num_results=None)` (`web`, `news`, `scholar`) and `serper_scrape_webpage(url, markdown=False)` through the Serper API.
-All functions return Serper's raw JSON, and `serper_scrape_webpage(markdown=True)` also requests the page as Markdown.
+`serper` provides `serper(action, query=None, url=None, num_results=None, markdown=None)` (`web`, `news`, `scholar`, `scrape`) through the Serper API.
+All actions return Serper's raw JSON, and `serper(action="scrape", url=..., markdown=True)` also requests the page as Markdown.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -241,10 +241,10 @@ All functions return Serper's raw JSON, and `serper_scrape_webpage(markdown=True
 | `language` | `text` | `en` | Google language code (`hl`) for all searches. |
 | `num_results` | `number` | `10` | Default result count when a call does not pass one. |
 | `date_range` | `text` | `null` | Google date filter (`tbs`) for all searches, such as `qdr:w`. |
-| `enable_search` | `boolean` | `true` | Enable `serper_search(action="web")`. |
-| `enable_search_news` | `boolean` | `true` | Enable `serper_search(action="news")`. |
-| `enable_search_scholar` | `boolean` | `true` | Enable `serper_search(action="scholar")`. |
-| `enable_scrape_webpage` | `boolean` | `true` | Enable `serper_scrape_webpage()`. |
+| `enable_search` | `boolean` | `true` | Enable `serper(action="web")`. |
+| `enable_search_news` | `boolean` | `true` | Enable `serper(action="news")`. |
+| `enable_search_scholar` | `boolean` | `true` | Enable `serper(action="scholar")`. |
+| `enable_scrape_webpage` | `boolean` | `true` | Enable `serper(action="scrape")`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 

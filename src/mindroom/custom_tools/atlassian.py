@@ -67,6 +67,7 @@ from mindroom.oauth.service import (
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import INLINE_ATTACHMENT_BYTES_ENV, inline_attachment_byte_limit
+from mindroom.tools.native_helpers import unexpected_action_args_error
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -184,23 +185,6 @@ def _extra_fields(value: dict | None) -> dict[str, object]:
     if value is None:
         return {}
     return dict(value)
-
-
-def _reject_unexpected_args(
-    action: str,
-    allowed: Collection[str],
-    provided: Mapping[str, object],
-    *,
-    hints: Mapping[str, str] | None = None,
-) -> None:
-    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
-    if not unexpected:
-        return
-    names = ", ".join(unexpected)
-    verb = "is" if len(unexpected) == 1 else "are"
-    hint = next((hints[name] for name in unexpected if hints and name in hints), "")
-    msg = f"{names} {verb} not used for action {action!r}." + (f" {hint}" if hint else "")
-    raise _InvalidArgumentError(msg)
 
 
 def _adf_document(text: str) -> dict[str, object]:
@@ -621,7 +605,8 @@ class AtlassianToolkit(Toolkit):
             return self._error(_InvalidArgumentError(f"Unsupported action {action!r}; expected one of: {expected}."))
         allowed, builder = entry
         try:
-            _reject_unexpected_args(action, allowed, provided, hints=(hints or {}).get(action))
+            if error := unexpected_action_args_error(action, allowed, provided, hints=(hints or {}).get(action)):
+                raise _InvalidArgumentError(error)
             operation = builder()
         except AtlassianError as exc:
             return self._error(exc)

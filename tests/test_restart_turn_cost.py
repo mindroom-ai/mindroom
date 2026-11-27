@@ -1132,7 +1132,7 @@ async def test_model_switch_before_restart_does_not_double_count_subagent_cost(
     request = _user_request(source_event_id=source)
     session_id = request.response_envelope.target.session_id
 
-    switch_call = tool_call("thread_model_write", "sw-1", action="switch", model_name="default", when="after-toolcall")
+    switch_call = tool_call("thread_model", "sw-1", action="switch", model_name="default", when="after-toolcall")
     attempt_1_turns = [
         _charge("c1", 0.5),
         calls(switch_call, metrics=_REQ_USAGE),
@@ -1269,7 +1269,7 @@ async def test_a_subagent_restarted_after_a_model_switch_and_an_approval_counts_
     Its turn's runs each store what the turn had received, the run the approval resumed too, so the continuation
     after the restart reads the same two receipts from whichever of them it finds.
     """
-    switch = tool_call("thread_model_write", "sw", action="switch", model_name="worker_model", when="after-toolcall")
+    switch = tool_call("thread_model", "sw", action="switch", model_name="worker_model", when="after-toolcall")
     bot, done, ai_run = await _run_subagent_job_with_restarts(
         tmp_path,
         monkeypatch,
@@ -1408,7 +1408,7 @@ async def test_a_continuation_starts_from_the_nested_jobs_its_cut_short_turn_s_r
         await runtime.acknowledge_wait("acknowledged", waited.claim, adapter={ACKNOWLEDGED_BY: before_switch.run_id})
         await _completed_research_job(runtime, nested_owner, "unacknowledged")
 
-    switch = tool_call("thread_model_write", "sw", action="switch", model_name="worker_model", when="after-toolcall")
+    switch = tool_call("thread_model", "sw", action="switch", model_name="worker_model", when="after-toolcall")
     _, done, ai_run = await _run_subagent_job_with_restarts(
         tmp_path,
         monkeypatch,

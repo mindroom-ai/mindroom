@@ -66,7 +66,7 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
   `tests/tool_system/test_toolkits.py` enforces zero duplicate function names and strict prefix compliance across `schemas.json` and `schemas_all_enabled.json`.
 - **Token efficiency**: Keep tool and parameter descriptions short and plain, drop text that repeats error messages or UI cards, omit legacy parameters from schemas, prefer string-first arguments where ergonomic, and rely on plain JSON types for `X | None = None` optionals.
   Measure schema and result token deltas against `origin/main` on every tool change.
-- **Migrations and weak-model evals**: Register retired functions in `RETIRED_CONSOLIDATED_FUNCTIONS` (`src/mindroom/config/legacy_fields.py`), regenerate `schemas.json`, `schemas_all_enabled.json`, and `src/mindroom/tools_metadata.json`, and check `.github/plugin-fleet.json` tests for pinned names.
+- **Migrations and weak-model evals**: Register retired functions in `RETIRED_CONSOLIDATED_FUNCTIONS` (`src/mindroom/config/retired_tool_renames.py`), regenerate `schemas.json`, `schemas_all_enabled.json`, and `src/mindroom/tools_metadata.json`, and check `.github/plugin-fleet.json` tests for pinned names.
   Test non-trivial schema or consolidation changes live on weaker/local models (`evals/tool_calling`, e.g. local `inkling-2:mini`, `gemma-4-31b-it`, `gpt-5-mini`), not only frontier models or mocks.
 
 ### Refactor Policy

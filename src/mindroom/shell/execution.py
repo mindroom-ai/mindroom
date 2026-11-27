@@ -1521,7 +1521,9 @@ def _probe_systemd_slice_launcher(
     systemd_run = str(Path(systemd_run).absolute())  # commands run in other directories
     env_bin = str(Path(env_bin).absolute())
     # --description hides raw argv from the systemd user journal;
-    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here).
+    # --expand-environment=no stops systemd 262+ from expanding $$ / $VAR in argv (older versions fail open here);
+    # OOMPolicy=kill sets memory.oom.group=1 on each transient .scope so a slice-level MemoryMax OOM cleanly
+    # terminates the whole offending command scope instead of picking off single workers one at a time.
     prefix = (
         systemd_run,
         "--user",
@@ -1530,13 +1532,14 @@ def _probe_systemd_slice_launcher(
         f"--description={_SYSTEMD_SCOPE_DESCRIPTION}",
         "--expand-environment=no",
         f"--slice={slice_name}",
+        "--property=OOMPolicy=kill",
         "--",
     )
     bus_env: tuple[tuple[str, str | None], ...] = (
         ("XDG_RUNTIME_DIR", runtime_dir),
         ("DBUS_SESSION_BUS_ADDRESS", dbus_addr),
     )
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
+    try:
         probe = subprocess.run(
             [*prefix, env_bin, "-u", "MINDROOM_PROBE_UNSET", "--", "MINDROOM_PROBE_SET=1", systemd_run, "--version"],
             capture_output=True,
@@ -1544,8 +1547,13 @@ def _probe_systemd_slice_launcher(
             check=False,
             env=_systemd_bus_env(runtime_dir, dbus_addr),
         )
-        if probe.returncode == 0:
-            return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
+    except subprocess.TimeoutExpired:
+        # Let transient probe timeouts escape lru_cache so the next call re-probes instead of caching None.
+        raise
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode == 0:
+        return _SystemdSliceLauncher(prefix=prefix, env_bin=env_bin, bus_env=bus_env)
     return None
 
 
@@ -1566,7 +1574,10 @@ def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
     if generation is None:
         _probe_systemd_slice_launcher.cache_clear()
         return None
-    return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
+    try:
+        return _probe_systemd_slice_launcher(slice_name, runtime_dir, dbus_addr, generation)
+    except subprocess.TimeoutExpired:
+        return None
 
 
 def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int = os.F_OK | os.X_OK) -> str | None:

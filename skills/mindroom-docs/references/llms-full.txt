@@ -3000,7 +3000,7 @@ models:
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
 `sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
-`!model list` and the `thread_model` tool's `thread_model_read(action="list")` show each model's levels and default.
+`!model list` and `thread_model(action="list")` show each model's levels and default.
 
 MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
 
@@ -3103,13 +3103,13 @@ agents:
       - thread_model
 ```
 
-- `thread_model_read(action="list")` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
-- `thread_model_read(action="get")` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `thread_model_write(action="switch", model_name=..., when=...)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
+- `thread_model(action="list")` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
+- `thread_model(action="get")` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
+- `thread_model(action="switch", model_name=..., when=...)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
-- `thread_model_write(action="reset")` removes the thread override so room-level selection applies again.
+- `thread_model(action="reset")` removes the thread override so room-level selection applies again.
 
-All operations except `thread_model_read(action="list")` require an active thread and return an error outside one.
+All operations except `thread_model(action="list")` require an active thread and return an error outside one.
 Overrides set by the tool follow the same entity scope and team rules as [`!model`](#model) and are stored per thread root and entity in `mindroom_data/tracking/thread_models.json`.
 
 # Team Configuration
@@ -4943,7 +4943,7 @@ A Matrix ID or agent key in an entry gives that person or agent the entry's name
 Someone else whose display name is the name of an entry with a Matrix ID or agent key goes by their username, so the two stay apart.
 A speaker whose display name is the name of an entry without one shares that entry's entity and its other names, so an entry named after your own display name needs no Matrix ID.
 A username that an entry with a Matrix ID or agent key, or an agent, is already named gets its homeserver added, such as `alice work.example`.
-Every other alias is a plain name that extraction maps to the entry's name and that `knowledge_graph_read(action="entity", ...)` finds the entity by.
+Every other alias is a plain name that extraction maps to the entry's name and that `knowledge_graph(action="entity", ...)` finds the entity by.
 Each alias belongs to one entry and is not another entry's name, in any letter case; names and aliases use single spaces, and a name cannot contain a colon.
 Two people with the same display name, or a person named like an agent, share one entity unless an entry gives one of them a name through their Matrix ID.
 Every entry is sent with every piece of a conversation for extraction, so a long list makes each extraction prompt longer.
@@ -4952,14 +4952,14 @@ Entities extracted earlier under other names, such as a Matrix ID, stay separate
 ## The `knowledge_graph` Tool
 
 ```python
-knowledge_graph_read(action="search", query="who owns Project Atlas", limit=10)  # limit 1 to 50
-knowledge_graph_read(action="entity", query="Project Atlas")
+knowledge_graph(action="search", query="who owns Project Atlas", limit=10)  # limit 1 to 50
+knowledge_graph(action="entity", query="Project Atlas")
 ```
 
 The agent decides when to look facts up; ask it to search the graph, or to cite each fact's source and date, when you want to be sure.
 A graph-enabled agent's `search_knowledge_base` also returns matching graph facts, labelled `knowledge_graph`, beside its knowledge-base results, so the agent has that tool even without knowledge bases.
 Each fact comes back with its validity, for example `valid 2026-01-05 until 2026-03-09 (superseded)`, and its sources with dates.
-`knowledge_graph_read(action="entity", ...)` returns the entity whose name equals the given `query` in any letter case, and the one with the most facts when several do.
+`knowledge_graph(action="entity", ...)` returns the entity whose name equals the given `query` in any letter case, and the one with the most facts when several do.
 A name listed in [`knowledge_graph.aliases`](#names), the username of a Matrix ID listed there, or an agent's key, Matrix ID, or display name finds the entity under its one name, or the entity named exactly as asked when there is none under that name yet.
 Without an exact name it returns the closest match and ends with `Other close matches: ...`, up to four more names to look up when the first is not the one meant.
 An agent reaches only its own graph; a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) has one graph per requester.
@@ -4968,20 +4968,20 @@ An agent reaches only its own graph; a [private agent](https://docs.mindroom.cha
 
 An agent with a graph can correct it.
 `agents.<name>.knowledge_graph_edits` (bool, default from `defaults.knowledge_graph_edits`, which defaults to `true`) turns this off when `false`, which keeps the agent's lookups read-only; setting it to `true` on an agent without `knowledge_graph` is a config error.
-With edits on, its lookups show each fact's and entity's id, `knowledge_graph_read(action="entity", ...)` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and the tool gains `knowledge_graph_write` with four actions:
+With edits on, its lookups show each fact's and entity's id, `knowledge_graph(action="entity", ...)` also takes an id and lists, as `Other entities under this name`, the other entities found under the name it was given, so looking up an alias or Matrix ID shows a duplicate extracted under it, and `knowledge_graph` gains four edit actions:
 
 ```python
-knowledge_graph_write(action="delete_fact", fact_id="<fact id>")                            # a fact that never held, or names the wrong person or thing
-knowledge_graph_write(action="delete_entity", entity_id="<entity id>")                      # a file path, URL, or other non-entity, with every fact that touches it
-knowledge_graph_write(action="merge", duplicate_id="<duplicate id>", into_id="<kept id>")   # the duplicate's facts and their sources move to the kept entity
-knowledge_graph_write(action="update_summary", entity_id="<entity id>", summary="...")      # a summary that still states a deleted fact
+knowledge_graph(action="delete_fact", fact_id="<fact id>")                            # a fact that never held, or names the wrong person or thing
+knowledge_graph(action="delete_entity", entity_id="<entity id>")                      # a file path, URL, or other non-entity, with every fact that touches it
+knowledge_graph(action="merge", duplicate_id="<duplicate id>", into_id="<kept id>")   # the duplicate's facts and their sources move to the kept entity
+knowledge_graph(action="update_summary", entity_id="<entity id>", summary="...")      # a summary that still states a deleted fact
 ```
 
 The kept entity keeps its name and summary, and facts between the two merged entities are dropped.
 An entity's summary is model-written text that collects what was said about it, so a deleted fact stays in it until the agent rewrites the summary.
 Ask the agent to fix what it finds wrong, or let an [`exploration`](https://docs.mindroom.chat/scheduling/#exploration) run do it: with edits on, its prompt also asks the agent to fix the mistakes it found in the graph.
 Deleting is permanent, and a later conversation or tool result that states a deleted fact again adds it back; the agent is told to keep a fact that held and later changed, because newer evidence marks it superseded.
-To approve each edit before it happens, add a [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rule for `knowledge_graph_write` (timed grants are scoped per `action`).
+To approve each edit before it happens, add [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules for `knowledge_graph` (for example auto-approving `arguments: {action: [search, entity]}` and requiring approval for `knowledge_graph`; timed grants are scoped per `action`).
 To keep extraction from creating a merged-away name again, list it in [`knowledge_graph.aliases`](#names).
 
 ## Privacy
@@ -9166,9 +9166,9 @@ Tools that do not support filtering reject these fields when the config loads.
 agents:
   research:
     tools:
-      - serper:
+      - arxiv:
           include_tools:
-            - serper_search
+            - search_arxiv_and_return_articles
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
@@ -9760,8 +9760,8 @@ Media returned by CLI calls reaches the model with the shell command's result, a
 mindroom-agent --help
 mindroom-agent tools list
 mindroom-agent tools search calendar
-mindroom-agent tools describe TOOLKIT FUNCTION
-mindroom-agent tools call TOOLKIT FUNCTION --json '{"argument":"value"}'
+mindroom-agent tools describe TOOLKIT [FUNCTION]
+mindroom-agent tools call TOOLKIT [FUNCTION] --json '{"argument":"value"}'
 mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
@@ -9770,6 +9770,7 @@ mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
+Single-function toolkits can omit `FUNCTION` in `tools describe` and `tools call`; background scripts still require `TOOLKIT FUNCTION` or `TOOLKIT.FUNCTION`.
 A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.attachment` (`{"action": "list"}`).
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
@@ -9787,8 +9788,8 @@ Use `--call-id UUID` to fix the call ID before submission; reusing an ID with th
 | --- | --- |
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
-| `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
+| `tools describe TOOLKIT [FUNCTION]` | None |
+| `tools call TOOLKIT [FUNCTION] [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |
@@ -9988,7 +9989,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `script_write(action="start")` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `memory`, `self_config`, `skill_manage`, `slack`, and `workflow` toolkits are never available to scripts, even when the agent has them.
-- Functions that can stop the agent's current model step, such as `thread_model`'s `thread_model_write`, are never available to scripts either; the toolkit's other functions are.
+- Functions that can stop the agent's current model step, such as `thread_model`, are never available to scripts either.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -11844,8 +11845,8 @@ When running `shell` directly in the MindRoom process on a Linux systemd host (`
 
 To move local shell commands into their own bounded cgroup, set `MINDROOM_SHELL_SYSTEMD_SLICE` to a systemd user slice name ending in `.slice` (for example `mindroom-shells.slice`).
 MindRoom checks the active `systemd --user` manager generation (`systemctl --user show`) and caches the `systemd-run --user --scope` + `env` probe per `(slice, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, manager generation)`.
-It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers.
-When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
+It fails open automatically when the user manager is unavailable or stopping (or on older systemd releases without `--expand-environment=no`), and re-enables slice isolation automatically once the user manager recovers; transient probe timeouts fail open without being cached, so the next command re-probes.
+When active, each command runs with a fixed `--description=MindRoom shell` so raw arguments are not written to the systemd user journal, `--expand-environment=no` so literal `$$` and `$VAR` arguments pass through unchanged, `--property=OOMPolicy=kill` (setting `memory.oom.group=1` on each transient scope so a slice-level `MemoryMax` OOM cleanly terminates the whole offending command scope instead of picking off single workers one at a time), and `env` restoration so `systemd-run` uses MindRoom's user bus while the command sees the caller's original values or omissions for those two bus variables.
 
 Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<uid>`):
 
@@ -11856,16 +11857,15 @@ Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<u
    Delegate=cpu cpuset io memory pids
    ```
 
-2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with limits sized to the host:
+2. Create the user slice (`~/.config/systemd/user/mindroom-shells.slice`) with a hard `MemoryMax` sized from host or container RAM minus peak non-shell usage and headroom, plus `MemorySwapMax=0` (or bounded swap):
 
    ```ini
    [Unit]
    Description=MindRoom agent shell subprocesses
 
    [Slice]
-   MemoryHigh=50%
    MemoryMax=60%
-   MemorySwapMax=4G
+   MemorySwapMax=0
    CPUWeight=1
    IOWeight=1
    ```
@@ -11888,6 +11888,10 @@ Minimal systemd setup for a MindRoom system service running as `<user>` (uid `<u
    ```
 
    In cgroup v2, `MemoryMin` and `MemoryLow` are bounded by ancestor cgroups, so set matching values on `system.slice` (and on the container cgroup when running inside LXC/Incus).
+
+!!! warning "Do not set `MemoryHigh` on a shared shell slice without an active userspace OOM killer"
+    Avoid setting `MemoryHigh` on a shared shell slice unless an active userspace OOM killer (such as `systemd-oomd`) is managing it.
+    In cgroup v2, once any job holds anonymous memory above `MemoryHigh` (below `MemoryMax`), the kernel throttles *every* new scope in the slice in `__mem_cgroup_handle_over_high` without firing OOM.
 
 ### Named workers
 
@@ -12495,7 +12499,7 @@ pandas_run_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `google_bigquery_list_tables()`, `google_bigquery_describe_table(table_id)`, and `google_bigquery_run_sql_query(query)` for the configured dataset.
+`google_bigquery` provides `google_bigquery_inspect(action, table_id=None)` (actions `list_tables`, `describe_table`) and `google_bigquery_run_sql_query(query)` for the configured dataset.
 The dataset is only the default for unqualified table names, so queries can still reference other datasets that the account can read.
 It runs as the [Google Cloud connection](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the agent's credential scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured, never as the MindRoom process's Application Default Credentials.
 That account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
@@ -12512,8 +12516,8 @@ It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `tru
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
 | `max_rows` | `number` | no | `100` | Most rows `google_bigquery_run_sql_query` returns, from `1` to `1000`. |
-| `list_tables` | `boolean` | no | `true` | Enable `google_bigquery_list_tables()`. |
-| `describe_table` | `boolean` | no | `true` | Enable `google_bigquery_describe_table()`. |
+| `list_tables` | `boolean` | no | `true` | Enable the `list_tables` action on `google_bigquery_inspect()`. |
+| `describe_table` | `boolean` | no | `true` | Enable the `describe_table` action on `google_bigquery_inspect()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `google_bigquery_run_sql_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
@@ -12932,8 +12936,8 @@ agents:
 
 ## [`serper`]
 
-`serper` provides `serper_search(query, action, num_results=None)` (`web`, `news`, `scholar`) and `serper_scrape_webpage(url, markdown=False)` through the Serper API.
-All functions return Serper's raw JSON, and `serper_scrape_webpage(markdown=True)` also requests the page as Markdown.
+`serper` provides `serper(action, query=None, url=None, num_results=None, markdown=None)` (`web`, `news`, `scholar`, `scrape`) through the Serper API.
+All actions return Serper's raw JSON, and `serper(action="scrape", url=..., markdown=True)` also requests the page as Markdown.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12942,10 +12946,10 @@ All functions return Serper's raw JSON, and `serper_scrape_webpage(markdown=True
 | `language` | `text` | `en` | Google language code (`hl`) for all searches. |
 | `num_results` | `number` | `10` | Default result count when a call does not pass one. |
 | `date_range` | `text` | `null` | Google date filter (`tbs`) for all searches, such as `qdr:w`. |
-| `enable_search` | `boolean` | `true` | Enable `serper_search(action="web")`. |
-| `enable_search_news` | `boolean` | `true` | Enable `serper_search(action="news")`. |
-| `enable_search_scholar` | `boolean` | `true` | Enable `serper_search(action="scholar")`. |
-| `enable_scrape_webpage` | `boolean` | `true` | Enable `serper_scrape_webpage()`. |
+| `enable_search` | `boolean` | `true` | Enable `serper(action="web")`. |
+| `enable_search_news` | `boolean` | `true` | Enable `serper(action="news")`. |
+| `enable_search_scholar` | `boolean` | `true` | Enable `serper(action="scholar")`. |
+| `enable_scrape_webpage` | `boolean` | `true` | Enable `serper(action="scrape")`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 
@@ -13538,14 +13542,14 @@ agents:
 ## [`hackernews`]
 
 `hackernews` reads the public Hacker News API.
-`hackernews_top_stories(num_stories=10)` returns the current top story items, including title, URL, score, and author.
-`hackernews_user_details(username)` returns the user's karma, about text, and number of submitted items.
+`hackernews(action="top_stories", num_stories=10)` returns the current top story items, including title, URL, score, and author.
+`hackernews(action="user", username=...)` returns the user's karma, about text, and number of submitted items.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_get_top_stories` | `boolean` | `true` | Enable `hackernews_top_stories()`. |
-| `enable_get_user_details` | `boolean` | `true` | Enable `hackernews_user_details()`. |
-| `all` | `boolean` | `false` | Enable both functions. |
+| `enable_get_top_stories` | `boolean` | `true` | Enable `hackernews(action="top_stories")`. |
+| `enable_get_user_details` | `boolean` | `true` | Enable `hackernews(action="user")`. |
+| `all` | `boolean` | `false` | Enable both actions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
 The tool returns story metadata only; pair it with [Web Scraping & Browser](https://docs.mindroom.chat/tools/web-scraping-and-browser/) to read the linked pages.
@@ -14173,10 +14177,10 @@ Writing a tag requires both the agent's Matrix account and the requesting user t
 ## [`thread_resolution`]
 
 `thread_resolution` lets an agent resolve or reopen threads in the current room.
-The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `resolve_thread` call wait for the requester's approval.
+The `mindroom config init` starter gives it to Mind, with a [tool approval](https://docs.mindroom.chat/tool-approval/) rule that makes each `thread_resolution(action="resolve")` call wait for the requester's approval.
 It is not in default tool sets, so other agents cannot resolve threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
-`resolve_thread(thread_id=None)` adds the `resolved` state, and `reopen_thread(thread_id=None)` removes it.
+`thread_resolution(action="resolve", thread_id=None)` adds the `resolved` state, and `thread_resolution(action="reopen", thread_id=None)` removes it.
 Without `thread_id`, both require an active thread.
 Pass a thread root or reply event ID to target another thread in the current room, including from the room timeline; an ID that does not resolve to a thread returns an error and changes nothing.
 
@@ -14188,7 +14192,7 @@ agents:
       - thread_resolution
 ```
 
-To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `resolve_thread(thread_id=...)` for each one.
+To close out finished threads, find candidates with `thread_tags(action="list", exclude_tag="resolved", include_untagged=True)`, check `truncated`, then call `thread_resolution(action="resolve", thread_id=...)` for each one.
 
 ## [`thread_snooze`]
 
@@ -14196,10 +14200,10 @@ To close out finished threads, find candidates with `thread_tags(action="list", 
 The `mindroom config init` starter gives it to Mind, without an approval rule.
 It is not in default tool sets, so other agents cannot snooze threads unless an operator grants it or an agent with [`self_config`](https://docs.mindroom.chat/tools/agent-orchestration/#self_config) adds it to its own tools.
 
-`snooze_thread(until, note=None, thread_id=None)` adds the `snoozed` state, and `unsnooze_thread(thread_id=None)` removes it.
+`thread_snooze(action="snooze", until=..., note=None, thread_id=None)` adds the `snoozed` state, and `thread_snooze(action="unsnooze", thread_id=None)` removes it.
 `until` is an ISO-8601 datetime with a time part, such as `2026-11-14T09:00:00+01:00`; a value without an offset is UTC, and a date alone, an unparsable value, or a time that is not in the future returns an error and changes nothing.
 `note` is a reminder the wake message quotes; it is stored unencrypted in room state, even in an encrypted room.
-`unsnooze_thread` returns `Thread is not snoozed.` when the thread has no snooze.
+`thread_snooze(action="unsnooze")` returns `Thread is not snoozed.` when the thread has no snooze.
 Without `thread_id`, both require an active thread; pass a thread root or reply event ID to target another thread in the current room.
 
 When the time comes, the `snoozed` state ends and a message in the thread quotes the note.
@@ -22802,6 +22806,35 @@ def check():
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
+#### Common use cases
+
+Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers(action="watch_script", ...)`:
+
+- **Email watching + cheap triage (`gmail`):** *"Whenever I get an unread email from my accountant or about an invoice, summarize it and draft a reply."* The check polls `tool("gmail", "gmail_read", action="search_emails", query=...)`, tracks `seen_ids` in `state` so idle ticks cost zero LLM tokens, and optionally attaches `triage_instructions` + a cheap `triage_model` to filter out noise before waking the main agent. Write tools configured to require approval under `tool_approval` (such as `gmail_send`) stay blocked inside the background tick, while the woken turn can still ask you to approve sending a reply.
+- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
+- **Smart home threshold alerts (`homeassistant`):** *"Alert me if the garage door stays open for more than 15 minutes."* Read `tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door")`, compare Home Assistant's `last_changed` timestamp against the current UTC time, and track `alerted_for` in `state` so each open event alerts once:
+
+  ```python
+  from datetime import UTC, datetime
+  import json
+
+
+  def check():
+      reading = json.loads(tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door"))
+      if reading.get("state") != "open" or not reading.get("last_changed"):
+          return None
+      last_changed = reading["last_changed"]
+      opened_at = datetime.fromisoformat(last_changed.replace("Z", "+00:00"))
+      minutes_open = (datetime.now(UTC) - opened_at).total_seconds() / 60
+      if minutes_open < 15 or state.get("alerted_for") == last_changed:
+          return None
+      state.set("alerted_for", last_changed)
+      return {"title": "Garage door open >15m", "data": {"minutes_open": round(minutes_open, 1)}}
+  ```
+
+- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
+- **Cross-agent wakeups & thread workflows:** Any `watch_script` runs with the authoring agent's credentials, but can wake a different agent or team (`target_agent`), post into a fresh thread (`new_thread=True`, optional `thread_key`), or reopen a resolved thread (`reopen_on_fire=True`).
+
 #### `check()` authoring contract
 
 - **Entry point:** Provide exactly one of `source` or `path` (`<= 64 KiB` UTF-8). The module must parse cleanly and define a top-level synchronous `def check():` taking no required or positional arguments (`async def check()` is rejected).
@@ -22819,6 +22852,7 @@ def check():
 - **Authoring authority:** `triggers` stays `executes_code=False`. Creating a `watch_script` trigger requires `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`, an agent configured with `triggers` plus `script` or `workflow`, a direct-agent Matrix room turn (refusing team-transport authoring, unattended automation including router-relayed scheduled turns, event-source watch turns, tool-filtered turns, and personas without `script`/`workflow`; targeting a team via `target_agent` is still supported), and valid `workflow_placement` (dedicated worker when configured; local only when `defaults.allow_shell_without_worker: true` or explicit local mode, never falling back to the host). `watch_script` is evaluated under `script_write` approval rules via `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)`. An agent relying on `workflow` without `script` is refused (`workflow_approval_required`) whenever `workflow(action="start")` may require approval (grant `script` or allow unapproved `workflow` launch).
 - **Non-interactive fail-closed tick execution:** Each tick rechecks policy, placement, executing-agent capability, and owner authorization in the source room. Ticks run in an ephemeral `script_runs` process (bounded by `script_check_timeout_seconds`, 4 concurrent ticks globally, 1 per owner, 1 per trigger, and pruned immediately on exit) with a stricter restricted-toolkit blocklist (blocking `triggers`, `script`, `workflow`, `delegate`, `terminal`, `desktop`, `scheduler`, `browser`, `browser_mcp`, `config_manager`, `oauth_connections`, `callback_manager`, `shared_directories`, and other sensitive toolkits) plus optional `external_trigger_policy.script_check_allowed_tools`. Any tool call requiring live `tool_approval` or `ToolGate.CONFIRM` is denied immediately without posting Matrix approval cards or honoring transient `!auto_approve` windows. Any policy-, hook-, or approval-denied tool call (including an approval-script evaluation failure) fails the tick (`tool_denied` / `approval_required`) without committing `state` or firing even if caught inside `check()`.
 - **Private checkpoint storage and redaction:** Snapshotted source (`source_utf8`), captured execution identity (`identity_json`), and persisted `state_json` are stored only in the primary-only `script_check_checkpoints` table inside `<control_state>/reactive_triggers.db` and never returned by `triggers(action="list")` or `/api/rooms/{room_id}/triggers`. `action="update"` is metadata-only for `script_check` triggers (updating `poll_interval_seconds` bumps the checkpoint revision atomically so in-flight ticks cannot overwrite the new schedule; delete and re-create with `watch_script` to replace script code). Disabling and re-enabling preserves `state`, resets error counters, bumps the revision, and rechecks policy, capability, placement, and quota.
+- **Agent and runtime support:** Works for shared agents, personal agents, and `private.per: user_agent` private agents across Linux local mode (`defaults.allow_shell_without_worker: true` or explicit local execution mode), dedicated Docker workers (with `MINDROOM_SCRIPT_GATEWAY_URL` or `MINDROOM_PUBLIC_URL`), and dedicated Kubernetes workers with an isolated gateway (`MINDROOM_SCRIPT_GATEWAY_ISOLATED=true` + `MINDROOM_SCRIPT_GATEWAY_URL`). Not supported on the shared `static_runner` backend, macOS local mode, or `private.per: user` agents under worker placement (rejected up front at authoring/re-enable time).
 
 ### Cheap tool-less triage
 

@@ -209,7 +209,7 @@ pandas_run_operation("sales", "describe", {})
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `google_bigquery_list_tables()`, `google_bigquery_describe_table(table_id)`, and `google_bigquery_run_sql_query(query)` for the configured dataset.
+`google_bigquery` provides `google_bigquery_inspect(action, table_id=None)` (actions `list_tables`, `describe_table`) and `google_bigquery_run_sql_query(query)` for the configured dataset.
 The dataset is only the default for unqualified table names, so queries can still reference other datasets that the account can read.
 It runs as the [Google Cloud connection](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the agent's credential scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured, never as the MindRoom process's Application Default Credentials.
 That account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
@@ -226,8 +226,8 @@ It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `tru
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
 | `max_rows` | `number` | no | `100` | Most rows `google_bigquery_run_sql_query` returns, from `1` to `1000`. |
-| `list_tables` | `boolean` | no | `true` | Enable `google_bigquery_list_tables()`. |
-| `describe_table` | `boolean` | no | `true` | Enable `google_bigquery_describe_table()`. |
+| `list_tables` | `boolean` | no | `true` | Enable the `list_tables` action on `google_bigquery_inspect()`. |
+| `describe_table` | `boolean` | no | `true` | Enable the `describe_table` action on `google_bigquery_inspect()`. |
 | `run_sql_query` | `boolean` | no | `true` | Enable `google_bigquery_run_sql_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 

@@ -39,6 +39,7 @@ from mindroom.oauth.service import (
 )
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import unexpected_action_args_error
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
@@ -141,15 +142,10 @@ def reject_unexpected_args(
     provided: Mapping[str, object],
 ) -> str | None:
     """Return an ``invalid_argument`` error payload when ``action`` receives unsupported arguments."""
-    allowed = allowed_by_action.get(action)
-    if allowed is None:
+    if (allowed := allowed_by_action.get(action)) is None:
         return None
-    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
-    if not unexpected:
+    if (msg := unexpected_action_args_error(action, allowed, provided, phrase="not supported")) is None:
         return None
-    fields = ", ".join(unexpected)
-    verb = "is" if len(unexpected) == 1 else "are"
-    msg = f"{fields} {verb} not supported for action {action!r}."
     return graph_error_payload(tool_name, MicrosoftGraphError(code="invalid_argument", message=msg))
 
 

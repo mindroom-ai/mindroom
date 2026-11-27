@@ -23,10 +23,11 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
-_ReadAction = Literal["list", "get"]
-_WriteAction = Literal["switch", "reset"]
+_Action = Literal["list", "get", "switch", "reset"]
 _SwitchWhen = Literal["after-toolcall", "next-turn"]
-_WRITE_ALLOWED: dict[str, frozenset[str]] = {
+_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "list": frozenset(),
+    "get": frozenset(),
     "switch": frozenset({"model_name", "when"}),
     "reset": frozenset(),
 }
@@ -41,15 +42,13 @@ class ThreadModelTools(Toolkit):
     def __init__(self) -> None:
         super().__init__(
             name="thread_model",
-            tools=[self.thread_model_read, self.thread_model_write],
+            tools=[self.thread_model],
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Mark `thread_model_write` non-strict and stop-capable, and allow redirecting `thread_model_read` output."""
-        if function.name == "thread_model_write":
+        """Mark `thread_model` non-strict and stop-capable so optional switch args stay optional."""
+        if function.name == "thread_model":
             return replace(function, may_stop_run=True, strict=False)
-        if function.name == "thread_model_read":
-            return replace(function, offer_output_path=True)
         return function
 
     @staticmethod
@@ -74,48 +73,32 @@ class ThreadModelTools(Toolkit):
             context.require_agent_reply_memberships(),
         )
 
-    async def thread_model_read(self, action: _ReadAction) -> str:
-        """List configured models or inspect this thread's model override.
+    async def thread_model(  # noqa: PLR0911
+        self,
+        action: _Action,
+        model_name: str | None = None,
+        when: _SwitchWhen | None = None,
+    ) -> str | ToolOutcome:
+        """List models or inspect, switch, or reset this thread's model override.
 
         - `list`: list configured models, providers, and reasoning levels (works outside a thread).
-        - `get`: inspect this thread's current active/stale model override.
-
+        - `get`: inspect this thread's active/stale model override.
+        - `switch`: set thread model to `model_name` (`name` or `name@level`) until reset; `when` is `next-turn` (default) or `after-toolcall` to continue this reply now.
+        - `reset`: clear override, restoring room selection.
         """
+        if (
+            error := validate_action_params(
+                "thread_model",
+                action,
+                _ALLOWED_PARAMS,
+                {"model_name": model_name, "when": when},
+            )
+        ) is not None:
+            return self._payload("error", **({"action": action} if action in _ALLOWED_PARAMS else {}), message=error)
         if action == "list":
             return await self._list_models()
         if action == "get":
             return await self._get_thread_model()
-        return self._payload(
-            "error",
-            message=f"Unsupported thread_model_read action {action!r}. Expected one of: list, get.",
-        )
-
-    async def thread_model_write(
-        self,
-        action: _WriteAction,
-        model_name: str | None = None,
-        when: _SwitchWhen | None = None,
-    ) -> str | ToolOutcome:
-        """Switch or reset this thread's model override.
-
-        - `switch`: set thread model to `model_name` until reset.
-        - `reset`: clear override, restoring room selection.
-
-        Args:
-            action: Action.
-            model_name: Model name or `name@level` (switch).
-            when: `next-turn` (default) or `after-toolcall` to continue now (switch).
-
-        """
-        if (
-            error := validate_action_params(
-                "thread_model_write",
-                action,
-                _WRITE_ALLOWED,
-                {"model_name": model_name, "when": when},
-            )
-        ) is not None:
-            return self._payload("error", **({"action": action} if action in _WRITE_ALLOWED else {}), message=error)
         if action == "reset":
             return await self._reset_thread_model()
         if not isinstance(model_name, str) or not model_name.strip():

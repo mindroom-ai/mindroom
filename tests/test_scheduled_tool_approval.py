@@ -2955,7 +2955,7 @@ async def test_scheduler_functions_are_never_scheduled_calls() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "arguments_json"),
-    [("thread_model_write", '{"action": "switch", "model_name": "default"}'), ("run_subagent", '{"task": "Research"}')],
+    [("thread_model", '{"action": "switch", "model_name": "default"}'), ("run_subagent", '{"task": "Research"}')],
 )
 async def test_a_model_switch_or_subagent_call_is_never_a_scheduled_call(tool_name: str, arguments_json: str) -> None:
     """A stored call can neither exercise conversation control nor run a child turn in its conversation later.
@@ -2969,7 +2969,7 @@ async def test_a_model_switch_or_subagent_call_is_never_a_scheduled_call(tool_na
         return task
 
     toolkit = {
-        "thread_model_write": (ThreadModelTools(), "thread_model"),
+        "thread_model": (ThreadModelTools(), "thread_model"),
         "run_subagent": (Toolkit(name="delegate", tools=[run_subagent]), "delegate"),
     }[tool_name]
     with (

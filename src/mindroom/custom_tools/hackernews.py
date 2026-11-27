@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import quote
 
 import httpx
 
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
 _HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
+_HackerNewsAction = Literal["top_stories", "user"]
+_ACTION_FIELDS: dict[str, str] = {
+    "top_stories": "num_stories",
+    "user": "username",
+}
 
 
 class HackerNewsTools(Toolkit):
@@ -28,26 +38,50 @@ class HackerNewsTools(Toolkit):
         timeout: int = 30,
     ) -> None:
         self.timeout = timeout
-        super().__init__(name="hackers_news")
-        if not (all or enable_get_top_stories):
-            self.functions.pop(self.hackernews_top_stories.__name__, None)
-        if not (all or enable_get_user_details):
-            self.functions.pop(self.hackernews_user_details.__name__, None)
+        toggles: dict[_HackerNewsAction, bool] = {
+            "top_stories": all or enable_get_top_stories,
+            "user": all or enable_get_user_details,
+        }
+        self._enabled_actions: tuple[_HackerNewsAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+        super().__init__(name="hackers_news", tools=[self.hackernews] if self._enabled_actions else [])
 
-    @tool
-    def hackernews_top_stories(self, num_stories: int = 10) -> str:
-        """Use this function to get top stories from Hacker News.
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``hackernews`` schema and parameters to enabled actions."""
+        if function.name == "hackernews":
+            return restrict_actions(function, self._enabled_actions, action_fields=_ACTION_FIELDS)
+        return function
 
-        Args:
-            num_stories (int): Number of stories to return. Defaults to 10.
+    def hackernews(
+        self,
+        action: _HackerNewsAction,
+        num_stories: int | None = None,
+        username: str | None = None,
+    ) -> str:
+        """Fetch top stories or user details from Hacker News as JSON.
 
-        Returns:
-            str: JSON string of top stories.
-
+        - `top_stories`: Top Hacker News stories (optional `num_stories`, default 10).
+        - `user`: User details for `username`.
         """
+        if (
+            error := require_enabled_action(action, self._enabled_actions)
+            or reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {"num_stories": num_stories is not None, "username": username is not None},
+            )
+        ) is not None:
+            return f"Error: {error}"
+        if action == "top_stories":
+            return self._top_stories(10 if num_stories is None else num_stories)
+        if not username or not username.strip():
+            return "Error: username is required for action='user'."
+        return self._user_details(username)
+
+    def _top_stories(self, num_stories: int) -> str:
         if num_stories <= 0:
             return "[]"
-
         try:
             logger.debug("Getting top Hacker News stories", num_stories=num_stories)
             response = httpx.get(f"{_HN_API_BASE}/topstories.json", timeout=self.timeout)
@@ -68,17 +102,7 @@ class HackerNewsTools(Toolkit):
             return f"Error fetching stories: {exc}"
         return json.dumps(stories)
 
-    @tool
-    def hackernews_user_details(self, username: str) -> str:
-        """Use this function to get the details of a Hacker News user using their username.
-
-        Args:
-            username (str): Username of the user to get details for.
-
-        Returns:
-            str: JSON string of the user details.
-
-        """
+    def _user_details(self, username: str) -> str:
         try:
             logger.debug("Getting Hacker News user details", username=username)
             encoded_username = quote(username, safe="")
