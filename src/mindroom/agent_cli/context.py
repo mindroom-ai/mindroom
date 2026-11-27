@@ -63,7 +63,7 @@ def minimal_system_message(
             "Bash starts in your workspace.",
             *guidance,
             "Other tools and full agent context: mindroom-agent --help; "
-            "call a tool with `mindroom-agent tools call TOOLKIT.FUNCTION '<json>'`.",
+            "call a tool with `mindroom-agent tools call TOOLKIT[.FUNCTION] '<json>'`.",
             roster,
             runtime_context,
             *instructions,

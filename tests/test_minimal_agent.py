@@ -334,7 +334,7 @@ def test_minimal_prompt_keeps_context_with_custom_instructions(instructions: lis
     )
     assert "minimal mode" in message
     assert "mindroom-agent --help" in message
-    assert "mindroom-agent tools call TOOLKIT.FUNCTION '<json>'" in message
+    assert "mindroom-agent tools call TOOLKIT[.FUNCTION] '<json>'" in message
     assert "SOUL.md" in message
     assert "context/notes.md" in message
     if instructions:

@@ -84,8 +84,8 @@ Media returned by CLI calls reaches the model with the shell command's result, a
 mindroom-agent --help
 mindroom-agent tools list
 mindroom-agent tools search calendar
-mindroom-agent tools describe TOOLKIT FUNCTION
-mindroom-agent tools call TOOLKIT FUNCTION --json '{"argument":"value"}'
+mindroom-agent tools describe TOOLKIT [FUNCTION]
+mindroom-agent tools call TOOLKIT [FUNCTION] --json '{"argument":"value"}'
 mindroom-agent calls get CALL_ID
 mindroom-agent calls wait CALL_ID
 mindroom-agent context list
@@ -94,6 +94,7 @@ mindroom-agent workers run NAME -- COMMAND
 ```
 
 Tool names are qualified by toolkit, and `TOOLKIT.FUNCTION` works anywhere `TOOLKIT FUNCTION` does.
+Single-function toolkits can omit `FUNCTION` in `tools describe` and `tools call`; background scripts still require `TOOLKIT FUNCTION` or `TOOLKIT.FUNCTION`.
 A toolkit keeps its own tool name when a preset or another tool brings it in, so with `matrix_message` or `openclaw_compat` configured, attachments are listed with `attachments.attachment` (`{"action": "list"}`).
 Discovery and calls use the current agent's permissions and requester context.
 Use command-specific `--help` for arguments and options.
@@ -111,8 +112,8 @@ Use `--call-id UUID` to fix the call ID before submission; reusing an ID with th
 | --- | --- |
 | `tools list` | `--cursor`, `--limit` (default 100) |
 | `tools search QUERY` | `--toolkit`, `--limit` (default 20) |
-| `tools describe TOOLKIT FUNCTION` | None |
-| `tools call TOOLKIT FUNCTION [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
+| `tools describe TOOLKIT [FUNCTION]` | None |
+| `tools call TOOLKIT [FUNCTION] [JSON]` | `--call-id`, `--json`, `--json-file`, `--json-stdin`, `--timeout` (seconds to wait for the result, default 30) |
 | `calls get CALL_ID` | None |
 | `calls wait CALL_ID` | `--timeout` (polling seconds, default 30) |
 | `context list` | `--cursor`, `--limit` (default 100) |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
@@ -271,10 +272,12 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
 def _call_approval_authority(
     config: Config,
     tools: ToolRegistry,
-    key: ToolKey,
+    key: ToolKey | str,
     *,
     agent_name: str,
 ) -> tuple[Any, ...]:
+    if isinstance(key, str):
+        return (json.dumps(config.tool_approval.model_dump(), sort_keys=True, separators=(",", ":")),)
     registered_toolkit = None if key.toolkit == "agent" else key.toolkit
     names = (SHELL_FUNCTION, *approval_policy_names(config, tools, registered_toolkit, key.function))
     return (
@@ -283,7 +286,7 @@ def _call_approval_authority(
     )
 
 
-def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKey) -> None:
+def check_prepared_catalog_authority(context: ToolRuntimeContext, *, key: ToolKey | str) -> None:
     """Refuse a prepared CLI catalog if a reload changed its authority, removed a room, or changed the key's approval."""
     current = context.current_config
     if current is context.config:
