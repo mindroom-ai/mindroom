@@ -26,6 +26,17 @@ class _RedshiftTools(SqlCursorToolkit):
 
     _db_label = "Redshift"
     _inspect_tool_name = "redshift_inspect"
+    _numeric_types: tuple[str, ...] = (
+        "integer",
+        "int",
+        "bigint",
+        "smallint",
+        "numeric",
+        "decimal",
+        "real",
+        "double precision",
+        "float",
+    )
     _text_stats_sql: LiteralString = (
         "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
         "COUNT(DISTINCT {col}) AS unique_values, AVG(LEN({col})) AS avg_length "
@@ -113,6 +124,11 @@ class _RedshiftTools(SqlCursorToolkit):
         import redshift_connector
 
         return redshift_connector.connect(**self._build_connection_kwargs())
+
+    def _should_rollback(self, exc: Exception) -> bool:
+        import redshift_connector
+
+        return isinstance(exc, redshift_connector.Error)
 
     def _format_sql_query(self, template: LiteralString, *, table: str, col: str | None = None) -> str:
         parts = {"tbl": f"{quote_sql_identifier(self.table_schema)}.{quote_sql_identifier(table)}"}

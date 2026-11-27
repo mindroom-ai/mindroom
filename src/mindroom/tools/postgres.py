@@ -19,6 +19,7 @@ class _PostgresTools(SqlCursorToolkit):
 
     _db_label = "PostgreSQL"
     _inspect_tool_name = "postgres_inspect"
+    _numeric_types: tuple[str, ...] = ("integer", "numeric", "real", "double precision", "bigint", "smallint")
     _text_stats_sql: LiteralString = (
         "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
         "COUNT(DISTINCT {col}) AS unique_values, AVG(LENGTH({col}::text)) AS avg_length "

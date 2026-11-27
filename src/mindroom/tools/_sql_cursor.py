@@ -14,17 +14,6 @@ from mindroom.tools.native_helpers import format_tabular_rows, require_non_empty
 logger = get_logger(__name__)
 
 SqlInspectAction = Literal["show_tables", "describe_table", "summarize_table", "inspect_query"]
-_NUMERIC_TYPES = (
-    "integer",
-    "int",
-    "bigint",
-    "smallint",
-    "numeric",
-    "decimal",
-    "real",
-    "double precision",
-    "float",
-)
 _TEXT_TYPES = ("char", "text", "uuid")
 
 
@@ -34,6 +23,14 @@ class SqlCursorToolkit(Toolkit):
     requires_connect = True
     _db_label: str = "SQL"
     _inspect_tool_name: str = "sql_inspect"
+    _numeric_types: tuple[str, ...] = (
+        "integer",
+        "numeric",
+        "real",
+        "double precision",
+        "bigint",
+        "smallint",
+    )
     _text_stats_sql: LiteralString = (
         "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
         "COUNT(DISTINCT {col}) AS unique_values, AVG(LENGTH({col})) AS avg_length "
@@ -68,8 +65,11 @@ class SqlCursorToolkit(Toolkit):
     def _empty_result_message(self, cursor: Any, /) -> str:  # noqa: ANN401, ARG002 - DB-API cursor
         return "Query executed successfully."
 
-    def _rollback_if_open(self, connection: Any | None) -> None:  # noqa: ANN401
-        if connection is not None and not getattr(connection, "closed", False):
+    def _should_rollback(self, exc: Exception) -> bool:  # noqa: ARG002
+        return True
+
+    def _rollback_if_open(self, connection: Any | None, exc: Exception) -> None:  # noqa: ANN401
+        if connection is not None and self._should_rollback(exc) and not getattr(connection, "closed", False):
             with suppress(Exception):
                 connection.rollback()
 
@@ -108,7 +108,7 @@ class SqlCursorToolkit(Toolkit):
                 row_values = [tuple(row.values()) if isinstance(row, dict) else tuple(row) for row in rows]
                 return format_tabular_rows(columns, row_values)
         except Exception as exc:
-            self._rollback_if_open(connection)
+            self._rollback_if_open(connection, exc)
             logger.exception(f"Error executing {self._db_label} query")
             return f"Error executing query: {exc}"
 
@@ -132,7 +132,7 @@ class SqlCursorToolkit(Toolkit):
                     data_type = str(col["data_type"] if isinstance(col, dict) else col[1])
                     lower_type = data_type.lower()
                     template: LiteralString
-                    if any(token in lower_type for token in _NUMERIC_TYPES):
+                    if any(token in lower_type for token in self._numeric_types):
                         template = (
                             "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
                             "MIN({col}) AS min, MAX({col}) AS max, AVG({col}) AS average, "
@@ -158,7 +158,7 @@ class SqlCursorToolkit(Toolkit):
                         summary_parts.append(f"  {key}: {rendered}")
                 return "\n".join(summary_parts)
         except Exception as exc:
-            self._rollback_if_open(connection)
+            self._rollback_if_open(connection, exc)
             logger.exception(f"Error summarizing {self._db_label} table", table=table)
             return f"Error summarizing table: {exc}"
 
@@ -207,7 +207,7 @@ class SqlCursorToolkit(Toolkit):
                     writer.writerow(columns)
                     writer.writerows(row.values() if isinstance(row, dict) else row for row in cursor)
         except Exception as exc:
-            self._rollback_if_open(connection)
+            self._rollback_if_open(connection, exc)
             logger.exception(f"Error exporting {self._db_label} table", table=table, path=path)
             return f"Error exporting table: {exc}"
         return f"Successfully exported table '{table_name}' to '{target_path}'."
