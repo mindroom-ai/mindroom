@@ -989,6 +989,25 @@ def _is_broad_glob_for_old(rule: _ApprovalRule, *, old: str, broad_probe: str) -
     return any(fnmatchcase(old, pattern) and fnmatchcase(broad_probe, pattern) for pattern in rule.match_patterns())
 
 
+def _script_covered_by_explicit_new(
+    rules: Sequence[_ApprovalRule],
+    new_indices: Sequence[int],
+    script_index: int,
+    new: str,
+) -> bool:
+    script_rule = rules[script_index]
+    if new in script_rule.match_patterns():
+        return True
+    must_precede = script_index in new_indices
+    return any(
+        (not must_precede or index < script_index)
+        and new in rules[index].match_patterns()
+        and rules[index].arguments is None
+        and (rules[index].agents is None or rules[index].agent_patterns() == script_rule.agent_patterns())
+        for index in new_indices
+    )
+
+
 def _retired_approval_pair_error(
     rules: Sequence[_ApprovalRule],
     *,
@@ -1002,7 +1021,6 @@ def _retired_approval_pair_error(
     old_indices = _effective_rule_indices(rules, old)
     new_indices = _effective_rule_indices(rules, new)
     rem_old, rem_new = _strip_shared_prefix(old_indices, new_indices)
-    shared_prefix = old_indices[: len(old_indices) - len(rem_old)]
     rem_new_fully_explicit = (
         bool(rem_new)
         and all(new in rules[index].match_patterns() for index in rem_new)
@@ -1010,8 +1028,17 @@ def _retired_approval_pair_error(
     )
     if (
         reject_wildcard_scripts
-        and not (rem_new_fully_explicit and all(rules[index].script is None for index in shared_prefix))
-        and (script_index := next((index for index in old_indices if rules[index].script is not None), None))
+        and (
+            script_index := next(
+                (
+                    index
+                    for index in old_indices
+                    if rules[index].script is not None
+                    and not _script_covered_by_explicit_new(rules, new_indices, index, new)
+                ),
+                None,
+            )
+        )
         is not None
     ):
         return (

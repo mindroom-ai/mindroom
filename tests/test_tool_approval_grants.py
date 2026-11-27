@@ -3336,6 +3336,37 @@ def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_ski
     with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
         Config.validate_with_runtime(leading_script, runtime_paths)
 
+    grouped_script = {
+        **base,
+        "tool_approval": {
+            "rules": [{"match": ["skill", "get_*"], "script": "review.py"}],
+        },
+    }
+    assert len(Config.validate_with_runtime(grouped_script, runtime_paths).tool_approval.rules) == 1
+
+    agent_scoped_explicit_and_retired = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "script": "review.py"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(agent_scoped_explicit_and_retired, runtime_paths).tool_approval.rules) == 2
+
+    agent_scoped_explicit_before_unconditional_wildcard = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(agent_scoped_explicit_before_unconditional_wildcard, runtime_paths)
+
 
 @pytest.mark.parametrize(
     "overrides",
