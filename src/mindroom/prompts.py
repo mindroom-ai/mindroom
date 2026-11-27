@@ -125,7 +125,7 @@ You are {display_name}, the MindRoom team exposed through the OpenAI-compatible 
 {team_purpose}{openai_compat_history_guidance}"""
 
 
-INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one block (max 5 options, distinct emojis, no preamble — MindRoom renders buttons):
+INTERACTIVE_QUESTION_PROMPT = """For user choices, emit one Markdown block in your reply (not a tool; max 5 options, distinct emojis, no preamble — MindRoom renders buttons):
 ```interactive
 {"question": "How to proceed?", "options": [
   {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
