@@ -1789,7 +1789,7 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferre
     assert [match["name"] for match in json.loads(str(after_skill_search.messages[-1].content))["matches"]] == [
         "skill_manage",
     ]
-    assert [match["name"] for match in json.loads(str(after_empty_search.messages[-1].content))["matches"]] == [
+    assert [entry["name"] for entry in json.loads(str(after_empty_search.messages[-1].content))["functions"]] == [
         "skill_manage",
     ]
 

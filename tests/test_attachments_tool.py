@@ -2300,6 +2300,16 @@ async def test_attachment_output_files_worker_and_no_workspace_behavior(tmp_path
             return_value=SimpleNamespace(worker_path="out/worker.bin", size_bytes=len(raw_bytes), sha256="sha256"),
         ) as mocked_save,
     ):
+        worker_redirect = await worker_tool.attachment("list", mindroom_output_path="manifest.json")
+        assert isinstance(worker_redirect, str)
+        worker_redirect_payload = json.loads(worker_redirect)
+        assert worker_redirect_payload["status"] == "error"
+        assert (
+            worker_redirect_payload["message"]
+            == "mindroom_output_path is only supported for action='get' when tools run in a worker."
+        )
+        assert list(worker_workspace.iterdir()) == []
+
         worker_list = await worker_tool.attachment("list")
         assert isinstance(worker_list, dict)
         worker_receipt = worker_list["mindroom_tool_output"]

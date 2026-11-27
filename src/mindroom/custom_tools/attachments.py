@@ -603,6 +603,11 @@ class AttachmentTools(Toolkit):
         output_path: str | None,
     ) -> ToolOutputFileRequest | dict[str, object] | str | None:
         """Prepare the shared output-file request matching ``get_tool_by_name`` whenever a workspace is configured."""
+        if self._workspace_in_worker and output_path is not None:
+            return _attachment_tool_payload(
+                "error",
+                message="mindroom_output_path is only supported for action='get' when tools run in a worker.",
+            )
         if self._tool_output_workspace_root is None:
             if output_path is not None:
                 return _attachment_tool_payload(

@@ -289,7 +289,7 @@ def _error_receipt(error: str) -> dict[str, object]:
     }
 
 
-def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
+def _with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
     """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
 
     With ``tools_use_workdir``, the path is described as relative to the saved tool outputs, where such a policy puts it.
@@ -674,7 +674,7 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
         return replace(function, strict=False, entrypoint=entrypoint)
     return replace(
         function,
-        parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
+        parameters=_with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
         strict=False,
         entrypoint=entrypoint,
     )

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -24,12 +23,6 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent
 
 _CALL_TOOL_NAME: Final = "call_tool"
-_SEARCH_WORD_RE: Final = re.compile(r"[a-z0-9]+")
-
-
-def search_words(*fields: str) -> set[str]:
-    """Return lowercase alphanumeric words extracted across ``fields``."""
-    return {word for field in fields for word in _SEARCH_WORD_RE.findall(field.lower())}
 
 
 def _arguments_object(value: object) -> dict[str, Any] | None:
@@ -135,10 +128,4 @@ def _resolved_call(call: dict[str, Any], callable_names: Container[str]) -> dict
     return {**call, "function": {**function, "name": name, "arguments": resolved_arguments}}
 
 
-__all__ = [
-    "call_arguments",
-    "portable_tool_search_request",
-    "portable_tool_search_stream",
-    "resolve_call_tool_calls",
-    "search_words",
-]
+__all__ = ["call_arguments", "portable_tool_search_request", "portable_tool_search_stream", "resolve_call_tool_calls"]

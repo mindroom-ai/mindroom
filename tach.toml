@@ -11030,6 +11030,7 @@ depends_on = [
     "mindroom.skill_learning.tools",
     "mindroom.skill_learning.transcript",
     "mindroom.tool_jobs.background_after",
+    "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",

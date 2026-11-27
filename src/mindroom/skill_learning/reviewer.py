@@ -12,8 +12,6 @@ digest instead, like Hermes' routed review.
 from __future__ import annotations
 
 import asyncio
-import json
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -24,12 +22,13 @@ from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.run import own_model_messages
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_run_usage
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools
 from mindroom.llm.runs import RunRecord
-from mindroom.llm.tool_search import resolve_call_tool_calls, search_words
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -39,6 +38,7 @@ from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_c
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_jobs.background_after import application_arguments
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
 from mindroom.tool_system.toolkits import adapt_toolkit
@@ -179,31 +179,23 @@ def _review_tools(
     )
     if deferred_runnable:
         if "tool_search" in answered:
-
-            async def review_tool_search(query: str = "", max_results: int = 5, **_extra: object) -> str:
-                matches = [
-                    {
-                        "name": definition.name,
-                        "description": definition.description or "",
-                        "parameters": dict(definition.parameters),
-                        "toolkit": definition.name,
-                    }
-                    for definition in _review_search_matches(deferred_runnable, query, max_results)
-                ]
-                return json.dumps(
-                    {
-                        "tool": "dynamic_tools",
-                        "status": "ok",
-                        "matches": matches,
-                        "usage": (
-                            "Only deferred skill tools are available during a skill review. "
-                            "Call a match with call_tool(name, arguments), passing arguments as a JSON object."
+            deferred_toolkits = tuple(
+                DeferredToolkit(
+                    deferral=ToolDeferral(domain_name=definition.name, description="", instructions=None),
+                    functions=(
+                        ToolFunction(
+                            name=definition.name,
+                            description=definition.description,
+                            parameters=definition.parameters,
+                            entrypoint=entrypoints[definition.name],
                         ),
-                    },
-                    ensure_ascii=False,
+                    ),
                 )
-
-            entrypoints["tool_search"] = review_tool_search
+                for definition in deferred_runnable
+            )
+            entrypoints["tool_search"] = validated_entrypoint(
+                DynamicToolsToolkit(deferred_toolkits=lambda: deferred_toolkits).tool_search,
+            )
         if "call_tool" in answered:
             deferred_names = _listing([definition.name for definition in deferred_runnable])
             example_name = deferred_runnable[0].name
@@ -233,24 +225,6 @@ def _review_tools(
         for name, definition in answered.items()
     }
     return PreparedTools(functions=functions), runnable, frozenset(d.name for d in deferred_runnable)
-
-
-def _review_search_matches(
-    deferred_runnable: Sequence[ToolSpec],
-    query: str,
-    max_results: int,
-) -> list[ToolSpec]:
-    query_tokens = search_words(query)
-    if not query_tokens:
-        return list(deferred_runnable)[: max(1, max_results)]
-    matched: list[ToolSpec] = []
-    for definition in deferred_runnable:
-        properties = definition.parameters.get("properties")
-        param_names = (str(param_name) for param_name in properties) if isinstance(properties, Mapping) else ()
-        searchable = search_words(definition.name, definition.description or "", *param_names)
-        if query_tokens & searchable:
-            matched.append(definition)
-    return matched[: max(1, max_results)]
 
 
 def _listing(names: Sequence[str]) -> str:

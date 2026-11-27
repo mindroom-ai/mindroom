@@ -87,7 +87,7 @@ agents:
 | `attachment(action="list", attachment_id=None)` | List the attachment IDs available in the current context with their metadata, plus any `missing_attachment_ids`; pass `attachment_id` to filter to one |
 | `attachment(action="get", attachment_id=..., mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `attachment(action="register", path=...)` | Turn a local file into a new attachment ID for this conversation |
-| `attachment(action="inline_image", attachment_id=...|path=..., alt=None)` | Upload an image (by context `attachment_id` or local `path`) and return Markdown to embed it in a reply |
+| `attachment(action="inline_image", ...)` (`attachment_id=...` or `path=...`, `alt=None`) | Upload an image (by context `attachment_id` or local `path`) and return Markdown to embed it in a reply |
 | `view_file(path)` | Show an image from the workspace to the model |
 
 ```python

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.llm.tool_search import search_words
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
 
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
 _MAX_RESULTS_LIMIT = 20
 _LISTING_BYTE_LIMIT = 16 * 1024
 _LISTED_DESCRIPTION_LENGTH = 256
@@ -32,6 +33,10 @@ _CALL_TOOL_PARAMETERS = {
     "required": ["name"],
 }
 _EXACT_NAME_SCORE = 1000
+
+
+def _tokens(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower()))
 
 
 class DynamicToolsToolkit(Toolkit):
@@ -63,7 +68,7 @@ class DynamicToolsToolkit(Toolkit):
         """
         raw_query = query.strip().lower()
         # A toolkit's other names find it too.
-        query_tokens = {name for token in search_words(raw_query) for name in (token, canonical_tool_name(token))}
+        query_tokens = {name for token in _tokens(raw_query) for name in (token, canonical_tool_name(token))}
         # No function name lacks word characters, so a query without them can only browse.
         if not query_tokens:
             return self._listing()
@@ -177,11 +182,13 @@ def _search_score(
     """Score one function by the query words it matches, each counted once in its best field."""
     if raw_query == definition["name"].lower():
         return _EXACT_NAME_SCORE
-    detail_tokens = search_words(definition["description"], *definition["parameters"].get("properties", ()))
+    detail_tokens = _tokens(definition["description"])
+    for parameter_name in definition["parameters"].get("properties", {}):
+        detail_tokens |= _tokens(parameter_name)
     fields = (
-        (8, search_words(definition["name"])),
-        (4, search_words(deferred.deferral.domain_name)),
+        (8, _tokens(definition["name"])),
+        (4, _tokens(deferred.deferral.domain_name)),
         (2, detail_tokens),
-        (1, search_words(deferred.deferral.description)),
+        (1, _tokens(deferred.deferral.description)),
     )
     return sum(max((weight for weight, tokens in fields if token in tokens), default=0) for token in query_tokens)
