@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import os
 import re
+import shlex
+import shutil
 import signal
 import sys
 import time
@@ -1789,3 +1791,65 @@ async def test_execute_tool_call_shell_outcome_boundaries(tmp_path: Path, monkey
     assert isinstance(rejected, ToolOutcome)
     assert (rejected.is_error, rejected.counts_as_tool_failure) == (True, True)
     assert rejected.content.startswith("Error: Too many backgrounded")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux session scan is Linux-only")
+@pytest.mark.asyncio
+async def test_scope_exit_stops_new_pgid_sigterm_ignoring_child_and_preserves_nohup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turn-end scope close kills a SIGTERM-ignoring `timeout` child in a new PGID while preserving `nohup`."""
+    if shutil.which("timeout") is None:
+        pytest.skip("requires GNU timeout")
+    monkeypatch.delenv("MINDROOM_SHELL_SYSTEMD_SLICE", raising=False)
+    workspace, fn = _workspace_shell_entrypoint(tmp_path)
+    info_file = workspace / "timeout-child.info"
+    nohup_file = workspace / "nohup.pid"
+    child_script = (
+        "import os, pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "tmp = pathlib.Path(sys.argv[1] + '.tmp'); "
+        "tmp.write_text(f'{os.getpid()} {os.getpgid(0)} {os.getsid(0)}', encoding='utf-8'); "
+        "os.replace(tmp, sys.argv[1]); time.sleep(30)"
+    )
+    py_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(child_script)} {shlex.quote(str(info_file))}"
+    child_pgid: int | None = None
+    nohup_pid: int | None = None
+    try:
+        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+            async with shell_background_scope():
+                await fn.entrypoint(
+                    [
+                        "bash",
+                        "-c",
+                        f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(nohup_file))}; exit 0",
+                    ],
+                )
+                nohup_pid = int(nohup_file.read_text(encoding="utf-8").strip())
+                os.kill(nohup_pid, 0)
+
+                receipt = await fn.entrypoint(["bash", "-c", f"timeout 60 {py_cmd}; true"])
+                assert isinstance(receipt, str)
+                leader_pid, rel_log = _parse_background_receipt(receipt)
+                for _ in range(150):
+                    if info_file.exists():
+                        break
+                    await asyncio.sleep(0.02)
+                assert info_file.exists()
+                child_pid, child_pgid, child_sid = (int(tok) for tok in info_file.read_text(encoding="utf-8").split())
+                assert child_pgid != leader_pid
+                assert child_sid == leader_pid
+                os.kill(child_pid, 0)
+
+        await assert_linux_pid_not_running(child_pid)
+        assert "[MindRoom: stopped when turn ended]" in (workspace / rel_log).read_text(encoding="utf-8")
+        # Cleanly exited `nohup` child still survives turn-end scope close.
+        os.kill(nohup_pid, 0)
+    finally:
+        if child_pgid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child_pgid, signal.SIGKILL)
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
