@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -104,10 +105,8 @@ def _v_canvas(ws: Path, c: Sequence[CallTrace]) -> bool:
 def _v_sched(_ws: Path, c: Sequence[CallTrace]) -> bool:
     def good(a: dict[str, Any]) -> bool:
         d = a.get("delay_seconds")
-        timed = (isinstance(d, int) and not isinstance(d, bool) and d > 0) or _str(a.get("execute_at"))
-        return (
-            a.get("action") == "create" and _str(a.get("message")) and isinstance(a.get("new_thread"), bool) and timed
-        )
+        timed = (isinstance(d, int) and not isinstance(d, bool) and 6000 <= d <= 8400) or _str(a.get("execute_at"))
+        return a.get("action") == "create" and _str(a.get("message")) and a.get("new_thread") is False and timed
 
     return _ok(c, "scheduler", good)
 
@@ -136,7 +135,16 @@ def _v_logs(ws: Path, c: Sequence[CallTrace]) -> bool:
 def _v_calc(ws: Path, c: Sequence[CallTrace]) -> bool:
     if not _ok(c, "run_shell_command", lambda a: "check_calc.py" in str(a.get("args", ""))):
         return False
-    proc = subprocess.run([sys.executable, "check_calc.py"], cwd=ws, capture_output=True, timeout=10, check=False)
+    bin_dir, base_path = str(Path(sys.executable).parent), os.environ.get("PATH", "")
+    env = {"PATH": f"{bin_dir}{os.pathsep}{base_path}" if base_path else bin_dir, "HOME": str(ws)}
+    proc = subprocess.run(
+        [sys.executable, "check_calc.py"],
+        cwd=ws,
+        env=env,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
     return proc.returncode == 0
 
 

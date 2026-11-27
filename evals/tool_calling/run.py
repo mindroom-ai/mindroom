@@ -85,7 +85,9 @@ def resolve_provider(model_spec: str, *, config_path: Path | None, base_url: str
         msg = f"Configured model {model_spec!r} requires an existing --config file (got {config_path})."
         raise ValueError(msg)
     rp = resolve_runtime_paths(config_path=config_path)
-    config = load_config(rp, tolerate_plugin_load_errors=True).model_copy(update={"debug": DebugConfig()})
+    loaded = load_config(rp, tolerate_plugin_load_errors=True)
+    models = {k: m.model_copy(update={"fallbacks": []}) for k, m in loaded.models.items()}
+    config = loaded.model_copy(update={"debug": DebugConfig(), "models": models})
     return build_model_provider(config, rp, model_spec)
 
 

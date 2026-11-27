@@ -17,13 +17,13 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import EndRun, LoopHooks, LoopState, RequestDecision, SendRequest
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import own_model_messages, run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths, workspace_home_identity_env
 from mindroom.entity_resolution import persist_offline_entity_accounts
-from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.tool_search import (
@@ -35,6 +35,7 @@ from mindroom.llm.tool_search import (
 from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.toolkits import model_arguments
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -50,18 +51,18 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 _REAL_TOOLKITS = frozenset({"shell", "filesystem", "dynamic_tools", None})
+_FS_TOOLS = frozenset({"read_file", "write_file", "edit_file", "delete_file", "find_files", "grep", "ls"})
+_FS_ERR_PREFIXES = ("Error:", "Error reading ", "Error writing ", "Error removing ", "Error running ", "Error listing ")
 _SHELL_OPS = frozenset({"|", "&&", "||", ";", ">", ">>", "<", "<<", "2>&1", "1>&2", "&>", "&>>", "|&"})
 _SHELL_INTERPS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "python", "python3", "perl", "ruby", "node"})
 _SHELL_FLAGS = frozenset({"-c", "-lc", "-ec", "-e"})
 _PORTABLE_PROJ = RequestProjection(lambda _inner, req: portable_tool_search_request(req))
 _DECODE_KEYS = ("decoding function arguments", "not a valid json object", "invalid json", "must be a json object")
+_INVALID_KEYS = ("invalid value for parameter", "type=literal_error", "validation error", "must be a positive")
 _FAIL_RULES = (
     ("missing_required_param", ("missing a required argument", "type=missing_argument", "missing required parameter")),
     ("unexpected_param", ("unexpected keyword argument", "type=unexpected_keyword_argument")),
-    (
-        "invalid_param_value",
-        ("invalid value for parameter", "type=literal_error", "validation error", "must be a positive", *_DECODE_KEYS),
-    ),
+    ("invalid_param_value", (*_INVALID_KEYS, *_DECODE_KEYS)),
 )
 _EVAL_TOOLS: list[Any] = [
     *("shell", "filesystem", "attachments", "matrix_message"),
@@ -118,38 +119,17 @@ def _try_json(raw: str) -> object:
         return None
 
 
-def _matches_schema(v: object, schema: Mapping[str, Any]) -> bool:
-    if "anyOf" in schema:
-        return any(_matches_schema(v, opt) for opt in schema["anyOf"])
-    if "enum" in schema and v not in schema["enum"]:
-        return False
-    expected = schema.get("type")
-    if expected == "array":
-        items = schema.get("items")
-        return isinstance(v, list) and (not isinstance(items, Mapping) or all(_matches_schema(x, items) for x in v))
-    ok = {
-        "null": v is None,
-        "string": isinstance(v, str),
-        "boolean": isinstance(v, bool),
-        "object": isinstance(v, dict),
-        "integer": isinstance(v, int) and not isinstance(v, bool),
-        "number": isinstance(v, (int, float)) and not isinstance(v, bool),
-    }
-    return ok.get(expected, True) if isinstance(expected, str) else True
-
-
 def _check_attachment(action: str, kw: Mapping[str, Any], ws: Path) -> None:
     has_id, has_path = _str(kw.get("attachment_id")), _str(kw.get("path"))
     if action == "register":
         _need(has_path, "Missing required parameter 'path' for action='register'.")
-        _require_file(ws, str(kw["path"]), "Attachment")
     elif action == "get":
         _need(has_id, "Missing required parameter 'attachment_id' for action='get'.")
     elif action == "inline_image":
         _need(has_id or has_path, "Missing required parameter: give 'attachment_id' or 'path'.")
         _need(not (has_id and has_path), "Invalid value for parameter: pass 'attachment_id' or 'path', not both.")
-        if has_path:
-            _require_file(ws, str(kw["path"]), "Attachment")
+    if action in {"register", "inline_image"} and has_path:
+        _require_file(ws, str(kw["path"]), "Attachment")
 
 
 def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) -> None:
@@ -190,8 +170,7 @@ def _memory_stub(action: str, kw: Mapping[str, Any], memories: dict[str, str]) -
         mid = f"mem_{len(memories) + 1}"
         memories[mid] = str(kw["content"])
         return {"status": "ok", "memory_id": mid}
-    mid = str(kw.get("memory_id") or "")
-    if mid not in memories:
+    if (mid := str(kw.get("memory_id") or "")) not in memories:
         return {"status": "error", "message": "Memory not found"}
     if action == "delete":
         memories.pop(mid)
@@ -201,9 +180,25 @@ def _memory_stub(action: str, kw: Mapping[str, Any], memories: dict[str, str]) -
     return {"status": "ok", "memory": {"id": mid, "content": memories[mid]}}
 
 
+def _attachment_stub(action: str, kw: Mapping[str, Any], atts: dict[str, str]) -> dict[str, Any]:
+    base: dict[str, Any] = {"status": "ok", "tool": "attachment", "action": action}
+    if action == "register":
+        aid = f"att_eval_{len(atts) + 1}"
+        atts[aid] = str(kw["path"])
+        return {**base, "attachment_id": aid}
+    if action == "get":
+        aid = str(kw["attachment_id"])
+        if aid not in atts:
+            return {**base, "status": "error", "message": f"Attachment not found: {aid}"}
+        return {**base, "attachment": {"attachment_id": aid, "path": atts[aid]}}
+    return {**base, "attachments": [{"attachment_id": k, "path": v} for k, v in atts.items()]}
+
+
 def _stateful_stub(name: str, action: str, kw: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     if name == "memory":
         return _memory_stub(action, kw, state["memories"])
+    if name == "attachment":
+        return _attachment_stub(action, kw, state["attachments"])
     if name in {"tag_thread", "untag_thread", "list_thread_tags"}:
         tags: dict[str, dict[str, Any]] = state["tags"]
         if name == "tag_thread":
@@ -212,13 +207,6 @@ def _stateful_stub(name: str, action: str, kw: Mapping[str, Any], state: dict[st
             tags.pop(str(kw["tag"]), None)
         extra: dict[str, Any] = {"tags": dict(tags)} if name == "list_thread_tags" else {"tag": kw["tag"]}
         return {"status": "ok", "tool": "thread_tags", "action": name.split("_", 1)[0], **extra}
-    if name == "attachment":
-        atts: list[dict[str, str]] = state["attachments"]
-        if action == "register":
-            aid = f"att_eval_{len(atts) + 1}"
-            atts.append({"attachment_id": aid, "path": str(kw["path"])})
-            return {"status": "ok", "tool": "attachment", "action": "register", "attachment_id": aid}
-        return {"status": "ok", "tool": "attachment", "action": action, "attachments": list(atts)}
     wf_run = {"run_id": "wf_01", "title": "nightly-smoke", "status": "completed"}
     stubs: dict[str, dict[str, Any]] = {
         "show_canvas": {"status": "ok", "tool": "chat_ui", "action": "show_canvas", "event_id": "$canvas_eval_1"},
@@ -240,21 +228,28 @@ def _validate_and_stub(call: ToolCall, workspace: Path, state: dict[str, Any]) -
     sig.bind(**kw)
     for req in call.function.parameters.get("required", ()):
         _need(req in kw, f"Missing required parameter: '{req}'.")
-    if isinstance(props, Mapping):
-        for k, v in kw.items():
-            if isinstance(prop := props.get(k), Mapping):
-                _need(_matches_schema(v, prop), f"Invalid value for parameter '{k}': {v!r}.")
+    try:
+        validate_tool_arguments(dict(call.function.parameters), kw)
+    except Exception as exc:
+        msg = f"Invalid value for parameter: {exc.__cause__ or exc}"
+        raise ValueError(msg) from exc
     name = call.function.name
     action = str(kw.get("action") or ("send" if name == "matrix_message" else ""))
     _check_semantics(name, action, kw, workspace)
     return json.dumps(_stateful_stub(name, action, kw, state))
 
 
-def _is_json_error(text: str) -> bool:
-    return text.lstrip().startswith("{") and isinstance(d := _try_json(text), dict) and d.get("status") == "error"
+def _is_error_result(text: str, resolved_name: str) -> bool:
+    if resolved_name in _FS_TOOLS and text.startswith(_FS_ERR_PREFIXES):
+        return True
+    if not text.lstrip().startswith("{") or not isinstance(d := _try_json(text), dict):
+        return False
+    return d.get("status") == "error" or bool(d.get("error")) or d.get("view_status") == "error"
 
 
-def _parse_raw_args(fn: Mapping[str, Any]) -> dict[str, Any]:
+def _parse_raw_args(fn: object) -> dict[str, Any]:
+    if not isinstance(fn, Mapping):
+        return {}
     raw = fn.get("arguments")
     if isinstance(raw, dict):
         return raw
@@ -298,14 +293,14 @@ def classify_failure(
     deferred: DeferredTools,
 ) -> str | None:
     """Classify a failed or mis-routed tool call into one failure kind, or None when clean."""
-    failed, lower = is_error or _is_json_error(result_text), result_text.lower()
+    failed, lower = is_error or _is_error_result(result_text, resolved_name), result_text.lower()
     if (
         (deferred.portable and raw_name in deferred.names)
         or result_text == MISSING_TOOL_ERROR_TEXT
         or (failed and function is None)
     ):
         return "unknown_tool"
-    if raw_name == "call_tool" and resolved_name == "call_tool":
+    if raw_name == "call_tool" and resolved_name == "call_tool" and result_text != CUT_OFF_TOOL_CALL_RESULT:
         target = args.get("name")
         valid_target = _str(target) and target != "call_tool" and _has_valid_nested_call_tool_args(args)
         bad_json = is_error and any(k in lower for k in _DECODE_KEYS)
@@ -321,9 +316,12 @@ def classify_failure(
 
 
 def _build_eval_agent(root: Path, case: EvalCase, provider: ModelProvider) -> tuple[AgentBuild, Path]:
+    storage = (root / "storage").resolve()
+    ws = agent_workspace_root_path(storage, "eval_agent")
     bin_dir, base_path = str(Path(sys.executable).parent), os.environ.get("PATH", "")
-    env = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PATH": f"{bin_dir}{os.pathsep}{base_path}" if base_path else bin_dir}
-    rp = resolve_runtime_paths(config_path=root / "config.yaml", storage_path=root / "storage", process_env=env)
+    path_val = f"{bin_dir}{os.pathsep}{base_path}" if base_path else bin_dir
+    env = {"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", "PATH": path_val, **workspace_home_identity_env(ws)}
+    rp = resolve_runtime_paths(config_path=root / "config.yaml", storage_path=storage, process_env=env)
     agent = {
         "display_name": "EvalAgent",
         "role": "Engineering assistant.",
@@ -340,7 +338,6 @@ def _build_eval_agent(root: Path, case: EvalCase, provider: ModelProvider) -> tu
     }
     config = Config.validate_with_runtime(authored, rp)
     persist_offline_entity_accounts(config, rp)
-    ws = agent_workspace_root_path(rp.storage_root, "eval_agent")
     seed_workspace(ws, case)
     identity = build_tool_execution_identity(
         channel="matrix",
@@ -366,27 +363,28 @@ def _collect_traces(
     unused = dict(enumerate(raw_history))
     traces, counts = [], Counter[str]()
     for idx, ex in enumerate(record.tools or () if record is not None else ()):
-        match = next((i for i, item in unused.items() if ex.tool_call_id and item[0] == ex.tool_call_id), None)
-        if match is None:
+        cid = ex.tool_call_id
+        match = next((i for i, item in unused.items() if cid and item[0] == cid), None)
+        if match is None and not cid:
             match = idx if idx in unused else next(iter(unused), None)
-        fallback = ("", 0, ex.tool_name, ex.tool_args or {})
-        _, turn, raw_name, raw_args = unused.pop(match) if match is not None else fallback
-        args, text = ex.tool_args if isinstance(ex.tool_args, dict) else {}, ex.result or ""
-        is_err = bool(ex.is_error)
-        failed = is_err or _is_json_error(text)
-        kind = classify_failure(
-            raw_name,
-            ex.tool_name,
-            args,
-            is_error=is_err,
-            result_text=text,
-            function=functions.get(ex.tool_name),
-            deferred=deferred,
-        )
+        name = ex.tool_name
+        _, turn, raw_name, raw_args = unused.pop(match) if match is not None else ("", 0, name, ex.tool_args or {})
+        args, text, is_err = ex.tool_args if isinstance(ex.tool_args, dict) else {}, ex.result or "", bool(ex.is_error)
+        failed, fn = is_err or _is_error_result(text, name), functions.get(name)
+        kind = classify_failure(raw_name, name, args, is_error=is_err, result_text=text, function=fn, deferred=deferred)
         if kind is not None:
             counts[kind] += 1
-        traces.append(CallTrace(turn, raw_name, raw_args, ex.tool_name, args, failed, kind, text[:220]))
+        traces.append(CallTrace(turn, raw_name, raw_args, name, args, failed, kind, text[:220]))
     return tuple(traces), dict(sorted(counts.items()))
+
+
+def _verify_case(case: EvalCase, ws: Path, calls: Sequence[CallTrace], err: str | None) -> tuple[bool, str | None]:
+    if err is not None:
+        return False, err
+    try:
+        return case.verify(ws, calls), None
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 async def evaluate_case(case: EvalCase, provider: ModelProvider, *, max_turns: int = 5) -> CaseResult:
@@ -400,11 +398,8 @@ async def evaluate_case(case: EvalCase, provider: ModelProvider, *, max_turns: i
         raw_history: list[tuple[str, int, str, dict[str, Any]]] = []
         batch_raw: dict[str, str] = {}
         current_turn = [0]
-        stub_state: dict[str, Any] = {
-            "tags": {"backend": {}},
-            "memories": {"mem_1": "Staging retries use fixed 1s backoff."},
-            "attachments": [],
-        }
+        mem = {"mem_1": "Staging retries use fixed 1s backoff."}
+        stub_state: dict[str, Any] = {"tags": {"backend": {}}, "memories": mem, "attachments": {}}
 
         async def before_req(state: LoopState) -> RequestDecision:
             if state.request_index >= max_turns:
@@ -415,48 +410,43 @@ async def evaluate_case(case: EvalCase, provider: ModelProvider, *, max_turns: i
         def rewrite_calls(calls: list[dict[str, Any]], fns: Mapping[str, ToolFunction]) -> list[dict[str, Any]]:
             batch_raw.clear()
             for tc in calls:
-                call_id, fn = str(tc.get("id") or ""), tc.get("function") or {}
+                call_id, fn = str(tc.get("id") or ""), tc.get("function")
                 raw_name = str(fn.get("name") or "") if isinstance(fn, Mapping) else ""
-                raw_args = _parse_raw_args(fn) if isinstance(fn, Mapping) else {}
-                raw_history.append((call_id, current_turn[0], raw_name, raw_args))
+                raw_history.append((call_id, current_turn[0], raw_name, _parse_raw_args(fn)))
                 batch_raw[call_id] = raw_name
             return resolve_call_tool_calls(calls, fns) if deferred.portable else calls
 
+        # Enforce the portable wire contract on direct deferred calls and intentionally skip build.tool_policy.
         async def middleware(call: ToolCall, call_next: ToolNext) -> object:
             raw = batch_raw.get(call.context.call_id, call.function.name)
             _need(not (deferred.portable and raw in deferred.names), f"Tool '{raw}' is deferred; use call_tool.")
             is_real = call.function.toolkit in _REAL_TOOLKITS or call.function.name == "view_file"
             return await call_next(call.arguments) if is_real else _validate_and_stub(call, workspace, stub_state)
 
-        hooks = LoopHooks(before_request=(before_req,), rewrite_tool_calls=rewrite_calls, tool_middleware=(middleware,))
+        hooks = LoopHooks(
+            before_request=(before_req,),
+            answer_tool_calls=output_limit_policy(),
+            rewrite_tool_calls=rewrite_calls,
+            tool_middleware=(middleware,),
+        )
         record: AnyRunRecord | None = None
-        error_text: str | None = None
+        err: str | None = None
         try:
             msgs = [Message(role="user", content=case.prompt)]
             async for event in run_agent(spec, msgs, ctx=ctx, persist=None, request_template=tpl, hooks=hooks):
                 if isinstance(event, RunFinished):
                     record = event.record
-        except ProviderError as exc:
-            error_text = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:
+            err = record.error if record and record.error else f"{type(exc).__name__}: {exc}"
 
-        calls, failure_counts = _collect_traces(record, raw_history, spec.functions, deferred)
-        mis_calls = sum(failure_counts.values())
-        passed = error_text is None and case.verify(workspace, calls)
+        calls, fc = _collect_traces(record, raw_history, spec.functions, deferred)
+        mis = sum(fc.values())
+        passed, err = _verify_case(case, workspace, calls, err)
         tok = record.metrics.tokens if record and record.metrics else None
         turns = len(own_model_messages(record)) if record else current_turn[0]
-        return CaseResult(
-            case.case_id,
-            passed,
-            passed and mis_calls == 0,
-            turns,
-            mis_calls,
-            failure_counts,
-            calls,
-            tok.input_tokens if tok else 0,
-            tok.output_tokens if tok else 0,
-            round(time.monotonic() - started, 3),
-            error_text,
-        )
+        in_t, out_t = (tok.input_tokens, tok.output_tokens) if tok else (0, 0)
+        dt = round(time.monotonic() - started, 3)
+        return CaseResult(case.case_id, passed, passed and not mis, turns, mis, fc, calls, in_t, out_t, dt, err)
 
 
 async def evaluate_model(
