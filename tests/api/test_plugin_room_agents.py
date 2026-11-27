@@ -62,7 +62,7 @@ READ_ONLY_FILE = {"file": {"exclude_tools": ["write_file", "edit_file"]}}
 WRITING_FUNCTIONS = {
     "filesystem": ("write_file", "edit_file"),
     "script": ("start_script",),
-    "workflow": ("start_workflow", "resume_workflow", "save_workflow"),
+    "workflow": ("workflow",),
     "claude_agent": ("claude_start_session", "claude_send"),
     "docker": ("docker_container", "docker_resource"),
 }

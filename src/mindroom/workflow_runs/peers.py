@@ -447,7 +447,7 @@ def visible_messages(
 
 
 def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
-    """Return the full, uncapped message history of *run_id* (for owner-checked `get_workflow(messages=True)`)."""
+    """Return the full, uncapped message history of *run_id* (for owner-checked `workflow(action="get", ..., messages=True)`)."""
     q = "SELECT seq, sender_key, sender_name, recipient_name, text, withdrawn, created_at FROM workflow_messages WHERE run_id = ? ORDER BY seq ASC"
     with store.read_connection() as conn:
         rows = conn.execute(q, (run_id,)).fetchall()
@@ -466,6 +466,6 @@ def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
 
 
 def all_state(store: WorkflowRunStore, run_id: str) -> dict[str, object]:
-    """Return all full, uncapped shared-state values of *run_id* (for owner-checked `get_workflow(messages=True)`)."""
+    """Return all full, uncapped shared-state values of *run_id* (for owner-checked `workflow(action="get", ..., messages=True)`)."""
     with store.read_connection() as conn:
         return _all_state_rows(conn, run_id)

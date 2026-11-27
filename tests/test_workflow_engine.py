@@ -430,7 +430,7 @@ async def test_settle_from_handle_pending_receipt_whose_effect_started_is_indete
     assert saved.error is not None
     assert saved.error["message"] == (
         "This call may already have run (attempt 1). Check its effect; "
-        f'to run it again call resume_workflow(run_id, rerun=["n{saved.seq}"]).'
+        f'to run it again call workflow(action="resume", run_id=..., rerun=["n{saved.seq}"]).'
     )
 
 

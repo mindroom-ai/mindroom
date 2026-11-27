@@ -296,13 +296,10 @@ tool_approval:
 
 `google_docs` creates, reads, and edits Google Docs through its own OAuth connection, separate from Google Drive.
 
-| Function | What it does |
-| --- | --- |
-| `google_docs_create_document(title, initial_text="")` | Creates a document, optionally with initial text. |
-| `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
-| `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
-| `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
-| `google_docs_batch_update(document_id, requests, required_revision_id=None)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` to reject the whole batch if the document changed since that read. |
+| Function | Actions | What it does |
+| --- | --- | --- |
+| `google_docs_get_document(document_id)` | — | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
+| `google_docs_write(action, ...)` | `create`, `insert_text`, `replace_text`, `batch_update` | Creates a document (with optional `initial_text`), inserts text at a 1-based body `index` (or appends to the end of `tab_id` when omitted), replaces `find_text` with `replace_text` across all or selected `tab_ids` (pass `""` to delete matches), or applies atomic Google Docs API `batchUpdate` `requests` in order for tables, headings, styles, lists, links, images, and deletions. Pass the `revisionId` from `google_docs_get_document` as `required_revision_id` on `batch_update` to reject the whole batch if the document changed since that read. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -311,9 +308,9 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `create_document` | `boolean` | `true` | Enable document creation. |
-| `read_document` | `boolean` | `true` | Enable structure and content reads. |
-| `edit_document` | `boolean` | `true` | Enable text insertion, text replacement, and batch updates. |
+| `create_document` | `boolean` | `true` | Enable `google_docs_write(action="create")`. |
+| `read_document` | `boolean` | `true` | Enable `google_docs_get_document()`. |
+| `edit_document` | `boolean` | `true` | Enable `google_docs_write()` `insert_text`, `replace_text`, and `batch_update` actions. |
 
 ## [`google_sheets`]
 

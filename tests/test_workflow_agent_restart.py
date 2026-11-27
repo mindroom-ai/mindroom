@@ -286,7 +286,7 @@ async def test_agent_of_a_run_whose_job_was_stopped_is_not_continued(
 ) -> None:
     """A Stop of the run's job wins over the restart: its agent is not continued before the run itself is cancelled."""
     monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
-    handle = json.loads(await stack.call("start_workflow", source="def main(args):\n    return None\n"))
+    handle = json.loads(await stack.call("workflow", action="start", source="def main(args):\n    return None\n"))
     stack.run_id = handle["run_id"]
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
     await _working(stack, after_append=False)

@@ -48,19 +48,24 @@ if TYPE_CHECKING:
 __all__ = [
     "SCRIPT_GATEWAY_PORT_ENV",
     "ScriptCallReceiptResponse",
+    "ScriptCheckInputResponse",
+    "ScriptCheckResultRequest",
     "ScriptToolCallRequestModel",
     "bind_script_tool_broker",
     "get_script_call",
+    "get_script_check_input",
     "listener_port",
     "router",
     "serve_listener",
     "serve_script_gateway_listener",
     "submit_script_call",
+    "submit_script_check_result",
 ]
 
 logger = get_logger(__name__)
 
 _MAX_REQUEST_BYTES = 64 * 1024
+_MAX_CHECK_RESULT_BYTES = 128 * 1024
 SCRIPT_GATEWAY_PORT_ENV = "MINDROOM_SCRIPT_GATEWAY_PORT"
 # Matches the primary API's shutdown grace; Uvicorn cancels listener requests still open after it.
 _LISTENER_SHUTDOWN_GRACE_SECONDS = 5
@@ -84,6 +89,27 @@ class _ScriptGatewayBroker(Protocol):
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate and retrieve one stable receipt."""
+        ...
+
+    async def get_authenticated_check_input(
+        self,
+        run_id: str,
+        authorization: str | None,
+    ) -> dict[str, object]:
+        """Authenticate a script_check tick and return its source and initial state."""
+        ...
+
+    async def submit_authenticated_check_result(
+        self,
+        run_id: str,
+        authorization: str | None,
+        *,
+        result: object,
+        state: dict[str, object],
+        state_changed: bool,
+        error: str | None,
+    ) -> None:
+        """Authenticate a script_check tick and record its final check result."""
         ...
 
 
@@ -147,6 +173,32 @@ class ScriptCallReceiptResponse(BaseModel):
         )
 
 
+class ScriptCheckInputResponse(BaseModel):
+    """Snapshotted source and persisted state delivered to one script_check tick."""
+
+    source: str
+    source_digest: str
+    state: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class ScriptCheckResultRequest(BaseModel):
+    """Strict untrusted wire payload posted by the script_check bootstrap upon completion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: JsonValue = None
+    state: dict[str, JsonValue] = Field(default_factory=dict)
+    state_changed: bool = False
+    error: str | None = Field(default=None, max_length=8192)
+
+    @field_validator("result", "state")
+    @classmethod
+    def _reject_non_finite_numbers(cls, value: JsonValue) -> JsonValue:
+        if not has_only_finite_numbers(value):
+            raise PydanticCustomError("finite_number", "Payload must contain only finite numbers")  # noqa: EM101
+        return value
+
+
 router = APIRouter(prefix="/api/script-gateway", tags=["script-gateway"])
 
 
@@ -169,22 +221,42 @@ def _app_script_tool_broker(app: FastAPI) -> _ScriptGatewayBroker:
     return cast("_ScriptGatewayBroker", broker)
 
 
-async def _bounded_payload(request: Request) -> ScriptToolCallRequestModel:
+async def _bounded_json_body(request: Request, *, max_bytes: int, too_large_detail: str) -> bytes:
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
             declared_bytes = int(content_length)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid Content-Length header.") from exc
-        if declared_bytes > _MAX_REQUEST_BYTES:
-            raise HTTPException(status_code=413, detail="Script call request is too large.")
+        if declared_bytes > max_bytes:
+            raise HTTPException(status_code=413, detail=too_large_detail)
 
     try:
-        body = await collect_bounded_bytes(request.stream(), max_bytes=_MAX_REQUEST_BYTES)
+        return await collect_bounded_bytes(request.stream(), max_bytes=max_bytes)
     except ByteLimitExceededError as exc:
-        raise HTTPException(status_code=413, detail="Script call request is too large.") from exc
+        raise HTTPException(status_code=413, detail=too_large_detail) from exc
+
+
+async def _bounded_payload(request: Request) -> ScriptToolCallRequestModel:
+    body = await _bounded_json_body(
+        request,
+        max_bytes=_MAX_REQUEST_BYTES,
+        too_large_detail="Script call request is too large.",
+    )
     try:
         return ScriptToolCallRequestModel.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_input=False)) from exc
+
+
+async def _bounded_check_result(request: Request) -> ScriptCheckResultRequest:
+    body = await _bounded_json_body(
+        request,
+        max_bytes=_MAX_CHECK_RESULT_BYTES,
+        too_large_detail="Script check result payload is too large.",
+    )
+    try:
+        return ScriptCheckResultRequest.model_validate_json(body)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_input=False)) from exc
 
@@ -235,6 +307,50 @@ async def get_script_call(
     except ScriptCallPreparationPendingError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ScriptCallReceiptResponse.from_domain(receipt)
+
+
+@router.get("/runs/{run_id}/check-input", response_model=ScriptCheckInputResponse)
+async def get_script_check_input(
+    request: Request,
+    run_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> ScriptCheckInputResponse:
+    """Authenticate a script_check tick and return its snapshotted source and persisted state."""
+    broker = _app_script_tool_broker(request.app)
+    try:
+        payload = await broker.get_authenticated_check_input(run_id, authorization)
+    except (ScriptBrokerAuthenticationError, ScriptCapabilityError, ScriptRunNotFoundError) as exc:
+        raise _unavailable() from exc
+    except ScriptRuntimeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ScriptCheckInputResponse.model_validate(payload)
+
+
+@router.post("/runs/{run_id}/check-result")
+async def submit_script_check_result(
+    request: Request,
+    run_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, bool]:
+    """Authenticate a script_check tick and record its final check result."""
+    payload = await _bounded_check_result(request)
+    broker = _app_script_tool_broker(request.app)
+    try:
+        await broker.submit_authenticated_check_result(
+            run_id,
+            authorization,
+            result=payload.result,
+            state=cast("dict[str, object]", payload.state),
+            state_changed=payload.state_changed,
+            error=payload.error,
+        )
+    except (ScriptBrokerAuthenticationError, ScriptCapabilityError, ScriptRunNotFoundError) as exc:
+        raise _unavailable() from exc
+    except ScriptCallConflictError as exc:
+        raise HTTPException(status_code=409, detail="Conflicting script check result submission.") from exc
+    except ScriptRuntimeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 class _ListenerServer(uvicorn.Server):

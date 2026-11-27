@@ -73,10 +73,10 @@ Scopes are classic wherever the API accepts them; Confluence page and comment wr
 | `write:jira-work` | classic | `jira_write` |
 | `search:confluence` | classic | `confluence_read`, `confluence_write` |
 | `read:confluence-content.all` | classic | `confluence_read`, `confluence_write` |
-| `readonly:content.attachment:confluence` | classic | `confluence_read` (`download_attachment`) |
-| `read:space:confluence` | granular | `confluence_write` (`create`), to resolve a space key |
-| `write:page:confluence` | granular | `confluence_write` (`create`, `update`) |
-| `write:comment:confluence` | granular | `confluence_write` (`comment`) |
+| `readonly:content.attachment:confluence` | classic | `confluence_read` (download_attachment action) |
+| `read:space:confluence` | granular | `confluence_write` (create action), to resolve a space key |
+| `write:page:confluence` | granular | `confluence_write` (create and update actions) |
+| `write:comment:confluence` | granular | `confluence_write` (comment action) |
 
 A stored connection that lacks any requested scope counts as disconnected, and the tool asks the requester to connect again.
 Adding a product or enabling writes therefore requires each user whose connection lacks the new scopes to reconnect once, while removing a product or disabling writes does not.

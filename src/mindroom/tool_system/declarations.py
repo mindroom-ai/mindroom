@@ -142,6 +142,7 @@ class ApprovalAlias:
 
     judged_as: str
     judge: Callable[[Mapping[str, object]], Sequence[Mapping[str, object]] | None]
+    allow_non_resumable_passthrough: bool = False
 
 
 @dataclass(frozen=True)
