@@ -1,4 +1,5 @@
 [
+  "mindroom-ai/compaction-export-plugin",
   "mindroom-ai/deep-research-plugin",
   "mindroom-ai/error-notifier-plugin",
   "mindroom-ai/injection-guard-plugin",

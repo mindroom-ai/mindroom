@@ -238,8 +238,8 @@ async def keep_prices_private(ctx):
 | `bot:ready` | Observer | `AgentLifecycleContext` | After the bot finishes room joins and initial sync | None | 5000 |
 | `agent:stopped` | Observer | `AgentLifecycleContext` | During orderly shutdown | None | 5000 |
 | `session:started` | Observer | `SessionHookContext` | Once per new persisted session, when the reply that created it ends, even a failed or stopped one, and before that reply's `message:after_response` or `message:cancelled` | None | 5000 |
-| `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved | None | 15000 |
-| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, with token counts and the generated summary; the counts size the conversation history before and after a compaction that runs before a reply, and the whole model request before and after one that runs during a reply | None | 5000 |
+| `compaction:before` | Observer | `CompactionHookContext` | After the messages to compact are chosen; before the compacted session is saved or a run-local rewrite is applied (not emitted for provider-native checkpoints) | None | 15000 |
+| `compaction:after` | Observer | `CompactionHookContext` | After compaction is saved, applied run-locally, or checkpointed natively by the provider, with token counts and the summary (`None` for encrypted native checkpoints); the counts size the conversation history for `pre_reply` compactions and the whole model request for `mid_turn`, `run_local`, and `native` compactions | None | 5000 |
 | `schedule:fired` | Observer | `ScheduleFiredContext` | Before a scheduled task posts its message | `message_text`, `suppress` | 1000 |
 | `reaction:received` | Observer | `ReactionReceivedContext` | For reactions not consumed by a built-in handler (tool approval, stop, config confirmation, interactive question) | None | 500 |
 | `room:member_joined` | Observer | `RoomMemberJoinedContext` | Once per join, after a human joins a room | None | 3000 |
@@ -284,7 +284,9 @@ Custom events default to 1000 ms.
   `sender` is `None` for a reply; for a user line it is the sender's Matrix ID, or a placeholder such as `"unknown"` when MindRoom recorded no sender, and `display_name` is the name the message carried, or `None`.
   `text` is the message's text without the context `message:enrich` hooks attached, and is not redacted.
   Tool calls, tool results, automation turns, queued-message notices, compaction summaries, job and media follow-up prompts, the reply of a stopped turn, and the notes MindRoom adds to a thread's context (that earlier thread messages were omitted, or that the agent's previous reply is still being delivered, with that reply's unfinished text) are left out.
-  A compaction during a reply also covers what the reply wrote so far, but not the message it answers, which stays uncompacted.
+  Text folds during a reply (`mid_turn`, `run_local`) also cover what the reply wrote so far, but exclude the current message being answered, which stays uncompacted; provider-native checkpoints (`native`) cover the sent request including it.
+  `kind` describes where and how compaction ran (`"pre_reply"`, `"mid_turn"`, `"run_local"`, or `"native"`), while `mode` describes what triggered it (`"auto"` vs `"manual"`).
+  `compacted_run_count` is `None` for `native` compactions and for `run_local` compactions that also fold flat replayed history.
 - **`schedule:fired`**: `ctx.thread_id` is the thread the message will be delivered to, which can differ from `ctx.workflow.thread_id` when the task starts a new thread or posts at room level.
   The event fires for visible and silent schedules.
   Set `ctx.suppress = True` to cancel the fire; an empty or whitespace-only `ctx.message_text` produces a visible scheduled-task failure notice instead.
@@ -558,7 +560,7 @@ All contexts include these fields:
 | `TurnLifecycleContext` | `envelope`, `outcome` (a `TurnOutcome` on `turn:ended`, otherwise `None`) |
 | `AgentLifecycleContext` | `entity_name`, `entity_type` (`"agent"`, `"team"`, or `"router"`), `rooms` (configured), `matrix_user_id`, `joined_room_ids`, `stop_reason` (`"restart"`, `"entity_removed"`, or `"shutdown"` on `agent:stopped`) |
 | `SessionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id` |
-| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary` |
+| `CompactionHookContext` | `agent_name`, `scope`, `session_id`, `room_id`, `thread_id`, `transcript`, `token_count_before`, `token_count_after`, `compaction_summary`, `workspace_root` (agent workspace path or `None` for teams), `kind` (where/how compaction ran: `"pre_reply"`, `"mid_turn"`, `"run_local"`, or `"native"`), `mode` (what triggered it: `"auto"` vs `"manual"`), `summary_model`, `compacted_at`, `compacted_run_count` (`None` for `native` compactions and for `run_local` compactions that fold flat replayed history), `requester_id` |
 | `ScheduleFiredContext` | `task_id`, `workflow`, `room_id`, `thread_id`, `created_by`, `message_text`, `suppress` |
 | `ReactionReceivedContext` | `room_id`, `event_id`, `sender_id`, `reaction_key`, `target_event_id`, `thread_id` |
 | `RoomMemberJoinedContext`, `RoomMemberLeftContext` | `agent_name`, `room_id`, `event_id`, `user_id`, `sender_id`, `display_name`, `avatar_url`, `membership`, `prev_membership` |

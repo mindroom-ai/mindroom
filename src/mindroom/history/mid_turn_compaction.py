@@ -12,14 +12,20 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
-from mindroom.history.compaction import compact_running_turn, scope_usage_recorder
+from mindroom.history.compaction import (
+    compact_running_turn,
+    compaction_hooks_registered,
+    emit_compaction_hook,
+    iso_utc_now,
+    projected_messages_transcript,
+    scope_usage_recorder,
+)
 from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import resolve_history_preparation_inputs
 from mindroom.history.replay import HistorySummaryBudgetError
@@ -36,6 +42,7 @@ from mindroom.history.summary_message import (
     mark_summary_follows,
 )
 from mindroom.history.types import owner_scope
+from mindroom.hooks import EVENT_COMPACTION_AFTER, EVENT_COMPACTION_BEFORE
 from mindroom.llm.messages import is_queued_notice_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -55,6 +62,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import (
         CompactionLifecycle,
         CompactionLifecycleProgress,
+        CompactionMode,
         CompactionOutcome,
         HistoryPreparationInputs,
         HistoryScope,
@@ -207,7 +215,7 @@ class _Fold:
 
     summary_message: Message
     rewritten_tokens: int
-    commit: Callable[[], None] | None = None
+    commit: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -242,6 +250,7 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
     if not layout.folded and all(is_compaction_summary(message) for message in layout.history):
         # Nothing but an earlier summary would fold, so compacting again cannot shrink the request.
         return
+    hook_mode: CompactionMode = "manual" if requested else "auto"
     fold = await _summarize(
         compaction,
         policy,
@@ -255,13 +264,14 @@ async def _prepare_request(compaction: _MidTurnCompaction, state: LoopState) -> 
         lambda rewritten: compaction.model.request_tokens(
             replace(state.request(rewritten), native_compaction=None),
         ),
+        hook_mode=hook_mode,
     )
     if fold is None:
         compaction.stopped = True
         return
     _require_fit(policy, fold.rewritten_tokens, fold.summary_message)
     if fold.commit is not None:
-        fold.commit()
+        await fold.commit()
     _disable_native_compaction(state, requested=requested)
     if policy.limit is not None and fold.rewritten_tokens > policy.limit:
         # What stays (system prompt, tools, summary, prompt) exceeds the replay window on its own; compacting again
@@ -322,6 +332,8 @@ async def _summarize(
     request_tokens: int,
     live_request: ModelRequest,
     size_request: Callable[[list[Message]], int],
+    *,
+    hook_mode: CompactionMode = "auto",
 ) -> _Fold | None:
     """Fold the history and every exchange of the turn into a summary and rewrite the request.
 
@@ -343,7 +355,7 @@ async def _summarize(
                 *(_snapshot_run(record, [message], None) for message in layout.history),
                 *_snapshots(record, layout, inputs),
             ]
-            summary, _ = await summarize_runs(
+            summary, summary_model = await summarize_runs(
                 load_summarizer(
                     inputs.execution_plan,
                     inputs.history_settings,
@@ -363,11 +375,48 @@ async def _summarize(
             rewritten, prompt_to_mark = _rewritten_messages(messages, layout, summary_message)
             # Sizing can tokenize the whole request, so it stays off the event loop that serves every room.
             rewritten_tokens = await asyncio.to_thread(size_request, rewritten)
-            return _Fold(
-                summary_message,
-                rewritten_tokens,
-                commit=partial(_apply_rewrite, messages, rewritten, prompt_to_mark, layout, record),
-            )
+            compacted_run_count = 1 if (layout.folded and not layout.history) else None
+
+            async def commit_run_local() -> None:
+                session_runs = compaction.storage.session.runs if compaction.storage is not None else ()
+                transcript = (
+                    projected_messages_transcript(
+                        layout.history,
+                        layout.folded,
+                        record=record,
+                        session_runs=session_runs,
+                    )
+                    if compaction_hooks_registered()
+                    else ()
+                )
+                workspace_root = await emit_compaction_hook(
+                    event_name=EVENT_COMPACTION_BEFORE,
+                    scope=compaction.scope,
+                    transcript=transcript,
+                    session_id=record.session_id or "",
+                    token_count_before=request_tokens,
+                    kind="run_local",
+                    mode=hook_mode,
+                    compacted_run_count=compacted_run_count,
+                )
+                _apply_rewrite(messages, rewritten, prompt_to_mark, layout, record)
+                await emit_compaction_hook(
+                    event_name=EVENT_COMPACTION_AFTER,
+                    scope=compaction.scope,
+                    transcript=transcript,
+                    session_id=record.session_id or "",
+                    token_count_before=request_tokens,
+                    token_count_after=rewritten_tokens,
+                    compaction_summary=summary,
+                    kind="run_local",
+                    mode=hook_mode,
+                    summary_model=summary_model.name,
+                    compacted_at=iso_utc_now(),
+                    compacted_run_count=compacted_run_count,
+                    workspace_root=workspace_root,
+                )
+
+            return _Fold(summary_message, rewritten_tokens, commit=commit_run_local)
         store, session = scope_fold
         if policy.limit is not None and kept_tokens >= policy.limit:
             # What the fold keeps, such as the prompt's attachments, fills the limit alone, so no summary could fit.
@@ -389,6 +438,7 @@ async def _summarize(
             store=store,
             session=session,
             max_summary_tokens=None if policy.limit is None else policy.limit - kept_tokens,
+            hook_mode=hook_mode,
         )
     except Exception:
         logger.exception("Mid-turn compaction failed; continuing without it", run_id=record.run_id)
@@ -409,6 +459,7 @@ async def _compact_scope(
     store: ConversationStore,
     session: ConversationSession,
     max_summary_tokens: int | None,
+    hook_mode: CompactionMode = "auto",
 ) -> _Fold | None:
     """Append one summary row to ``session``'s scope, covering its runs after the latest row and this run's exchanges.
 
@@ -500,6 +551,7 @@ async def _compact_scope(
             rewritten_request_tokens=size_rewritten,
             complete=complete,
             fork=fork,
+            hook_mode=hook_mode,
         )
 
     result = await run_scope_compaction_with_lifecycle(
