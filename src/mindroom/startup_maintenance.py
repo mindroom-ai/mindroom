@@ -94,7 +94,7 @@ class StartupMaintenanceController:
         bots: list[AgentBot],
         config: Config,
         *,
-        first_sync_deadline: float | None = None,
+        first_sync_deadline: float | None,
     ) -> None:
         if self.wait_for_first_syncs is not None:
             wait = self.wait_for_first_syncs

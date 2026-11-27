@@ -1181,7 +1181,7 @@ class _MultiAgentOrchestrator:
             phase_started = log_startup_phase_started("start_matrix_sync_loops")
             self.fleet.start_sync(started_bots)
             log_startup_phase_finished("start_matrix_sync_loops", phase_started)
-            first_sync_deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
+            first_sync_deadline = self._first_sync_deadline()
 
             if runtime_shutdown_event.is_set():
                 return
@@ -1214,10 +1214,11 @@ class _MultiAgentOrchestrator:
                 if runtime_shutdown_event.is_set():
                     return
                 self.config_reload.startup_published(config)
+                maintenance_bots = self._running_bots_for_entities(self.agent_bots)
                 self._startup_maintenance.start(
-                    self._running_bots_for_entities(self.agent_bots),
+                    maintenance_bots,
                     self.config,
-                    first_sync_deadline=first_sync_deadline,
+                    first_sync_deadline=first_sync_deadline if set(maintenance_bots).issubset(started_bots) else None,
                 )
                 set_runtime_ready()
                 self._runtime_ready_event.set()
@@ -1230,10 +1231,13 @@ class _MultiAgentOrchestrator:
             await emit_service_bot_ready()
         await runtime_shutdown_event.wait()
 
+    def _first_sync_deadline(self) -> float:
+        return time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
+
     async def _wait_for_bots_first_sync(self, bots: list[AgentBot], deadline: float | None = None) -> None:
         """Wait until every running bot in *bots* synced once, stopped, or reached the first-sync deadline."""
         if deadline is None:
-            deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
+            deadline = self._first_sync_deadline()
         # Polled, because a bot's stop has no event to await.
         while time.monotonic() < deadline and any(  # noqa: ASYNC110
             bot.running and not bot.first_sync_complete for bot in bots

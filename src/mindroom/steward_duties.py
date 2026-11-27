@@ -275,6 +275,7 @@ class StewardDuties:
 
     async def _publish_room_state(self, room_id: str, only: set[str] | None = None) -> None:
         """Reconcile one held room, or ``only`` some of its state, and let transient failures retry without another trigger."""
+        # Snapshot `queued` (and pop `needed` in retries) inside the permit so failures arriving while queued stay pending.
         async with self._room_state_semaphore:
             queued = self._room_state_reruns.get(room_id)
             failed = await self._reconcile_room_state(room_id, only)

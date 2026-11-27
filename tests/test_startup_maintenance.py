@@ -208,22 +208,14 @@ async def test_startup_maintenance_waits_for_first_syncs_before_cleanup_and_repl
     controller.start([MagicMock()], MagicMock(), first_sync_deadline=123.0)
     await asyncio.wait_for(wait_started.wait(), timeout=1.0)
     assert call_order == ["wait_for_first_syncs"]
-    assert seen_deadlines == [123.0]
 
-    replay_bot = MagicMock()
-    replay_config = MagicMock()
-    with patch.object(controller, "start") as replay_start:
-        async with controller.paused(
-            config_provider=lambda: replay_config,
-            running_bots=lambda: [replay_bot],
-        ) as interrupted:
-            assert interrupted is True
+    async with controller.paused(
+        config_provider=MagicMock,
+        running_bots=lambda: [MagicMock()],
+    ) as interrupted:
+        assert interrupted is True
+        release_wait.set()
 
-    replay_start.assert_called_once_with([replay_bot], replay_config)
-    assert call_order == ["wait_for_first_syncs"]
-
-    release_wait.set()
-    controller.start([MagicMock()], MagicMock())
     await _wait_for_controller(controller)
     assert call_order == ["wait_for_first_syncs", "wait_for_first_syncs", "orphaned_bots", "setup"]
     assert seen_deadlines == [123.0, None]
