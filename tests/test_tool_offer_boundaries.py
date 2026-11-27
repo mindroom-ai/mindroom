@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.agents import build_agent_toolkit, create_agent
+from mindroom.agents import create_agent
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config
 from mindroom.delegation.state import SubagentPersona
@@ -27,6 +27,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.toolkits import toolkit_function_names
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_tool_offer import _identity, _runtime_paths

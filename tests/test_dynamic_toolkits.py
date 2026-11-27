@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from pydantic import ValidationError
 
-from mindroom import agents as agents_module
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.tools import PreparedTools, toolkit_instructions
 from mindroom.agents import create_agent
@@ -32,6 +31,7 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
@@ -949,7 +949,7 @@ def test_native_tool_search_does_not_defer_eager_local_collision_survivor(
             local.functions[function_name] = lambda: "local"
         return local
 
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", fake_build_agent_toolkit)
 
     agent = create_agent(
         "code",
@@ -993,7 +993,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
     config = _validated_config(tmp_path, raw)
     runtime_paths = _runtime_paths(tmp_path)
     built: dict[str, Toolkit] = {}
-    build_agent_toolkit = agents_module.build_agent_toolkit
+    build_agent_toolkit = toolkit_builder.build_agent_toolkit
 
     def fake_build_agent_toolkit(tool_name: str, **kwargs: object) -> Toolkit | None:
         if tool_name == "mcp_demo":
@@ -1012,7 +1012,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
             return local
         return build_agent_toolkit(tool_name, **kwargs)
 
-    monkeypatch.setattr("mindroom.agents.build_agent_toolkit", fake_build_agent_toolkit)
+    monkeypatch.setattr("mindroom.tool_system.toolkit_builder.build_agent_toolkit", fake_build_agent_toolkit)
 
     agent = create_agent(
         "code",

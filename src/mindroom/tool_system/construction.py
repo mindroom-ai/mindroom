@@ -7,7 +7,6 @@ import inspect
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from weakref import WeakKeyDictionary
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -47,15 +46,12 @@ class ToolConstruction:
         return cls(name, origin, tool_config_signature(tool_config_overrides))
 
 
-_CONSTRUCTIONS: WeakKeyDictionary[Toolkit, ToolConstruction] = WeakKeyDictionary()
-
-
 def bind_toolkit_construction[T: Toolkit](toolkit: T, construction: ToolConstruction) -> T:
-    """Retain selected construction evidence on the final returned wrapper's lifetime."""
-    _CONSTRUCTIONS[toolkit] = construction
+    """Retain selected construction evidence on the toolkit instance."""
+    toolkit.tool_construction = construction
     return toolkit
 
 
 def get_toolkit_construction(toolkit: Toolkit) -> ToolConstruction | None:
     """Read evidence captured by construction without looking at the current registry."""
-    return _CONSTRUCTIONS.get(toolkit)
+    return toolkit.tool_construction

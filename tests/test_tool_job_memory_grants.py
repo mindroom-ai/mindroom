@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agents import build_agent_toolkit
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -25,6 +24,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids

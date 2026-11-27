@@ -931,10 +931,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.custom_tools.attachments",
     "mindroom.custom_tools.computer_announcement",
-    "mindroom.custom_tools.delegate",
-    "mindroom.custom_tools.report_publishing",
     "mindroom.custom_tools.job",
-    "mindroom.custom_tools.memory",
     "mindroom.custom_tools.workflow_peers",
     "mindroom.entity_resolution",
     "mindroom.hooks",
@@ -945,8 +942,6 @@ depends_on = [
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.settings",
-    "mindroom.tool_system.catalog",
-    "mindroom.tool_system.construction",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.output_files",
@@ -962,6 +957,7 @@ depends_on = [
     "mindroom.agent_loop.prompt",
     "mindroom.llm",
     "mindroom.providers.registry",
+    "mindroom.tool_system.toolkit_builder",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.toolkit_connections",
@@ -7672,7 +7668,6 @@ from = ["mindroom.history.summary_call"]
 [[interfaces]]
 expose = [
     "agent_build_can_overlap_file_memory",
-    "build_agent_toolkit",
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
@@ -7680,6 +7675,12 @@ expose = [
     "team_background_jobs",
 ]
 from = ["mindroom.agents"]
+
+[[interfaces]]
+expose = [
+    "build_agent_toolkit",
+]
+from = ["mindroom.tool_system.toolkit_builder"]
 
 [[interfaces]]
 expose = [
@@ -8619,7 +8620,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
-    "mindroom.agents",
+    "mindroom.tool_system.toolkit_builder",
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
     "mindroom.mcp_gateway.types",
@@ -10620,10 +10621,25 @@ visibility = [
 path = "mindroom.tool_system.construction"
 depends_on = []
 visibility = [
-    "mindroom.agents",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.metadata",
+    "mindroom.tool_system.toolkit_builder",
+]
+
+[[modules]]
+path = "mindroom.tool_system.toolkit_builder"
+depends_on = [
+    "mindroom.custom_tools.delegate",
+    "mindroom.custom_tools.knowledge_graph",
+    "mindroom.custom_tools.memory",
+    "mindroom.custom_tools.report_publishing",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.construction",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.skills",
+    "mindroom.tool_system.toolkits",
 ]
 
 [[modules]]
@@ -11237,7 +11253,7 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.config.resolution",
 ]
-visibility = ["mindroom.agents"]
+visibility = ["mindroom.agents", "mindroom.tool_system.toolkit_builder"]
 
 [[modules]]
 path = "mindroom.tools.knowledge_graph"

@@ -60,8 +60,8 @@ async def _close_once_built(building: asyncio.Task[Toolkit]) -> None:
 
 
 def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
-    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
+    from mindroom.tool_system.toolkit_builder import build_agent_toolkit  # noqa: PLC0415
 
     runtime = resolve_agent_runtime(
         context.agent_name,

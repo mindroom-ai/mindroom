@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-import mindroom.agents as agents_module
 import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
 from mindroom.approval.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
@@ -22,7 +21,7 @@ from mindroom.script_runs.policy import (
     resolve_script_launch_grants,
     resolve_script_launch_toolkit_names,
 )
-from mindroom.tool_system import toolkits
+from mindroom.tool_system import toolkit_builder, toolkits
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -160,7 +159,7 @@ def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
         # The toolkit's own name differs from the configured one the grant names.
         return Toolkit(name="arithmetic", tools=[echo])
 
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build_toolkit)
 
     assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
     assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo")) is not None
@@ -391,13 +390,13 @@ def test_requested_toolkit_builds_only_the_granted_toolkit(
         ),
     )
     built: list[str] = []
-    original_build = agents_module.build_agent_toolkit
+    original_build = toolkit_builder.build_agent_toolkit
 
     def recording_build(tool_name: str, **kwargs: object) -> Toolkit | None:
         built.append(tool_name)
         return original_build(tool_name, **kwargs)
 
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", recording_build)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", recording_build)
 
     assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "calculate")) is not None
     assert built == ["calculator"]
@@ -423,11 +422,11 @@ def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: py
     adapted: list[str] = []
     adapt = toolkits._adapt_function
 
-    def counting_adapt(toolkit: Toolkit, name: str, finishing: object) -> object:
+    def counting_adapt(toolkit: Toolkit, name: str) -> object:
         adapted.append(name)
-        return adapt(toolkit, name, finishing)
+        return adapt(toolkit, name)
 
-    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+    monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build_toolkit)
     monkeypatch.setattr(toolkits, "_adapt_function", counting_adapt)
 
     resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo"))

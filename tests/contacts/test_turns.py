@@ -12,7 +12,6 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import agents as agents_module
 from mindroom import ai
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -68,6 +67,7 @@ from mindroom.response_sources import ResponseSources
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, TurnPolicy, TurnPolicyDeps
 from tests.bot_helpers import _hook_plugin, dispatch_reaction_durably, make_test_agent_bot, unique_room_send_responses
@@ -941,7 +941,7 @@ async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
         browsed.append(action)
         return "Opened the calendar."
 
-    build = agents_module.build_agent_toolkit
+    build = toolkit_builder.build_agent_toolkit
 
     def build_with_fake_browser(tool_name: str, **kwargs: Any) -> object:  # noqa: ANN401
         if tool_name == "browser":
@@ -962,7 +962,7 @@ async def test_a_contact_turn_reaches_its_room_only_through_the_message_policy(
     bot = _bot(config, paths)
 
     with (
-        patch.object(agents_module, "build_agent_toolkit", side_effect=build_with_fake_browser),
+        patch.object(toolkit_builder, "build_agent_toolkit", side_effect=build_with_fake_browser),
         capture_logs() as logs,
     ):
         [delivery] = (await _run(bot, CONTACT_ROOM)).ended
@@ -1077,7 +1077,7 @@ async def test_a_contact_tool_that_cannot_be_built_is_left_out_like_in_any_turn(
     model = ScriptedModel([answer("Told Alice's agent Bob is free.")])
     install_model_providers(monkeypatch, {"default": model})
     bot = _bot(config, paths)
-    build = agents_module.build_agent_toolkit
+    build = toolkit_builder.build_agent_toolkit
 
     def build_or_fail(tool_name: str, **kwargs: Any) -> object:  # noqa: ANN401
         if tool_name == "calculator":
@@ -1085,7 +1085,7 @@ async def test_a_contact_tool_that_cannot_be_built_is_left_out_like_in_any_turn(
             raise RuntimeError(msg)
         return build(tool_name, **kwargs)
 
-    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_or_fail):
+    with patch.object(toolkit_builder, "build_agent_toolkit", side_effect=build_or_fail):
         [delivery] = (await _run(bot, CONTACT_ROOM)).ended
 
     assert delivery.ending == Suppressed(Suppression.CONTACT_TURN)

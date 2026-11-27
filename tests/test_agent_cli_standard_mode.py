@@ -22,6 +22,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system import toolkit_builder
 from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -483,14 +484,14 @@ async def test_cli_calls_share_state_with_the_run_a_subagent_result_continues(
         assert call is not None
         return f"recalled:{call.session_state.get('remembered')}"
 
-    original = agents.get_tool_by_name
+    original = toolkit_builder.get_tool_by_name
 
     def build(name: str, *args: object, **kwargs: object) -> object:
         if name != "calculator":
             return original(name, *args, **kwargs)
         return Toolkit(name="calculator", tools=[remember, recall])
 
-    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    monkeypatch.setattr(toolkit_builder, "get_tool_by_name", build)
     provider = ScriptedProvider()
     ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")])}).install(monkeypatch)
     command = _call_and_wait("00000000-0000-4000-8000-000000000005", "calculator", "remember", {"value": 7})
@@ -531,14 +532,14 @@ async def test_a_timer_cancelled_during_a_reply_does_not_keep_its_agent_alive(
         timers.append(timer)
         return "waited"
 
-    original = agents.get_tool_by_name
+    original = toolkit_builder.get_tool_by_name
 
     def build(name: str, *args: object, **kwargs: object) -> object:
         if name != "calculator":
             return original(name, *args, **kwargs)
         return Toolkit(name="calculator", tools=[wait])
 
-    monkeypatch.setattr(agents, "get_tool_by_name", build)
+    monkeypatch.setattr(toolkit_builder, "get_tool_by_name", build)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
     provider.steps = [[("wait", {})], "done"]
