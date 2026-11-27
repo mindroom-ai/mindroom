@@ -735,7 +735,7 @@ Matrix sync callback
 | `reactive_triggers/management.py` | Shared owner-checking, re-enable cursor/checkpoint refresh, enable/disable, and delete helpers across webhook and reactive trigger stores |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller (with opt-in `include_bots` internal-entity watching and target self-loop prevention), live `com.mindroom.thread.tags` observer, GitHub PR and `ScriptCheckPoller` cadence loops, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
 | `custom_tools/triggers.py` | Local-only unified `triggers(action=...)` toolkit (`watch_room`, `watch_thread`, `watch_pr`, `watch_script`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
-| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="start_script", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
+| `tools/triggers.py` | Tool-catalog registration, `ApprovalAlias(judged_as="script_write", allow_non_resumable_passthrough=True)` for `watch_script`, and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State
 
