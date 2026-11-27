@@ -78,9 +78,9 @@ def connect_attempts(monkeypatch: pytest.MonkeyPatch) -> list[object]:
 def _call_all_url_functions(url: str) -> list[str]:
     toolkit = trafilatura_tools()()
     return [
-        toolkit.extract_text(url),
-        toolkit.extract_metadata_only(url),
-        toolkit.extract_batch([url]),
+        toolkit.trafilatura_extract("text", url=url),
+        toolkit.trafilatura_extract("metadata", url=url),
+        toolkit.trafilatura_extract("batch", urls=[url]),
         toolkit.crawl_website(url, extract_content=True),
     ]
 
@@ -116,9 +116,9 @@ def test_trafilatura_revalidates_redirects_before_following(monkeypatch: pytest.
     )
 
     results = [
-        trafilatura_tools()().extract_text(start_url),
-        trafilatura_tools()().extract_metadata_only(start_url),
-        trafilatura_tools()().extract_batch([start_url]),
+        trafilatura_tools()().trafilatura_extract("text", url=start_url),
+        trafilatura_tools()().trafilatura_extract("metadata", url=start_url),
+        trafilatura_tools()().trafilatura_extract("batch", urls=[start_url]),
         trafilatura_tools()().crawl_website(start_url),
     ]
 
@@ -170,7 +170,7 @@ def test_trafilatura_refuses_a_hostname_that_resolves_to_loopback(
 
     monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", loopback_getaddrinfo)
 
-    result = trafilatura_tools()().extract_text(f"http://rebind.test:{port}/api/config/raw")
+    result = trafilatura_tools()().trafilatura_extract("text", url=f"http://rebind.test:{port}/api/config/raw")
 
     assert _DENIED in result
     assert "loopback secret" not in result
@@ -190,9 +190,9 @@ def test_trafilatura_extracts_public_page(monkeypatch: pytest.MonkeyPatch) -> No
     )
     toolkit = trafilatura_tools()()
 
-    text = toolkit.extract_text(start_url)
-    metadata = json.loads(toolkit.extract_metadata_only(article_url))
-    batch = json.loads(toolkit.extract_batch([article_url]))
+    text = toolkit.trafilatura_extract("text", url=start_url)
+    metadata = json.loads(toolkit.trafilatura_extract("metadata", url=article_url))
+    batch = json.loads(toolkit.trafilatura_extract("batch", urls=[article_url]))
 
     assert "Bridges connect Matrix rooms" in text
     assert metadata["title"] == "Matrix bridges"
@@ -208,7 +208,7 @@ def test_trafilatura_rejects_oversized_download(monkeypatch: pytest.MonkeyPatch)
     serve_routes(monkeypatch, {url: httpx.Response(200, text=_ARTICLE_HTML)})
     monkeypatch.setattr(trafilatura_module, "_MAX_FILE_SIZE", 64)
 
-    result = trafilatura_tools()().extract_text(url)
+    result = trafilatura_tools()().trafilatura_extract("text", url=url)
 
     assert result == f"Error: Could not fetch content from URL: {url}"
 
@@ -219,7 +219,7 @@ def test_trafilatura_rejects_compressed_download(monkeypatch: pytest.MonkeyPatch
     bomb = gzip.compress(b"\0" * 32 * 1024 * 1024)
     requests = serve_routes(monkeypatch, {url: httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=bomb)})
 
-    result = trafilatura_tools()().extract_text(url)
+    result = trafilatura_tools()().trafilatura_extract("text", url=url)
 
     assert [request.headers["accept-encoding"] for request in requests] == ["identity"]
     assert result == f"Error: Could not fetch content from URL: {url}"
@@ -356,7 +356,10 @@ def test_trafilatura_refuses_a_batch_over_its_url_limit(monkeypatch: pytest.Monk
     """A batch longer than the per-call limit is refused before anything downloads."""
     requests = serve_routes(monkeypatch, {})
 
-    result = trafilatura_tools()().extract_batch([f"https://example.com/{index}" for index in range(11)])
+    result = trafilatura_tools()().trafilatura_extract(
+        "batch",
+        urls=[f"https://example.com/{index}" for index in range(11)],
+    )
 
     assert result == "Error: extract_batch takes at most 10 URLs per call; split the list into several calls."
     assert requests == []
@@ -379,7 +382,7 @@ def test_trafilatura_batch_stops_downloading_at_its_time_limit(monkeypatch: pyte
     requests = serve(monkeypatch, trickle)
     urls = [f"https://example.com/{index}" for index in range(3)]
 
-    batch = json.loads(trafilatura_tools()().extract_batch(urls))
+    batch = json.loads(trafilatura_tools()().trafilatura_extract("batch", urls=urls))
 
     assert batch["failed_urls"] == urls
     assert batch["results"] == {}
@@ -425,3 +428,22 @@ def test_trafilatura_factory_installs_guarded_fetchers() -> None:
     assert spider.fetch_response is trafilatura_module._crawl_fetch_response
     assert spider.crawl_page is trafilatura_module._crawl_page
     assert spider.sleep is trafilatura_module._pause
+
+
+def test_trafilatura_extract_toggles_narrow_schema_and_guard_disabled_actions() -> None:
+    """Disabling trafilatura_extract actions narrows its schema, prunes fields, and omits the function when all off."""
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    batch_only = trafilatura_tools()(enable_extract_text=False, enable_extract_metadata_only=False)
+    offered = next(fn for fn in adapt_toolkit(batch_only).functions if fn.name == "trafilatura_extract")
+    assert offered.parameters["properties"]["action"]["enum"] == ["batch"]
+    assert set(offered.parameters["properties"]) == {"action", "urls"}
+    assert "`text`" not in (offered.description or "")
+    assert "disabled" in batch_only.trafilatura_extract("text", url="https://example.com").lower()
+
+    none_extract = trafilatura_tools()(
+        enable_extract_text=False,
+        enable_extract_metadata_only=False,
+        enable_extract_batch=False,
+    )
+    assert "trafilatura_extract" not in none_extract.functions

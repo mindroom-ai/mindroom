@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.logging_config import get_logger
 from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, run_fetch_sync
@@ -22,6 +22,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
 from mindroom.trafilatura_call_limit import CALL_SECONDS
 
 if TYPE_CHECKING:
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from trafilatura.downloads import Response
     from trafilatura.spider import CrawlParameters
 
+    from mindroom.tool_system.tool_function import ToolFunction
+
 logger = get_logger(__name__)
 
 # Crawled pages are downloaded again to extract them after the crawl, so the crawler stops visiting pages at this
@@ -41,6 +44,13 @@ _MAX_BATCH_URLS = 10
 _MAX_FILE_SIZE: int | None = None
 _visit_page: Callable[[CrawlParameters, bool], CrawlParameters] | None = None
 _process_url_store: UrlStore | None = None
+
+_ExtractAction = Literal["text", "metadata", "batch"]
+_EXTRACT_ACTION_FIELDS: dict[str, str] = {
+    "text": "url output_format",
+    "metadata": "url as_json",
+    "batch": "urls",
+}
 
 
 class _TrafilaturaImports(NamedTuple):
@@ -259,15 +269,20 @@ class _TrafilaturaTools(Toolkit):
         self.max_crawl_urls = max_crawl_urls
         self.max_known_urls = max_known_urls
 
+        extract_toggles: dict[_ExtractAction, bool] = {
+            "text": all or enable_extract_text,
+            "metadata": all or enable_extract_metadata_only,
+            "batch": all or enable_extract_batch,
+        }
+        self._extract_actions: tuple[_ExtractAction, ...] = tuple(
+            action for action, enabled in extract_toggles.items() if enabled
+        )
+
         tools: list[Callable[..., Any]] = []
-        if all or enable_extract_text:
-            tools.append(self.extract_text)
-        if all or enable_extract_metadata_only:
-            tools.append(self.extract_metadata_only)
+        if self._extract_actions:
+            tools.append(self.trafilatura_extract)
         if all or enable_html_to_text:
             tools.append(self.html_to_text)
-        if all or enable_extract_batch:
-            tools.append(self.extract_batch)
         if all or enable_crawl_website:
             if _load_spider() is None:
                 logger.warning("trafilatura_crawler_disabled")
@@ -276,64 +291,72 @@ class _TrafilaturaTools(Toolkit):
 
         super().__init__(name="trafilatura_tools", tools=tools)
 
-    def _get_extraction_params(
-        self,
-        output_format: str | None = None,
-        include_comments: bool | None = None,
-        include_tables: bool | None = None,
-        include_images: bool | None = None,
-        include_formatting: bool | None = None,
-        include_links: bool | None = None,
-        with_metadata: bool | None = None,
-        favor_precision: bool | None = None,
-        favor_recall: bool | None = None,
-        target_language: str | None = None,
-        deduplicate: bool | None = None,
-        max_tree_size: int | None = None,
-        url_blacklist: set[str] | None = None,
-        author_blacklist: set[str] | None = None,
-    ) -> dict[str, Any]:
-        """Build Trafilatura extraction parameters with fallbacks to instance defaults."""
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``trafilatura_extract`` schema and parameters to enabled actions."""
+        if function.name == "trafilatura_extract":
+            return restrict_actions(function, self._extract_actions, action_fields=_EXTRACT_ACTION_FIELDS)
+        return function
+
+    def _get_extraction_params(self, output_format: str | None = None) -> dict[str, Any]:
+        """Build Trafilatura extraction parameters from instance defaults and optional ``output_format``."""
         return {
             "output_format": output_format if output_format is not None else self.output_format,
-            "include_comments": include_comments if include_comments is not None else self.include_comments,
-            "include_tables": include_tables if include_tables is not None else self.include_tables,
-            "include_images": include_images if include_images is not None else self.include_images,
-            "include_formatting": include_formatting if include_formatting is not None else self.include_formatting,
-            "include_links": include_links if include_links is not None else self.include_links,
-            "with_metadata": with_metadata if with_metadata is not None else self.with_metadata,
-            "favor_precision": favor_precision if favor_precision is not None else self.favor_precision,
-            "favor_recall": favor_recall if favor_recall is not None else self.favor_recall,
-            "target_language": target_language if target_language is not None else self.target_language,
-            "deduplicate": deduplicate if deduplicate is not None else self.deduplicate,
-            "max_tree_size": max_tree_size if max_tree_size is not None else self.max_tree_size,
-            "url_blacklist": url_blacklist,
-            "author_blacklist": author_blacklist,
+            "include_comments": self.include_comments,
+            "include_tables": self.include_tables,
+            "include_images": self.include_images,
+            "include_formatting": self.include_formatting,
+            "include_links": self.include_links,
+            "with_metadata": self.with_metadata,
+            "favor_precision": self.favor_precision,
+            "favor_recall": self.favor_recall,
+            "target_language": self.target_language,
+            "deduplicate": self.deduplicate,
+            "max_tree_size": self.max_tree_size,
+            "url_blacklist": None,
+            "author_blacklist": None,
         }
 
-    def extract_text(self, url: str, output_format: str | None = None) -> str:
-        """Extract main text content from a web page URL using Trafilatura.
+    def _fetch_and_extract(self, trafilatura: _TrafilaturaImports, url: str) -> str | None:
+        html_content = _fetch_url(url)
+        if not html_content:
+            return None
+        content = trafilatura.extract(html_content, url=url, **self._get_extraction_params())
+        return content or None
 
-        Args:
-            url: The URL to extract content from.
-            output_format: Output format. Options: 'txt', 'json', 'xml', 'markdown', 'csv', 'html', 'xmltei'.
+    def trafilatura_extract(
+        self,
+        action: _ExtractAction,
+        url: str | None = None,
+        urls: list[str] | None = None,
+        output_format: str | None = None,
+        as_json: bool = True,
+    ) -> str:
+        """Extract readable text or metadata from web page URL(s) via Trafilatura.
 
-        Returns:
-            Extracted content in the specified format, or an error message if extraction fails.
-
+        - `text`: Extract main content from `url` (optional `output_format`: txt, json, xml, markdown, csv, html, xmltei).
+        - `metadata`: Extract metadata only from `url` (optional `as_json`, default True).
+        - `batch`: Extract main content from up to 10 `urls` and return JSON results.
         """
+        if (disabled := require_enabled_action(action, self._extract_actions)) is not None:
+            return f"Error: {disabled}"
+        if action == "batch":
+            return "Error: urls is required for batch extraction." if urls is None else self._extract_batch(urls)
+        if not url:
+            return f"Error: url is required for {action} extraction."
+        if action == "text":
+            return self._extract_text(url, output_format=output_format)
+        return self._extract_metadata(url, as_json=as_json)
+
+    def _extract_text(self, url: str, *, output_format: str | None) -> str:
         trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_extract_text", url=url)
             html_content = _fetch_url(url)
             if not html_content:
                 return f"Error: Could not fetch content from URL: {url}"
-
-            params = self._get_extraction_params(output_format=output_format)
-            result = trafilatura.extract(html_content, url=url, **params)
+            result = trafilatura.extract(html_content, url=url, **self._get_extraction_params(output_format))
             if result is None:
                 return f"Error: Could not extract readable content from URL: {url}"
-
             trafilatura.reset_caches()
         except Exception as exc:
             logger.warning("trafilatura_extract_text_failed", url=url, error=str(exc))
@@ -341,24 +364,13 @@ class _TrafilaturaTools(Toolkit):
         else:
             return result
 
-    def extract_metadata_only(self, url: str, as_json: bool = True) -> str:
-        """Extract only metadata from a web page URL.
-
-        Args:
-            url: The URL to extract metadata from.
-            as_json: Whether to return metadata as JSON string.
-
-        Returns:
-            Extracted metadata as JSON string or formatted text.
-
-        """
+    def _extract_metadata(self, url: str, *, as_json: bool) -> str:
         trafilatura = _require_trafilatura()
         try:
             logger.debug("trafilatura_extract_metadata", url=url)
             html_content = _fetch_url(url)
             if not html_content:
                 return f"Error: Could not fetch content from URL: {url}"
-
             metadata_doc = trafilatura.extract_metadata(
                 html_content,
                 default_url=url,
@@ -367,7 +379,6 @@ class _TrafilaturaTools(Toolkit):
             )
             if metadata_doc is None:
                 return f"Error: Could not extract metadata from URL: {url}"
-
             metadata_dict = metadata_doc.as_dict()
             trafilatura.reset_caches()
             if as_json:
@@ -377,38 +388,7 @@ class _TrafilaturaTools(Toolkit):
             logger.warning("trafilatura_extract_metadata_failed", url=url, error=str(exc))
             return f"Error extracting metadata from {url}: {exc}"
 
-    def html_to_text(self, html_content: str, clean: bool = True) -> str:
-        """Convert HTML content to plain text using Trafilatura's html2txt function.
-
-        Args:
-            html_content: The HTML content to convert.
-            clean: Whether to remove potentially undesirable elements.
-
-        Returns:
-            Plain text extracted from HTML.
-
-        """
-        trafilatura = _require_trafilatura()
-        try:
-            logger.debug("trafilatura_html_to_text")
-            result = trafilatura.html2txt(html_content, clean=clean)
-            trafilatura.reset_caches()
-        except Exception as exc:
-            logger.warning("trafilatura_html_to_text_failed", error=str(exc))
-            return f"Error converting HTML to text: {exc}"
-        else:
-            return result or "Error: Could not extract text from HTML content"
-
-    def extract_batch(self, urls: list[str]) -> str:
-        """Extract content from multiple URLs in batch.
-
-        Args:
-            urls: List of URLs to extract content from.
-
-        Returns:
-            JSON containing batch extraction results.
-
-        """
+    def _extract_batch(self, urls: list[str]) -> str:
         if len(urls) > _MAX_BATCH_URLS:
             return f"Error: extract_batch takes at most {_MAX_BATCH_URLS} URLs per call; split the list into several calls."
         trafilatura = _require_trafilatura()
@@ -417,17 +397,11 @@ class _TrafilaturaTools(Toolkit):
                 logger.debug("trafilatura_extract_batch", count=len(urls))
                 results: dict[str, str] = {}
                 failed_urls: list[str] = []
-
                 for url in urls:
                     try:
-                        params = self._get_extraction_params()
-                        html_content = _fetch_url(url)
-                        if html_content:
-                            content = trafilatura.extract(html_content, url=url, **params)
-                            if content:
-                                results[url] = content
-                            else:
-                                failed_urls.append(url)
+                        content = self._fetch_and_extract(trafilatura, url)
+                        if content is not None:
+                            results[url] = content
                         else:
                             failed_urls.append(url)
                     except Exception as exc:
@@ -448,17 +422,21 @@ class _TrafilaturaTools(Toolkit):
                 logger.warning("trafilatura_extract_batch_failed", error=str(exc))
                 return f"Error in batch extraction: {exc}"
 
+    def html_to_text(self, html_content: str, clean: bool = True) -> str:
+        """Convert `html_content` to plain text (optional `clean`, default True)."""
+        trafilatura = _require_trafilatura()
+        try:
+            logger.debug("trafilatura_html_to_text")
+            result = trafilatura.html2txt(html_content, clean=clean)
+            trafilatura.reset_caches()
+        except Exception as exc:
+            logger.warning("trafilatura_html_to_text_failed", error=str(exc))
+            return f"Error converting HTML to text: {exc}"
+        else:
+            return result or "Error: Could not extract text from HTML content"
+
     def crawl_website(self, homepage_url: str, extract_content: bool = False) -> str:
-        """Crawl a website and optionally extract content from discovered pages.
-
-        Args:
-            homepage_url: The starting URL (preferably homepage) to crawl from.
-            extract_content: Whether to extract content from discovered URLs.
-
-        Returns:
-            JSON containing crawl results and optionally extracted content.
-
-        """
+        """Crawl a website from `homepage_url` and optionally extract discovered pages (`extract_content`)."""
         trafilatura_spider = _load_spider()
         if trafilatura_spider is None:
             return "Error: Web crawling functionality not available. Trafilatura spider module could not be imported."
@@ -487,15 +465,11 @@ class _TrafilaturaTools(Toolkit):
                 if extract_content and known_links:
                     logger.debug("trafilatura_crawl_extract_content")
                     extracted_content: dict[str, str] = {}
-                    urls_to_extract = list(known_links)[: min(10, len(known_links))]
-                    for url in urls_to_extract:
+                    for url in list(known_links)[: min(10, len(known_links))]:
                         try:
-                            params = self._get_extraction_params()
-                            html_content = _fetch_url(url)
-                            if html_content:
-                                content = trafilatura.extract(html_content, url=url, **params)
-                                if content:
-                                    extracted_content[url] = content
+                            content = self._fetch_and_extract(trafilatura, url)
+                            if content is not None:
+                                extracted_content[url] = content
                         except Exception as exc:
                             extracted_content[url] = f"Error extracting content: {exc}"
                     crawl_results["extracted_content"] = extracted_content
@@ -573,7 +547,8 @@ class _TrafilaturaTools(Toolkit):
     ],
     dependencies=["trafilatura"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#trafilatura",
-    function_names=("crawl_website", "extract_batch", "extract_metadata_only", "extract_text", "html_to_text"),
+    function_names=("crawl_website", "html_to_text", "trafilatura_extract"),
+    action_scoped_grants=("trafilatura_extract",),
 )
 def trafilatura_tools() -> type[Toolkit]:
     """Return Trafilatura tools whose downloads follow the server-fetch policy within one time limit per call."""

@@ -6417,8 +6417,8 @@ def _proxied_shell(
         ("shell", "run_shell_command", {"args": "make"}, 150.0),
         ("browser", "browser_control", {"action": "status"}, 150.0),
         ("trafilatura", "crawl_website", {"homepage_url": "https://example.com/"}, 210.0),
-        ("trafilatura", "extract_batch", {"urls": ["https://example.com/"]}, 210.0),
-        ("trafilatura", "extract_text", {"url": "https://example.com/"}, 120.0),
+        ("trafilatura", "trafilatura_extract", {"action": "batch", "urls": ["https://example.com/"]}, 210.0),
+        ("trafilatura", "trafilatura_extract", {"action": "text", "url": "https://example.com/"}, 120.0),
     ],
 )
 async def test_a_worker_call_waits_as_long_as_its_runner(

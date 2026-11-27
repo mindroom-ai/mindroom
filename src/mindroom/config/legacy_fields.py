@@ -357,6 +357,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 # Legacy format: scheduler, searxng, memory, todo, Wave 2 native toolkits (calculator, duckduckgo, googlesearch,
 #   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github,
 #   google_drive, google_sheets, homeassistant, including prefixed secondary Google Workspace plugin copies),
+#   Wave 4 native toolkits (exa, trafilatura, brightdata, oxylabs, browserbase, spider),
 #   Wave 5 native toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql,
 #   postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona),
 #   Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom, x), and Wave 8 native toolkits
@@ -377,7 +378,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration,
-#   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration.
+#   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_brightdata_tool.py::test_wave4_action_scoped_grants_and_fail_closed_migration.
 RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
@@ -691,6 +693,40 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_file": "daytona_files",
         "delete_file": "daytona_files",
         "change_directory": "daytona_files",
+    },
+    "exa": {
+        "search_exa": "exa_lookup",
+        "get_contents": "exa_lookup",
+        "find_similar": "exa_lookup",
+        "exa_answer": "exa_lookup",
+    },
+    "trafilatura": {
+        "extract_text": "trafilatura_extract",
+        "extract_metadata_only": "trafilatura_extract",
+        "extract_batch": "trafilatura_extract",
+    },
+    "brightdata": {
+        "scrape_as_markdown": "brightdata",
+        "get_screenshot": "brightdata",
+        "search_engine": "brightdata",
+        "web_data_feed": "brightdata",
+    },
+    "oxylabs": {
+        "search_google": "oxylabs",
+        "get_amazon_product": "oxylabs",
+        "search_amazon_products": "oxylabs",
+        "scrape_website": "oxylabs",
+    },
+    "browserbase": {
+        "navigate_to": "browserbase",
+        "screenshot": "browserbase",
+        "get_page_content": "browserbase",
+        "close_session": "browserbase",
+    },
+    "spider": {
+        "search_web": "spider",
+        "scrape": "spider",
+        "crawl": "spider",
     },
     "file_generation": {
         "generate_json_file": "generate_file",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
@@ -16,11 +16,19 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
+
+_SpiderAction = Literal["search", "scrape", "crawl"]
+_ACTION_FIELDS: dict[str, str] = {
+    "search": "query max_results",
+    "scrape": "url",
+    "crawl": "url limit",
+}
 
 
 class _SpiderTools(Toolkit):
@@ -40,89 +48,73 @@ class _SpiderTools(Toolkit):
         self.url = url
         self.optional_params = optional_params or {}
 
-        tools: list[Callable[..., Any]] = []
-        if enable_search or all:
-            tools.append(self.search_web)
-        if enable_scrape or all:
-            tools.append(self.scrape)
-        if enable_crawl or all:
-            tools.append(self.crawl)
+        toggles: dict[_SpiderAction, bool] = {
+            "search": enable_search or all,
+            "scrape": enable_scrape or all,
+            "crawl": enable_crawl or all,
+        }
+        self._enabled_actions: tuple[_SpiderAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+        super().__init__(name="spider", tools=(self.spider,) if self._enabled_actions else ())
 
-        super().__init__(name="spider", tools=tools)
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``spider`` schema and parameters to enabled actions."""
+        if function.name == "spider":
+            return restrict_actions(function, self._enabled_actions, action_fields=_ACTION_FIELDS)
+        return function
 
-    def search_web(self, query: str, max_results: int | None = None) -> str:
-        """Use this function to search the web.
+    def spider(
+        self,
+        action: _SpiderAction,
+        query: str | None = None,
+        url: str | None = None,
+        max_results: int | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Search, scrape, or crawl the web via Spider and return JSON results.
 
-        Args:
-            query: The query to search the web with.
-            max_results: The maximum number of results to return. Defaults to the value set on the toolkit, or 5.
-
-        Returns:
-            The results of the search.
-
+        - `search`: Search for `query` (optional `max_results`, default toolkit setting or 5).
+        - `scrape`: Scrape `url` as Markdown.
+        - `crawl`: Crawl `url` as Markdown (optional `limit`, default 10).
         """
+        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
+            return f"Error: {disabled}"
+        if action == "search" and not query:
+            return "Error: query is required for search."
+        if action in {"scrape", "crawl"} and not url:
+            return f"Error: url is required for {action}."
+
         from spider import Spider
 
         app = Spider()
         try:
-            num_results = self.max_results if self.max_results is not None else 5
-            options = {"fetch_page_content": False, "num": num_results, **self.optional_params}
-            # Applied after the optional_params spread so an explicit call argument always wins.
-            if max_results is not None:
-                options["num"] = max_results
-            logger.info("spider_search", query=query, max_results=options["num"])
-            results = app.search(query, options)
-            return json.dumps(results)
+            if action == "search":
+                assert query is not None
+                num_results = self.max_results if self.max_results is not None else 5
+                options = {"fetch_page_content": False, "num": num_results, **self.optional_params}
+                # Applied after the optional_params spread so an explicit call argument always wins.
+                if max_results is not None:
+                    options["num"] = max_results
+                logger.info("spider_search", query=query, max_results=options["num"])
+                result = app.search(query, options)
+            elif action == "scrape":
+                assert url is not None
+                logger.info("spider_scrape", url=url)
+                result = app.scrape_url(url, {"return_format": "markdown", **self.optional_params})
+            else:
+                assert url is not None
+                logger.info("spider_crawl", url=url)
+                options = {"return_format": "markdown", "limit": 10, **self.optional_params}
+                if limit is not None:
+                    options["limit"] = limit
+                result = app.crawl_url(url, options)
+            return json.dumps(result)
         except Exception as exc:
-            logger.exception("spider_search_failed")
-            return f"Error fetching results from spider: {exc}"
-
-    def scrape(self, url: str) -> str:
-        """Use this function to scrape the content of a webpage.
-
-        Args:
-            url: The URL of the webpage to scrape.
-
-        Returns:
-            Markdown of the webpage.
-
-        """
-        from spider import Spider
-
-        app = Spider()
-        logger.info("spider_scrape", url=url)
-        try:
-            options = {"return_format": "markdown", **self.optional_params}
-            results = app.scrape_url(url, options)
-            return json.dumps(results)
-        except Exception as exc:
-            logger.exception("spider_scrape_failed", url=url)
-            return f"Error fetching content from spider: {exc}"
-
-    def crawl(self, url: str, limit: int | None = None) -> str:
-        """Use this function to crawl the web.
-
-        Args:
-            url: The URL of the webpage to crawl.
-            limit: The maximum number of pages to crawl. Defaults to 10.
-
-        Returns:
-            The results of the crawl.
-
-        """
-        from spider import Spider
-
-        app = Spider()
-        logger.info("spider_crawl", url=url)
-        try:
-            options = {"return_format": "markdown", "limit": 10, **self.optional_params}
-            # Applied after the optional_params spread so an explicit call argument always wins.
-            if limit is not None:
-                options["limit"] = limit
-            results = app.crawl_url(url, options)
-            return json.dumps(results)
-        except Exception as exc:
-            logger.exception("spider_crawl_failed", url=url)
+            if action == "search":
+                logger.exception("spider_search_failed")
+                return f"Error fetching results from spider: {exc}"
+            logger.exception(f"spider_{action}_failed", url=url)
             return f"Error fetching content from spider: {exc}"
 
 
@@ -159,7 +151,8 @@ class _SpiderTools(Toolkit):
     dependencies=["spider-client"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#spider",
     helper_text="Get your API key from the [Spider dashboard](https://spider.cloud)",
-    function_names=("crawl", "scrape", "search_web"),
+    function_names=("spider",),
+    action_scoped_grants=("spider",),
 )
 def spider_tools() -> type[Toolkit]:
     """Return Spider tools for web scraping and crawling."""

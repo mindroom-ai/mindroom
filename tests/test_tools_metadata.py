@@ -645,7 +645,7 @@ def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> 
     ("tool_function", "error"),
     [
         pytest.param(
-            lambda: trafilatura_tools()().extract_text,
+            lambda: lambda url: trafilatura_tools()().trafilatura_extract("text", url=url),
             "Error: Could not fetch content from URL: http://93.184.216.34/slow",
             id="trafilatura",
         ),

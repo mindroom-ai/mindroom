@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -21,11 +21,20 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
+
+_BrightDataAction = Literal["scrape_markdown", "screenshot", "search_engine", "web_data_feed"]
+_ACTION_FIELDS: dict[str, str] = {
+    "scrape_markdown": "url",
+    "screenshot": "url",
+    "search_engine": "query engine num_results language country_code",
+    "web_data_feed": "source_type url num_of_reviews",
+}
 
 _DATASETS: dict[str, str] = {
     "amazon_product": "gd_l7q7dkf244hwjntr0",
@@ -109,17 +118,22 @@ class _BrightDataTools(Toolkit):
         self.web_unlocker_zone = web_unlocker_zone
         self.serp_zone = serp_zone
 
-        tools: list[Callable[..., Any]] = []
-        if all or enable_scrape_markdown:
-            tools.append(self.scrape_as_markdown)
-        if all or enable_screenshot:
-            tools.append(self.get_screenshot)
-        if all or enable_search_engine:
-            tools.append(self.search_engine)
-        if all or enable_web_data_feed:
-            tools.append(self.web_data_feed)
+        toggles: dict[_BrightDataAction, bool] = {
+            "scrape_markdown": all or enable_scrape_markdown,
+            "screenshot": all or enable_screenshot,
+            "search_engine": all or enable_search_engine,
+            "web_data_feed": all or enable_web_data_feed,
+        }
+        self._enabled_actions: tuple[_BrightDataAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+        super().__init__(name="brightdata_tools", tools=(self.brightdata,) if self._enabled_actions else ())
 
-        super().__init__(name="brightdata_tools", tools=tools)
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``brightdata`` schema and parameters to enabled actions."""
+        if function.name == "brightdata":
+            return restrict_actions(function, self._enabled_actions, action_fields=_ACTION_FIELDS)
+        return function
 
     def _make_request(self, payload: dict[str, Any]) -> str:
         import requests
@@ -137,16 +151,36 @@ class _BrightDataTools(Toolkit):
             raise RuntimeError(msg)
         return response.text
 
-    def scrape_as_markdown(self, url: str) -> str:
-        """Scrape a webpage and return content in Markdown format.
+    def brightdata(
+        self,
+        action: _BrightDataAction,
+        url: str | None = None,
+        query: str | None = None,
+        engine: str = "google",
+        num_results: int = 10,
+        language: str | None = None,
+        country_code: str | None = None,
+        source_type: str | None = None,
+        num_of_reviews: int | None = None,
+    ) -> str | ToolValue:
+        """Scrape pages, capture screenshots, run SERP searches, or query structured datasets via Bright Data.
 
-        Args:
-            url: URL to scrape.
-
-        Returns:
-            Scraped content as Markdown.
-
+        - `scrape_markdown`: Scrape `url` as Markdown.
+        - `screenshot`: Capture PNG screenshot of `url` as an image artifact.
+        - `search_engine`: Search `query` on `engine` (google, bing, yandex; optional `num_results`, `language`, `country_code`).
+        - `web_data_feed`: Fetch structured JSON dataset for `source_type` and `url` (optional `num_of_reviews` for Facebook reviews).
         """
+        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
+            return disabled
+        if action == "scrape_markdown":
+            return self._scrape_markdown(url or "")
+        if action == "screenshot":
+            return self._screenshot(url or "")
+        if action == "search_engine":
+            return self._search_engine(query or "", engine, num_results, language, country_code)
+        return self._web_data_feed(source_type or "", url or "", num_of_reviews)
+
+    def _scrape_markdown(self, url: str) -> str:
         if not self.api_key:
             return "Please provide a Bright Data API key"
         if not url:
@@ -163,16 +197,7 @@ class _BrightDataTools(Toolkit):
         except Exception as exc:
             return f"Error scraping URL {url}: {exc}"
 
-    def get_screenshot(self, url: str) -> ToolValue:
-        """Capture a screenshot of a webpage.
-
-        Args:
-            url: URL to screenshot.
-
-        Returns:
-            ToolValue containing the screenshot image or an error message.
-
-        """
+    def _screenshot(self, url: str) -> ToolValue:
         if not self.api_key:
             return ToolValue(content="Please provide a Bright Data API key")
         if not url:
@@ -213,27 +238,14 @@ class _BrightDataTools(Toolkit):
         except Exception as exc:
             return ToolValue(content=f"Error taking screenshot of {url}: {exc}")
 
-    def search_engine(
+    def _search_engine(
         self,
         query: str,
-        engine: str = "google",
-        num_results: int = 10,
-        language: str | None = None,
-        country_code: str | None = None,
+        engine: str,
+        num_results: int,
+        language: str | None,
+        country_code: str | None,
     ) -> str:
-        """Search using Google, Bing, or Yandex and return results in Markdown.
-
-        Args:
-            query: Search query.
-            engine: Search engine - 'google', 'bing', or 'yandex'.
-            num_results: Number of results to return.
-            language: Two-letter language code.
-            country_code: Two-letter country code.
-
-        Returns:
-            Search results as Markdown.
-
-        """
         if not self.api_key:
             return "Please provide a Bright Data API key"
         if not query:
@@ -272,23 +284,7 @@ class _BrightDataTools(Toolkit):
         except Exception as exc:
             return f"Error searching for query {query}: {exc}"
 
-    def web_data_feed(
-        self,
-        source_type: str,
-        url: str,
-        num_of_reviews: int | None = None,
-    ) -> str:
-        """Retrieve structured web data from various sources like LinkedIn, Amazon, Instagram, etc.
-
-        Args:
-            source_type: Type of data source (e.g., 'linkedin_person_profile', 'amazon_product').
-            url: URL of the web resource to retrieve data from.
-            num_of_reviews: Number of reviews to retrieve.
-
-        Returns:
-            Structured data from the requested source as JSON.
-
-        """
+    def _web_data_feed(self, source_type: str, url: str, num_of_reviews: int | None) -> str:
         if not self.api_key:
             return "Please provide a Bright Data API key"
         if not url:
@@ -397,7 +393,8 @@ class _BrightDataTools(Toolkit):
     ],
     dependencies=["requests"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#brightdata",
-    function_names=("get_screenshot", "scrape_as_markdown", "search_engine", "web_data_feed"),
+    function_names=("brightdata",),
+    action_scoped_grants=("brightdata",),
 )
 def brightdata_tools() -> type[Toolkit]:
     """Return BrightData tools for web scraping and data extraction."""

@@ -16,15 +16,26 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
 _RESEARCH_MODEL_EFFORT: dict[str, str] = {
     "exa-research": "auto",
     "exa-research-pro": "high",
+}
+
+_LookupAction = Literal["search", "contents", "similar", "answer"]
+_LOOKUP_ACTION_FIELDS: dict[str, str] = {
+    "search": "query num_results category",
+    "contents": "urls",
+    "similar": "url num_results",
+    "answer": "query text",
 }
 
 
@@ -108,19 +119,29 @@ class _ExaTools(Toolkit):
         self.model = model
         self.research_model = research_model
 
+        toggles: dict[_LookupAction, bool] = {
+            "search": all or enable_search,
+            "contents": all or enable_get_contents,
+            "similar": all or enable_find_similar,
+            "answer": all or enable_answer,
+        }
+        self._lookup_actions: tuple[_LookupAction, ...] = tuple(
+            action for action, enabled in toggles.items() if enabled
+        )
+
         tools: list[Callable[..., Any]] = []
-        if all or enable_search:
-            tools.append(self.search_exa)
-        if all or enable_get_contents:
-            tools.append(self.get_contents)
-        if all or enable_find_similar:
-            tools.append(self.find_similar)
-        if all or enable_answer:
-            tools.append(self.exa_answer)
+        if self._lookup_actions:
+            tools.append(self.exa_lookup)
         if all or enable_research:
             tools.append(self.research)
 
         super().__init__(name="exa", tools=tools)
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Narrow ``exa_lookup`` schema and parameters to enabled actions."""
+        if function.name == "exa_lookup":
+            return restrict_actions(function, self._lookup_actions, action_fields=_LOOKUP_ACTION_FIELDS)
+        return function
 
     def _parse_results(self, exa_results: Any) -> str:  # noqa: ANN401
         parsed = []
@@ -133,192 +154,158 @@ class _ExaTools(Toolkit):
             if result.published_date:
                 result_dict["published_date"] = result.published_date
             if result.text:
-                text = result.text
-                if self.text_length_limit:
-                    text = text[: self.text_length_limit]
+                text = result.text[: self.text_length_limit] if self.text_length_limit else result.text
                 result_dict["text"] = text
-            summary = getattr(result, "summary", None)
-            if summary:
+            if summary := getattr(result, "summary", None):
                 result_dict["summary"] = summary
-            highlights = getattr(result, "highlights", None)
-            if highlights:
+            if highlights := getattr(result, "highlights", None):
                 result_dict["highlights"] = highlights
             parsed.append(result_dict)
         return json.dumps(parsed, indent=4, ensure_ascii=False)
 
-    def search_exa(self, query: str, num_results: int = 5, category: str | None = None) -> str:
-        """Use this function to search the web using Exa for a query.
-
-        Args:
-            query: The query to search for.
-            num_results: Number of results to return. Defaults to 5.
-            category: The category to filter search results. Options are "company", "research paper", "news",
-                "pdf", "github", "tweet", "personal site", "linkedin profile", "financial report".
-
-        Returns:
-            The search results in JSON format.
-
-        """
-        try:
-            if self.show_results:
-                logger.info("exa_search", query=query)
-            search_kwargs: dict[str, Any] = {
-                "text": self.text,
-                "summary": self.summary,
-                "livecrawl": self.livecrawl,
-                "num_results": self.num_results or num_results,
-                "start_crawl_date": self.start_crawl_date,
-                "end_crawl_date": self.end_crawl_date,
-                "start_published_date": self.start_published_date,
-                "end_published_date": self.end_published_date,
-                "type": self.type,
-                "category": self.category or category,
-                "include_domains": self.include_domains,
-                "exclude_domains": self.exclude_domains,
-                "include_text": self.include_text,
-                "exclude_text": self.exclude_text,
-                "user_location": self.user_location,
-                "moderation": self.moderation,
-                "highlights": self.highlights or None,
-            }
-            search_kwargs = {key: value for key, value in search_kwargs.items() if value is not None}
-
-            exa_results = self.exa.search_and_contents(query, **search_kwargs)
-            parsed_results = self._parse_results(exa_results)
-            if self.show_results:
-                logger.info("exa_search_results", results=parsed_results)
-        except (TimeoutError, self._timeout_error_cls) as exc:
-            logger.exception("exa_search_timeout", timeout=self.timeout, error=str(exc))
-            return f"Error: {exc}"
-        except Exception as exc:
-            logger.exception("exa_search_failed")
-            return f"Error: {exc}"
-        else:
-            return parsed_results
-
-    def get_contents(self, urls: list[str]) -> str:
-        """Retrieve detailed content from specific URLs using the Exa API.
-
-        Args:
-            urls: A list of URLs from which to fetch content.
-
-        Returns:
-            The search results in JSON format.
-
-        """
-        query_kwargs: dict[str, Any] = {
+    def _content_options(self) -> dict[str, Any]:
+        return {
             "text": self.text,
             "summary": self.summary,
             "livecrawl": self.livecrawl,
             "highlights": self.highlights or None,
         }
-        try:
-            if self.show_results:
-                logger.info("exa_get_contents", urls=urls)
-            exa_results = self.exa.get_contents(urls=urls, **query_kwargs)
-            parsed_results = self._parse_results(exa_results)
-            if self.show_results:
-                logger.info("exa_get_contents_results", results=parsed_results)
-        except (TimeoutError, self._timeout_error_cls) as exc:
-            logger.exception("exa_get_contents_timeout", timeout=self.timeout, error=str(exc))
-            return f"Error: {exc}"
-        except Exception as exc:
-            logger.exception("exa_get_contents_failed")
-            return f"Error: {exc}"
-        else:
-            return parsed_results
 
-    def find_similar(self, url: str, num_results: int = 5) -> str:
-        """Find similar links to a given URL using the Exa API.
-
-        Args:
-            url: The URL for which to find similar links.
-            num_results: The number of similar links to return. Defaults to 5.
-
-        Returns:
-            The search results in JSON format.
-
-        """
-        query_kwargs: dict[str, Any] = {
-            "text": self.text,
-            "summary": self.summary,
-            "livecrawl": self.livecrawl,
+    def _filtered_options(self, num_results: int | None) -> dict[str, Any]:
+        effective_num = self.num_results or (5 if num_results is None else num_results)
+        return {
+            **self._content_options(),
             "include_domains": self.include_domains,
             "exclude_domains": self.exclude_domains,
             "include_text": self.include_text,
             "exclude_text": self.exclude_text,
-            "highlights": self.highlights or None,
             "start_crawl_date": self.start_crawl_date,
             "end_crawl_date": self.end_crawl_date,
             "start_published_date": self.start_published_date,
             "end_published_date": self.end_published_date,
-            "num_results": self.num_results or num_results,
+            "num_results": effective_num,
         }
+
+    def _run_lookup(
+        self,
+        event: str,
+        log_context: dict[str, Any],
+        call: Callable[[], Any],
+        *,
+        serialize: Callable[[Any], str] | None = None,
+    ) -> str:
         try:
             if self.show_results:
-                logger.info("exa_find_similar", url=url)
-            exa_results = self.exa.find_similar_and_contents(url=url, **query_kwargs)
-            parsed_results = self._parse_results(exa_results)
+                logger.info(event, **log_context)
+            raw = call()
+            serialized = self._parse_results(raw) if serialize is None else serialize(raw)
             if self.show_results:
-                logger.info("exa_find_similar_results", results=parsed_results)
+                logger.info(f"{event}_results", results=serialized)
         except (TimeoutError, self._timeout_error_cls) as exc:
-            logger.exception("exa_find_similar_timeout", timeout=self.timeout, error=str(exc))
+            logger.exception(f"{event}_timeout", timeout=self.timeout, error=str(exc))
             return f"Error: {exc}"
         except Exception as exc:
-            logger.exception("exa_find_similar_failed")
-            return f"Error: {exc}"
-        else:
-            return parsed_results
-
-    def exa_answer(self, query: str, text: bool = False) -> str:
-        """Get an LLM answer to a question informed by Exa search results.
-
-        Args:
-            query: The question or query to answer.
-            text: Include full text from citation. Default is False.
-
-        Returns:
-            The answer results in JSON format with both generated answer and sources.
-
-        """
-        if self.model and self.model not in {"exa", "exa-pro"}:
-            msg = "Model must be either 'exa' or 'exa-pro'"
-            raise ValueError(msg)
-        try:
-            if self.show_results:
-                logger.info("exa_answer", query=query)
-            answer_kwargs: dict[str, Any] = {
-                "model": self.model,
-                "text": text,
-            }
-            answer_kwargs = {key: value for key, value in answer_kwargs.items() if value is not None}
-
-            answer = self.exa.answer(query=query, **answer_kwargs)
-            result = {
-                "answer": answer.answer,
-                "citations": [
-                    {
-                        "id": citation.id,
-                        "url": citation.url,
-                        "title": citation.title,
-                        "published_date": citation.published_date,
-                        "author": citation.author,
-                        "text": citation.text if text else None,
-                    }
-                    for citation in answer.citations
-                ],
-            }
-            serialized = json.dumps(result, indent=4)
-            if self.show_results:
-                logger.info("exa_answer_result", result=serialized)
-        except (TimeoutError, self._timeout_error_cls) as exc:
-            logger.exception("exa_answer_timeout", timeout=self.timeout, error=str(exc))
-            return f"Error: {exc}"
-        except Exception as exc:
-            logger.exception("exa_answer_failed")
+            logger.exception(f"{event}_failed")
             return f"Error: {exc}"
         else:
             return serialized
+
+    def exa_lookup(
+        self,
+        action: _LookupAction,
+        query: str | None = None,
+        url: str | None = None,
+        urls: list[str] | None = None,
+        num_results: int | None = None,
+        category: str | None = None,
+        text: bool = False,
+    ) -> str:
+        """Query the Exa API and return JSON results.
+
+        - `search`: Web search for `query` (optional `num_results`, default 5; `category`: company, research paper,
+          news, pdf, github, tweet, personal site, linkedin profile, financial report).
+        - `contents`: Fetch content for `urls`.
+        - `similar`: Find pages similar to `url` (optional `num_results`, default 5).
+        - `answer`: LLM answer with citations for `query` (optional `text` to include citation full text).
+        """
+        if (disabled := require_enabled_action(action, self._lookup_actions)) is not None:
+            return f"Error: {disabled}"
+        if action == "search":
+            return self._run_search(query, num_results=num_results, category=category)
+        if action == "contents":
+            return (
+                "Error: urls is required for contents."
+                if not urls
+                else self._run_lookup(
+                    "exa_get_contents",
+                    {"urls": urls},
+                    lambda: self.exa.get_contents(urls=urls, **self._content_options()),
+                )
+            )
+        if action == "similar":
+            return (
+                "Error: url is required for similar."
+                if not url
+                else self._run_lookup(
+                    "exa_find_similar",
+                    {"url": url},
+                    lambda: self.exa.find_similar_and_contents(url=url, **self._filtered_options(num_results)),
+                )
+            )
+        return self._run_answer(query, text=text)
+
+    def _run_search(self, query: str | None, *, num_results: int | None, category: str | None) -> str:
+        if not query:
+            return "Error: query is required for search."
+        kwargs = {
+            **self._filtered_options(num_results),
+            "type": self.type,
+            "category": self.category or category,
+            "user_location": self.user_location,
+            "moderation": self.moderation,
+        }
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        return self._run_lookup(
+            "exa_search",
+            {"query": query},
+            lambda: self.exa.search_and_contents(query, **kwargs),
+        )
+
+    def _run_answer(self, query: str | None, *, text: bool) -> str:
+        if not query:
+            return "Error: query is required for answer."
+        if self.model and self.model not in {"exa", "exa-pro"}:
+            msg = "Model must be either 'exa' or 'exa-pro'"
+            raise ValueError(msg)
+        answer_kwargs: dict[str, Any] = {"text": text}
+        if self.model is not None:
+            answer_kwargs["model"] = self.model
+
+        def _serialize_answer(answer: Any) -> str:  # noqa: ANN401
+            return json.dumps(
+                {
+                    "answer": answer.answer,
+                    "citations": [
+                        {
+                            "id": citation.id,
+                            "url": citation.url,
+                            "title": citation.title,
+                            "published_date": citation.published_date,
+                            "author": citation.author,
+                            "text": citation.text if text else None,
+                        }
+                        for citation in answer.citations
+                    ],
+                },
+                indent=4,
+            )
+
+        return self._run_lookup(
+            "exa_answer",
+            {"query": query},
+            lambda: self.exa.answer(query=query, **answer_kwargs),
+            serialize=_serialize_answer,
+        )
 
     @staticmethod
     def _serialize_research_run(terminal_run: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -352,16 +339,7 @@ class _ExaTools(Toolkit):
         }
 
     def research(self, instructions: str, output_schema: dict[str, Any] | None = None) -> str:
-        """Perform deep research on a topic.
-
-        Args:
-            instructions: Research instructions.
-            output_schema: JSON schema for structured output. If not provided, the API will auto-infer a schema.
-
-        Returns:
-            JSON formatted research results including data and citations.
-
-        """
+        """Perform deep research on `instructions` with optional `output_schema` JSON schema and return JSON data and citations."""
         try:
             logger.debug("exa_research_create_run", instructions=instructions, has_schema=output_schema is not None)
             create_kwargs: dict[str, Any] = {
@@ -544,7 +522,8 @@ class _ExaTools(Toolkit):
     ],
     dependencies=["exa_py"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#exa",
-    function_names=("exa_answer", "find_similar", "get_contents", "research", "search_exa"),
+    function_names=("exa_lookup", "research"),
+    action_scoped_grants=("exa_lookup",),
 )
 def exa_tools() -> type[Toolkit]:
     """Return Exa tools for AI-powered web search and research."""

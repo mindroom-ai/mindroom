@@ -1340,12 +1340,12 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "function_name", "expected_timeout"),
+    ("tool_name", "function_name", "kwargs", "expected_timeout"),
     [
-        ("trafilatura", "crawl_website", 210.0),
-        ("trafilatura", "extract_batch", 210.0),
-        ("trafilatura", "extract_text", 120.0),
-        ("firecrawl", "crawl_website", 120.0),
+        ("trafilatura", "crawl_website", {}, 210.0),
+        ("trafilatura", "trafilatura_extract", {"action": "batch"}, 210.0),
+        ("trafilatura", "trafilatura_extract", {"action": "text"}, 120.0),
+        ("firecrawl", "crawl_website", {}, 120.0),
     ],
 )
 def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run_past_the_runner_limit(
@@ -1353,6 +1353,7 @@ def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run
     tmp_path: Path,
     tool_name: str,
     function_name: str,
+    kwargs: dict[str, object],
     expected_timeout: float,
 ) -> None:
     """A worker call that stops itself at a longer time limit than the runner's keeps running until it answers."""
@@ -1380,7 +1381,7 @@ def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run
             tool_name=tool_name,
             function_name=function_name,
             args=[],
-            kwargs={},
+            kwargs=kwargs,
         ),
     )
 

@@ -1737,6 +1737,8 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
             trafilatura_request_budget_seconds(
                 prepared_request.request.tool_name,
                 prepared_request.request.function_name,
+                args=prepared_request.request.args,
+                kwargs=prepared_request.request.kwargs,
             ),
         )
     )
