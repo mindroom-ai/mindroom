@@ -739,3 +739,47 @@ def test_broken_plugin_check_delivery_access_returns_source_error_without_500(tm
     assert resp.status_code == 200
     rows = {row["trigger_id"]: row for row in resp.json()["triggers"]}
     assert rows["tr_broken"]["paused_reason"] == "source_error"
+
+
+def test_hidden_private_trigger_returns_404_on_patch_and_delete_for_non_owner(tmp_path: Path) -> None:
+    """Non-owners get 404 (matching absent IDs) on PATCH/DELETE of hidden private triggers, while visible triggers still return 403."""
+    h = _Harness(tmp_path)
+    registry = EventSourceRegistry(lambda: h.config, AsyncMock(return_value=0))
+    priv_emitter = registry.register(_RoomTestEventSource("slack", private_room_only=True))
+    ensure_app_state(h.app).embedded = SimpleNamespace(  # type: ignore[assignment]
+        reactive_triggers=SimpleNamespace(event_sources=registry),
+    )
+    h.add_reactive(
+        "tr_slack_priv",
+        ExternalEventSourceSpec(
+            source_id="slack",
+            kind="message",
+            binding={"team_id": "T1", "slack_user_id": "U1"},
+            source_origin="registered",
+            private_room_only=True,
+        ),
+        description="Private Slack watch",
+        prompt="Summarize",
+        created_at=1.0,
+    )
+    h.add_reactive(
+        "tr_visible",
+        ExternalEventSourceSpec(source_id="github_wh", kind="push"),
+        description="GitHub push",
+        prompt="Review",
+        created_at=2.0,
+    )
+
+    assert h.req("PATCH", ROOM_A, BOB, "tr_slack_priv", {"enabled": False}).status_code == 404
+    assert h.req("DELETE", ROOM_A, BOB, "tr_slack_priv").status_code == 404
+    assert h.req("PATCH", ROOM_A, BOB, "tr_visible", {"enabled": False}).status_code == 403
+    assert h.req("DELETE", ROOM_A, BOB, "tr_visible").status_code == 403
+
+    # Still 404 after the registered source is unregistered.
+    assert registry.unregister("slack", priv_emitter.token) is True
+    assert h.req("PATCH", ROOM_A, BOB, "tr_slack_priv", {"enabled": False}).status_code == 404
+    assert h.req("DELETE", ROOM_A, BOB, "tr_slack_priv").status_code == 404
+
+    # Owner can still toggle and delete their own private trigger.
+    assert h.req("PATCH", ROOM_A, ALICE, "tr_slack_priv", {"enabled": False}).status_code == 200
+    assert h.req("DELETE", ROOM_A, ALICE, "tr_slack_priv").status_code == 204

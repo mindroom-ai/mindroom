@@ -178,7 +178,7 @@ async def update_room_trigger(
 ) -> TriggerRow:
     """Enable or disable one trigger belonging to ``room_id``; owner only."""
     config, runtime_paths = _require_trigger_runtime(request)
-    matched = await _require_owned_room_trigger(runtime_paths, config, room_id, trigger_id, member.user_id)
+    matched = await _require_owned_room_trigger(request, runtime_paths, config, room_id, trigger_id, member.user_id)
     record = matched.record
 
     refreshed_tag_present: bool | None = None
@@ -234,7 +234,7 @@ async def update_room_trigger(
 async def delete_room_trigger(request: Request, member: _Member, room_id: str, trigger_id: str) -> Response:
     """Delete one trigger belonging to ``room_id``; owner only."""
     config, runtime_paths = _require_trigger_runtime(request)
-    await _require_owned_room_trigger(runtime_paths, config, room_id, trigger_id, member.user_id)
+    await _require_owned_room_trigger(request, runtime_paths, config, room_id, trigger_id, member.user_id)
     await _run_store(
         lambda: delete_trigger_sync(
             runtime_paths,
@@ -282,6 +282,7 @@ def _match_trigger_to_room(record: TriggerRecord, room_id: str, runtime_paths: R
 
 
 async def _require_owned_room_trigger(
+    request: Request,
     runtime_paths: RuntimePaths,
     config: Config,
     room_id: str,
@@ -293,7 +294,15 @@ async def _require_owned_room_trigger(
         return None if record is None else _match_trigger_to_room(record, room_id, runtime_paths)
 
     matched = await _run_store(_find)
-    if matched is None:
+    if matched is None or (
+        isinstance(matched.record, ReactiveTriggerRecord)
+        and not can_view_reactive_trigger(
+            matched.record,
+            user_id,
+            event_sources=_event_sources_registry(request),
+            viewer_user_ids=equivalent_requester_ids(user_id, config, runtime_paths),
+        )
+    ):
         raise HTTPException(404, "Trigger not found in this room.")
     _require_owner(user_id, config, runtime_paths, matched.record)
     return matched

@@ -44,7 +44,7 @@ from mindroom.slack.turns import conversation_label, delivery_failed, event_auth
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -207,7 +207,12 @@ class SlackEventSource(EventSource):
     default_max_fires_per_hour: int | None = 60
 
     def __init__(self) -> None:
-        self.migration_failed: bool = False
+        self.retry_migration: Callable[[], object] | None = None
+
+    @property
+    def migration_pending(self) -> bool:
+        """Whether legacy Slack watch migration failed at bind time and will retry lazily."""
+        return self.retry_migration is not None
 
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         """Advertise Slack watches when the Slack app has an app token and personal Slack is configured."""
@@ -464,13 +469,19 @@ async def emit_slack_watch_event(
         or (registered := reactive_triggers.event_sources.get(SLACK_EVENT_SOURCE_ID)) is None
     ):
         return "ignored"
-    if isinstance(registered, SlackEventSource) and registered.migration_failed:
-        logger.warning(
-            "Retrying Slack watch event because legacy Slack watch migration has not completed",
-            event_id=attempt.event.event_id,
-            channel_id=attempt.event.channel_id,
-        )
-        return "retry"
+    if isinstance(registered, SlackEventSource) and registered.migration_pending:
+        retry = registered.retry_migration
+        if retry is not None:
+            try:
+                await asyncio.to_thread(retry)
+            except Exception:
+                logger.exception(
+                    "Failed to migrate legacy Slack watches.json; ignoring Slack watch event",
+                    event_id=attempt.event.event_id,
+                    channel_id=attempt.event.channel_id,
+                )
+                return "ignored"
+            registered.retry_migration = None
 
     event = attempt.event
     is_dm, mentioned = is_direct_message(event), mentioned_user_ids(event.text)

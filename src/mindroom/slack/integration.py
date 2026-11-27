@@ -75,15 +75,19 @@ def _bind(
         except ValueError as exc:
             logger.warning("Could not register built-in Slack EventSource", reason=str(exc))
         else:
-            if reactive_triggers.store is not None:
-                try:
-                    migrate_legacy_slack_watches(
+            if (store := reactive_triggers.store) is not None:
+
+                def _migrate() -> int:
+                    return migrate_legacy_slack_watches(
                         reactive_triggers.runtime_paths,
-                        reactive_triggers.store,
+                        store,
                         reactive_triggers.config_provider(),
                     )
+
+                try:
+                    _migrate()
                 except Exception:
-                    slack_source.migration_failed = True
+                    slack_source.retry_migration = _migrate
                     logger.exception("Failed to migrate legacy Slack watches.json")
 
     _runtimes(api_app)[_NAME] = SlackRuntime(

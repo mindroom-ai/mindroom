@@ -1320,6 +1320,16 @@ async def test_slack_subscribe_default_max_fires_per_hour_and_explicit_new_threa
                 new_thread=False,
             ),
         )
+        static_thread_key = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="sl_static_key",
+                source_id="slack",
+                kind="message",
+                prompt="Group alerts.",
+                thread_key="alert_feed",
+            ),
+        )
     assert default_sub["status"] == "ok"
     assert default_sub["trigger"]["max_fires_per_hour"] == 60
     assert default_sub["trigger"]["target"]["new_thread"] is True
@@ -1331,6 +1341,12 @@ async def test_slack_subscribe_default_max_fires_per_hour_and_explicit_new_threa
     assert explicit_cap_and_thread["trigger"]["target"]["new_thread"] is False
     assert explicit_cap_and_thread["trigger"]["target"]["thread_key_from_event"] is False
     assert explicit_cap_and_thread["trigger"]["target"]["thread_id"] == "$existing_thread"
+
+    assert static_thread_key["status"] == "ok"
+    assert static_thread_key["trigger"]["target"]["new_thread"] is True
+    assert static_thread_key["trigger"]["target"]["thread_key"] == "alert_feed"
+    assert static_thread_key["trigger"]["target"]["thread_key_from_event"] is False
+    assert static_thread_key["trigger"]["target"]["thread_id"] is None
 
     # Lower policy cap (25): default is capped to min(60, 25) == 25.
     cfg_low, paths_low = _make_config(tmp_path / "low", max_fires_per_hour=25)
@@ -1566,11 +1582,82 @@ async def test_admin_cannot_toggle_or_delete_private_slack_trigger_but_can_manag
 
 
 @pytest.mark.asyncio
-async def test_pre_commit_migration_failure_retries_slack_watch_events(tmp_path: Path) -> None:
-    """Pre-commit legacy watch migration failure marks SlackEventSource unready so Slack events return 'retry'."""
+async def test_admin_rotate_key_on_hidden_private_slack_trigger_returns_not_found(tmp_path: Path) -> None:
+    """Non-owner trigger admins get the absent-trigger not-found error on rotate_key for hidden private Slack triggers."""
     config, paths = _make_config(tmp_path)
     install_slack_state(paths, app_token=APP_TOKEN)
     connect_alice(paths)
+    agent_id = entity_identity_registry(config, paths).current_id("assistant").full_id
+    client = _multi_room_client(
+        {
+            WATCH_ROOM: room_state_client((ALICE, agent_id), room_id=WATCH_ROOM),
+            ADMIN_ROOM: room_state_client((ADMIN, agent_id), room_id=ADMIN_ROOM),
+        },
+    )
+    service = ReactiveTriggerService(
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=ReactiveTriggerStore(paths),
+    )
+    slack_emitter = service.event_sources.register(SlackEventSource())
+    tool = TriggersTools()
+    sample_public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+    owner_ctx = _tool_context(config=config, paths=paths, client=client, service=service)
+    with tool_runtime_context(owner_ctx):
+        sub = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="alice_slack",
+                source_id="slack",
+                kind="message",
+                prompt="Watch my Slack",
+            ),
+        )
+        owner_rotate = json.loads(
+            await tool.triggers(action="rotate_key", trigger_id="alice_slack", public_key=sample_public_key),
+        )
+    assert sub["status"] == "ok"
+    assert owner_rotate["status"] == "error"
+    assert owner_rotate["message"] == "Key rotation applies only to direct signed external triggers."
+
+    admin_ctx = _tool_context(
+        config=config,
+        paths=paths,
+        client=client,
+        service=service,
+        room_id=ADMIN_ROOM,
+        requester_id=ADMIN,
+    )
+    with tool_runtime_context(admin_ctx):
+        hidden_rotate = json.loads(
+            await tool.triggers(action="rotate_key", trigger_id="alice_slack", public_key=sample_public_key),
+        )
+        absent_rotate = json.loads(
+            await tool.triggers(action="rotate_key", trigger_id="absent_trigger", public_key=sample_public_key),
+        )
+    assert hidden_rotate["status"] == "error"
+    assert hidden_rotate["message"] == "external trigger not found: alice_slack"
+    assert absent_rotate["message"] == "external trigger not found: absent_trigger"
+
+    assert service.event_sources.unregister(SLACK_EVENT_SOURCE_ID, slack_emitter.token) is True
+    with tool_runtime_context(admin_ctx):
+        unregistered_rotate = json.loads(
+            await tool.triggers(action="rotate_key", trigger_id="alice_slack", public_key=sample_public_key),
+        )
+    assert unregistered_rotate["status"] == "error"
+    assert unregistered_rotate["message"] == "external trigger not found: alice_slack"
+
+
+@pytest.mark.asyncio
+async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(tmp_path: Path) -> None:
+    """Pre-commit migration failure returns 'ignored' (never 'retry'/503) and lazily migrates & delivers once fixed."""
+    config, paths = _make_config(tmp_path)
+    install_slack_state(paths, app_token=APP_TOKEN)
+    connect_alice(paths)
+    agent_id = entity_identity_registry(config, paths).current_id("assistant").full_id
     assert paths.control_state_root is not None
     watches_path = paths.control_state_root / "slack" / "watches.json"
     watches_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1578,26 +1665,35 @@ async def test_pre_commit_migration_failure_retries_slack_watch_events(tmp_path:
 
     store = ReactiveTriggerStore(paths)
     memberships = AgentReplyMembershipIndex()
-    bots: dict[str, AgentBot] = {}
+    bots = {"assistant": FakeBot(room_state_client((ALICE, agent_id), room_id=WATCH_ROOM))}
     service = ReactiveTriggerService(
         config_provider=lambda: config,
         runtime_paths=paths,
-        bots=lambda: bots,
+        bots=lambda: cast("dict[str, AgentBot]", bots),
         memberships=memberships,
         store=store,
     )
     app_api = FastAPI()
     ensure_app_state(app_api)
-    SLACK_INTEGRATION.bind(app_api, bots, memberships, service)
+    SLACK_INTEGRATION.bind(app_api, cast("dict[str, AgentBot]", bots), memberships, service)
 
     registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
     assert isinstance(registered, SlackEventSource)
-    assert registered.migration_failed is True
+    assert registered.migration_pending is True
     assert watches_path.exists()
     assert not store.has_migration("slack_watches_v1")
 
-    slack = FakeSlack(answers={"auth.test": AUTH_TEST})
-    runtime = runtime_for({}, memberships, slack, reactive_triggers=service)
+    slack = FakeSlack(
+        answers={
+            "auth.test": AUTH_TEST,
+            "apps.event.authorizations.list": {
+                "ok": True,
+                "authorizations": [{"user_id": SLACK_IDS["alice"], "is_bot": False}],
+            },
+            "users.info": {"ok": False, "error": "user_not_found"},
+        },
+    )
+    runtime = runtime_for(bots, memberships, slack, reactive_triggers=service)
     manager = get_runtime_credentials_manager(paths)
     slack_creds = load_slack_app(manager)
     assert slack_creds is not None
@@ -1613,8 +1709,57 @@ async def test_pre_commit_migration_failure_retries_slack_watch_events(tmp_path:
             client=http_client,
             now=NOW,
         )
-    assert result == "retry"
+    assert result == "ignored"
+    assert registered.migration_pending is True
     assert slack.calls("apps.event.authorizations.list") == []
+
+    # Once the underlying watches.json error is fixed, the next event lazily completes migration and delivers.
+    watches_path.write_text(
+        json.dumps(
+            {
+                "watches": {
+                    "w1": {
+                        "watch_id": "w1",
+                        "owner_id": ALICE,
+                        "agent_name": "assistant",
+                        "room_id": WATCH_ROOM,
+                        "team_id": TEAM,
+                        "slack_user_id": SLACK_IDS["alice"],
+                        "mentions": True,
+                        "direct_messages": True,
+                        "channels": [],
+                        "created_at": NOW,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    recovered_dm = event_payload(
+        "message",
+        author="dana",
+        text="after fix",
+        ts="1700000002.000100",
+        channel=DM,
+        channel_type="im",
+    )
+    async with slack.client() as http_client:
+        recovered_result = await deliver_slack_event(
+            recovered_dm,
+            runtime=runtime,
+            config=config,
+            runtime_paths=paths,
+            credentials_manager=manager,
+            app=slack_creds,
+            client=http_client,
+            now=NOW + 1,
+        )
+    assert recovered_result == "delivered"
+    assert registered.migration_pending is False
+    assert store.has_migration("slack_watches_v1") is True
+    assert not watches_path.exists()
+    assert watches_path.with_name("watches.json.migrated").exists()
+    assert len(store.list_firings(trigger_id="slack_watch_w1")) == 1
 
 
 @pytest.mark.asyncio
@@ -1680,7 +1825,7 @@ async def test_post_commit_archive_rename_failure_delivers_and_self_heals(
 
     registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
     assert isinstance(registered, SlackEventSource)
-    assert registered.migration_failed is False
+    assert registered.migration_pending is False
     assert store.has_migration("slack_watches_v1") is True
     assert store.get_trigger("slack_watch_w1") is not None
     assert watches_path.exists()

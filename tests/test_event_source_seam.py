@@ -2123,3 +2123,53 @@ async def test_broken_plugin_hooks_do_not_crash_triggers_list(tmp_path: Path) ->
     assert "broken_access" in source_ids
     by_id = {t["trigger_id"]: t for t in listed["reactive_triggers"]}
     assert by_id["broken_access_rule"]["paused_reason"] == "source_error"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_test_unavailable_registered_source_errors_without_yaml_fallback_or_triage(
+    tmp_path: Path,
+) -> None:
+    """Dry-run test on an unregistered plugin source reports unavailable and never falls back to YAML matching or triage."""
+    tool, _store, _source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
+    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
+
+    class _PluginAlertSource(EventSource):
+        source_id = "plugin_alerts"
+        description = "Plugin alert source"
+        allowed_kinds = ("alert",)
+        match_fields = ("severity",)
+
+    emitter = registry.register(_PluginAlertSource())
+    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
+        created = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="plugin_alert_rule",
+                source_id="plugin_alerts",
+                kind="alert",
+                match={"severity": "high"},
+                triage_instructions="Only wake for urgent alerts.",
+                triage_model="default",
+                prompt="Handle alert",
+            ),
+        )
+    assert created["status"] == "ok", created
+
+    assert registry.unregister("plugin_alerts", emitter.token) is True
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="llm"))
+    with (
+        tool_runtime_context(make_ctx(requester_id=_OWNER)),
+        patch("mindroom.custom_tools.triggers.evaluate_triage", new=triage_mock),
+    ):
+        res = json.loads(
+            await tool.triggers(
+                action="test",
+                trigger_id="plugin_alert_rule",
+                sample_data={"severity": "high"},
+            ),
+        )
+    assert res["status"] == "error"
+    assert "unavailable" in res["message"].lower()
+    assert "plugin_alerts" in res["message"]
+    assert res.get("would_fire") is not True
+    assert triage_mock.await_count == 0

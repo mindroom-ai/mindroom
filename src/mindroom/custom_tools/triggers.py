@@ -1342,7 +1342,13 @@ class TriggersTools(Toolkit):
         resolved_key_id = "default" if args["key_id"] is None else args["key_id"]
 
         def _rotate() -> str:
-            if isinstance(get_trigger_record(context.runtime_paths, resolved_trigger_id), ReactiveTriggerRecord):
+            existing = get_trigger_record(context.runtime_paths, resolved_trigger_id)
+            if isinstance(existing, ReactiveTriggerRecord) and can_view_reactive_trigger(
+                existing,
+                context.requester_id,
+                event_sources=_event_sources_registry(context),
+                viewer_user_ids=equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths),
+            ):
                 msg = "Key rotation applies only to direct signed external triggers."
                 raise ExternalTriggerStoreError(msg)
             record = ExternalTriggerStore(context.runtime_paths).rotate_key(
@@ -1751,7 +1757,7 @@ def _resolve_target_options(
     raw_new_thread = args["new_thread"]
     thread_key = args["thread_key"]
     if raw_new_thread is None:
-        new_thread = default_new_thread if (target_thread_id is None and thread_key is None) else False
+        new_thread = default_new_thread if target_thread_id is None else False
     else:
         new_thread = raw_new_thread
     if new_thread and target_thread_id is not None:
@@ -2259,17 +2265,19 @@ def _build_dry_run_event_and_match(
             text=args["text"],
             data=extra_data,
         )
-        registered = _registered_event_source(context, rule.source.source_id) if rule.source.is_registered else None
-        matched = (
-            registered.matches_rule(
+        if rule.source.is_registered:
+            registered = _registered_event_source(context, rule.source.source_id)
+            if registered is None:
+                msg = f"Registered event source {rule.source.source_id!r} is currently unavailable."
+                raise ValueError(msg)
+            matched = registered.matches_rule(
                 rule,
                 event,
                 audience=registered.dry_run_audience(rule),
                 has_thread_binding=False,
             )
-            if registered is not None
-            else matches_external_event(rule.source, event)
-        )
+        else:
+            matched = matches_external_event(rule.source, event)
         return event, matched, None
 
     if isinstance(rule.source, GitHubPRSourceSpec):
