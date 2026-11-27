@@ -97,6 +97,7 @@ class _ReviewRequest:
     tools: PreparedTools
     settings: ModelRequest
     forked: bool
+    deferred_runnable: frozenset[str] = frozenset()
 
 
 def _transcript_budget_chars(counter: TokenCounter, messages: Sequence[Sequence[Utterance]], budget_tokens: int) -> int:
@@ -154,14 +155,15 @@ def _review_tools(
     *,
     awaiting_decision: frozenset[str] = frozenset(),
     deferred_tools: DeferredTools = _NO_DEFERRED_TOOLS,
-) -> tuple[PreparedTools, list[str]]:
+) -> tuple[PreparedTools, list[str], frozenset[str]]:
     """Answer the calls of every tool the request defines, but run only the skill tools, as the review's.
 
     Like Hermes' denial message, every other tool answers with the skill tools the review can use. A tool whose call
     waits for a decision (``awaiting_decision``) gets no function, so the loop answers that it does not exist or is not
     available instead of pausing the review. When portable tool search defers a runnable skill tool, ``tool_search``
     returns only those deferred skill definitions and ``call_tool`` answers unresolved calls with a retry hint while
-    ``resolve_call_tool_calls`` rewrites resolvable ``call_tool`` calls before dispatch.
+    ``resolve_call_tool_calls`` rewrites only ``call_tool`` calls targeting deferred runnable skill tools before
+    dispatch.
     """
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.
@@ -203,14 +205,15 @@ def _review_tools(
 
             entrypoints["tool_search"] = review_tool_search
         if "call_tool" in answered:
+            deferred_names = _listing([definition.name for definition in deferred_runnable])
+            example_name = deferred_runnable[0].name
 
             async def review_call_tool(name: str = "", arguments: object = None, **_extra: object) -> str:
                 del arguments
-                deferred_names = _listing([definition.name for definition in deferred_runnable])
                 subject = f"'{name}' was not called" if name else "Nothing was called"
                 return (
                     f"{subject}. In this review, call {deferred_names} via "
-                    'call_tool(name="skill_manage", arguments={...}) with arguments as a JSON object.'
+                    f'call_tool(name="{example_name}", arguments={{...}}) with arguments as a JSON object.'
                 )
 
             entrypoints["call_tool"] = review_call_tool
@@ -229,7 +232,7 @@ def _review_tools(
         )
         for name, definition in answered.items()
     }
-    return PreparedTools(functions=functions), runnable
+    return PreparedTools(functions=functions), runnable, frozenset(d.name for d in deferred_runnable)
 
 
 def _listing(names: Sequence[str]) -> str:
@@ -300,7 +303,7 @@ def _fork(
         return None
     # A gated call pauses its run, asks as its job, or runs elsewhere.
     awaiting_decision = frozenset(function.name for function in captured.functions if function.gate is not None)
-    functions, runnable = _review_tools(
+    functions, runnable, deferred_runnable = _review_tools(
         request.tools,
         tools,
         awaiting_decision=awaiting_decision,
@@ -342,6 +345,7 @@ def _fork(
             overrides=replace(request.overrides, wait_for_connectivity=False),
         ),
         forked=True,
+        deferred_runnable=deferred_runnable,
     )
 
 
@@ -429,7 +433,7 @@ async def _replay(
         skills_root,
         catalog,
     )
-    functions, runnable = _review_tools(definitions, tools)
+    functions, runnable, _ = _review_tools(definitions, tools)
     evidence = (
         "The conversation to review is supplied inside <conversation> tags as a transcript of the stored turns.\n"
         f"<conversation>\n{transcript}\n</conversation>"
@@ -484,7 +488,11 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
     return LoopHooks(
         before_request=(within_budget, offer_definitions),
         answer_tool_calls=output_limit_policy(),
-        rewrite_tool_calls=resolve_call_tool_calls if review.settings.deferred_tools.portable else None,
+        rewrite_tool_calls=(
+            (lambda calls, _names: resolve_call_tool_calls(calls, review.deferred_runnable))
+            if review.deferred_runnable
+            else None
+        ),
     )
 
 

@@ -366,8 +366,9 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when any retired function's effective decision differs from the replacement's effective
-#   decision (regardless of other toolkits).
+#   reject tool_approval.rules when any retired function is decided by an approval script or its effective decision
+#   differs from the replacement's effective decision (regardless of other toolkits); also reject include_tools or
+#   exclude_tools naming a retired attachment function on an attachments entry, naming `attachment` and `view_file`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
@@ -909,6 +910,12 @@ def _retired_approval_pair_error(
     if first_new is not None and rules[first_new].match == new:
         return None
     first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+    if first_old is not None and rules[first_old].script is not None:
+        return (
+            f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} runs approval script "
+            f"{rules[first_old].script!r} for retired tool {old}; {old} is now {new}; "
+            f"update the script for {new} and add an explicit match: {new} rule."
+        )
     old_decision = _effective_approval_decision(
         rules[first_old] if first_old is not None else None,
         default=default,
@@ -1021,11 +1028,26 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     )
 
 
+def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired attachment function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_CONSOLIDATED_FUNCTIONS["attachments"],
+        guidance_for=lambda key, new: (
+            f"attachment operations were consolidated into `{new}` (with `view_file` standalone); "
+            f"use `attachments: {{{key}: [{new}]}}` or `view_file`, or use `tool_approval.rules` matching `{new}` "
+            "if per-action gating is needed"
+        ),
+    )
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
         return retired
     if tool_name == "triggers" and (retired := _retired_trigger_setting(overrides)) is not None:
+        return retired
+    if tool_name == "attachments" and (retired := _retired_attachments_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

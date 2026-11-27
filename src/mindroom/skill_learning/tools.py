@@ -187,10 +187,10 @@ class SkillTools:
         mindroom_output_path: str | None = None,
     ) -> str:
         """Load a skill's SKILL.md instructions or one listed reference/script file."""
-        if mindroom_output_path is not None:
+        if mindroom_output_path is not None and mindroom_output_path.strip():
             return _refusal("mindroom_output_path is not available during a skill review.")
         if action == "instructions":
-            if path:
+            if path is not None and path.strip():
                 return _refusal("path must be omitted when action='instructions'.")
             relative_path: str | None = SKILL_FILENAME
         elif action == "reference":
@@ -440,7 +440,7 @@ def _patched(
 
 def _support_path(directory: str, filename: str | None) -> str | None:
     """Return a support file's path; a review lists support files with their directory, and readers accept both."""
-    return f"{directory}/{filename.removeprefix(f'{directory}/')}" if filename else None
+    return f"{directory}/{filename.removeprefix(f'{directory}/')}" if filename and filename.strip() else None
 
 
 def _loader(relative_path: str) -> str:

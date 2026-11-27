@@ -1286,3 +1286,24 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
     assert writers
     assert threading.main_thread() not in writers
     assert "last_used_at" in json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]
+
+
+def test_skill_tool_treats_blank_path_as_unset_on_instructions_and_rejects_on_files(tmp_path: Path) -> None:
+    """Empty/whitespace path is ignored for instructions, while blank path is rejected for reference and script."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    skill_dir = _write_skill(workspace_skills, "local", "Workspace skill").parent
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "guide.md").write_text("Guide text.", encoding="utf-8")
+    skills = _load_workspace_only(tmp_path, storage)
+    assert skills is not None
+
+    for blank in ("", "   "):
+        inst = _call(skills, "skill", "instructions", "local", blank)
+        assert "error" not in inst
+        assert "Body" in str(inst["instructions"])
+
+    for action in ("reference", "script"):
+        for blank in ("", "   "):
+            err = _call(skills, "skill", action, "local", blank)
+            assert "error" in err
+            assert "path is required" in str(err["error"])

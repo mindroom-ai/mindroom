@@ -210,7 +210,7 @@ class SkillsToolkit(Toolkit):
 
         """
         if action == "instructions":
-            if path:
+            if path is not None and path.strip():
                 return json.dumps(
                     {
                         "error": "Parameter 'path' must be omitted when action is 'instructions'",
@@ -245,7 +245,7 @@ class SkillsToolkit(Toolkit):
         if skill is None:
             return self._not_found(skill_name)
         listed = kind.listed(skill)
-        if not filename or filename not in listed:
+        if not filename or not filename.strip() or filename not in listed:
             return json.dumps(_unlisted_file_error(skill_name, kind, filename, listed))
         workspace_root = self._workspace_roots.get(skill_name)
         if workspace_root is not None:
@@ -332,7 +332,7 @@ def _unlisted_file_error(
     listed: tuple[str, ...],
 ) -> dict[str, object]:
     """Return the error a skill function answers when ``filename`` is missing or not a listed file of the skill."""
-    if not filename:
+    if not filename or not filename.strip():
         return {
             "error": f"A path is required to read a {kind.noun} from skill '{skill_name}'",
             "skill_name": skill_name,

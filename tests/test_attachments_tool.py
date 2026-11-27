@@ -2169,3 +2169,142 @@ async def test_inline_image_strictly_separates_attachment_id_and_path(tmp_path: 
         assert by_att_filename["status"] == "ok"
         assert by_att_filename["markdown"] == "![Chart](mxc://hs/att-file)"
         upload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_attachment_list_auto_saves_large_result_while_get_redirect_keeps_raw_bytes(tmp_path: Path) -> None:
+    """Large non-redirected attachment results honor tool_output_auto_save_threshold_bytes; get saves raw bytes."""
+    from mindroom.config.models import DefaultsConfig  # noqa: PLC0415
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sample_file = tmp_path / "binary-payload.bin"
+    raw_bytes = b"\x00\x01\x02PNG_RAW_BYTES" * 40
+    sample_file.write_bytes(raw_bytes)
+
+    attachment_ids: list[str] = []
+    for idx in range(6):
+        record = register_local_attachment(
+            tmp_path,
+            sample_file,
+            kind="file",
+            attachment_id=f"att_bulk_{idx}",
+            filename=f"very-long-attachment-filename-{idx}-" + ("x" * 60) + ".bin",
+        )
+        assert record is not None
+        attachment_ids.append(record.attachment_id)
+
+    base_context = _tool_context(tmp_path, attachment_ids=tuple(attachment_ids))
+    small_threshold_config = base_context.config.model_copy(
+        update={"defaults": DefaultsConfig(tool_output_auto_save_threshold_bytes=120)},
+    )
+    context = dataclasses.replace(base_context, config=small_threshold_config)
+    tool = AttachmentTools(
+        runtime_paths=context.runtime_paths,
+        runtime_config=small_threshold_config,
+        tool_output_workspace_root=workspace,
+    )
+
+    with tool_runtime_context(context):
+        list_result = await tool.attachment("list")
+        assert isinstance(list_result, dict)
+        receipt = list_result["mindroom_tool_output"]
+        assert isinstance(receipt, dict)
+        assert receipt["status"] == "saved_to_file"
+        assert receipt["auto_saved"] is True
+        assert receipt["threshold_bytes"] == 120
+        saved_file = workspace / str(receipt["path"])
+        assert saved_file.exists()
+        saved_payload = json.loads(saved_file.read_text(encoding="utf-8"))
+        assert saved_payload["status"] == "ok"
+        assert saved_payload["attachment_ids"] == attachment_ids
+
+        # Explicit mindroom_output_path on action="get" still writes raw binary bytes unchanged.
+        get_result = await tool.attachment("get", attachment_id="att_bulk_0", mindroom_output_path="out/data.bin")
+        assert isinstance(get_result, str)
+        get_payload = json.loads(get_result)
+        assert get_payload["status"] == "ok"
+        assert get_payload["mindroom_tool_output"]["format"] == "binary"
+        assert (workspace / "out/data.bin").read_bytes() == raw_bytes
+
+    # Worker mode must not write auto-saved output into the unreachable local primary workspace.
+    worker_workspace = tmp_path / "worker-primary-workspace"
+    worker_workspace.mkdir()
+    worker_tool = AttachmentTools(
+        runtime_paths=context.runtime_paths,
+        runtime_config=small_threshold_config,
+        tool_output_workspace_root=worker_workspace,
+        workspace_in_worker=True,
+    )
+    with tool_runtime_context(context):
+        worker_list = await worker_tool.attachment("list")
+        assert isinstance(worker_list, str)
+        assert json.loads(worker_list)["status"] == "ok"
+    assert not any(worker_workspace.rglob("*"))
+
+
+@pytest.mark.asyncio
+async def test_attachment_treats_blank_irrelevant_optional_params_as_unset_and_rejects_blank_required(
+    tmp_path: Path,
+) -> None:
+    """Empty/whitespace optional params on unused actions succeed, while blank required params still fail."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    note = workspace / "note.txt"
+    note.write_text("hello", encoding="utf-8")
+    pic = workspace / "pic.png"
+    pic.write_bytes(image_bytes())
+    record = register_local_attachment(tmp_path, pic, kind="image", mime_type="image/png", attachment_id="att_pic")
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = False
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+
+    with (
+        patch(
+            "mindroom.matrix.client_delivery.upload_media_bytes",
+            new=AsyncMock(return_value=(nio.UploadResponse("mxc://hs/blank-opt"), None)),
+        ),
+        tool_runtime_context(context),
+    ):
+        # Blank irrelevant optional parameters are treated as unset across all 4 actions.
+        list_ok = json.loads(
+            await tool.attachment("list", attachment_id="  ", path="", alt="   ", mindroom_output_path=""),
+        )
+        assert list_ok["status"] == "ok"
+        assert list_ok["attachment_ids"] == ["att_pic"]
+
+        get_ok = json.loads(await tool.attachment("get", attachment_id="att_pic", path="", alt="  "))
+        assert get_ok["status"] == "ok"
+        assert get_ok["attachment_id"] == "att_pic"
+
+        reg_ok = json.loads(
+            await tool.attachment("register", path="note.txt", attachment_id="", alt=" ", mindroom_output_path="  "),
+        )
+        assert reg_ok["status"] == "ok"
+
+        inline_by_id = json.loads(
+            await tool.attachment("inline_image", attachment_id="att_pic", path="", alt="", mindroom_output_path=" "),
+        )
+        assert inline_by_id["status"] == "ok"
+
+        inline_by_path = json.loads(
+            await tool.attachment("inline_image", attachment_id="  ", path="pic.png", mindroom_output_path=""),
+        )
+        assert inline_by_path["status"] == "ok"
+
+        # Blank required parameters and blank mindroom_output_path on action="get" are still rejected.
+        for bad_kwargs in (
+            {"action": "get", "attachment_id": ""},
+            {"action": "get", "attachment_id": "   "},
+            {"action": "get", "attachment_id": "att_pic", "mindroom_output_path": ""},
+            {"action": "get", "attachment_id": "att_pic", "view": True, "mindroom_output_path": ""},
+            {"action": "register", "path": ""},
+            {"action": "register", "path": "   "},
+            {"action": "inline_image", "attachment_id": "", "path": ""},
+            {"action": "inline_image", "attachment_id": "   ", "path": "  "},
+            {"action": "inline_image", "attachment_id": ""},
+            {"action": "inline_image", "path": "   "},
+        ):
+            bad = json.loads(await tool.attachment(**bad_kwargs))  # type: ignore[arg-type]
+            assert bad["status"] == "error", bad_kwargs

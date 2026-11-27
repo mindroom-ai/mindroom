@@ -1777,10 +1777,9 @@ async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferre
     search_result = json.loads(str(after_search.messages[-1].content))
     assert [match["name"] for match in search_result["matches"]] == ["skill_manage"]
 
-    # Non-skill deferred tool is rewritten and denied; gated deferred tool hits the retry hint without pausing/running.
-    assert after_denied_shell.messages[-1].content == (
-        "This tool is not available during a skill review; only skill_manage and skill run here."
-    )
+    # Both ungated and gated non-skill deferred tools go straight to review_call_tool without probing answered tools.
+    assert "'shell' was not called" in str(after_denied_shell.messages[-1].content)
+    assert 'call_tool(name="skill_manage"' in str(after_denied_shell.messages[-1].content)
     assert "'deploy' was not called" in str(after_gated_deploy.messages[-1].content)
     assert 'call_tool(name="skill_manage"' in str(after_gated_deploy.messages[-1].content)
 
@@ -2532,3 +2531,24 @@ def test_notice_diffs_show_a_changed_final_newline_and_other_line_separators() -
         (1, 1, "@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text\n"),
         (2, 1, "@@ -1 +1,2 @@\n-a\vb\n+a\n+b\n"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_review_skill_tool_treats_blank_optional_path_as_unset_on_instructions(tmp_path: Path) -> None:
+    """SkillTools.skill ignores blank path on instructions while still rejecting blank path on reference/script."""
+    config, paths = _learner(tmp_path)
+    skills_root = _skills_root(config, paths)
+    _write_skill(skills_root, "demo-skill", "---\nname: demo-skill\ndescription: Demo\n---\n\nStep one.\n")
+    catalog = load_skill_catalog(config, paths, "mind", skills_root)
+    tools = SkillTools(skills_root, dict(catalog.entries), catalog.reserved_names)
+
+    for blank in ("", "   "):
+        loaded = json.loads(await tools.skill("instructions", "demo-skill", path=blank, mindroom_output_path=blank))
+        assert "error" not in loaded
+        assert "Step one." in loaded["content"]
+
+    for action in ("reference", "script"):
+        for blank in ("", "   "):
+            refused = json.loads(await tools.skill(action, "demo-skill", path=blank))
+            assert "error" in refused
+            assert "Name the support file" in refused["error"]
