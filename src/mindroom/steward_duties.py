@@ -241,6 +241,7 @@ class StewardDuties:
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
         self._joined_room_ids.add(room.room_id)
+        self.deps.runtime.orchestrator.thread_auto_reopen.observe_power_levels_changed(room.room_id)
 
     def publish_joined_room_state(self, *, every_room: bool = False) -> None:
         """Reconcile the thread mode and MindRoom accounts of the marked rooms, each through its steward.

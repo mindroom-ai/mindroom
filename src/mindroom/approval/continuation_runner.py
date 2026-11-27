@@ -53,6 +53,7 @@ from mindroom.attachments.storage import load_attachment, parent_attachment_refs
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
+    RESOLVED_IN_TURN_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -887,6 +888,7 @@ class ApprovalContinuationRunner:
             )
             else nullcontext()
         )
+        resolved_thread_ids: set[str] = set()
         async with progress_scope as progress:
             result = await self._continue_entity_call(
                 claimed,
@@ -895,9 +897,13 @@ class ApprovalContinuationRunner:
                 tool_trace_collector=tool_trace,
                 progress=progress,
                 cli_approval_handler=cli_approval_handler,
+                resolved_thread_ids=resolved_thread_ids,
             )
         current = await self.deps.approval_store.approval_continuation(claimed.approval_id) or claimed
         if isinstance(result, CompletedApprovalRun):
+            final_extra = dict(result.metadata_content) if result.metadata_content else {}
+            if target.resolved_thread_id is not None and target.resolved_thread_id in resolved_thread_ids:
+                final_extra[RESOLVED_IN_TURN_KEY] = True
             return (
                 await self.deps.delivery_gateway.deliver_final(
                     FinalDeliveryRequest(
@@ -906,7 +912,7 @@ class ApprovalContinuationRunner:
                         response_text=result.response_text,
                         identity=identity,
                         tool_trace=tool_trace if claimed.show_tool_calls else None,
-                        extra_content=merge_response_extra_content(result.metadata_content, claimed.attachment_ids),
+                        extra_content=merge_response_extra_content(final_extra or None, claimed.attachment_ids),
                     ),
                 ),
                 current,
@@ -1287,6 +1293,7 @@ class ApprovalContinuationRunner:
         tool_trace_collector: list[ToolTraceEntry],
         progress: ProgressPublisher | None,
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
+        resolved_thread_ids: set[str] | None = None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = continuation.execution_identity
         resumed_attachment_ids, resumed_fork_parent_scopes = await self._resume_fork_attachments(
@@ -1308,7 +1315,13 @@ class ApprovalContinuationRunner:
             msg = "Approval continuation execution identity no longer matches its target"
             raise RuntimeError(msg)
         # The resumed run's calls read as its turn's did: shown only where its reply shows them and the turn is not quiet.
-        tool_context = replace(tool_context, tool_calls_shown=continuation.show_tool_calls and not request.quiet)
+        tool_context = replace(
+            tool_context,
+            tool_calls_shown=continuation.show_tool_calls and not request.quiet,
+            resolved_thread_ids=resolved_thread_ids
+            if resolved_thread_ids is not None
+            else tool_context.resolved_thread_ids,
+        )
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
         # The agent's or team's new runs get the hook's instructions and, after them, a silent schedule's quiet-delivery

@@ -17,6 +17,7 @@ from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
     INLINE_MEDIA_CONTENT_KEY,
     REASONING_CONTENT_KEY,
+    RESOLVED_IN_TURN_KEY,
     STREAM_VISIBLE_BODY_KEY,
     TOOL_TRACE_CONTENT_KEY,
 )
@@ -199,6 +200,7 @@ def _continuation_content(
     *,
     thread_id: str | None,
     reply_to_event_id: str | None,
+    is_edit: bool = False,
     enable_footnotes: bool = True,
 ) -> dict[str, Any]:
     """Build a continuation that recovery cannot mistake for a fresh answer.
@@ -215,6 +217,9 @@ def _continuation_content(
     content = _rich_text_content(source, body, relation=relation, enable_footnotes=enable_footnotes)
     # The reply's compactions are shown once, on its first segment.
     content.pop(COMPACTIONS_CONTENT_KEY, None)
+    if is_edit:
+        # Continuations of an edit belong to an already-created reply and must not auto-reopen a resolved thread.
+        content[RESOLVED_IN_TURN_KEY] = True
     return content
 
 
@@ -416,6 +421,7 @@ def _segment_builders(
             chunk,
             thread_id=continuation_thread_id,
             reply_to_event_id=continuation_reply_to_event_id,
+            is_edit=is_edit,
             enable_footnotes=enable_footnotes,
         )
 

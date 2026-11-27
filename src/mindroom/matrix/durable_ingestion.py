@@ -131,6 +131,7 @@ async def consume_one_ingestion_batch(
     after_admission: _AfterAdmission | None = None,
     after_sync: Callable[[bool], Awaitable[None]] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
+    on_timeline_record: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> ej.AdmissionFacts | None:
     """Commit the whole batch, run ordered hooks and callbacks, then acknowledge."""
@@ -160,10 +161,26 @@ async def consume_one_ingestion_batch(
             continue
         if converted_record.disposition is ej.IngestionRecordDisposition.COMPATIBILITY_ONLY:
             await _dispatch_auxiliary_record(session, record, account_id)
+        _notify_timeline_record(on_timeline_record, record, facts)
     if batch.completes_sync and after_sync is not None:
         await after_sync(result.receipt_new)
     await session.ack(batch)
     return result
+
+
+def _notify_timeline_record(
+    on_timeline_record: Callable[[SyncRecord], None] | None,
+    record: SyncRecord,
+    facts: ej.AdmissionFacts,
+) -> None:
+    if (
+        on_timeline_record is not None
+        and facts.receipt_new
+        and record.kind is RecordKind.TIMELINE
+        and record.provenance is not nio.TimelineEventProvenance.HISTORY
+        and record.room_id is not None
+    ):
+        on_timeline_record(record)
 
 
 async def _dispatch_auxiliary_record(
@@ -193,6 +210,7 @@ async def run_ingestion_pump(
     after_sync: Callable[[bool], Awaitable[None]] | None = None,
     after_ack: Callable[[], None] | None = None,
     on_decryption_failure: Callable[[SyncRecord], None] | None = None,
+    on_timeline_record: Callable[[SyncRecord], None] | None = None,
     sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> None:
     """Drain batches, waiting on work or the existing delivery projection barrier."""
@@ -218,6 +236,7 @@ async def run_ingestion_pump(
                 after_admission=after_admission,
                 after_sync=after_sync,
                 on_decryption_failure=on_decryption_failure,
+                on_timeline_record=on_timeline_record,
                 sender_is_managed=sender_is_managed,
             )
         except ej.DeliveryProjectionPendingError:

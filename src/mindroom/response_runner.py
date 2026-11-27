@@ -34,6 +34,7 @@ from mindroom.constants import (
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
+    RESOLVED_IN_TURN_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
@@ -2239,6 +2240,10 @@ class ResponseRunner:
         def response_stream() -> AsyncIterator[StreamInputChunk]:
             return turn.stream(turn.runtime, active_event_ids, compaction_lifecycle, sinks)
 
+        def thread_resolved_in_turn() -> bool:
+            thread_id = turn.runtime.tool_context.target.resolved_thread_id
+            return thread_id is not None and thread_id in turn.runtime.tool_context.resolved_thread_ids
+
         def final_extra_content() -> dict[str, Any] | None:
             # A turn that published no run metadata still names the run the record holds.
             fallback = ai_run_extra_content_from_metadata(recorder.run_metadata) or {}
@@ -2250,8 +2255,9 @@ class ResponseRunner:
                 published[AI_RUN_METADATA_KEY] = {**fallback[AI_RUN_METADATA_KEY], **ai_run}
             entries = compactions.content()
             compaction_content = {COMPACTIONS_CONTENT_KEY: entries} if entries is not None else {}
+            resolved_content = {RESOLVED_IN_TURN_KEY: True} if thread_resolved_in_turn() else {}
             return merge_response_extra_content(
-                {**fallback, **published, **compaction_content} or None,
+                {**fallback, **published, **compaction_content, **resolved_content} or None,
                 request.attachment_ids,
             )
 
@@ -2344,6 +2350,10 @@ class ResponseRunner:
                         ),
                         allow_new_terminal_message=lambda: participation is None or participation.approved,
                         placeholder_ready=None if participation is None else participation.wait_for_approval,
+                        resolved_in_turn=lambda: (
+                            (thread_id := runtime.tool_context.target.resolved_thread_id) is not None
+                            and thread_id in runtime.tool_context.resolved_thread_ids
+                        ),
                     ),
                 )
             if request.pipeline_timing is not None:
