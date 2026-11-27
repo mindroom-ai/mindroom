@@ -11,6 +11,7 @@ import base64
 import re
 import unicodedata
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from html import escape
 from html.parser import HTMLParser
 from pathlib import PureWindowsPath
@@ -24,7 +25,7 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import UploadSourceError, open_upload_source
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.microsoft import microsoft_token_url
+from mindroom.oauth.microsoft import microsoft_oauth_provider, microsoft_token_url
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
@@ -37,9 +38,10 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
     from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import BinaryIO
@@ -113,11 +115,42 @@ def graph_int(value: int, field_name: str, *, maximum: int, minimum: int = 1) ->
     return value
 
 
-def required_text(value: str, field_name: str) -> str:
-    """Return a model-supplied text argument unchanged, refusing one that is empty or only whitespace."""
-    if not value.strip():
+def required_text(value: str | None, field_name: str) -> str:
+    """Return a model-supplied text argument unchanged, refusing one that is missing, empty, or only whitespace."""
+    if not isinstance(value, str) or not value.strip():
         raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
     return value
+
+
+def require_arg[T](value: T | None, field_name: str, message: str | None = None) -> T:
+    """Return a required argument, raising invalid_argument when omitted."""
+    if value is None:
+        raise MicrosoftGraphError(code="invalid_argument", message=message or f"{field_name} is required.")
+    return value
+
+
+def invalid_action(action: object) -> MicrosoftGraphError:
+    """Return an invalid_argument error for an unsupported action."""
+    return MicrosoftGraphError(code="invalid_argument", message=f"Unsupported action: {action!r}.")
+
+
+def reject_unexpected_args(
+    tool_name: str,
+    action: str,
+    allowed_by_action: Mapping[str, Collection[str]],
+    provided: Mapping[str, object],
+) -> str | None:
+    """Return an ``invalid_argument`` error payload when ``action`` receives unsupported arguments."""
+    allowed = allowed_by_action.get(action)
+    if allowed is None:
+        return None
+    unexpected = [name for name, value in provided.items() if value is not None and name not in allowed]
+    if not unexpected:
+        return None
+    fields = ", ".join(unexpected)
+    verb = "is" if len(unexpected) == 1 else "are"
+    msg = f"{fields} {verb} not supported for action {action!r}."
+    return graph_error_payload(tool_name, MicrosoftGraphError(code="invalid_argument", message=msg))
 
 
 def time_zone_name(value: str) -> str:
@@ -525,7 +558,7 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
 
 
 @contextmanager
-def graph_session(
+def _graph_session(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
@@ -624,3 +657,30 @@ def mailbox_tool_result(
             raise
 
     return _graph_tool_result(tool_name, run)
+
+
+class MicrosoftGraphToolkit(Toolkit):
+    """Shared base for requester-scoped Microsoft Graph toolkits."""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        runtime_paths: RuntimePaths,
+        credentials_manager: CredentialsManager | None,
+        worker_target: ResolvedWorkerTarget | None,
+        runtime_config: Config | None,
+        tools: Sequence[Callable[..., str]],
+    ) -> None:
+        if credentials_manager is None:
+            msg = f"{type(self).__name__} requires an explicit credentials_manager"
+            raise RuntimeError(msg)
+        self._session = partial(
+            _graph_session,
+            microsoft_oauth_provider(tool_name),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
+        super().__init__(name=tool_name, tools=tools)

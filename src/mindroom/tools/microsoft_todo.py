@@ -49,11 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_todo_list_lists",
-        "microsoft_todo_list_tasks",
-        "microsoft_todo_create_task",
-        "microsoft_todo_update_task",
-        "microsoft_todo_delete_task",
+        "microsoft_todo_read",
+        "microsoft_todo_write",
+    ),
+    action_scoped_grants=(
+        "microsoft_todo_read",
+        "microsoft_todo_write",
     ),
 )
 def microsoft_todo_tools() -> type[MicrosoftTodoTools]:

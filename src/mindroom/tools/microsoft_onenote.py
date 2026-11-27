@@ -49,12 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_onenote_list_notebooks",
-        "microsoft_onenote_list_sections",
-        "microsoft_onenote_list_pages",
-        "microsoft_onenote_get_page",
-        "microsoft_onenote_create_page",
-        "microsoft_onenote_append_to_page",
+        "microsoft_onenote_read",
+        "microsoft_onenote_write",
+    ),
+    action_scoped_grants=(
+        "microsoft_onenote_read",
+        "microsoft_onenote_write",
     ),
 )
 def microsoft_onenote_tools() -> type[MicrosoftOneNoteTools]:

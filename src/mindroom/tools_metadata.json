@@ -497,9 +497,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_meetings_find",
-        "microsoft_meetings_list_transcripts",
-        "microsoft_meetings_get_transcript"
+        "microsoft_meetings_read"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "TbBrandTeams",
@@ -539,17 +537,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_teams_list_teams",
-        "microsoft_teams_list_channels",
-        "microsoft_teams_list_channel_messages",
-        "microsoft_teams_list_channel_message_replies",
-        "microsoft_teams_list_chats",
-        "microsoft_teams_list_chat_messages",
-        "microsoft_teams_get_presence",
-        "microsoft_teams_send_channel_message",
-        "microsoft_teams_reply_to_channel_message",
-        "microsoft_teams_send_chat_message",
-        "microsoft_teams_start_chat"
+        "microsoft_teams_read",
+        "microsoft_teams_send"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "TbBrandTeams",
@@ -6965,16 +6954,10 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "outlook_mail_search",
-        "outlook_mail_get_message",
-        "outlook_mail_download_attachment",
-        "outlook_mail_get_automatic_replies",
+        "outlook_mail_read",
         "outlook_mail_create_draft",
-        "outlook_mail_send",
-        "outlook_mail_reply",
-        "outlook_mail_mark_read",
-        "outlook_mail_move",
-        "outlook_mail_set_automatic_replies"
+        "outlook_mail_send_message",
+        "outlook_mail_manage"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "Mail",
@@ -8764,15 +8747,8 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "microsoft_files_search",
-        "microsoft_files_list_folder",
-        "microsoft_files_get_file",
-        "microsoft_files_download_file",
-        "microsoft_files_replace_file",
-        "microsoft_files_upload_file",
-        "microsoft_files_excel_list_worksheets",
-        "microsoft_files_excel_read_range",
-        "microsoft_files_excel_update_range"
+        "microsoft_files_read",
+        "microsoft_files_write"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "TbBrandOnedrive",
@@ -8812,12 +8788,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_onenote_list_notebooks",
-        "microsoft_onenote_list_sections",
-        "microsoft_onenote_list_pages",
-        "microsoft_onenote_get_page",
-        "microsoft_onenote_create_page",
-        "microsoft_onenote_append_to_page"
+        "microsoft_onenote_read",
+        "microsoft_onenote_write"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "NotebookPen",
@@ -8843,9 +8815,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_people_search",
-        "microsoft_people_get_profile",
-        "microsoft_people_list_direct_reports"
+        "microsoft_people_read"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service. An administrator must grant consent for User.Read.All.",
       "icon": "Users",
@@ -8885,15 +8855,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_sharepoint_search_sites",
-        "microsoft_sharepoint_get_site",
-        "microsoft_sharepoint_list_lists",
-        "microsoft_sharepoint_get_list",
-        "microsoft_sharepoint_list_items",
-        "microsoft_sharepoint_create_item",
-        "microsoft_sharepoint_update_item",
-        "microsoft_sharepoint_list_pages",
-        "microsoft_sharepoint_get_page"
+        "microsoft_sharepoint_read",
+        "microsoft_sharepoint_write"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "LayoutList",
@@ -8933,11 +8896,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "microsoft_todo_list_lists",
-        "microsoft_todo_list_tasks",
-        "microsoft_todo_create_task",
-        "microsoft_todo_update_task",
-        "microsoft_todo_delete_task"
+        "microsoft_todo_read",
+        "microsoft_todo_write"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "ListTodo",
@@ -9224,14 +9184,8 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "outlook_calendar_list_calendars",
-        "outlook_calendar_list_events",
-        "outlook_calendar_get_event",
-        "outlook_calendar_get_free_busy",
-        "outlook_calendar_create_event",
-        "outlook_calendar_update_event",
-        "outlook_calendar_delete_event",
-        "outlook_calendar_respond_to_event"
+        "outlook_calendar_read",
+        "outlook_calendar_write"
       ],
       "helper_text": "Each user connects their own Microsoft account. Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service.",
       "icon": "CalendarDays",

@@ -49,17 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_teams_list_teams",
-        "microsoft_teams_list_channels",
-        "microsoft_teams_list_channel_messages",
-        "microsoft_teams_list_channel_message_replies",
-        "microsoft_teams_list_chats",
-        "microsoft_teams_list_chat_messages",
-        "microsoft_teams_get_presence",
-        "microsoft_teams_send_channel_message",
-        "microsoft_teams_reply_to_channel_message",
-        "microsoft_teams_send_chat_message",
-        "microsoft_teams_start_chat",
+        "microsoft_teams_read",
+        "microsoft_teams_send",
+    ),
+    action_scoped_grants=(
+        "microsoft_teams_read",
+        "microsoft_teams_send",
     ),
 )
 def microsoft_teams_tools() -> type[MicrosoftTeamsTools]:
