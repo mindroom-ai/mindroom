@@ -3202,6 +3202,12 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
         ("outlook_mail", "outlook_mail_manage", ("mark_read", "move", "set_automatic_replies")),
         ("outlook_calendar", "outlook_calendar_read", ("list_calendars", "list_events", "get_free_busy")),
         ("outlook_calendar", "outlook_calendar_write", ("create_event", "delete_event", "respond_to_event")),
+        ("microsoft_teams", "microsoft_teams_read", ("list_teams", "list_channel_messages", "get_presence")),
+        ("microsoft_teams", "microsoft_teams_send", ("send_channel_message", "send_chat_message", "start_chat")),
+        ("microsoft_files", "microsoft_files_read", ("search", "download_file", "excel_read_range")),
+        ("microsoft_files", "microsoft_files_write", ("replace_file", "upload_file", "excel_update_range")),
+        ("microsoft_sharepoint", "microsoft_sharepoint_read", ("search_sites", "list_items", "get_page")),
+        ("microsoft_sharepoint", "microsoft_sharepoint_write", ("create_item", "update_item")),
     ],
 )
 def test_microsoft_365_registry_action_scoped_grants_bind_per_action(
@@ -3243,6 +3249,9 @@ def test_outlook_mail_create_draft_keeps_tool_wide_grants() -> None:
         ("outlook_mail", "outlook_mail_reply", "outlook_mail_send"),
         ("outlook_mail", "outlook_mail_set_automatic_replies", "outlook_mail_manage"),
         ("outlook_calendar", "outlook_calendar_create_event", "outlook_calendar_write"),
+        ("microsoft_teams", "microsoft_teams_send_channel_message", "microsoft_teams_send"),
+        ("microsoft_files", "microsoft_files_replace_file", "microsoft_files_write"),
+        ("microsoft_sharepoint", "microsoft_sharepoint_create_item", "microsoft_sharepoint_write"),
     ],
 )
 def test_microsoft_365_retired_approval_rules_fail_closed(

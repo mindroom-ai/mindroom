@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="microsoft_teams",
     display_name="Microsoft Teams",
-    description="Read and send Teams channel and chat messages, start chats, and read presence as the connected user",
+    description="Read and send Microsoft Teams channel and chat messages, start chats, and check presence as the connected user",
     category=ToolCategory.COMMUNICATION,
     file_access=ToolFileAccess.NONE,
     status=ToolStatus.REQUIRES_CONFIG,
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     auth_provider="microsoft_teams",
     icon="TbBrandTeams",
-    icon_color="text-indigo-600",
+    icon_color="text-violet-600",
     config_fields=[
         bool_config_field(
             "write",
@@ -49,17 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_teams_list_teams",
-        "microsoft_teams_list_channels",
-        "microsoft_teams_list_channel_messages",
-        "microsoft_teams_list_channel_message_replies",
-        "microsoft_teams_list_chats",
-        "microsoft_teams_list_chat_messages",
-        "microsoft_teams_get_presence",
-        "microsoft_teams_send_channel_message",
-        "microsoft_teams_reply_to_channel_message",
-        "microsoft_teams_send_chat_message",
-        "microsoft_teams_start_chat",
+        "microsoft_teams_read",
+        "microsoft_teams_send",
+    ),
+    action_scoped_grants=(
+        "microsoft_teams_read",
+        "microsoft_teams_send",
     ),
 )
 def microsoft_teams_tools() -> type[MicrosoftTeamsTools]:
