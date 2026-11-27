@@ -15,9 +15,8 @@ from mindroom.api.app_state import app_state, notify_reactive_event_loop
 from mindroom.api.config_lifecycle import bind_current_request_snapshot
 from mindroom.api.room_reads import read_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
+from mindroom.event_sources import EventSourceContext, EventSourceRegistry, delivery_pause_reason
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
-from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
 from mindroom.plugin_http import ClientUser, client_rooms, require_room_member
 from mindroom.reactive_triggers.management import (
@@ -44,15 +43,13 @@ from mindroom.reactive_triggers.store import (
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.external_triggers.store import ExternalTriggerTarget
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.reactive_triggers.models import TriggerTargetSpec
-
-logger = get_logger(__name__)
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["room-triggers"])
 
 _Member = Annotated[ClientUser, Depends(require_room_member)]
@@ -112,17 +109,18 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
             *ReactiveTriggerStore(runtime_paths).list_triggers(include_disabled=True),
         ]
         items = [item for rec in records if (item := _match_trigger_to_room(rec, room_id, runtime_paths))]
-        items.sort(
-            key=lambda item: (
-                0 if item.relation == "target" else 1,
-                float(item.record.created_at),
-                item.record.trigger_id,
-            ),
-        )
+        items.sort(key=lambda item: (item.relation != "target", float(item.record.created_at), item.record.trigger_id))
         return items
 
     matched = await _run_store(_load)
     owner_ids = equivalent_requester_ids(member.user_id, config, runtime_paths)
+    event_sources = _event_sources_registry(request)
+    matched = [
+        item
+        for item in matched
+        if not isinstance(item.record, ReactiveTriggerRecord)
+        or can_view_reactive_trigger(item.record, owner_ids, event_sources=event_sources)
+    ]
     watch_targets = list(
         dict.fromkeys(
             item.target_room_id
@@ -131,41 +129,38 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
         ),
     )
     joined_targets = set(await client_rooms(request, watch_targets)) if watch_targets else set()
-    event_sources = _event_sources_registry(request)
-    room_state_cache: dict[str, RoomStateSnapshot | None] = {}
-    rows: list[TriggerRow] = []
-    for item in matched:
-        can_manage = item.record.owner_user_id in owner_ids
-        if isinstance(item.record, ReactiveTriggerRecord) and not can_view_reactive_trigger(
-            item.record,
-            member.user_id,
-            event_sources=event_sources,
-            viewer_user_ids=owner_ids,
-        ):
-            continue
-        registered = _registered_source_for_record(item.record, event_sources)
-        paused_reason = (
-            await _paused_reason_for_owner_trigger(
-                request,
-                registered=registered,
-                record=item.record,
-                target_room_id=item.target_room_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                room_state_cache=room_state_cache,
-            )
-            if can_manage and registered is not None and isinstance(item.record, ReactiveTriggerRecord)
-            else None
-        )
-        rows.append(
+    room_state: RoomStateSnapshot | None = None
+    room_state_loaded = False
+
+    async def _load_room_state() -> RoomStateSnapshot | None:
+        nonlocal room_state, room_state_loaded
+        if not room_state_loaded:
+            room_state_loaded = True
+            room_state = await _read_room_state(request, room_id)
+        return room_state
+
+    return {
+        "triggers": [
             _build_trigger_row(
                 item,
-                can_manage=can_manage,
+                can_manage=(can_manage := item.record.owner_user_id in owner_ids),
                 joined_target_rooms=joined_targets,
-                paused_reason=paused_reason,
-            ),
-        )
-    return {"triggers": rows}
+                paused_reason=(
+                    await _owner_paused_reason(
+                        item.record,
+                        event_sources=event_sources,
+                        target_room_id=item.target_room_id,
+                        config=config,
+                        runtime_paths=runtime_paths,
+                        load_room_state=_load_room_state,
+                    )
+                    if can_manage
+                    else None
+                ),
+            )
+            for item in matched
+        ],
+    }
 
 
 @router.patch("/triggers/{trigger_id}")
@@ -208,19 +203,13 @@ async def update_room_trigger(
     )
     if body.enabled and isinstance(updated, ReactiveTriggerRecord):
         notify_reactive_event_loop(request.app, trigger_id=trigger_id)
-    registered = _registered_source_for_record(updated, _event_sources_registry(request))
-    paused_reason = (
-        await _paused_reason_for_owner_trigger(
-            request,
-            registered=registered,
-            record=updated,
-            target_room_id=matched.target_room_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            room_state_cache={},
-        )
-        if registered is not None and isinstance(updated, ReactiveTriggerRecord)
-        else None
+    paused_reason = await _owner_paused_reason(
+        updated,
+        event_sources=_event_sources_registry(request),
+        target_room_id=matched.target_room_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        load_room_state=lambda: _read_room_state(request, matched.target_room_id),
     )
     return _build_trigger_row(
         _MatchedTrigger(updated, matched.relation, matched.target_room_id),
@@ -298,9 +287,8 @@ async def _require_owned_room_trigger(
         isinstance(matched.record, ReactiveTriggerRecord)
         and not can_view_reactive_trigger(
             matched.record,
-            user_id,
+            equivalent_requester_ids(user_id, config, runtime_paths),
             event_sources=_event_sources_registry(request),
-            viewer_user_ids=equivalent_requester_ids(user_id, config, runtime_paths),
         )
     ):
         raise HTTPException(404, "Trigger not found in this room.")
@@ -320,75 +308,43 @@ def _thread_mode(target: ExternalTriggerTarget | TriggerTargetSpec) -> _TriggerT
 
 def _event_sources_registry(request: Request) -> EventSourceRegistry | None:
     embedded = app_state(request.app).embedded
-    if embedded is None:
-        return None
-    registry = getattr(getattr(embedded, "reactive_triggers", None), "event_sources", None)
-    return registry if isinstance(registry, EventSourceRegistry) else None
+    return None if embedded is None else embedded.reactive_triggers.event_sources
 
 
-def _registered_source_for_record(
-    record: TriggerRecord,
-    event_sources: EventSourceRegistry | None,
-) -> EventSource | None:
-    if (
-        event_sources is not None
-        and isinstance(record, ReactiveTriggerRecord)
-        and isinstance(record.source, ExternalEventSourceSpec)
-        and record.source.is_registered
-    ):
-        return event_sources.get(record.source.source_id)
-    return None
-
-
-async def _read_target_room_state(
-    request: Request,
-    room_id: str,
-    cache: dict[str, RoomStateSnapshot | None],
-) -> RoomStateSnapshot | None:
-    if room_id in cache:
-        return cache[room_id]
+async def _read_room_state(request: Request, room_id: str) -> RoomStateSnapshot | None:
     reader = app_state(request.app).room_state
-    snapshot: RoomStateSnapshot | None = None
-    if reader is not None:
-        try:
-            snapshot = await reader(room_id)
-        except HTTPException:
-            snapshot = None
-    cache[room_id] = snapshot
-    return snapshot
+    if reader is None:
+        return None
+    try:
+        return await reader(room_id)
+    except HTTPException:
+        return None
 
 
-async def _paused_reason_for_owner_trigger(
-    request: Request,
+async def _owner_paused_reason(
+    record: TriggerRecord,
     *,
-    registered: EventSource,
-    record: ReactiveTriggerRecord,
+    event_sources: EventSourceRegistry | None,
     target_room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    room_state_cache: dict[str, RoomStateSnapshot | None],
+    load_room_state: Callable[[], Awaitable[RoomStateSnapshot | None]],
 ) -> str | None:
-    target_room_state = await _read_target_room_state(request, target_room_id, room_state_cache)
+    if event_sources is None or not isinstance(record, ReactiveTriggerRecord):
+        return None
+    registered = event_sources.for_rule(record)
+    if registered is None:
+        return None
     ctx = EventSourceContext(
         owner_user_id=record.owner_user_id,
         config=config,
         runtime_paths=runtime_paths,
         target_room_id=target_room_id,
         target_agent=record.target.agent,
-        target_room_state=target_room_state,
+        target_room_state=await load_room_state(),
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
     )
-    try:
-        result = await registered.check_delivery_access(ctx, rule=record, event=None)
-    except Exception:
-        logger.warning(
-            "Event source check_delivery_access failed during room trigger listing",
-            source_id=registered.source_id,
-            trigger_id=record.trigger_id,
-            exc_info=True,
-        )
-        return "source_error"
-    return result.reason if result is not None else None
+    return await delivery_pause_reason(registered, ctx, record)
 
 
 def _build_trigger_row(

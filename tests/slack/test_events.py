@@ -17,7 +17,6 @@ from mindroom.slack.events import (
     mentioned_user_ids,
     parse_message_event,
     project_thread_key,
-    project_wake_agent,
     verify_slack_signature,
 )
 
@@ -236,12 +235,3 @@ def test_mention_parsing_forms(text: str, expected: set[str]) -> None:
 
 def test_thread_keys() -> None:
     assert project_thread_key(TEAM, CHANNEL, "1700000000.000050") == f"{TEAM}:{CHANNEL}:1700000000.000050"
-
-
-def test_project_wake_agent_answers_the_events_channel() -> None:
-    answering = (_answering("alpha", CHANNEL), _answering("beta", OTHER_CHANNEL))
-    event = _event()
-    assert project_wake_agent(event, answering) == answering[0]
-    assert project_wake_agent(replace(event, channel_id=OTHER_CHANNEL), answering) == answering[1]
-    assert project_wake_agent(replace(event, channel_id="C0UNOWNED"), answering) is None
-    assert project_wake_agent(event, ()) is None

@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
 from mindroom.config.slack import has_personal_slack
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.event_sources import (
+    LEGACY_SLACK_WATCH_HOOK_PREFIX,
     EventSource,
     EventSourceAccessDenial,
     EventSourceContext,
     EventSourceDescriptor,
+    EventSourceInactiveError,
     ExternalBindingValue,
     ExternalMatchValue,
     ValidatedSubscription,
+    event_source_hook_source,
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.credential_lifecycle import (
@@ -30,27 +33,22 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
 from mindroom.reactive_triggers.models import ExternalEventSourceSpec, ReactiveTriggerRecord, TriggerEvent
-from mindroom.requester_identity import (
-    equivalent_requester_ids,
-    is_access_checked_requester_id,
-    resolve_human_requester_alias,
-)
+from mindroom.requester_identity import equivalent_requester_ids, is_access_checked_requester_id
 from mindroom.slack.api import SlackApiError, parse_conversation_target, slack_call
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app
 from mindroom.slack.events import is_direct_message, mentioned_user_ids
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.render import json_objects, next_cursor, slack_plain_text
-from mindroom.slack.turns import conversation_label, delivery_failed, event_author, failure_reason
+from mindroom.slack.turns import conversation_label, event_author, failure_reason
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-    from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.reactive_triggers.store import ReactiveTriggerStore
     from mindroom.slack.turns import DeliveryResult, SlackAttempt
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -58,13 +56,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 SLACK_EVENT_SOURCE_ID = "slack"
-_SLACK_TRIGGER_HOOK_SOURCE = f"event_source:{SLACK_EVENT_SOURCE_ID}"
-# LEGACY_COMPAT: Turns emitted by legacy slack/watches.py carried `slack-watch/<watch_id>` hook sources.
-# Legacy format: `hook_source` starting with `"slack-watch/"` on queued or resumed runs across upgrade.
-# Last legacy release: v2026.11; replacement: `event_source:slack` on reactive trigger dispatches.
-# Handling: Keep refusing Slack writes for both `event_source:slack` and `slack-watch/`.
-# Coverage: tests/slack/test_toolkit.py::test_writes_refused_during_watch_turn.
-_LEGACY_WATCH_SOURCE_PREFIX = "slack-watch/"
+_SLACK_TRIGGER_HOOK_SOURCE = event_source_hook_source(SLACK_EVENT_SOURCE_ID)
 _ALLOWED_KINDS = ("message", "mention", "direct_message")
 _PRIVATE_HISTORY_VISIBILITY = frozenset({"invited", "joined"})
 _NEEDS_APP_TOKEN = "The MindRoom Slack app needs an app-level token for watches"  # noqa: S105
@@ -76,7 +68,7 @@ _ACCOUNT_CHANGED = "Slack account changed; recreate this subscription"
 def started_by_slack_trigger(context: ToolRuntimeContext | None) -> bool:
     """Return whether a Slack reactive trigger or legacy Slack watch started this turn."""
     hook = context.hook_source if context is not None else None
-    return bool(hook and (hook == _SLACK_TRIGGER_HOOK_SOURCE or hook.startswith(_LEGACY_WATCH_SOURCE_PREFIX)))
+    return bool(hook and (hook == _SLACK_TRIGGER_HOOK_SOURCE or hook.startswith(LEGACY_SLACK_WATCH_HOOK_PREFIX)))
 
 
 def _watch_room_problem_from_state(
@@ -97,13 +89,25 @@ def _watch_room_problem_from_state(
     return None if vis in _PRIVATE_HISTORY_VISIBILITY else "people who join this room later could read earlier messages"
 
 
-def _room_problem(room_state: RoomStateSnapshot | None, owner_id: str, ctx: EventSourceContext) -> str | None:
-    return _watch_room_problem_from_state(room_state, owner_id, ctx.config, ctx.runtime_paths)
-
-
 async def _slack_app_for_ctx(ctx: EventSourceContext) -> tuple[CredentialsManager, SlackAppCredentials | None]:
     creds_mgr = ctx.credentials_manager or get_runtime_credentials_manager(ctx.runtime_paths)
     return creds_mgr, await asyncio.to_thread(load_slack_app, creds_mgr)
+
+
+async def usable_slack_credentials(
+    context: OAuthCredentialContext,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read usable Slack OAuth credentials without refreshing, returning ``(creds, error_reason)``."""
+    if context.worker_target is None:
+        return None, None
+    try:
+        creds = (await load_oauth_credentials_snapshot(context)).credentials
+    except OAuthCredentialUnreadableError:
+        return None, OAUTH_RESET_REQUIRED_REASON
+    usable = await asyncio.to_thread(oauth_credentials_usable, context.provider, context.runtime_paths, creds)
+    if creds is None or not usable or not isinstance(creds.get("token"), str) or not creds["token"]:
+        return None, None
+    return creds, None
 
 
 async def _load_owner_credentials(
@@ -113,31 +117,21 @@ async def _load_owner_credentials(
     owner_user_id: str,
 ) -> tuple[dict[str, Any] | None, OAuthCredentialContext, str | None]:
     """Read the owner's usable Slack credentials without refreshing, returning ``(creds, context, error_reason)``."""
-    provider = slack_oauth_provider()
-    owner = resolve_human_requester_alias(owner_user_id, ctx.config, ctx.runtime_paths)
     identity = build_requester_execution_identity(
         agent_name=agent_name,
         runtime_paths=ctx.runtime_paths,
-        requester_id=owner,
+        requester_id=owner_user_id,
     )
     cred_ctx = resolve_oauth_credential_context(
-        provider,
+        slack_oauth_provider(),
         ctx.runtime_paths,
         creds_mgr,
         None,
         execution_identity=identity,
         config=ctx.config,
     )
-    if cred_ctx.worker_target is None:
-        return None, cred_ctx, None
-    try:
-        creds = (await load_oauth_credentials_snapshot(cred_ctx)).credentials
-    except OAuthCredentialUnreadableError:
-        return None, cred_ctx, OAUTH_RESET_REQUIRED_REASON
-    usable = await asyncio.to_thread(oauth_credentials_usable, provider, ctx.runtime_paths, creds)
-    if creds is None or not usable or not isinstance(creds.get("token"), str) or not creds["token"]:
-        return None, cred_ctx, None
-    return creds, cred_ctx, None
+    creds, error_reason = await usable_slack_credentials(cred_ctx)
+    return creds, cred_ctx, error_reason
 
 
 def _bound_slack_account(rule: ReactiveTriggerRecord) -> tuple[str, str] | None:
@@ -149,22 +143,37 @@ def _bound_slack_account(rule: ReactiveTriggerRecord) -> tuple[str, str] | None:
     return None
 
 
-def _matches_slack_rule(
-    source: ExternalEventSourceSpec,
-    is_dm: bool,
+def _classify_slack_rule(
+    rule: ReactiveTriggerRecord,
+    *,
+    team_id: object,
     channel_id: object,
-    is_mention: bool,
-    has_thread: bool,
-) -> bool:
+    user_id: object,
+    is_dm: bool,
+    mentioned: Collection[str],
+    is_thread_reply: bool,
+) -> tuple[Literal["direct", "thread"], str] | None:
+    """Classify whether ``rule`` matches directly, via a bound thread reply, or not at all."""
+    if not isinstance(rule.source, ExternalEventSourceSpec) or not rule.source.is_registered:
+        return None
+    if (bound := _bound_slack_account(rule)) is None or bound[0] != team_id or bound[1] == user_id:
+        return None
+    uid = bound[1]
+    is_mention = uid in mentioned
     if is_dm:
-        return source.kind in ("message", "direct_message") or (source.kind == "mention" and is_mention)
-    filt = source.match.get("channel_id")
+        matched = rule.source.kind in ("message", "direct_message") or (rule.source.kind == "mention" and is_mention)
+        return ("direct", uid) if matched else None
+    filt = rule.source.match.get("channel_id")
     channel_ok = (
         filt is None
         or (isinstance(filt, str) and channel_id == filt)
         or (isinstance(filt, list) and channel_id in filt)
     )
-    return source.kind in ("message", "mention") and channel_ok and (is_mention or has_thread)
+    if rule.source.kind not in ("message", "mention") or not channel_ok:
+        return None
+    if is_mention:
+        return ("direct", uid)
+    return ("thread", uid) if is_thread_reply else None
 
 
 def _normalize_slack_match(kind: str, match: Mapping[str, ExternalMatchValue]) -> dict[str, ExternalMatchValue]:
@@ -209,10 +218,18 @@ class SlackEventSource(EventSource):
     def __init__(self) -> None:
         self.retry_migration: Callable[[], object] | None = None
 
-    @property
-    def migration_pending(self) -> bool:
-        """Whether legacy Slack watch migration failed at bind time and will retry lazily."""
-        return self.retry_migration is not None
+    async def ensure_migrated(self) -> bool:
+        """Complete any deferred legacy watch migration; return False if migration still fails."""
+        retry = self.retry_migration
+        if retry is None:
+            return True
+        try:
+            await asyncio.to_thread(retry)
+        except Exception:
+            logger.exception("Failed to migrate legacy Slack watches.json")
+            return False
+        self.retry_migration = None
+        return True
 
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         """Advertise Slack watches when the Slack app has an app token and personal Slack is configured."""
@@ -260,7 +277,12 @@ class SlackEventSource(EventSource):
             if existing_binding is not None
             else {"team_id": team_id, "slack_user_id": slack_user_id}
         )
-        problem = _room_problem(ctx.target_room_state, ctx.owner_user_id, ctx)
+        problem = _watch_room_problem_from_state(
+            ctx.target_room_state,
+            ctx.owner_user_id,
+            ctx.config,
+            ctx.runtime_paths,
+        )
         if problem is not None:
             msg = f"Cannot watch Slack here: {problem}"
             raise ValueError(msg)
@@ -275,17 +297,21 @@ class SlackEventSource(EventSource):
         has_thread_binding: bool = False,
     ) -> bool:
         """Match one Slack event against a personal Slack watch rule using ephemeral visibility audience."""
-        if not isinstance(rule.source, ExternalEventSourceSpec) or not isinstance(audience, frozenset) or not audience:
-            return False
-        if (bound := _bound_slack_account(rule)) is None:
-            return False
-        team_id, uid = bound
-        if team_id != event.data.get("team_id") or uid not in audience or uid == event.data.get("user_id"):
+        if not isinstance(audience, frozenset) or not audience:
             return False
         raw_mentioned = event.data.get("mentioned_user_ids", ())
-        is_mention = isinstance(raw_mentioned, (list, tuple, set, frozenset)) and uid in raw_mentioned
-        is_dm, channel_id = bool(event.data.get("is_dm")), event.data.get("channel_id")
-        return _matches_slack_rule(rule.source, is_dm, channel_id, is_mention, has_thread_binding)
+        classified = _classify_slack_rule(
+            rule,
+            team_id=event.data.get("team_id"),
+            channel_id=event.data.get("channel_id"),
+            user_id=event.data.get("user_id"),
+            is_dm=bool(event.data.get("is_dm")),
+            mentioned=raw_mentioned if isinstance(raw_mentioned, (list, tuple, set, frozenset)) else (),
+            is_thread_reply=bool(event.data.get("thread_ts")),
+        )
+        return (
+            classified is not None and classified[1] in audience and (classified[0] == "direct" or has_thread_binding)
+        )
 
     def dry_run_audience(self, rule: ReactiveTriggerRecord) -> object:
         """Synthesize a single-owner audience for dry-run ``triggers(action="test")``."""
@@ -301,23 +327,25 @@ class SlackEventSource(EventSource):
     ) -> EventSourceAccessDenial | None:
         """Re-verify app token, personal Slack config, verified OAuth identity, and private target room."""
         del event
-        reason = await self._delivery_pause_reason(ctx, rule)
-        return EventSourceAccessDenial(reason=reason) if reason is not None else None
-
-    async def _delivery_pause_reason(self, ctx: EventSourceContext, rule: ReactiveTriggerRecord) -> str | None:
         if (bound := _bound_slack_account(rule)) is None:
-            return _ACCOUNT_CHANGED
+            return EventSourceAccessDenial(reason=_ACCOUNT_CHANGED)
         creds_mgr, app = await _slack_app_for_ctx(ctx)
         if app is None or app.app_token is None:
-            return _NEEDS_APP_TOKEN
+            return EventSourceAccessDenial(reason=_NEEDS_APP_TOKEN)
         if not has_personal_slack(ctx.config, rule.target.agent):
-            return _AGENT_NO_PERSONAL_SLACK
+            return EventSourceAccessDenial(reason=_AGENT_NO_PERSONAL_SLACK)
         creds, _, _ = await _load_owner_credentials(ctx, creds_mgr, rule.target.agent, rule.owner_user_id)
         if creds is None:
-            return _SLACK_NOT_CONNECTED
+            return EventSourceAccessDenial(reason=_SLACK_NOT_CONNECTED)
         if (oauth_verified_claim(creds, "team_id"), oauth_verified_claim(creds, "sub")) != bound:
-            return _ACCOUNT_CHANGED
-        return _room_problem(ctx.target_room_state, rule.owner_user_id, ctx)
+            return EventSourceAccessDenial(reason=_ACCOUNT_CHANGED)
+        problem = _watch_room_problem_from_state(
+            ctx.target_room_state,
+            rule.owner_user_id,
+            ctx.config,
+            ctx.runtime_paths,
+        )
+        return EventSourceAccessDenial(reason=problem) if problem is not None else None
 
     async def check_history_access(
         self,
@@ -327,12 +355,18 @@ class SlackEventSource(EventSource):
         event: TriggerEvent | None = None,
     ) -> bool:
         """Allow inspecting private Slack firing payloads only for the owner in a private room."""
-        if ctx.owner_user_id not in equivalent_requester_ids(rule.owner_user_id, ctx.config, ctx.runtime_paths):
-            return False
         del event
-        if _room_problem(ctx.calling_room_state, rule.owner_user_id, ctx):
-            return False
-        return await self._delivery_pause_reason(ctx, rule) is None
+        return (
+            ctx.owner_user_id in equivalent_requester_ids(rule.owner_user_id, ctx.config, ctx.runtime_paths)
+            and _watch_room_problem_from_state(
+                ctx.calling_room_state,
+                rule.owner_user_id,
+                ctx.config,
+                ctx.runtime_paths,
+            )
+            is None
+            and await self.check_delivery_access(ctx, rule=rule) is None
+        )
 
 
 async def _visible_to(attempt: SlackAttempt, app_token: str) -> frozenset[str]:
@@ -357,14 +391,71 @@ async def _visible_to(attempt: SlackAttempt, app_token: str) -> frozenset[str]:
             return frozenset(people)
 
 
-async def _build_watch_trigger_event(
+async def _prefilter_watch_candidates(
     attempt: SlackAttempt,
+    store: ReactiveTriggerStore,
     is_dm: bool,
     mentioned: frozenset[str],
     thread_key: str,
-    dedupe_key: str,
-) -> TriggerEvent:
+) -> frozenset[str]:
+    """Return bound Slack user IDs whose enabled registered ``slack`` rules could match this event."""
+    now, event = time.time(), attempt.event
+    rules = await asyncio.to_thread(store.list_active_external_rules, SLACK_EVENT_SOURCE_ID, now, registered=True)
+    matched: set[str] = set()
+    thread_candidates: list[tuple[str, str]] = []
+    for rule in rules:
+        if (
+            classified := _classify_slack_rule(
+                rule,
+                team_id=event.team_id,
+                channel_id=event.channel_id,
+                user_id=event.user_id,
+                is_dm=is_dm,
+                mentioned=mentioned,
+                is_thread_reply=event.thread_ts is not None,
+            )
+        ) is None:
+            continue
+        mode, uid = classified
+        if mode == "direct":
+            matched.add(uid)
+        else:
+            thread_candidates.append((rule.trigger_id, uid))
+    if thread_candidates:
+        bound_ids = await asyncio.to_thread(
+            store.get_bound_thread_keys,
+            [tid for tid, _ in thread_candidates],
+            thread_key,
+            now=now,
+        )
+        matched.update(uid for tid, uid in thread_candidates if tid in bound_ids)
+    return frozenset(matched)
+
+
+async def emit_slack_watch_event(attempt: SlackAttempt) -> DeliveryResult:
+    """Prefilter Slack watch rules, verify Slack event visibility, and emit through the token-fenced emitter."""
+    runtime, app_token = attempt.runtime, attempt.app.app_token
+    store = runtime.reactive_triggers.store if runtime.reactive_triggers is not None else None
+    event_source, emitter = runtime.event_source, runtime.event_source_emitter
+    if (
+        app_token is None
+        or store is None
+        or event_source is None
+        or emitter is None
+        or not attempt.config.external_trigger_policy.is_reactive_active
+        or not await event_source.ensure_migrated()
+    ):
+        return "ignored"
+
     event = attempt.event
+    is_dm, mentioned = is_direct_message(event), mentioned_user_ids(event.text)
+    thread_key = event.channel_id if is_dm else f"{event.channel_id}:{event.thread_ts or event.ts}"
+    candidates = await _prefilter_watch_candidates(attempt, store, is_dm, mentioned, thread_key)
+    if not candidates:
+        return "ignored"
+    visible_to = await _visible_to(attempt, app_token)
+    if not (candidates & visible_to):
+        return "ignored"
     try:
         author = (await event_author(attempt)).display_name
     except (SlackApiError, httpx.HTTPError) as exc:
@@ -382,125 +473,31 @@ async def _build_watch_trigger_event(
         title, event_kind = f"Slack {dm_label} from {author}", "direct_message"
     else:
         title, event_kind = f"Slack message from {author} in {channel_label}", ("mention" if mentioned else "message")
-    return TriggerEvent(
-        source_type="external_event",
-        source_id=SLACK_EVENT_SOURCE_ID,
-        kind=event_kind,
-        event_id=dedupe_key,
-        timestamp=float(attempt.now),
-        actor=event.user_id,
-        title=title,
-        summary=f"{title}: {attempt.permalink}",
-        text=plain_text,
-        thread_key=thread_key,
-        data={
-            "team_id": event.team_id,
-            "channel_id": event.channel_id,
-            "channel_type": event.channel_type,
-            "channel_label": channel_label,
-            "user_id": event.user_id,
-            "author_display_name": author,
-            "ts": event.ts,
-            "thread_ts": event.thread_ts,
-            "permalink": attempt.permalink,
-            "is_dm": is_dm,
-            "mentioned_user_ids": sorted(mentioned),
-        },
-    )
-
-
-async def _prefilter_watch_candidates(
-    attempt: SlackAttempt,
-    store: ReactiveTriggerStore,
-    is_dm: bool,
-    mentioned: frozenset[str],
-    thread_key: str,
-) -> frozenset[str]:
-    """Return bound Slack user IDs whose enabled registered ``slack`` rules could match this event."""
-    now, event = time.time(), attempt.event
-    rules = await asyncio.to_thread(
-        store.list_triggers,
-        include_disabled=False,
-        source_type="external_event",
-        source_id=SLACK_EVENT_SOURCE_ID,
-    )
-    matched: set[str] = set()
-    thread_candidates: list[tuple[str, str]] = []
-    has_thread = not is_dm and event.thread_ts is not None
-    for rule in rules:
-        if (
-            (rule.expires_at is not None and rule.expires_at <= now)
-            or not isinstance(rule.source, ExternalEventSourceSpec)
-            or rule.source.source_origin != "registered"
-            or (bound := _bound_slack_account(rule)) is None
-            or bound[0] != event.team_id
-            or bound[1] == event.user_id
-        ):
-            continue
-        is_mention = bound[1] in mentioned
-        if not _matches_slack_rule(rule.source, is_dm, event.channel_id, is_mention, has_thread):
-            continue
-        if is_dm or is_mention:
-            matched.add(bound[1])
-        else:
-            thread_candidates.append((rule.trigger_id, bound[1]))
-    if thread_candidates:
-        bound_ids = await asyncio.to_thread(
-            store.get_bound_thread_keys,
-            [tid for tid, _ in thread_candidates],
-            thread_key,
-            now=now,
-        )
-        matched.update(uid for tid, uid in thread_candidates if tid in bound_ids)
-    return frozenset(matched)
-
-
-async def emit_slack_watch_event(
-    attempt: SlackAttempt,
-    reactive_triggers: ReactiveTriggerService | None,
-) -> DeliveryResult:
-    """Prefilter Slack watch rules, verify Slack event visibility, and emit onto ``ReactiveTriggerService``."""
-    app_token, policy = attempt.app.app_token, attempt.config.external_trigger_policy
-    if (
-        app_token is None
-        or reactive_triggers is None
-        or reactive_triggers.store is None
-        or not (policy.enabled and policy.reactive_enabled)
-        or (registered := reactive_triggers.event_sources.get(SLACK_EVENT_SOURCE_ID)) is None
-    ):
-        return "ignored"
-    if isinstance(registered, SlackEventSource) and registered.migration_pending:
-        retry = registered.retry_migration
-        if retry is not None:
-            try:
-                await asyncio.to_thread(retry)
-            except Exception:
-                logger.exception(
-                    "Failed to migrate legacy Slack watches.json; ignoring Slack watch event",
-                    event_id=attempt.event.event_id,
-                    channel_id=attempt.event.channel_id,
-                )
-                return "ignored"
-            registered.retry_migration = None
-
-    event = attempt.event
-    is_dm, mentioned = is_direct_message(event), mentioned_user_ids(event.text)
-    thread_key = event.channel_id if is_dm else f"{event.channel_id}:{event.thread_ts or event.ts}"
-    dedupe_key = f"{event.team_id}:{event.channel_id}:{event.ts}"
-    candidates = await _prefilter_watch_candidates(attempt, reactive_triggers.store, is_dm, mentioned, thread_key)
-    if not candidates:
-        return "ignored"
     try:
-        visible_to = await _visible_to(attempt, app_token)
-    except (SlackApiError, httpx.HTTPError) as exc:
-        return delivery_failed(exc, event_id=event.event_id, channel_id=event.channel_id)
-    if not (candidates & visible_to):
+        enqueued = await emitter.emit(
+            kind=event_kind,
+            event_id=f"{event.team_id}:{event.channel_id}:{event.ts}",
+            timestamp=float(attempt.now),
+            actor=event.user_id,
+            title=title,
+            summary=f"{title}: {attempt.permalink}",
+            text=plain_text,
+            thread_key=thread_key,
+            data={
+                "team_id": event.team_id,
+                "channel_id": event.channel_id,
+                "channel_type": event.channel_type,
+                "channel_label": channel_label,
+                "user_id": event.user_id,
+                "author_display_name": author,
+                "ts": event.ts,
+                "thread_ts": event.thread_ts,
+                "permalink": attempt.permalink,
+                "is_dm": is_dm,
+                "mentioned_user_ids": sorted(mentioned),
+            },
+            audience=visible_to,
+        )
+    except EventSourceInactiveError:
         return "ignored"
-    trigger_event = await _build_watch_trigger_event(attempt, is_dm, mentioned, thread_key, dedupe_key)
-    enqueued = await reactive_triggers.emit_event(
-        SLACK_EVENT_SOURCE_ID,
-        trigger_event,
-        audience=visible_to,
-        dedupe_key=dedupe_key,
-    )
     return "delivered" if enqueued > 0 else "ignored"

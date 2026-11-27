@@ -18,7 +18,7 @@ from mindroom.response_admission import admitted_response_decision
 from mindroom.slack.api import SlackApiError, slack_call, slack_http_client
 from mindroom.slack.app import load_slack_app, slack_bot_identity
 from mindroom.slack.event_source import emit_slack_watch_event
-from mindroom.slack.events import parse_message_event, project_thread_key, project_wake_agent
+from mindroom.slack.events import parse_message_event, project_thread_key
 from mindroom.slack.identity import project_channel_refusal
 from mindroom.slack.turns import (
     DELIVERY_ERRORS,
@@ -40,7 +40,7 @@ from mindroom.slack.turns import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -48,8 +48,10 @@ if TYPE_CHECKING:
     from mindroom.config.slack import SlackAnsweringAgent
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.event_sources import EventSourceEmitter
     from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.slack.app import SlackAppCredentials
+    from mindroom.slack.event_source import SlackEventSource
     from mindroom.slack.turns import DeliveryResult
 
 logger = get_logger(__name__)
@@ -72,7 +74,8 @@ class SlackRuntime:
     agent_reply_memberships: AgentReplyMembershipIndex
     http_client: Callable[[], httpx.AsyncClient] = slack_http_client
     reactive_triggers: ReactiveTriggerService | None = None
-    event_source_token: str | None = None
+    event_source: SlackEventSource | None = None
+    event_source_emitter: EventSourceEmitter | None = None
     # When each (Slack author, thread key) last got a notice; they get at most one a day, remembered in memory only.
     notices: dict[tuple[str, str], int] = field(default_factory=dict)
 
@@ -83,7 +86,6 @@ async def deliver_slack_event(
     runtime: SlackRuntime,
     config: Config,
     runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager,
     app: SlackAppCredentials,
     client: httpx.AsyncClient,
     now: int,
@@ -102,7 +104,6 @@ async def deliver_slack_event(
             runtime=runtime,
             config=config,
             runtime_paths=runtime_paths,
-            credentials_manager=credentials_manager,
             app=app,
             client=client,
             now=now,
@@ -147,7 +148,6 @@ async def retry_slack_event(
                 runtime=runtime,
                 config=config,
                 runtime_paths=runtime_paths,
-                credentials_manager=credentials_manager,
                 app=app,
                 client=client,
                 now=int(time.time()),
@@ -163,7 +163,6 @@ async def _deliver(
     runtime: SlackRuntime,
     config: Config,
     runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager,
     app: SlackAppCredentials,
     client: httpx.AsyncClient,
     now: int,
@@ -176,11 +175,11 @@ async def _deliver(
     identity = await slack_bot_identity(client, app)
     if payload.get("team_id") != identity.team_id:
         return "ignored"
-    answering = slack_answering_agents(config)
+    answering_by_channel = {channel: agent for agent in slack_answering_agents(config) for channel in agent.channels}
     event = parse_message_event(
         payload,
         bot_user_id=identity.bot_user_id,
-        answered_channels=frozenset(channel for agent in answering for channel in agent.channels),
+        answered_channels=frozenset(answering_by_channel),
     )
     if event is None:
         return "ignored"
@@ -188,7 +187,6 @@ async def _deliver(
         runtime=runtime,
         config=config,
         runtime_paths=runtime_paths,
-        credentials_manager=credentials_manager,
         client=client,
         app=app,
         identity=identity,
@@ -198,24 +196,22 @@ async def _deliver(
         now=now,
         last_attempt=last_attempt,
     )
-    project = await _deliver_to_project(attempt, answering)
-    watch_result = await retry_on_failure(event, emit_slack_watch_event(attempt, attempt.runtime.reactive_triggers))
-    return _combined([project, watch_result])
+    project = await _deliver_to_project(attempt, answering_by_channel.get(event.channel_id))
+    watch = await retry_on_failure(event, emit_slack_watch_event(attempt))
+    return _combined(project, watch)
 
 
-def _combined(results: Iterable[DeliveryResult]) -> DeliveryResult:
-    outcomes = set(results)
-    if "retry" in outcomes:
+def _combined(project: DeliveryResult, watch: DeliveryResult) -> DeliveryResult:
+    if "retry" in (project, watch):
         return "retry"
-    return "delivered" if "delivered" in outcomes else "ignored"
+    return "delivered" if "delivered" in (project, watch) else "ignored"
 
 
-async def _deliver_to_project(attempt: SlackAttempt, answering: tuple[SlackAnsweringAgent, ...]) -> DeliveryResult:
+async def _deliver_to_project(attempt: SlackAttempt, agent: SlackAnsweringAgent | None) -> DeliveryResult:
     """Wake the agent answering the event's channel; on the last attempt, a wake that still fails tells its author."""
-    event = attempt.event
-    agent = project_wake_agent(event, answering)
     if agent is None:
         return "ignored"
+    event = attempt.event
     thread_key = project_thread_key(event.team_id, event.channel_id, event.thread_ts or event.ts)
     result = await retry_on_failure(event, _wake_project_agent(attempt, agent, thread_key))
     if result == "retry" and attempt.last_attempt:

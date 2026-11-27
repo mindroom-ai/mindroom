@@ -175,7 +175,7 @@ def _make_orchestrator(
     *,
     bots: dict[str, object] | None = None,
 ) -> SimpleNamespace:
-    reactive_triggers = SimpleNamespace(notify_work=MagicMock())
+    reactive_triggers = SimpleNamespace(notify_work=MagicMock(), event_sources=None)
     return SimpleNamespace(
         agent_bots=bots or {},
         reactive_triggers=reactive_triggers,

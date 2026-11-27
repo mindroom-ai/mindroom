@@ -37,7 +37,9 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_sources import EventSourceEmitter
     from mindroom.reactive_triggers.service import ReactiveTriggerService
+    from mindroom.slack.event_source import SlackEventSource
 
 TEAM = "T0123ABCD"
 BOT_USER = "U0BOT0000"
@@ -183,6 +185,8 @@ def runtime_for(
     slack: FakeSlack,
     *,
     reactive_triggers: ReactiveTriggerService | None = None,
+    event_source: SlackEventSource | None = None,
+    event_source_emitter: EventSourceEmitter | None = None,
 ) -> SlackRuntime:
     """Return a Slack runtime over fake bots whose Slack calls reach `slack`."""
     return SlackRuntime(
@@ -190,6 +194,8 @@ def runtime_for(
         memberships,
         http_client=slack.client,
         reactive_triggers=reactive_triggers,
+        event_source=event_source,
+        event_source_emitter=event_source_emitter,
     )
 
 

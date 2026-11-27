@@ -90,11 +90,6 @@ def _enqueue_matched_rules(
     )
 
 
-def _reactive_enabled(config: Config) -> bool:
-    """Return whether reactive triggers are currently enabled in policy."""
-    return config.external_trigger_policy.enabled and config.external_trigger_policy.reactive_enabled
-
-
 def _is_rule_expired(rule: ReactiveTriggerRecord, now: float) -> bool:
     """Return whether a rule has an expires_at timestamp at or before now."""
     return rule.expires_at is not None and now >= rule.expires_at
@@ -236,7 +231,7 @@ class ReactiveTriggerService:
 
     async def sync(self, config: Config) -> None:
         """Start or stop the background loop to match the active reactive trigger policy."""
-        if self._store is not None and _reactive_enabled(config):
+        if self._store is not None and config.external_trigger_policy.is_reactive_active:
             self.start()
             self._schedule_thread_tag_reconcile()
             self.notify_work()
@@ -302,7 +297,7 @@ class ReactiveTriggerService:
         store = self._store
         config = self.config_provider()
         source = self.event_sources.get(source_id)
-        if store is None or not _reactive_enabled(config) or source is None:
+        if store is None or not config.external_trigger_policy.is_reactive_active or source is None:
             return 0
         if event.source_type != "external_event" or event.source_id != source_id:
             msg = f"Event source_type/source_id mismatch for {source_id!r}"
@@ -312,17 +307,18 @@ class ReactiveTriggerService:
             msg = "dedupe_key must not be empty"
             raise ValueError(msg)
 
-        allowed_owners = self._expand_emit_owners(owner_user_ids, config=config)
-        if owner_user_ids is not None and not allowed_owners:
+        allowed_owners = (
+            {uid for owner in owner_user_ids for uid in equivalent_requester_ids(owner, config, self.runtime_paths)}
+            if owner_user_ids is not None
+            else None
+        )
+        if allowed_owners is not None and not allowed_owners:
             return 0
 
         now = time.time()
-        candidates = await self._load_emit_candidates(
-            store,
-            source_id=source_id,
-            allowed_owners=allowed_owners,
-            now=now,
-        )
+        candidates = await asyncio.to_thread(store.list_active_external_rules, source_id, now, registered=True)
+        if allowed_owners is not None:
+            candidates = [rule for rule in candidates if rule.owner_user_id in allowed_owners]
         if not candidates:
             return 0
 
@@ -359,42 +355,6 @@ class ReactiveTriggerService:
         if enqueued > 0:
             self.notify_work(poll_github_prs=False)
         return enqueued
-
-    def _expand_emit_owners(
-        self,
-        owner_user_ids: Collection[str] | None,
-        *,
-        config: Config,
-    ) -> set[str] | None:
-        if owner_user_ids is None:
-            return None
-        expanded: set[str] = set()
-        for user_id in owner_user_ids:
-            expanded.update(equivalent_requester_ids(user_id, config, self.runtime_paths))
-        return expanded
-
-    @staticmethod
-    async def _load_emit_candidates(
-        store: ReactiveTriggerStore,
-        *,
-        source_id: str,
-        allowed_owners: set[str] | None,
-        now: float,
-    ) -> list[ReactiveTriggerRecord]:
-        rules = await asyncio.to_thread(
-            store.list_triggers,
-            include_disabled=False,
-            source_type="external_event",
-            source_id=source_id,
-        )
-        return [
-            rule
-            for rule in rules
-            if isinstance(rule.source, ExternalEventSourceSpec)
-            and rule.source.source_origin == "registered"
-            and not _is_rule_expired(rule, now)
-            and (allowed_owners is None or rule.owner_user_id in allowed_owners)
-        ]
 
     def _schedule_thread_tag_reconcile(self) -> None:
         """Schedule background thread_tag reconciliation without blocking config hot-reload."""
@@ -511,7 +471,7 @@ class ReactiveTriggerService:
         if self._store is None:
             return
         config = self.config_provider()
-        if not _reactive_enabled(config):
+        if not config.external_trigger_policy.is_reactive_active:
             return
         observed = _extract_thread_tag_observation(source)
         if observed is None:
@@ -644,7 +604,11 @@ class ReactiveTriggerService:
     async def restore_room(self, bot: AgentBot, room_id: str) -> None:
         """Reconcile thread_tag rules against room state on startup/join without reading rooms lacking rules."""
         client = bot.client
-        if self._store is None or client is None or not _reactive_enabled(self.config_provider()):
+        if (
+            self._store is None
+            or client is None
+            or not self.config_provider().external_trigger_policy.is_reactive_active
+        ):
             return
         if self._still_watched(bot, room_id):
             return
@@ -825,7 +789,7 @@ class ReactiveTriggerService:
         if self._store is None:
             return
         config = self.config_provider()
-        if not _reactive_enabled(config):
+        if not config.external_trigger_policy.is_reactive_active:
             return
 
         now = time.time()
@@ -1299,7 +1263,7 @@ class ReactiveTriggerService:
         """Return True when policy, rule state, target/source access, and optional claim guards allow proceeding."""
         assert self._store is not None
         store = self._store
-        if not _reactive_enabled(config):
+        if not config.external_trigger_policy.is_reactive_active:
             await self._run_store_update_safe(store.mark_skipped, firing.id, "reactive_triggers_disabled")
             return False
         if not rule.enabled or _is_rule_expired(rule, time.time()):

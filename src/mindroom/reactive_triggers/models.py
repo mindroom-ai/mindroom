@@ -119,7 +119,14 @@ class ExternalEventSourceSpec(BaseModel):
     @property
     def is_registered(self) -> bool:
         """Return whether this spec targets a registered EventSource rather than a YAML webhook source."""
-        return self.source_origin == "registered" or bool(self.binding)
+        return self.source_origin == "registered"
+
+    @model_validator(mode="after")
+    def _validate_spec(self) -> ExternalEventSourceSpec:
+        if self.binding and self.source_origin != "registered":
+            msg = "binding is only allowed when source_origin='registered'"
+            raise ValueError(msg)
+        return self
 
     @field_validator("source_id", "kind")
     @classmethod

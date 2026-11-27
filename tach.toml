@@ -11358,6 +11358,7 @@ depends_on = [
 path = "mindroom.slack.legacy_watch_migration"
 depends_on = [
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
     "mindroom.slack.event_source",
     "mindroom.slack.turns",
 ]
@@ -11367,7 +11368,6 @@ path = "mindroom.custom_tools.slack"
 depends_on = [
     "mindroom.config.main",
     "mindroom.file_access",
-    "mindroom.oauth.credential_lifecycle",
     "mindroom.slack.api",
     "mindroom.slack.app",
     "mindroom.slack.files",

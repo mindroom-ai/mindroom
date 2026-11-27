@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -43,6 +44,7 @@ type _PrDue = tuple[ReactiveTriggerRecord, GitHubPRCheckpoint | None]
 _ONE_HOUR_SECONDS = 3600.0
 _MAX_BACKOFF_SECONDS = 300.0
 _BASE_BACKOFF_SECONDS = 5.0
+THREAD_KEY_TTL_SECONDS = 7 * 86400
 
 ClaimResult = Literal["claimed", "disabled", "expired", "cooldown", "rate_limited", "missing", "rule_replaced"]
 ClaimCheckResult = Literal["ok", "disabled", "expired", "cooldown", "rate_limited", "missing", "rule_replaced"]
@@ -275,6 +277,22 @@ class ReactiveTriggerStore:
         with self._read_connection() as conn:
             rows = conn.execute(query, params).fetchall()
         return [_record_from_row(row) for row in rows]
+
+    def list_active_external_rules(
+        self,
+        source_id: str,
+        now: float,
+        *,
+        registered: bool | None = None,
+    ) -> list[ReactiveTriggerRecord]:
+        """Return enabled, unexpired external_event rules subscribed to source_id."""
+        return [
+            rule
+            for rule in self.list_triggers(include_disabled=False, source_type="external_event", source_id=source_id)
+            if isinstance(rule.source, ExternalEventSourceSpec)
+            and (rule.expires_at is None or rule.expires_at > now)
+            and (registered is None or rule.source.is_registered is registered)
+        ]
 
     def update_trigger(
         self,
@@ -1062,30 +1080,37 @@ class ReactiveTriggerStore:
                     )
         return firings
 
+    def _active_thread_key_bindings(
+        self,
+        trigger_ids: Collection[str],
+        thread_key: str,
+        *,
+        ttl_seconds: float,
+        now: float | None,
+    ) -> dict[str, str]:
+        if not trigger_ids or not thread_key:
+            return {}
+        cutoff = (time.time() if now is None else now) - ttl_seconds
+        with self._read_connection() as conn:
+            rows = conn.execute(
+                "SELECT trigger_id, thread_root_id FROM trigger_thread_keys "
+                "WHERE thread_key = ? AND updated_at > ? AND trigger_id IN (SELECT value FROM json_each(?))",
+                (thread_key, cutoff, json.dumps(list(dict.fromkeys(trigger_ids)))),
+            ).fetchall()
+        return {str(row["trigger_id"]): str(row["thread_root_id"]) for row in rows}
+
     def get_thread_key_binding(
         self,
         trigger_id: str,
         thread_key: str,
         *,
-        ttl_seconds: float = 7 * 86400,
+        ttl_seconds: float = THREAD_KEY_TTL_SECONDS,
         now: float | None = None,
     ) -> str | None:
         """Return the bound Matrix thread root ID for a thread_key if present and unexpired."""
-        current_time = time.time() if now is None else now
-        with self._read_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT thread_root_id, updated_at
-                FROM trigger_thread_keys
-                WHERE trigger_id = ? AND thread_key = ?
-                """,
-                (trigger_id, thread_key),
-            ).fetchone()
-        if row is None:
-            return None
-        if current_time - float(row["updated_at"]) >= ttl_seconds:
-            return None
-        return str(row["thread_root_id"])
+        return self._active_thread_key_bindings((trigger_id,), thread_key, ttl_seconds=ttl_seconds, now=now).get(
+            trigger_id,
+        )
 
     def save_thread_key_binding(
         self,
@@ -1099,21 +1124,10 @@ class ReactiveTriggerStore:
         """Persist or refresh the Matrix thread root ID bound to (trigger_id, thread_key)."""
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
-            if expected_rule_uid is not None:
-                live_uid = _live_rule_uid(conn, trigger_id)
-                if live_uid != expected_rule_uid:
-                    return False
+            if expected_rule_uid is not None and _live_rule_uid(conn, trigger_id) != expected_rule_uid:
+                return False
             try:
-                conn.execute(
-                    """
-                    INSERT INTO trigger_thread_keys (trigger_id, thread_key, thread_root_id, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(trigger_id, thread_key) DO UPDATE SET
-                        thread_root_id = excluded.thread_root_id,
-                        updated_at = excluded.updated_at
-                    """,
-                    (trigger_id, thread_key, thread_root_id, current_time),
-                )
+                _upsert_thread_key(conn, trigger_id, thread_key, thread_root_id, current_time)
             except sqlite3.IntegrityError as exc:
                 msg = f"Cannot save thread key binding for unknown trigger: {trigger_id}"
                 raise ReactiveTriggerStoreError(msg) from exc
@@ -1124,38 +1138,16 @@ class ReactiveTriggerStore:
         trigger_ids: Collection[str],
         thread_key: str,
         *,
-        ttl_seconds: float = 7 * 86400,
+        ttl_seconds: float = THREAD_KEY_TTL_SECONDS,
         now: float | None = None,
     ) -> frozenset[str]:
         """Return the subset of trigger_ids with an unexpired binding for thread_key."""
-        if not trigger_ids or not thread_key:
-            return frozenset()
-        unique_ids = tuple(dict.fromkeys(trigger_ids))
-        current_time = time.time() if now is None else now
-        cutoff = current_time - ttl_seconds
-        bound: set[str] = set()
-        with self._read_connection() as conn:
-            for start in range(0, len(unique_ids), 500):
-                chunk = unique_ids[start : start + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
-                    f"""
-                    SELECT trigger_id
-                    FROM trigger_thread_keys
-                    WHERE thread_key = ?
-                      AND updated_at > ?
-                      AND trigger_id IN ({placeholders})
-                    """,  # noqa: S608 - placeholders are generated '?' markers
-                    (thread_key, cutoff, *chunk),
-                ).fetchall()
-                bound.update(str(row["trigger_id"]) for row in rows)
-        return frozenset(bound)
+        return frozenset(self._active_thread_key_bindings(trigger_ids, thread_key, ttl_seconds=ttl_seconds, now=now))
 
     def has_migration(self, name: str) -> bool:
         """Return whether a one-time store migration has already been applied."""
         with self._read_connection() as conn:
-            row = conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (name,)).fetchone()
-        return row is not None
+            return _has_migration(conn, name)
 
     def import_triggers_once(
         self,
@@ -1172,7 +1164,11 @@ class ReactiveTriggerStore:
             raise ValueError(msg)
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
-            if conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (stripped_name,)).fetchone() is not None:
+            claimed = conn.execute(
+                "INSERT INTO applied_migrations (name, applied_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
+                (stripped_name, current_time),
+            )
+            if claimed.rowcount == 0:
                 return 0
             inserted_ids: set[str] = set()
             skipped_ids: list[str] = []
@@ -1182,23 +1178,8 @@ class ReactiveTriggerStore:
                 else:
                     skipped_ids.append(record.trigger_id)
             for trigger_id, thread_key, thread_root_id, updated_at in thread_keys:
-                if trigger_id not in inserted_ids:
-                    continue
-                conn.execute(
-                    """
-                    INSERT INTO trigger_thread_keys (trigger_id, thread_key, thread_root_id, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(trigger_id, thread_key) DO UPDATE SET
-                        thread_root_id = excluded.thread_root_id,
-                        updated_at = excluded.updated_at
-                    WHERE excluded.updated_at > trigger_thread_keys.updated_at
-                    """,
-                    (trigger_id, thread_key, thread_root_id, updated_at),
-                )
-            conn.execute(
-                "INSERT INTO applied_migrations (name, applied_at) VALUES (?, ?)",
-                (stripped_name, current_time),
-            )
+                if trigger_id in inserted_ids:
+                    _upsert_thread_key(conn, trigger_id, thread_key, thread_root_id, updated_at, only_if_newer=True)
             if skipped_ids:
                 logger.warning(
                     "Skipped colliding trigger IDs during migration import",
@@ -1211,7 +1192,7 @@ class ReactiveTriggerStore:
         self,
         *,
         retention_seconds: float = 30 * 86400,
-        thread_key_ttl_seconds: float = 7 * 86400,
+        thread_key_ttl_seconds: float = THREAD_KEY_TTL_SECONDS,
         now: float | None = None,
     ) -> int:
         """Delete old finished firing rows and expired thread_key bindings; return deleted firing count."""
@@ -1227,13 +1208,7 @@ class ReactiveTriggerStore:
                 """,
                 (*_FINISHED_FIRING_STATUSES, cutoff),
             )
-            conn.execute(
-                """
-                DELETE FROM trigger_thread_keys
-                WHERE updated_at < ?
-                """,
-                (thread_key_cutoff,),
-            )
+            conn.execute("DELETE FROM trigger_thread_keys WHERE updated_at < ?", (thread_key_cutoff,))
             return cursor.rowcount
 
     def _initialize_database(self) -> None:
@@ -1282,6 +1257,31 @@ def _live_rule_uid(conn: sqlite3.Connection, trigger_id: str) -> str | None:
         (trigger_id,),
     ).fetchone()
     return str(row["rule_uid"]) if row is not None else None
+
+
+def _has_migration(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        bool(s := name.strip())
+        and conn.execute("SELECT 1 FROM applied_migrations WHERE name = ?", (s,)).fetchone() is not None
+    )
+
+
+def _upsert_thread_key(
+    conn: sqlite3.Connection,
+    trigger_id: str,
+    thread_key: str,
+    thread_root_id: str,
+    updated_at: float,
+    *,
+    only_if_newer: bool = False,
+) -> None:
+    conn.execute(
+        "INSERT INTO trigger_thread_keys (trigger_id, thread_key, thread_root_id, updated_at) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(trigger_id, thread_key) DO UPDATE SET "
+        "thread_root_id = excluded.thread_root_id, updated_at = excluded.updated_at "
+        "WHERE ? OR excluded.updated_at > trigger_thread_keys.updated_at",
+        (trigger_id, thread_key, thread_root_id, updated_at, 0 if only_if_newer else 1),
+    )
 
 
 def _insert_trigger_row(

@@ -20,13 +20,8 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import UploadSourceError, checked_upload_source, read_upload_source
 from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.credential_lifecycle import (
-    OAuthCredentialUnreadableError,
-    load_oauth_credentials_snapshot,
-    oauth_credentials_usable,
-)
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
-from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
+from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, oauth_connection_required
 from mindroom.slack.api import (
     SLACK_TS_RE,
     SLACK_UNREACHABLE,
@@ -39,7 +34,7 @@ from mindroom.slack.api import (
     slack_http_client,
 )
 from mindroom.slack.app import SLACK_APP_NOT_CONFIGURED, SlackAppCredentials, load_slack_app, slack_bot_identity
-from mindroom.slack.event_source import started_by_slack_trigger
+from mindroom.slack.event_source import started_by_slack_trigger, usable_slack_credentials
 from mindroom.slack.files import MAX_FILE_BYTES, SlackFileError, fetch_file, save_download, share_file
 from mindroom.slack.identity import NOT_PROJECT_CHANNEL, project_channel_refusal, slack_channel_info
 from mindroom.slack.oauth import slack_oauth_provider
@@ -200,12 +195,6 @@ def _conversation_target(target: str) -> tuple[str, SlackTarget]:
         return parse_conversation_target(target)
     except ValueError as exc:
         raise _SlackRefusalError(str(exc)) from None
-
-
-def _refuse_write_in_watch_turn() -> None:
-    """Refuse a Slack write when a Slack trigger or legacy watch started this turn; a call outside any turn passes."""
-    if started_by_slack_trigger(get_tool_runtime_context()):
-        raise _SlackRefusalError(_WATCH_TURN_WRITE_REFUSAL)
 
 
 def _name_matches(query: str, *names: object) -> bool:
@@ -398,21 +387,9 @@ class SlackTools(Toolkit):
         self.project_channels = frozenset(channels) if channels else None
         # A project agent answers a Slack-started thread in its room, and MindRoom mirrors that reply to Slack itself.
         self._reply_mirrored = self.project_channels is not None and bool(room)
-        functions: dict[str, Callable[..., Awaitable[str]]] = {
-            "slack_search": self.slack_search,
-            "slack_recent": self.slack_recent,
-            "slack_read": self.slack_read,
-            "slack_download": self.slack_download,
-            "slack_post": self.slack_post,
-            "slack_react": self.slack_react,
-            "slack_edit": self.slack_edit,
-            "slack_delete": self.slack_delete,
-            "slack_upload": self.slack_upload,
-        }
-        super().__init__(
-            name=_TOOL_NAME,
-            tools=[function for name, function in functions.items() if write or name not in _WRITE_FUNCTIONS],
-        )
+        read_tools = [self.slack_search, self.slack_recent, self.slack_read, self.slack_download]
+        write_tools = [self.slack_post, self.slack_react, self.slack_edit, self.slack_delete, self.slack_upload]
+        super().__init__(name=_TOOL_NAME, tools=[*read_tools, *(write_tools if write else ())])
 
     def instructions_for(self, function_names: Collection[str]) -> str:
         """Tell an agent offered `slack_post` not to answer a Slack-started thread with it, as MindRoom mirrors the reply."""
@@ -427,24 +404,13 @@ class SlackTools(Toolkit):
             config=self._config,
         )
 
-    async def _requester_credentials(self) -> dict[str, Any]:
-        """Return the requester's usable Slack credentials: the user token, which neither expires nor refreshes."""
-        context = self._credential_context()
-        if context.worker_target is None:
-            # Requester-scoped credentials never fall back to a shared token.
-            raise await _connection_required(context)
-        try:
-            credentials = (await load_oauth_credentials_snapshot(context)).credentials
-        except OAuthCredentialUnreadableError:
-            raise await _connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
-        usable = await asyncio.to_thread(oauth_credentials_usable, self._provider, self._runtime_paths, credentials)
-        token = (credentials or {}).get("token")
-        if credentials is None or not usable or not isinstance(token, str) or not token:
-            raise await _connection_required(context)
-        return credentials
-
     async def _requester_token(self) -> str:
-        return (await self._requester_credentials())["token"]
+        """Return the requester's usable Slack user token, which neither expires nor refreshes."""
+        context = self._credential_context()
+        credentials, reason = await usable_slack_credentials(context)
+        if credentials is None:
+            raise await _connection_required(context, reason=reason)
+        return credentials["token"]
 
     async def _session(self, client: httpx.AsyncClient) -> _Session:
         # The app is the OAuth client of every personal connection too, and its bot names the workspace.
@@ -461,9 +427,9 @@ class SlackTools(Toolkit):
         """
         personal = self.project_channels is None
         write = function in _WRITE_FUNCTIONS
+        if write and started_by_slack_trigger(get_tool_runtime_context()):
+            return _error(_WATCH_TURN_WRITE_REFUSAL)
         try:
-            if write:
-                _refuse_write_in_watch_turn()
             async with slack_http_client() as client:
                 fields = await operation(await self._session(client))
         except (_SlackRefusalError, SlackFileError) as exc:
@@ -473,8 +439,10 @@ class SlackTools(Toolkit):
         except SlackApiError as exc:
             if personal and exc.error in _AUTH_ERRORS:
                 required = await _connection_required(self._credential_context(), reason=OAUTH_ACCESS_REJECTED_REASON)
-                return custom_tool_payload(_TOOL_NAME, "error", **oauth_connection_required_payload(required))
-            return _error(_api_error_text(exc, personal=personal))
+                result = custom_tool_payload(_TOOL_NAME, "error", **oauth_connection_required_payload(required))
+            else:
+                result = _error(_api_error_text(exc, personal=personal))
+            return result
         except httpx.HTTPError:
             return _error(_WRITE_UNANSWERED if write else SLACK_UNREACHABLE)
         return custom_tool_payload(_TOOL_NAME, "ok", **fields)

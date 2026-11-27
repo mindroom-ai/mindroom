@@ -238,7 +238,7 @@ class GitHubPRPoller:
         config = self._config_provider()
         current_time = time.time() if now is None else now
         policy = config.external_trigger_policy
-        if not (policy.enabled and policy.reactive_enabled):
+        if not policy.is_reactive_active:
             return 0
         due_watches = await asyncio.to_thread(
             self._store.list_due_github_pr_triggers,

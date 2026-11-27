@@ -243,7 +243,7 @@ _SIGNATURES = {
     "EventSourceAccessDenial": "(reason, retry)",
     "EventSourceContext": (
         "(owner_user_id, config, runtime_paths, target_room_id, target_agent, target_room_state, "
-        "calling_room_id, calling_room_state, client, credentials_manager)"
+        "calling_room_state, client, credentials_manager)"
     ),
     "EventSourceDescriptor": (
         "(source_id, description, allowed_kinds, match_fields, example, default_once, default_new_thread, "
@@ -517,6 +517,7 @@ _MEMBERS = {
     "mindroom.plugin_api.EventSource": {
         "describe_for_user": "(self, ctx)",
         "validate_subscription": "(self, ctx, *, kind, match, existing_binding)",
+        "dry_run_audience": "(self, rule)",
         "matches_rule": "(self, rule, event, *, audience, has_thread_binding)",
         "check_delivery_access": "(self, ctx, *, rule, event)",
         "check_history_access": "(self, ctx, *, rule, event)",
@@ -721,7 +722,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 36), "3f8d6dc5c33cda8c0761db1f7da2911b6a84cad82baad44286f18bc999e91bf5")
+_PINNED_VERSION = ((1, 36), "da31e7f5f4067f15a4226661f62117108c54707d43cada371770076b6defcf18")
 
 
 def _is_enum(obj: object) -> bool:

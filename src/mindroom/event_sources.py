@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
+
+from mindroom.config.external_trigger_policy import EVENT_SOURCE_ID_PATTERN
+from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -20,11 +22,31 @@ if TYPE_CHECKING:
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.reactive_triggers.models import ReactiveTriggerRecord, TriggerEvent
 
-_EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+logger = get_logger(__name__)
+
 _RESERVED_BUILTIN_SOURCE_IDS: frozenset[str] = frozenset({"slack"})
+
+_EVENT_SOURCE_HOOK_PREFIX = "event_source:"
+# LEGACY_COMPAT: Turns emitted by legacy slack/watches.py carried `slack-watch/<watch_id>` hook sources.
+# Legacy format: `hook_source` starting with `"slack-watch/"` on queued or resumed runs across upgrade.
+# Last legacy release: v2026.11.651; replacement: `event_source:slack` on reactive trigger dispatches.
+# Handling: Keep treating both `event_source:*` and `slack-watch/*` as watch-originated turns for mutation/write guards.
+# Coverage: tests/slack/test_toolkit.py::test_writes_refused_during_watch_turn,
+#   tests/test_event_source_seam.py::test_triggers_tool_registered_event_source_paused_test_history_and_watch_guard.
+LEGACY_SLACK_WATCH_HOOK_PREFIX = "slack-watch/"
 
 type ExternalMatchValue = str | bool | int | list[str]
 type ExternalBindingValue = str | bool | int
+
+
+def event_source_hook_source(source_id: str) -> str:
+    """Return the canonical ``hook_source`` provenance string for a reactive external event source."""
+    return f"{_EVENT_SOURCE_HOOK_PREFIX}{source_id}"
+
+
+def is_event_source_watch_turn(hook_source: str | None) -> bool:
+    """Return whether ``hook_source`` marks an event-source or legacy Slack watch turn."""
+    return bool(hook_source and hook_source.startswith((_EVENT_SOURCE_HOOK_PREFIX, LEGACY_SLACK_WATCH_HOOK_PREFIX)))
 
 
 class EventSourceInactiveError(RuntimeError):
@@ -45,31 +67,6 @@ class _EventSourceEmitHandler(Protocol):
     ) -> int:
         """Fan out one normalized event for source_id and return newly enqueued firing count."""
         ...
-
-
-@dataclass(frozen=True, slots=True)
-class EventSourceDescriptor:
-    """User-facing metadata and subscription defaults for a registered EventSource."""
-
-    source_id: str
-    description: str
-    allowed_kinds: tuple[str, ...] = ()
-    match_fields: tuple[str, ...] = ()
-    example: str | None = None
-    default_once: bool = True
-    default_new_thread: bool = False
-    default_thread_key_from_event: bool = False
-    default_reopen_on_fire: bool = False
-    private_room_only: bool = False
-    default_max_fires_per_hour: int | None = None
-
-    def __post_init__(self) -> None:
-        """Validate descriptor bounds."""
-        if self.default_max_fires_per_hour is not None and (
-            isinstance(self.default_max_fires_per_hour, bool) or self.default_max_fires_per_hour < 1
-        ):
-            msg = "default_max_fires_per_hour must be an integer >= 1 when set"
-            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +96,6 @@ class EventSourceContext:
     target_room_id: str | None = None
     target_agent: str | None = None
     target_room_state: RoomStateSnapshot | None = None
-    calling_room_id: str | None = None
     calling_room_state: RoomStateSnapshot | None = None
     client: nio.AsyncClient | None = None
     credentials_manager: CredentialsManager | None = None
@@ -123,19 +119,11 @@ class EventSource:
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         """Return user-facing metadata for ctx.owner_user_id, or None when hidden/unavailable."""
         del ctx
-        return EventSourceDescriptor(
-            source_id=self.source_id,
-            description=self.description or f"Event source {self.source_id!r}",
-            allowed_kinds=tuple(self.allowed_kinds),
-            match_fields=tuple(self.match_fields),
-            example=self.example,
-            default_once=self.default_once,
-            default_new_thread=self.default_new_thread,
-            default_thread_key_from_event=self.default_thread_key_from_event,
-            default_reopen_on_fire=self.default_reopen_on_fire,
-            private_room_only=self.private_room_only,
-            default_max_fires_per_hour=self.default_max_fires_per_hour,
-        )
+        values: dict[str, Any] = {f.name: getattr(self, f.name) for f in fields(EventSourceDescriptor)}
+        values["description"] = self.description or f"Event source {self.source_id!r}"
+        values["allowed_kinds"] = tuple(self.allowed_kinds)
+        values["match_fields"] = tuple(self.match_fields)
+        return EventSourceDescriptor(**values)
 
     async def validate_subscription(
         self,
@@ -207,6 +195,61 @@ class EventSource:
 
 
 @dataclass(frozen=True, slots=True)
+class EventSourceDescriptor:
+    """User-facing metadata and subscription defaults for a registered EventSource."""
+
+    source_id: str
+    description: str
+    allowed_kinds: tuple[str, ...] = EventSource.allowed_kinds
+    match_fields: tuple[str, ...] = EventSource.match_fields
+    example: str | None = EventSource.example
+    default_once: bool = EventSource.default_once
+    default_new_thread: bool = EventSource.default_new_thread
+    default_thread_key_from_event: bool = EventSource.default_thread_key_from_event
+    default_reopen_on_fire: bool = EventSource.default_reopen_on_fire
+    private_room_only: bool = EventSource.private_room_only
+    default_max_fires_per_hour: int | None = EventSource.default_max_fires_per_hour
+
+    def __post_init__(self) -> None:
+        """Validate descriptor bounds."""
+        limit = self.default_max_fires_per_hour
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            msg = "default_max_fires_per_hour must be an integer >= 1 when set"
+            raise ValueError(msg)
+
+
+async def delivery_pause_reason(
+    source: EventSource,
+    ctx: EventSourceContext,
+    rule: ReactiveTriggerRecord,
+) -> str | None:
+    """Return a trigger's current delivery pause reason, isolating plugin hook errors."""
+    try:
+        denial = await source.check_delivery_access(ctx, rule=rule, event=None)
+    except Exception:
+        logger.warning(
+            "Event source check_delivery_access failed",
+            source_id=source.source_id,
+            trigger_id=rule.trigger_id,
+            exc_info=True,
+        )
+        return "source_error"
+    return denial.reason if denial is not None else None
+
+
+async def safe_describe_event_source(
+    source: EventSource,
+    ctx: EventSourceContext,
+) -> EventSourceDescriptor | None:
+    """Return an EventSourceDescriptor for the caller, isolating plugin hook errors."""
+    try:
+        return await source.describe_for_user(ctx)
+    except Exception:
+        logger.warning("Event source describe_for_user failed", source_id=source.source_id, exc_info=True)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class EventSourceEmitter:
     """Token-fenced emitter handle that stamps source_type and source_id on emitted events."""
 
@@ -267,7 +310,6 @@ class EventSourceEmitter:
 class _RegisteredEventSource:
     source: EventSource
     owner_plugin: str | None
-    token: str
     emitter: EventSourceEmitter
 
 
@@ -283,7 +325,7 @@ class EventSourceRegistry:
     def register(self, source: EventSource, *, owner_plugin: str | None = None) -> EventSourceEmitter:
         """Register an EventSource with namespace/collision checks and atomic same-plugin hot-reload replacement."""
         source_id = source.source_id
-        if not isinstance(source_id, str) or _EVENT_SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+        if not isinstance(source_id, str) or EVENT_SOURCE_ID_PATTERN.fullmatch(source_id) is None:
             msg = f"Invalid event source_id {source_id!r}: must match ^[A-Za-z0-9_-]{{1,64}}$"
             raise ValueError(msg)
         if owner_plugin is not None:
@@ -309,16 +351,15 @@ class EventSourceRegistry:
                 owner = f"plugin {existing.owner_plugin!r}" if existing.owner_plugin is not None else "built-in"
                 msg = f"Event source {source_id!r} is already registered by {owner}"
                 raise ValueError(msg)
-            token = uuid4().hex
-            emitter = EventSourceEmitter(source_id=source_id, token=token, _registry=self)
-            self._entries[source_id] = _RegisteredEventSource(source, owner_plugin, token, emitter)
+            emitter = EventSourceEmitter(source_id=source_id, token=uuid4().hex, _registry=self)
+            self._entries[source_id] = _RegisteredEventSource(source, owner_plugin, emitter)
             return emitter
 
     def unregister(self, source_id: str, token: str) -> bool:
         """Unregister source_id only if token still matches the active registration."""
         with self._lock:
             entry = self._entries.get(source_id)
-            if entry is None or entry.token != token:
+            if entry is None or entry.emitter.token != token:
                 return False
             del self._entries[source_id]
             return True
@@ -328,6 +369,14 @@ class EventSourceRegistry:
         with self._lock:
             entry = self._entries.get(source_id)
             return entry.source if entry is not None else None
+
+    def for_rule(self, rule: ReactiveTriggerRecord) -> EventSource | None:
+        """Return the registered EventSource for a registered external_event rule, or None."""
+        from mindroom.reactive_triggers.models import ExternalEventSourceSpec  # noqa: PLC0415
+
+        if isinstance(rule.source, ExternalEventSourceSpec) and rule.source.is_registered:
+            return self.get(rule.source.source_id)
+        return None
 
     def all(self) -> tuple[EventSource, ...]:
         """Return all currently registered EventSources sorted by source_id."""
@@ -344,4 +393,4 @@ class EventSourceRegistry:
         """Return whether token still matches the active registration for source_id."""
         with self._lock:
             entry = self._entries.get(source_id)
-            return entry is not None and entry.token == token
+            return entry is not None and entry.emitter.token == token

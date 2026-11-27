@@ -18,9 +18,11 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_sources import EventSourceEmitter
     from mindroom.hooks import MessageEnvelope
     from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.slack.delivery import SlackRuntime
+    from mindroom.slack.event_source import SlackEventSource
 
 _NAME = "slack"
 logger = get_logger(__name__)
@@ -44,11 +46,10 @@ def _events_router() -> APIRouter:
 
 
 def _unregister_slack_event_source(runtime: SlackRuntime | None) -> None:
-    if runtime is None or runtime.reactive_triggers is None or runtime.event_source_token is None:
+    if runtime is None or runtime.reactive_triggers is None or runtime.event_source_emitter is None:
         return
-    from mindroom.slack.event_source import SLACK_EVENT_SOURCE_ID  # noqa: PLC0415
-
-    runtime.reactive_triggers.event_sources.unregister(SLACK_EVENT_SOURCE_ID, runtime.event_source_token)
+    emitter = runtime.event_source_emitter
+    runtime.reactive_triggers.event_sources.unregister(emitter.source_id, emitter.token)
 
 
 def _bind(
@@ -67,14 +68,16 @@ def _bind(
         return
     _unregister_slack_event_source(runtime)
 
-    token: str | None = None
+    event_source: SlackEventSource | None = None
+    emitter: EventSourceEmitter | None = None
     if reactive_triggers is not None:
         slack_source = SlackEventSource()
         try:
-            token = reactive_triggers.event_sources.register(slack_source).token
+            emitter = reactive_triggers.event_sources.register(slack_source)
         except ValueError as exc:
             logger.warning("Could not register built-in Slack EventSource", reason=str(exc))
         else:
+            event_source = slack_source
             if (store := reactive_triggers.store) is not None:
 
                 def _migrate() -> int:
@@ -94,7 +97,8 @@ def _bind(
         bots,
         agent_reply_memberships,
         reactive_triggers=reactive_triggers,
-        event_source_token=token,
+        event_source=event_source,
+        event_source_emitter=emitter,
     )
 
 

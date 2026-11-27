@@ -11,8 +11,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.slack import SlackAnsweringAgent
-
 _SIGNATURE_WINDOW_SECONDS = 300
 _TIMESTAMP = re.compile(r"[0-9]{1,15}")
 # Tuples, not sets: a list or object in the payload must compare unequal, not raise `TypeError` as an unhashable key.
@@ -129,11 +127,3 @@ def is_direct_message(event: SlackMessageEvent) -> bool:
 def project_thread_key(team_id: str, channel_id: str, root_ts: str) -> str:
     """Return the key of a project agent's Slack thread, named by its team, channel and root message."""
     return f"{team_id}:{channel_id}:{root_ts}"
-
-
-def project_wake_agent(
-    event: SlackMessageEvent,
-    answering: tuple[SlackAnsweringAgent, ...],
-) -> SlackAnsweringAgent | None:
-    """Return the agent that answers the event's channel; delivery wakes it for an app mention or a bound reply."""
-    return next((agent for agent in answering if event.channel_id in agent.channels), None)

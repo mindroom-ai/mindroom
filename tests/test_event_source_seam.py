@@ -263,7 +263,10 @@ def test_external_event_models_and_list_matching() -> None:
         kind="message",
         match={"channel_id": [" C1 ", "C2"], "nested.env": ["prod", "staging"], "retry": 1, "urgent": True},
         binding={"team_id": "T1", "slack_user_id": "U1", "verified": True, "version": 2},
+        source_origin="registered",
     )
+    with pytest.raises(ValidationError, match="binding is only allowed"):
+        ExternalEventSourceSpec(source_id="slack", kind="message", binding={"team_id": "T1"})
     assert spec.match["channel_id"] == ["C1", "C2"]
     assert ExternalEventSourceSpec.model_validate_json(spec.model_dump_json()) == spec
 
@@ -525,6 +528,7 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
     mock_warn.assert_called_once()
     assert mock_warn.call_args.kwargs["skipped_trigger_ids"] == ["collide_rule"]
     assert upgraded.has_migration("slack_watches_v1") is True
+    assert upgraded.has_migration("  slack_watches_v1  ") is True
     assert upgraded.get_thread_key_binding("collide_rule", "C1:1", now=1500.0) == "$original-root"
     loaded_a = upgraded.get_trigger("slack_watch_a")
     assert loaded_a is not None
@@ -1104,7 +1108,7 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
         ):
             assert client.post(path).status_code == 503
 
-        # Integration binding forwards reactive_triggers from embedded runtime when omitted.
+        # Integration binding forwards explicit reactive_triggers and defaults to None when omitted.
         seen_triggers: list[object] = []
         custom_integration = replace(
             SLACK_INTEGRATION,
@@ -1113,8 +1117,9 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
             unbind=lambda _app: None,
         )
         monkeypatch.setattr(integrations, "_integrations", lambda: (custom_integration,))
+        integrations.bind_integrations(app, {}, AgentReplyMembershipIndex(), service)
         integrations.bind_integrations(app, {}, AgentReplyMembershipIndex())
-        assert seen_triggers == [service]
+        assert seen_triggers == [service, None]
 
         # Orchestrator wires reactive_triggers into both EmbeddedRuntime and PluginLifespans.
         orchestrator = ready_runtime(config, runtime_paths)
@@ -1594,9 +1599,12 @@ def test_event_source_descriptor_default_max_fires_validation() -> None:
         ).default_max_fires_per_hour
         == 60
     )
-    for bad in (0, -5, True, False):
+    bad_limits: tuple[Any, ...] = (0, -5, True, False, 1.5)
+    for bad in bad_limits:
         with pytest.raises(ValueError, match="default_max_fires_per_hour"):
             EventSourceDescriptor(source_id="ok", description="Ok", default_max_fires_per_hour=bad)
+    with pytest.raises(ValidationError, match="binding is only allowed"):
+        ExternalEventSourceSpec(source_id="ok", kind="ping", binding={"secret": "x"}, source_origin="yaml")
 
 
 @pytest.mark.asyncio
@@ -1673,7 +1681,7 @@ async def test_registered_source_admin_visibility_and_unregistered_hiding(tmp_pa
     assert (admin_pub_disable["status"], admin_pub_enable["status"], admin_pub_delete["status"]) == ("ok", "ok", "ok")
     assert store.get_trigger("owner_pub") is None
 
-    entry_token = registry._entries["slack_private"].token
+    entry_token = registry._entries["slack_private"].emitter.token
     assert registry.unregister("slack_private", entry_token) is True
     with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
         admin_list_after = json.loads(await tool.triggers(action="list"))

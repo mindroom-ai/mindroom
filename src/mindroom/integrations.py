@@ -53,13 +53,8 @@ def bind_integrations(
     reactive_triggers: ReactiveTriggerService | None = None,
 ) -> None:
     """Let every integration's events reach the orchestrator's live bots."""
-    resolved_triggers = reactive_triggers
-    if resolved_triggers is None:
-        state = getattr(api_app.state, "mindroom_app_state", None)
-        embedded = getattr(state, "embedded", None)
-        resolved_triggers = getattr(embedded, "reactive_triggers", None)
     for integration in _integrations():
-        integration.bind(api_app, bots, agent_reply_memberships, resolved_triggers)
+        integration.bind(api_app, bots, agent_reply_memberships, reactive_triggers)
 
 
 def unbind_integrations(api_app: FastAPI) -> list[tuple[str, object]]:

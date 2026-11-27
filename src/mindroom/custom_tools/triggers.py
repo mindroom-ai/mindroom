@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 import time
 from collections.abc import Mapping
@@ -11,6 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import nio
+from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import (
@@ -32,7 +32,12 @@ from mindroom.custom_tools.external_trigger_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.event_sources import EventSource, EventSourceContext, EventSourceDescriptor, EventSourceRegistry
+from mindroom.event_sources import (
+    EventSourceContext,
+    delivery_pause_reason,
+    is_event_source_watch_turn,
+    safe_describe_event_source,
+)
 from mindroom.external_triggers.policy import is_external_trigger_administrator, is_source_subscriber_allowed
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
@@ -95,7 +100,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.bot import AgentBot
-    from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+    from mindroom.config.external_trigger_policy import ExternalEventSourceConfig, ExternalTriggerPolicyConfig
+    from mindroom.event_sources import EventSource, EventSourceDescriptor, EventSourceRegistry
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -214,20 +220,8 @@ _ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
 _NON_NONE_PARAM_DEFAULTS: dict[str, object] = {
     "include_disabled": True,
 }
-_WATCH_TURN_HOOK_SOURCE_PREFIXES: tuple[str, ...] = ("event_source:", "slack-watch/")
-_WATCH_TURN_MUTATING_ACTIONS: frozenset[str] = frozenset(
-    {
-        "watch_room",
-        "watch_thread",
-        "watch_pr",
-        "subscribe_event",
-        "create",
-        "update",
-        "set_enabled",
-        "delete",
-        "rotate_key",
-    },
-)
+_DEFAULT_MAX_FIRES_PER_HOUR = 10
+_WATCH_TURN_READ_ONLY_ACTIONS: frozenset[str] = frozenset({"list", "history", "test"})
 _WATCH_TURN_MUTATION_ERROR = "Ask me in a new message to change your triggers."
 
 
@@ -285,7 +279,7 @@ class TriggersTools(Toolkit):
         policy: ExternalTriggerPolicyConfig,
         now: float,
         allow_triage: bool = True,
-        default_max_fires_per_hour: int = 10,
+        default_max_fires_per_hour: int = _DEFAULT_MAX_FIRES_PER_HOUR,
     ) -> tuple[str | None, TriageSpec | None, float | None, int, int]:
         max_fires = default_max_fires_per_hour if args["max_fires_per_hour"] is None else args["max_fires_per_hour"]
         cooldown = 0 if args["cooldown_seconds"] is None else args["cooldown_seconds"]
@@ -357,21 +351,33 @@ class TriggersTools(Toolkit):
         args: _TriggerParams,
         *,
         prompt: str,
-        default_thread_id: Callable[[str], str | None],
-        allow_origin: bool,
-        default_new_thread: bool = False,
-        default_thread_key_from_event: bool = False,
-        default_reopen_on_fire: bool = False,
+        default_thread_id: Callable[[str], str | None] | None = None,
+        allow_origin: bool = False,
+        defaults: EventSourceDescriptor | None = None,
     ) -> TriggerTargetSpec:
-        target_agent = args["target_agent"]
-        target_room_id = args["target_room_id"]
-        target_thread_id = args["target_thread_id"]
-        new_thread, thread_key, thread_key_from_event, reopen_on_fire = _resolve_target_options(
-            args,
-            allow_origin=allow_origin,
-            default_new_thread=default_new_thread,
-            default_thread_key_from_event=default_thread_key_from_event,
-            default_reopen_on_fire=default_reopen_on_fire,
+        target_agent, target_room_id, target_thread_id, thread_key = (
+            args["target_agent"],
+            args["target_room_id"],
+            args["target_thread_id"],
+            args["thread_key"],
+        )
+        default_new = defaults.default_new_thread if defaults is not None else False
+        new_thread = (
+            (default_new if target_thread_id is None else False) if args["new_thread"] is None else args["new_thread"]
+        )
+        if new_thread and target_thread_id is not None:
+            msg = "target_thread_id and new_thread are mutually exclusive"
+            raise ValueError(msg)
+        if target_thread_id == "origin" and not allow_origin:
+            msg = "target_thread_id='origin' is only allowed for watch_room triggers"
+            raise ValueError(msg)
+        thread_key_from_event = bool(
+            defaults and defaults.default_thread_key_from_event and new_thread and thread_key is None,
+        )
+        reopen_on_fire = (
+            (defaults.default_reopen_on_fire if defaults is not None else False)
+            if args["reopen_on_fire"] is None
+            else args["reopen_on_fire"]
         )
 
         resolved_agent = (target_agent if target_agent is not None else context.agent_name).strip()
@@ -425,7 +431,15 @@ class TriggersTools(Toolkit):
         if new_thread or target_thread_id == "room":
             resolved_thread_id = None
         elif target_thread_id is None:
-            resolved_thread_id = default_thread_id(resolved_target_room_id)
+            resolved_thread_id = (
+                default_thread_id(resolved_target_room_id)
+                if default_thread_id is not None
+                else (
+                    (context.resolved_thread_id or context.thread_id)
+                    if resolved_target_room_id == current_room_id
+                    else None
+                )
+            )
         elif target_thread_id == "origin":
             resolved_thread_id = "origin"
         else:
@@ -621,13 +635,13 @@ class TriggersTools(Toolkit):
 
     @staticmethod
     def _reactive_record_payload(record: ReactiveTriggerRecord) -> dict[str, object]:
-        payload = record.model_dump(mode="json", exclude={"rule_uid"})
-        source_payload = payload.get("source")
-        if isinstance(source_payload, dict):
-            source_payload.pop("binding", None)
-            source_payload.pop("source_origin", None)
-            source_payload.pop("private_room_only", None)
-        return {"trigger_kind": "reactive", **payload}
+        return {
+            "trigger_kind": "reactive",
+            **record.model_dump(
+                mode="json",
+                exclude={"rule_uid": True, "source": {"binding", "source_origin", "private_room_only"}},
+            ),
+        }
 
     @staticmethod
     def _notify_reactive_service(context: ToolRuntimeContext) -> None:
@@ -641,20 +655,20 @@ class TriggersTools(Toolkit):
         record: ReactiveTriggerRecord,
         *,
         verb: str = "changed",
-        not_found_prefix: str = "external trigger not found",
+        allow_admin: bool = True,
     ) -> None:
-        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-        if not can_view_reactive_trigger(
-            record,
-            context.requester_id,
-            event_sources=_event_sources_registry(context),
-            viewer_user_ids=owner_ids,
-        ):
-            msg = f"{not_found_prefix}: {record.trigger_id}"
+        owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+        if not can_view_reactive_trigger(record, owner_ids, event_sources=_event_sources_registry(context)):
+            msg = f"external trigger not found: {record.trigger_id}"
             raise ReactiveTriggerStoreError(msg)
-        if not (record.owner_user_id in owner_ids or cls._is_admin(context)):
-            msg = f"trigger can only be {verb} by its owner or an external trigger admin"
-            raise ReactiveTriggerStoreError(msg)
+        if record.owner_user_id in owner_ids or (allow_admin and cls._is_admin(context)):
+            return
+        msg = (
+            f"trigger can only be {verb} by its owner or an external trigger admin"
+            if allow_admin
+            else "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
+        )
+        raise ReactiveTriggerStoreError(msg)
 
     async def _create_reactive_rule(
         self,
@@ -809,9 +823,7 @@ class TriggersTools(Toolkit):
             handler = handlers.get(action)
             if handler is None:
                 return self._payload("error", message=f"Unsupported triggers action: {action!r}")
-            if action in _WATCH_TURN_MUTATING_ACTIONS and (context.hook_source or "").startswith(
-                _WATCH_TURN_HOOK_SOURCE_PREFIXES,
-            ):
+            if action not in _WATCH_TURN_READ_ONLY_ACTIONS and is_event_source_watch_turn(context.hook_source):
                 return self._payload("error", message=_WATCH_TURN_MUTATION_ERROR)
             supplied = {key for key, value in args.items() if value is not _NON_NONE_PARAM_DEFAULTS.get(key)}
             if unsupported := sorted(supplied - _ACTION_ALLOWED_PARAMS[action]):
@@ -897,14 +909,7 @@ class TriggersTools(Toolkit):
             room_id=resolved_watch_room_id,
             thread_id=raw_watch_thread_id,
         )
-        current_thread_id = context.resolved_thread_id or context.thread_id
-        target = await self._resolve_reactive_target(
-            context,
-            args,
-            prompt=resolved_prompt,
-            default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
-            allow_origin=False,
-        )
+        target = await self._resolve_reactive_target(context, args, prompt=resolved_prompt)
         source = ThreadTagSourceSpec(
             room_id=resolved_watch_room_id,
             thread_id=resolved_watch_thread_id,
@@ -962,26 +967,13 @@ class TriggersTools(Toolkit):
         p_def = f"GitHub PR {src.repo}#{src.number} had new activity. Inspect the event data below and take any needed action."
         p_text = p_def if args["prompt"] is None else _require_non_empty_arg(args["prompt"], "prompt", "watch_pr")
         desc = f"Watch PR {src.repo}#{src.number}" if args["description"] is None else args["description"]
-        reopen_on_fire = True if args["reopen_on_fire"] is None else args["reopen_on_fire"]
         ta: dict[str, Any] = {
-            "target_agent": args["target_agent"],
-            "target_room_id": args["target_room_id"],
-            "target_thread_id": args["target_thread_id"],
-            "new_thread": args["new_thread"],
+            **args,
             "thread_key": None,
-            "reopen_on_fire": reopen_on_fire,
-            "once": args["once"],
+            "reopen_on_fire": True if args["reopen_on_fire"] is None else args["reopen_on_fire"],
             "description": desc,
         }
-        rm_id = resolve_room_id(context.room_id, context.runtime_paths)
-        th_id = context.resolved_thread_id or context.thread_id
-        target = await self._resolve_reactive_target(
-            context,
-            ta,
-            prompt=p_text,
-            default_thread_id=lambda dest_room: th_id if dest_room == rm_id else None,
-            allow_origin=False,
-        )
+        target = await self._resolve_reactive_target(context, ta, prompt=p_text)
         if wh_id is None and not pol.github_pr_polling_enabled:
             msg = f"GitHub PR polling is disabled and no webhook source covers {src.repo}."
             raise ReactiveTriggerStoreError(msg)
@@ -1027,91 +1019,78 @@ class TriggersTools(Toolkit):
         policy = self._require_reactive_policy(context)
         now = time.time()
         current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
-        current_thread_id = context.resolved_thread_id or context.thread_id
-        source_config = policy.event_sources.get(resolved_source_id)
-        registered = _registered_event_source(context, resolved_source_id)
-        if source_config is not None and registered is not None:
-            msg = (
-                f"Event source {resolved_source_id!r} conflicts between YAML external_trigger_policy.event_sources "
-                "and a registered EventSource; remove the duplicate YAML event source."
+        match = dict(args["match"]) if args["match"] is not None else {}
+        source_config, registered = _resolve_event_source(context, resolved_source_id)
+        descriptor = (
+            await safe_describe_event_source(
+                registered,
+                await _build_event_source_context(context, owner_user_id=context.requester_id),
             )
-            raise ValueError(msg)
+            if source_config is None and registered is not None
+            else None
+        )
+        available = (
+            is_source_subscriber_allowed(source_config, context.requester_id, context.config, context.runtime_paths)
+            if source_config is not None
+            else descriptor is not None
+        )
+        if not available:
+            raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
+
+        default_max_fires = (
+            min(descriptor.default_max_fires_per_hour, policy.max_fires_per_hour)
+            if descriptor is not None and descriptor.default_max_fires_per_hour is not None
+            else _DEFAULT_MAX_FIRES_PER_HOUR
+        )
+        common = self._validate_reactive_common(
+            context,
+            args,
+            policy=policy,
+            now=now,
+            default_max_fires_per_hour=default_max_fires,
+        )
         if source_config is not None:
-            common = self._validate_reactive_common(context, args, policy=policy, now=now)
-            if not is_source_subscriber_allowed(
-                source_config,
-                context.requester_id,
-                context.config,
-                context.runtime_paths,
-            ):
-                raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
             source_spec = ExternalEventSourceSpec(
                 source_id=resolved_source_id,
                 kind=resolved_kind,
-                match=dict(args["match"]) if args["match"] is not None else {},
+                match=match,
                 source_origin="yaml",
             )
             validate_subscription_against_source(source_config, kind=source_spec.kind, match=source_spec.match)
-            target = await self._resolve_reactive_target(
-                context,
-                args,
-                prompt=resolved_prompt,
-                default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
-                allow_origin=False,
-            )
-            default_once = True
-        else:
-            if registered is None:
-                raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
-            discovery_ctx = await _build_event_source_context(context, owner_user_id=context.requester_id)
-            descriptor = await _safe_describe_for_user(registered, discovery_ctx)
-            if descriptor is None:
-                raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
-            default_max_fires = (
-                10
-                if descriptor.default_max_fires_per_hour is None
-                else min(descriptor.default_max_fires_per_hour, policy.max_fires_per_hour)
-            )
-            common = self._validate_reactive_common(
-                context,
-                args,
-                policy=policy,
-                now=now,
-                default_max_fires_per_hour=default_max_fires,
-            )
-            target = await self._resolve_reactive_target(
-                context,
-                args,
-                prompt=resolved_prompt,
-                default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
-                allow_origin=False,
-                default_new_thread=descriptor.default_new_thread,
-                default_thread_key_from_event=descriptor.default_thread_key_from_event,
-                default_reopen_on_fire=descriptor.default_reopen_on_fire,
-            )
-            validation_ctx = await _build_event_source_context(
-                context,
-                owner_user_id=context.requester_id,
-                target_room_id=target.room_id,
-                target_agent=target.agent,
-                read_target_state=True,
-                read_calling_state=target.room_id == current_room_id,
-            )
+        target = await self._resolve_reactive_target(context, args, prompt=resolved_prompt, defaults=descriptor)
+        if source_config is None:
+            assert registered is not None
+            assert descriptor is not None
             validated = await registered.validate_subscription(
-                validation_ctx,
+                await _build_event_source_context(
+                    context,
+                    owner_user_id=context.requester_id,
+                    target=target,
+                    read_calling_state=target.room_id == current_room_id,
+                ),
                 kind=resolved_kind,
-                match=dict(args["match"]) if args["match"] is not None else {},
+                match=match,
                 existing_binding=None,
             )
-            source_spec = ExternalEventSourceSpec(
-                source_id=resolved_source_id,
-                kind=validated.kind,
-                match=validated.match,
-                binding=validated.binding,
-                source_origin="registered",
-                private_room_only=descriptor.private_room_only,
-            )
-            default_once = descriptor.default_once
+            try:
+                source_spec = ExternalEventSourceSpec(
+                    source_id=resolved_source_id,
+                    kind=validated.kind,
+                    match=validated.match,
+                    binding=validated.binding,
+                    source_origin="registered",
+                    private_room_only=descriptor.private_room_only,
+                )
+            except ValidationError as exc:
+                if any(err.get("loc", (None,))[0] == "binding" for err in exc.errors()):
+                    logger.warning(
+                        "Event source returned an invalid subscription binding",
+                        source_id=resolved_source_id,
+                        exc_info=True,
+                    )
+                    msg = f"Event source {resolved_source_id!r} returned an invalid subscription binding."
+                    raise ValueError(msg) from None
+                raise
 
         created = await self._create_reactive_rule(
             context,
@@ -1120,7 +1099,7 @@ class TriggersTools(Toolkit):
             common=common,
             source=source_spec,
             target=target,
-            default_once=default_once,
+            default_once=True if descriptor is None else descriptor.default_once,
             now=now,
         )
         return self._payload("ok", action="subscribe_event", trigger=self._reactive_record_payload(created))
@@ -1165,68 +1144,45 @@ class TriggersTools(Toolkit):
 
     async def _list_triggers(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         include_disabled = args["include_disabled"]
+        owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+        is_admin = self._is_admin(context)
 
         def _load_records() -> tuple[list[ExternalTriggerRecord], list[ReactiveTriggerRecord]]:
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
-            if self._is_admin(context):
-                external_records = external_store.list_records(owner_user_id=None)
-                reactive_records = reactive_store.list_triggers(owner_user_id=None, include_disabled=include_disabled)
-            else:
-                owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-                external_records = [
-                    record for record in external_store.list_records() if record.owner_user_id in owner_ids
-                ]
-                reactive_records = [
-                    record
-                    for record in reactive_store.list_triggers(include_disabled=include_disabled)
-                    if record.owner_user_id in owner_ids
-                ]
-            if not include_disabled:
-                external_records = [record for record in external_records if record.enabled]
-            return external_records, reactive_records
+            return (
+                [
+                    r
+                    for r in ExternalTriggerStore(context.runtime_paths).list_records()
+                    if (is_admin or r.owner_user_id in owner_ids) and (include_disabled or r.enabled)
+                ],
+                [
+                    r
+                    for r in ReactiveTriggerStore(context.runtime_paths).list_triggers(
+                        include_disabled=include_disabled,
+                    )
+                    if is_admin or r.owner_user_id in owner_ids
+                ],
+            )
 
         external_records, reactive_records = await run_blocking_until_complete(_load_records)
         external_payloads = [self._record_payload(record) for record in external_records]
-        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
         event_sources = _event_sources_registry(context)
         room_state_cache: dict[str, RoomStateSnapshot | None] = {}
         reactive_payloads: list[dict[str, object]] = []
         for record in reactive_records:
-            if not can_view_reactive_trigger(
-                record,
-                context.requester_id,
-                event_sources=event_sources,
-                viewer_user_ids=owner_ids,
-            ):
+            if not can_view_reactive_trigger(record, owner_ids, event_sources=event_sources):
                 continue
             payload = self._reactive_record_payload(record)
             if (
                 record.owner_user_id in owner_ids
-                and isinstance(record.source, ExternalEventSourceSpec)
-                and record.source.is_registered
-                and (registered := _registered_event_source(context, record.source.source_id)) is not None
+                and (registered := _registered_source_for_rule(context, record)) is not None
             ):
                 ctx = await _build_event_source_context(
                     context,
                     owner_user_id=record.owner_user_id,
-                    target_room_id=record.target.room_id,
-                    target_agent=record.target.agent,
-                    read_target_state=True,
+                    target=record.target,
                     room_state_cache=room_state_cache,
                 )
-                try:
-                    access_result = await registered.check_delivery_access(ctx, rule=record, event=None)
-                except Exception:
-                    logger.warning(
-                        "Event source check_delivery_access failed during trigger listing",
-                        source_id=record.source.source_id,
-                        trigger_id=record.trigger_id,
-                        exc_info=True,
-                    )
-                    payload["paused_reason"] = "source_error"
-                else:
-                    payload["paused_reason"] = access_result.reason if access_result is not None else None
+                payload["paused_reason"] = await delivery_pause_reason(registered, ctx, record)
             reactive_payloads.append(payload)
 
         return self._payload(
@@ -1240,29 +1196,16 @@ class TriggersTools(Toolkit):
 
     async def _update_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _validate_update_args(args)
-        external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
         existing = await run_blocking_until_complete(
             partial(
                 _load_reactive_or_error,
-                external_store,
-                reactive_store,
+                context,
                 resolved_trigger_id,
                 direct_error="In-place update is only supported for reactive triggers.",
             ),
         )
-        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-        if not can_view_reactive_trigger(
-            existing,
-            context.requester_id,
-            event_sources=_event_sources_registry(context),
-            viewer_user_ids=owner_ids,
-        ):
-            msg = f"Reactive trigger not found: {resolved_trigger_id}"
-            raise ReactiveTriggerStoreError(msg)
-        if existing.owner_user_id not in owner_ids:
-            msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
-            raise ReactiveTriggerStoreError(msg)
+        self._require_reactive_owner_or_admin(context, existing, allow_admin=False)
 
         now = time.time()
         validated = await _build_updated_reactive_record(context, existing=existing, args=args, now=now)
@@ -1346,9 +1289,8 @@ class TriggersTools(Toolkit):
             existing = get_trigger_record(context.runtime_paths, resolved_trigger_id)
             if isinstance(existing, ReactiveTriggerRecord) and can_view_reactive_trigger(
                 existing,
-                context.requester_id,
+                equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths),
                 event_sources=_event_sources_registry(context),
-                viewer_user_ids=equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths),
             ):
                 msg = "Key rotation applies only to direct signed external triggers."
                 raise ExternalTriggerStoreError(msg)
@@ -1378,14 +1320,13 @@ class TriggersTools(Toolkit):
         else:
             clamped_limit = max(1, min(raw_limit, _MAX_HISTORY_LIMIT))
 
-        external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
-        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-        event_sources = _event_sources_registry(context)
+        owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
         is_admin = self._is_admin(context)
         room_access_cache: dict[str, bool] = {}
         room_state_cache: dict[str, RoomStateSnapshot | None] = {}
 
+        record: ReactiveTriggerRecord | None = None
         if args["trigger_id"] is not None:
             stripped_id = args["trigger_id"].strip()
             if not stripped_id:
@@ -1394,79 +1335,40 @@ class TriggersTools(Toolkit):
             record = await run_blocking_until_complete(
                 partial(
                     _load_reactive_or_error,
-                    external_store,
-                    reactive_store,
+                    context,
                     stripped_id,
                     direct_error="Firing history is only available for reactive triggers.",
                 ),
             )
-            self._require_reactive_owner_or_admin(
+            self._require_reactive_owner_or_admin(context, record, verb="viewed")
+            if not is_admin and not await self._has_source_access_for_history(
                 context,
                 record,
-                verb="viewed",
-                not_found_prefix="Reactive trigger not found",
-            )
-            if not is_admin:
-                if not await self._has_source_access_for_history(
-                    context,
-                    record,
-                    room_access_cache=room_access_cache,
-                    room_state_cache=room_state_cache,
-                ):
-                    msg = f"You no longer have access to the source for trigger {record.trigger_id}."
-                    raise ReactiveTriggerStoreError(msg)
-                firings = await self._list_owner_history(
-                    context,
-                    reactive_store,
-                    limit=clamped_limit,
-                    room_access_cache=room_access_cache,
-                    room_state_cache=room_state_cache,
-                    trigger_record=record,
-                )
-                serialized = [_firing_summary_payload(firing) for firing in firings]
-            else:
-                firings = await run_blocking_until_complete(
-                    partial(reactive_store.list_firings, trigger_id=stripped_id, limit=clamped_limit),
-                )
-                firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
-                owner_has_access = record.owner_user_id in owner_ids and await self._has_source_access_for_history(
-                    context,
-                    record,
-                    room_access_cache=room_access_cache,
-                    room_state_cache=room_state_cache,
-                )
-                serialized = [
-                    _firing_summary_payload(
-                        firing,
-                        include_event=(
-                            owner_has_access
-                            and await self._firing_allowed_for_history(
-                                context,
-                                record,
-                                firing,
-                                room_state_cache=room_state_cache,
-                            )
-                        ),
-                    )
-                    for firing in firings
-                ]
-        elif is_admin:
+                room_access_cache=room_access_cache,
+                room_state_cache=room_state_cache,
+            ):
+                msg = f"You no longer have access to the source for trigger {record.trigger_id}."
+                raise ReactiveTriggerStoreError(msg)
+
+        if is_admin:
             serialized = await self._list_admin_history(
                 context,
                 reactive_store,
                 owner_ids=owner_ids,
-                event_sources=event_sources,
                 limit=clamped_limit,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
+                trigger_record=record,
             )
         else:
             firings = await self._list_owner_history(
                 context,
                 reactive_store,
+                owner_ids=owner_ids,
                 limit=clamped_limit,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
+                trigger_record=record,
             )
             serialized = [_firing_summary_payload(firing) for firing in firings]
 
@@ -1478,40 +1380,42 @@ class TriggersTools(Toolkit):
         reactive_store: ReactiveTriggerStore,
         *,
         owner_ids: set[str],
-        event_sources: EventSourceRegistry | None,
         limit: int,
         room_access_cache: dict[str, bool],
         room_state_cache: dict[str, RoomStateSnapshot | None],
+        trigger_record: ReactiveTriggerRecord | None = None,
     ) -> list[dict[str, object]]:
-        all_rules = await run_blocking_until_complete(
-            partial(reactive_store.list_triggers, include_disabled=True),
-        )
-        visible_rules = {
-            rule.trigger_id: rule
-            for rule in all_rules
-            if can_view_reactive_trigger(
-                rule,
-                context.requester_id,
-                event_sources=event_sources,
-                viewer_user_ids=owner_ids,
-            )
-        }
-        if not visible_rules:
-            return []
+        if trigger_record is not None:
+            visible_rules = {trigger_record.trigger_id: trigger_record}
+        else:
+            all_rules = await run_blocking_until_complete(partial(reactive_store.list_triggers, include_disabled=True))
+            event_sources = _event_sources_registry(context)
+            visible_rules = {
+                rule.trigger_id: rule
+                for rule in all_rules
+                if can_view_reactive_trigger(rule, owner_ids, event_sources=event_sources)
+            }
+            if not visible_rules:
+                return []
         firings = await run_blocking_until_complete(
             partial(reactive_store.list_firings, trigger_ids=visible_rules, limit=limit),
         )
-        referenced_ids = {firing.trigger_id for firing in firings}
-        allowed_owned_rules: dict[str, ReactiveTriggerRecord] = {}
-        for trigger_id in referenced_ids:
-            rule = visible_rules[trigger_id]
-            if rule.owner_user_id in owner_ids and await self._has_source_access_for_history(
+        firings = [
+            firing
+            for firing in firings
+            if (rule := visible_rules.get(firing.trigger_id)) is not None and firing.rule_uid == rule.rule_uid
+        ]
+        allowed_owned_rules = {
+            rule.trigger_id: rule
+            for trigger_id in {firing.trigger_id for firing in firings}
+            if (rule := visible_rules[trigger_id]).owner_user_id in owner_ids
+            and await self._has_source_access_for_history(
                 context,
                 rule,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
-            ):
-                allowed_owned_rules[rule.trigger_id] = rule
+            )
+        }
         return [
             _firing_summary_payload(
                 firing,
@@ -1533,29 +1437,29 @@ class TriggersTools(Toolkit):
         context: ToolRuntimeContext,
         reactive_store: ReactiveTriggerStore,
         *,
+        owner_ids: set[str],
         limit: int,
         room_access_cache: dict[str, bool],
         room_state_cache: dict[str, RoomStateSnapshot | None],
         trigger_record: ReactiveTriggerRecord | None = None,
     ) -> list[FiringRecord]:
-        owner_ids: set[str] | None = None
+        query_owner_ids = None if trigger_record is not None else owner_ids
         if trigger_record is not None:
             allowed_rules = {trigger_record.trigger_id: trigger_record}
         else:
-            resolved_owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-            owner_ids = resolved_owner_ids
             candidate_rules = await run_blocking_until_complete(
-                partial(reactive_store.list_triggers_with_firings, owner_user_ids=resolved_owner_ids),
+                partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
             )
-            allowed_rules = {}
-            for candidate in candidate_rules:
+            allowed_rules = {
+                candidate.trigger_id: candidate
+                for candidate in candidate_rules
                 if await self._has_source_access_for_history(
                     context,
                     candidate,
                     room_access_cache=room_access_cache,
                     room_state_cache=room_state_cache,
-                ):
-                    allowed_rules[candidate.trigger_id] = candidate
+                )
+            }
             if not allowed_rules:
                 return []
 
@@ -1566,9 +1470,8 @@ class TriggersTools(Toolkit):
             batch = await run_blocking_until_complete(
                 partial(
                     reactive_store.list_firings,
-                    trigger_id=trigger_record.trigger_id if trigger_record is not None else None,
-                    trigger_ids=None if trigger_record is not None else allowed_rules,
-                    owner_user_ids=owner_ids,
+                    trigger_ids=allowed_rules,
+                    owner_user_ids=query_owner_ids,
                     before_id=before_id,
                     limit=batch_size,
                 ),
@@ -1598,18 +1501,12 @@ class TriggersTools(Toolkit):
         rule = await run_blocking_until_complete(
             partial(
                 _load_reactive_or_error,
-                ExternalTriggerStore(context.runtime_paths),
-                ReactiveTriggerStore(context.runtime_paths),
+                context,
                 resolved_trigger_id,
                 direct_error="Dry-run testing is only supported for reactive triggers.",
             ),
         )
-        self._require_reactive_owner_or_admin(
-            context,
-            rule,
-            verb="tested",
-            not_found_prefix="Reactive trigger not found",
-        )
+        self._require_reactive_owner_or_admin(context, rule, verb="tested")
 
         now = time.time()
         event, matched, skip_note = _build_dry_run_event_and_match(context, rule=rule, args=args, now=now)
@@ -1660,17 +1557,20 @@ class TriggersTools(Toolkit):
 
 
 def _load_reactive_or_error(
-    external_store: ExternalTriggerStore,
-    reactive_store: ReactiveTriggerStore,
+    context: ToolRuntimeContext,
     trigger_id: str,
     *,
     direct_error: str,
 ) -> ReactiveTriggerRecord:
-    record = reactive_store.get_trigger(trigger_id)
-    if record is not None:
-        return record
-    if external_store.get_record(trigger_id) is not None:
+    record = get_trigger_record(context.runtime_paths, trigger_id)
+    if isinstance(record, ExternalTriggerRecord):
         raise ReactiveTriggerStoreError(direct_error)
+    if record is not None and can_view_reactive_trigger(
+        record,
+        equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths),
+        event_sources=_event_sources_registry(context),
+    ):
+        return record
     msg = f"Reactive trigger not found: {trigger_id}"
     raise ReactiveTriggerStoreError(msg)
 
@@ -1756,47 +1656,6 @@ def _validate_expires_in_hours(expires_in_hours: float | None, *, now: float) ->
     return now + expires_in_hours * 3600.0
 
 
-def _resolve_target_options(
-    args: _TriggerParams,
-    *,
-    allow_origin: bool,
-    default_new_thread: bool,
-    default_thread_key_from_event: bool,
-    default_reopen_on_fire: bool,
-) -> tuple[bool, str | None, bool, bool]:
-    target_thread_id = args["target_thread_id"]
-    raw_new_thread = args["new_thread"]
-    thread_key = args["thread_key"]
-    if raw_new_thread is None:
-        new_thread = default_new_thread if target_thread_id is None else False
-    else:
-        new_thread = raw_new_thread
-    if new_thread and target_thread_id is not None:
-        msg = "target_thread_id and new_thread are mutually exclusive"
-        raise ValueError(msg)
-    if target_thread_id == "origin" and not allow_origin:
-        msg = "target_thread_id='origin' is only allowed for watch_room triggers"
-        raise ValueError(msg)
-    thread_key_from_event = default_thread_key_from_event if new_thread and thread_key is None else False
-    reopen_on_fire = default_reopen_on_fire if args["reopen_on_fire"] is None else args["reopen_on_fire"]
-    return new_thread, thread_key, thread_key_from_event, reopen_on_fire
-
-
-async def _safe_describe_for_user(
-    registered: EventSource,
-    ctx: EventSourceContext,
-) -> EventSourceDescriptor | None:
-    try:
-        return await registered.describe_for_user(ctx)
-    except Exception:
-        logger.warning(
-            "Event source describe_for_user failed",
-            source_id=registered.source_id,
-            exc_info=True,
-        )
-        return None
-
-
 async def _check_registered_history_access(
     context: ToolRuntimeContext,
     rule: ReactiveTriggerRecord,
@@ -1804,16 +1663,12 @@ async def _check_registered_history_access(
     event: TriggerEvent | None,
     room_state_cache: dict[str, RoomStateSnapshot | None] | None = None,
 ) -> bool:
-    assert isinstance(rule.source, ExternalEventSourceSpec)
-    registered = _registered_event_source(context, rule.source.source_id)
-    if registered is None:
+    if (registered := _registered_source_for_rule(context, rule)) is None:
         return False
     ctx = await _build_event_source_context(
         context,
         owner_user_id=context.requester_id,
-        target_room_id=rule.target.room_id,
-        target_agent=rule.target.agent,
-        read_target_state=True,
+        target=rule.target,
         read_calling_state=True,
         room_state_cache=room_state_cache,
     )
@@ -1821,89 +1676,74 @@ async def _check_registered_history_access(
 
 
 def _event_sources_registry(context: ToolRuntimeContext) -> EventSourceRegistry | None:
-    if context.orchestrator is None:
-        return None
-    reactive_triggers = getattr(context.orchestrator, "reactive_triggers", None)
-    registry = getattr(reactive_triggers, "event_sources", None)
-    return registry if isinstance(registry, EventSourceRegistry) else None
+    return None if context.orchestrator is None else context.orchestrator.reactive_triggers.event_sources
 
 
-def _registered_event_source(context: ToolRuntimeContext, source_id: str) -> EventSource | None:
+def _registered_source_for_rule(context: ToolRuntimeContext, rule: ReactiveTriggerRecord) -> EventSource | None:
     registry = _event_sources_registry(context)
-    return registry.get(source_id) if registry is not None else None
+    return None if registry is None else registry.for_rule(rule)
 
 
-async def _read_live_room_state(client: nio.AsyncClient | None, room_id: str) -> RoomStateSnapshot | None:
-    if client is None or not hasattr(client, "room_get_state"):
-        return None
-    return await read_room_state(client, room_id)
-
-
-async def _cached_room_state(
+def _resolve_event_source(
     context: ToolRuntimeContext,
-    room_id: str,
+    source_id: str,
     *,
-    preferred_agent: str | None = None,
-    cache: dict[str, RoomStateSnapshot | None] | None = None,
-) -> RoomStateSnapshot | None:
-    if cache is not None and room_id in cache:
-        return cache[room_id]
-    client = _client_for_room(context, room_id, preferred_agent=preferred_agent)
-    snapshot = await _read_live_room_state(client, room_id)
-    if cache is not None:
-        cache[room_id] = snapshot
-    return snapshot
+    expect_registered: bool = False,
+) -> tuple[ExternalEventSourceConfig | None, EventSource | None]:
+    yaml_config = context.config.external_trigger_policy.event_sources.get(source_id)
+    registry = _event_sources_registry(context)
+    registered = registry.get(source_id) if registry is not None else None
+    if yaml_config is not None and (registered is not None or expect_registered):
+        msg = (
+            f"Event source {source_id!r} conflicts between YAML external_trigger_policy.event_sources "
+            "and a registered EventSource; remove the duplicate YAML event source."
+        )
+        raise ValueError(msg)
+    return yaml_config, registered
 
 
 async def _build_event_source_context(
     context: ToolRuntimeContext,
     *,
     owner_user_id: str,
-    target_room_id: str | None = None,
-    target_agent: str | None = None,
-    read_target_state: bool = False,
+    target: TriggerTargetSpec | None = None,
     read_calling_state: bool = False,
     room_state_cache: dict[str, RoomStateSnapshot | None] | None = None,
 ) -> EventSourceContext:
-    current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
-    resolved_target_room_id = (
-        resolve_room_id(target_room_id, context.runtime_paths) if target_room_id is not None else None
+    cache = room_state_cache if room_state_cache is not None else {}
+
+    async def _room_state(room_id: str, room_client: nio.AsyncClient | None) -> RoomStateSnapshot | None:
+        if room_id not in cache:
+            cache[room_id] = (
+                await read_room_state(room_client, room_id)
+                if room_client is not None and hasattr(room_client, "room_get_state")
+                else None
+            )
+        return cache[room_id]
+
+    target_room_id = resolve_room_id(target.room_id, context.runtime_paths) if target is not None else None
+    target_agent = target.agent if target is not None else None
+    target_client = (
+        _client_for_room(context, target_room_id, preferred_agent=target_agent) if target_room_id is not None else None
     )
-    target_room_state = (
-        await _cached_room_state(
-            context,
-            resolved_target_room_id,
-            preferred_agent=target_agent,
-            cache=room_state_cache,
+    target_room_state = await _room_state(target_room_id, target_client) if target_room_id is not None else None
+    calling_room_id = resolve_room_id(context.room_id, context.runtime_paths) if read_calling_state else None
+    calling_room_state = (
+        await _room_state(
+            calling_room_id,
+            _client_for_room(context, calling_room_id, preferred_agent=context.agent_name),
         )
-        if read_target_state and resolved_target_room_id is not None
+        if calling_room_id is not None
         else None
     )
-    if read_calling_state:
-        if resolved_target_room_id == current_room_id and read_target_state:
-            calling_room_state = target_room_state
-        else:
-            calling_room_state = await _cached_room_state(
-                context,
-                current_room_id,
-                preferred_agent=context.agent_name,
-                cache=room_state_cache,
-            )
-    else:
-        calling_room_state = None
-    client = (
-        _client_for_room(context, resolved_target_room_id, preferred_agent=target_agent)
-        if resolved_target_room_id is not None
-        else context.client
-    ) or context.client
+    client = target_client or context.client
     return EventSourceContext(
         owner_user_id=owner_user_id,
         config=context.config,
         runtime_paths=context.runtime_paths,
-        target_room_id=resolved_target_room_id,
+        target_room_id=target_room_id,
         target_agent=target_agent,
         target_room_state=target_room_state,
-        calling_room_id=current_room_id,
         calling_room_state=calling_room_state,
         client=client,
         credentials_manager=get_runtime_credentials_manager(context.runtime_paths),
@@ -1911,48 +1751,45 @@ async def _build_event_source_context(
 
 
 async def _unavailable_event_source_message(context: ToolRuntimeContext, source_id: str) -> str:
-    allowed_source_ids = [str(item["source_id"]) for item in await _visible_event_sources_payload(context)]
-    if allowed_source_ids:
-        return f"Event source {source_id!r} is unavailable. Available event sources: {', '.join(allowed_source_ids)}"
-    return f"Event source {source_id!r} is unavailable. No event sources are available to you."
+    allowed = [str(item["source_id"]) for item in await _visible_event_sources_payload(context)]
+    suffix = f"Available event sources: {', '.join(allowed)}" if allowed else "No event sources are available to you."
+    return f"Event source {source_id!r} is unavailable. {suffix}"
+
+
+def _yaml_event_source_entry(source_id: str, cfg: ExternalEventSourceConfig) -> dict[str, object] | None:
+    base: dict[str, object] = {"source_id": source_id, "kind": cfg.kind}
+    if isinstance(cfg, GitHubEventSourceConfig):
+        return base | {"allowed_repos": list(cfg.allowed_repos), "allowed_events": list(cfg.allowed_events)}
+    if isinstance(cfg, (Ed25519EventSourceConfig, HmacEventSourceConfig)):
+        return base | {"allowed_kinds": list(cfg.allowed_kinds)}
+    return None
 
 
 async def _visible_event_sources_payload(context: ToolRuntimeContext) -> list[dict[str, object]]:
     policy = context.config.external_trigger_policy
-    if not policy.enabled or not policy.reactive_enabled:
+    if not policy.is_reactive_active:
         return []
-    sources: list[dict[str, object]] = []
-    for source_id in sorted(policy.event_sources):
-        cfg = policy.event_sources[source_id]
-        if not is_source_subscriber_allowed(cfg, context.requester_id, context.config, context.runtime_paths):
-            continue
-        if isinstance(cfg, GitHubEventSourceConfig):
-            sources.append(
-                {
-                    "source_id": source_id,
-                    "kind": cfg.kind,
-                    "allowed_repos": list(cfg.allowed_repos),
-                    "allowed_events": list(cfg.allowed_events),
-                },
-            )
-        elif isinstance(cfg, (Ed25519EventSourceConfig, HmacEventSourceConfig)):
-            sources.append(
-                {
-                    "source_id": source_id,
-                    "kind": cfg.kind,
-                    "allowed_kinds": list(cfg.allowed_kinds),
-                },
-            )
     registry = _event_sources_registry(context)
-    if registry is not None:
+    registered_sources = registry.all() if registry is not None else ()
+    conflicted = set(policy.event_sources) & {source.source_id for source in registered_sources}
+    sources = [
+        entry
+        for source_id, cfg in sorted(policy.event_sources.items())
+        if source_id not in conflicted
+        and is_source_subscriber_allowed(cfg, context.requester_id, context.config, context.runtime_paths)
+        and (entry := _yaml_event_source_entry(source_id, cfg)) is not None
+    ]
+    if registered_sources:
         discovery_ctx = await _build_event_source_context(context, owner_user_id=context.requester_id)
-        for registered in registry.all():
-            descriptor = await _safe_describe_for_user(registered, discovery_ctx)
-            if descriptor is None:
+        for registered in registered_sources:
+            if (
+                registered.source_id in conflicted
+                or (descriptor := await safe_describe_event_source(registered, discovery_ctx)) is None
+            ):
                 continue
             sources.append(
                 {
-                    "source_id": descriptor.source_id,
+                    "source_id": registered.source_id,
                     "kind": "registered",
                     "description": descriptor.description,
                     "allowed_kinds": list(descriptor.allowed_kinds),
@@ -1972,20 +1809,6 @@ def _truncate_preview(text: str | None, limit: int) -> str | None:
 
 
 def _firing_summary_payload(firing: FiringRecord, *, include_event: bool = True) -> dict[str, object]:
-    event_payload: dict[str, object] | None = (
-        {
-            "source_type": firing.event.source_type,
-            "kind": firing.event.kind,
-            "actor": firing.event.actor,
-            "event_id": firing.event.event_id,
-            "room_id": firing.event.room_id,
-            "thread_id": firing.event.thread_id,
-            "title": firing.event.title,
-            "text": _truncate_preview(firing.event.text, _HISTORY_TEXT_PREVIEW_CHARS),
-        }
-        if include_event
-        else None
-    )
     payload: dict[str, object] = {
         "id": firing.id,
         "trigger_id": firing.trigger_id,
@@ -1995,11 +1818,23 @@ def _firing_summary_payload(firing: FiringRecord, *, include_event: bool = True)
         "attempt_count": firing.attempt_count,
         "created_at": firing.created_at,
         "updated_at": firing.updated_at,
-        "event": event_payload,
+        "event": None,
     }
     if include_event:
-        payload["dedupe_key"] = firing.dedupe_key
-        payload["error_message"] = firing.error_message
+        payload.update(
+            dedupe_key=firing.dedupe_key,
+            error_message=firing.error_message,
+            event={
+                "source_type": firing.event.source_type,
+                "kind": firing.event.kind,
+                "actor": firing.event.actor,
+                "event_id": firing.event.event_id,
+                "room_id": firing.event.room_id,
+                "thread_id": firing.event.thread_id,
+                "title": firing.event.title,
+                "text": _truncate_preview(firing.event.text, _HISTORY_TEXT_PREVIEW_CHARS),
+            },
+        )
     return payload
 
 
@@ -2022,15 +1857,11 @@ async def _build_updated_reactive_record(
         if args["expires_in_hours"] is None
         else _validate_expires_in_hours(args["expires_in_hours"], now=now)
     )
-    target_updates: dict[str, Any] = {}
-    if args["prompt"] is not None:
-        target_updates["prompt"] = args["prompt"]
-    if args["reopen_on_fire"] is not None:
-        target_updates["reopen_on_fire"] = args["reopen_on_fire"]
+    target_updates = {k: args[k] for k in ("prompt", "reopen_on_fire") if args[k] is not None}
     new_target = (
-        existing.target
-        if not target_updates
-        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), **target_updates})
+        TriggerTargetSpec.model_validate(existing.target.model_dump() | target_updates)
+        if target_updates
+        else existing.target
     )
     if args["enabled"] is None:
         new_enabled, new_disabled_reason = existing.enabled, existing.disabled_reason
@@ -2092,63 +1923,47 @@ async def _resolve_updated_source(
         )
 
     if isinstance(existing.source, ExternalEventSourceSpec) and args["match"] is not None:
-        preserved_binding = copy.deepcopy(existing.source.binding)
+        source_id = existing.source.source_id
+        unavailable = f"Event source {source_id!r} is unavailable."
+        source_config, registered = _resolve_event_source(
+            context,
+            source_id,
+            expect_registered=existing.source.is_registered,
+        )
         if existing.source.is_registered:
-            if existing.source.source_id in context.config.external_trigger_policy.event_sources:
-                msg = (
-                    f"Event source {existing.source.source_id!r} conflicts between YAML "
-                    "external_trigger_policy.event_sources and a registered EventSource."
-                )
-                raise ValueError(msg)
-            registered = _registered_event_source(context, existing.source.source_id)
             if registered is None:
-                msg = f"Event source {existing.source.source_id!r} is unavailable."
-                raise ValueError(msg)
+                raise ValueError(unavailable)
             ctx = await _build_event_source_context(
                 context,
                 owner_user_id=existing.owner_user_id,
-                target_room_id=existing.target.room_id,
-                target_agent=existing.target.agent,
-                read_target_state=True,
+                target=existing.target,
             )
-            descriptor = await _safe_describe_for_user(registered, ctx)
-            if descriptor is None:
-                msg = f"Event source {existing.source.source_id!r} is unavailable."
-                raise ValueError(msg)
+            if (descriptor := await safe_describe_event_source(registered, ctx)) is None:
+                raise ValueError(unavailable)
             validated = await registered.validate_subscription(
                 ctx,
                 kind=existing.source.kind,
                 match=dict(args["match"]),
-                existing_binding=MappingProxyType(copy.deepcopy(preserved_binding)),
+                existing_binding=MappingProxyType(dict(existing.source.binding)),
             )
-            return ExternalEventSourceSpec(
-                source_id=existing.source.source_id,
-                kind=existing.source.kind,
-                match=validated.match,
-                binding=copy.deepcopy(preserved_binding),
-                source_origin="registered",
-                private_room_only=existing.source.private_room_only or descriptor.private_room_only,
+            return ExternalEventSourceSpec.model_validate(
+                existing.source.model_dump()
+                | {
+                    "match": validated.match,
+                    "private_room_only": existing.source.private_room_only or descriptor.private_room_only,
+                },
             )
 
-        source_config = context.config.external_trigger_policy.event_sources.get(existing.source.source_id)
         if source_config is None or not is_source_subscriber_allowed(
             source_config,
             context.requester_id,
             context.config,
             context.runtime_paths,
         ):
-            msg = f"Event source {existing.source.source_id!r} is unavailable."
-            raise ValueError(msg)
+            raise ValueError(unavailable)
         new_match = dict(args["match"])
         validate_subscription_against_source(source_config, kind=existing.source.kind, match=new_match)
-        return ExternalEventSourceSpec(
-            source_id=existing.source.source_id,
-            kind=existing.source.kind,
-            match=new_match,
-            binding=preserved_binding,
-            source_origin="yaml",
-            private_room_only=existing.source.private_room_only,
-        )
+        return ExternalEventSourceSpec.model_validate(existing.source.model_dump() | {"match": new_match})
 
     return existing.source
 
@@ -2277,8 +2092,7 @@ def _build_dry_run_event_and_match(
             data=extra_data,
         )
         if rule.source.is_registered:
-            registered = _registered_event_source(context, rule.source.source_id)
-            if registered is None:
+            if (registered := _registered_source_for_rule(context, rule)) is None:
                 msg = f"Registered event source {rule.source.source_id!r} is currently unavailable."
                 raise ValueError(msg)
             matched = registered.matches_rule(

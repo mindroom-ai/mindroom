@@ -506,9 +506,17 @@ async def test_validate_subscription_normalization_oauth_and_immutable_binding(t
             True,
             False,
         ),
-        # Mentions & bound thread replies vs unbound channel firehose
+        # Mentions & bound thread replies vs unbound channel firehose (top-level requires mention, not thread binding)
         ("message", {}, {"mentioned_user_ids": []}, frozenset({SLACK_IDS["alice"]}), False, False),
-        ("message", {}, {"mentioned_user_ids": []}, frozenset({SLACK_IDS["alice"]}), True, True),
+        ("message", {}, {"mentioned_user_ids": []}, frozenset({SLACK_IDS["alice"]}), True, False),
+        (
+            "message",
+            {},
+            {"mentioned_user_ids": [], "thread_ts": "1700000000.000100"},
+            frozenset({SLACK_IDS["alice"]}),
+            True,
+            True,
+        ),
         ("mention", {}, {"mentioned_user_ids": [SLACK_IDS["alice"]]}, frozenset({SLACK_IDS["alice"]}), False, True),
         (
             "direct_message",
@@ -783,8 +791,16 @@ async def test_emit_prefilter_pagination_reopen_and_fail_soft_lookups(
         memberships=memberships,
         store=store,
     )
-    service.event_sources.register(SlackEventSource())
-    runtime = runtime_for(bots, memberships, slack, reactive_triggers=service)
+    slack_source = SlackEventSource()
+    slack_emitter = service.event_sources.register(slack_source)
+    runtime = runtime_for(
+        bots,
+        memberships,
+        slack,
+        reactive_triggers=service,
+        event_source=slack_source,
+        event_source_emitter=slack_emitter,
+    )
     manager = get_runtime_credentials_manager(paths)
     app = load_slack_app(manager)
     assert app is not None
@@ -796,7 +812,6 @@ async def test_emit_prefilter_pagination_reopen_and_fail_soft_lookups(
                 runtime=runtime,
                 config=config,
                 runtime_paths=paths,
-                credentials_manager=manager,
                 app=app,
                 client=http_client,
                 now=NOW,
@@ -1691,9 +1706,11 @@ async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(tm
     ensure_app_state(app_api)
     SLACK_INTEGRATION.bind(app_api, cast("dict[str, AgentBot]", bots), memberships, service)
 
+    bound_runtime = bound_slack_runtime(app_api)
+    assert bound_runtime is not None
     registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
     assert isinstance(registered, SlackEventSource)
-    assert registered.migration_pending is True
+    assert registered.retry_migration is not None
     assert watches_path.exists()
     assert not store.has_migration("slack_watches_v1")
 
@@ -1707,7 +1724,14 @@ async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(tm
             "users.info": {"ok": False, "error": "user_not_found"},
         },
     )
-    runtime = runtime_for(bots, memberships, slack, reactive_triggers=service)
+    runtime = runtime_for(
+        bots,
+        memberships,
+        slack,
+        reactive_triggers=service,
+        event_source=bound_runtime.event_source,
+        event_source_emitter=bound_runtime.event_source_emitter,
+    )
     manager = get_runtime_credentials_manager(paths)
     slack_creds = load_slack_app(manager)
     assert slack_creds is not None
@@ -1718,13 +1742,12 @@ async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(tm
             runtime=runtime,
             config=config,
             runtime_paths=paths,
-            credentials_manager=manager,
             app=slack_creds,
             client=http_client,
             now=NOW,
         )
     assert result == "ignored"
-    assert registered.migration_pending is True
+    assert registered.retry_migration is not None
     assert slack.calls("apps.event.authorizations.list") == []
 
     # Once the underlying watches.json error is fixed, the next event lazily completes migration and delivers.
@@ -1763,13 +1786,12 @@ async def test_pre_commit_migration_failure_ignores_until_lazy_retry_succeeds(tm
             runtime=runtime,
             config=config,
             runtime_paths=paths,
-            credentials_manager=manager,
             app=slack_creds,
             client=http_client,
             now=NOW + 1,
         )
     assert recovered_result == "delivered"
-    assert registered.migration_pending is False
+    assert registered.retry_migration is None
     assert store.has_migration("slack_watches_v1") is True
     assert not watches_path.exists()
     assert watches_path.with_name("watches.json.migrated").exists()
@@ -1837,9 +1859,11 @@ async def test_post_commit_archive_rename_failure_delivers_and_self_heals(
     ensure_app_state(app_api)
     SLACK_INTEGRATION.bind(app_api, cast("dict[str, AgentBot]", bots), memberships, service)
 
+    bound_runtime = bound_slack_runtime(app_api)
+    assert bound_runtime is not None
     registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
     assert isinstance(registered, SlackEventSource)
-    assert registered.migration_pending is False
+    assert registered.retry_migration is None
     assert store.has_migration("slack_watches_v1") is True
     assert store.get_trigger("slack_watch_w1") is not None
     assert watches_path.exists()
@@ -1856,7 +1880,14 @@ async def test_post_commit_archive_rename_failure_delivers_and_self_heals(
             "users.info": {"ok": False, "error": "user_not_found"},
         },
     )
-    runtime = runtime_for(bots, memberships, slack, reactive_triggers=service)
+    runtime = runtime_for(
+        bots,
+        memberships,
+        slack,
+        reactive_triggers=service,
+        event_source=bound_runtime.event_source,
+        event_source_emitter=bound_runtime.event_source_emitter,
+    )
     manager = get_runtime_credentials_manager(paths)
     slack_creds = load_slack_app(manager)
     assert slack_creds is not None
@@ -1867,7 +1898,6 @@ async def test_post_commit_archive_rename_failure_delivers_and_self_heals(
             runtime=runtime,
             config=config,
             runtime_paths=paths,
-            credentials_manager=manager,
             app=slack_creds,
             client=http_client,
             now=NOW,

@@ -22210,6 +22210,12 @@
                       },
                       {
                         "type": "integer"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     ]
                   }
@@ -22288,7 +22294,14 @@
               ]
             },
             "new_thread": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "thread_key": {
               "anyOf": [

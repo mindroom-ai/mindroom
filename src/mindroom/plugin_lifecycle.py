@@ -45,7 +45,7 @@ class PluginLifecycle:
     # Set before the stop code runs: a newer lifespan of the plugin started and can take over ``process_state``
     # (``reload``), none did (``disabled``), or MindRoom stops (``shutdown``).
     stop_reason: _StopReason | None = field(default=None, init=False)
-    _registered_event_sources: list[tuple[str, str]] = field(default_factory=list, init=False, repr=False)
+    _registered_event_sources: list[EventSourceEmitter] = field(default_factory=list, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
 
     def context(self) -> PluginContext:
@@ -62,11 +62,11 @@ class PluginLifecycle:
         if self._event_sources is None:
             msg = "Event sources are only available in the primary runtime"
             raise RuntimeError(msg)
-        if self._closed:
+        if self._closed or self.stop_reason is not None:
             msg = f"Plugin {self.plugin_name!r} lifespan has ended"
             raise RuntimeError(msg)
         emitter = self._event_sources.register(source, owner_plugin=self.plugin_name)
-        self._registered_event_sources.append((emitter.source_id, emitter.token))
+        self._registered_event_sources.append(emitter)
         return emitter
 
     def _unregister_event_sources(self) -> None:
@@ -76,8 +76,8 @@ class PluginLifecycle:
             self._registered_event_sources.clear()
             return
         registered, self._registered_event_sources = self._registered_event_sources, []
-        for source_id, token in reversed(registered):
-            self._event_sources.unregister(source_id, token)
+        for emitter in reversed(registered):
+            self._event_sources.unregister(emitter.source_id, emitter.token)
 
 
 @dataclass(eq=False)
@@ -182,6 +182,8 @@ class PluginLifespans:
                 return
             previous, self._published = self._published, generation
             replaced, self._running = self._running, {}
+            for running in replaced.values():
+                running.lifecycle._closed = True
             # The new code may start services as it starts, so those the replaced code started stop first.
             await stop_started_worker_services()
             for plugin in generation.plugins.values():

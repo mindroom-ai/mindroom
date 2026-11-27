@@ -360,18 +360,9 @@ def fan_out_external_event(
     if isinstance(source, GitHubEventSourceConfig) and event.kind == "ping" and "ping" not in source.allowed_events:
         return 0
     current_time = time.time() if now is None else now
-    rules = store.list_triggers(
-        include_disabled=False,
-        source_type="external_event",
-        source_id=source_id,
-    )
-
     matched_count = 0
-    for rule in rules:
-        if rule.expires_at is not None and rule.expires_at <= current_time:
-            continue
-        if not isinstance(rule.source, ExternalEventSourceSpec) or rule.source.is_registered:
-            continue
+    for rule in store.list_active_external_rules(source_id, current_time, registered=False):
+        assert isinstance(rule.source, ExternalEventSourceSpec)
         if not is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths):
             continue
         if not matches_external_event(rule.source, event):

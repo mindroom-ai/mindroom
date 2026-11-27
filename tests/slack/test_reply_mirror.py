@@ -226,7 +226,6 @@ async def _start_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel
             runtime=runtime,
             config=config,
             runtime_paths=paths,
-            credentials_manager=manager,
             app=app,
             client=client,
             now=int(time.time()),

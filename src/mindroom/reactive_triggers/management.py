@@ -39,25 +39,20 @@ def is_trigger_owner(actor_user_id: str, owner_user_id: str, config: Config, run
 
 def can_view_reactive_trigger(
     record: ReactiveTriggerRecord,
-    viewer_user_id: str,
+    viewer_user_ids: Collection[str],
     *,
     event_sources: EventSourceRegistry | None,
-    viewer_user_ids: Collection[str] | None = None,
 ) -> bool:
-    """Return whether ``viewer_user_id`` may view ``record`` in listings or firing history."""
-    if viewer_user_ids is not None:
-        if record.owner_user_id in viewer_user_ids:
-            return True
-    elif record.owner_user_id == viewer_user_id:
+    """Return whether a caller with ``viewer_user_ids`` may view ``record`` in listings or firing history."""
+    if record.owner_user_id in viewer_user_ids:
         return True
     if isinstance(record.source, ExternalEventSourceSpec):
         if record.source.private_room_only:
             return False
-        registered = event_sources.get(record.source.source_id) if event_sources is not None else None
-        if registered is not None and registered.private_room_only:
-            return False
-        if registered is None and record.source.is_registered:
-            return False
+        if record.source.is_registered:
+            registered = event_sources.for_rule(record) if event_sources is not None else None
+            if registered is None or registered.private_room_only:
+                return False
     return True
 
 

@@ -132,7 +132,6 @@ class Harness:
                 runtime=self.runtime,
                 config=self.config,
                 runtime_paths=self.paths,
-                credentials_manager=manager,
                 app=loaded,
                 client=client,
                 now=now,
@@ -207,8 +206,16 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
         memberships=memberships,
         store=ReactiveTriggerStore(paths),
     )
-    reactive_triggers.event_sources.register(SlackEventSource())
-    runtime = runtime_for(bots, memberships, slack, reactive_triggers=reactive_triggers)
+    slack_source = SlackEventSource()
+    slack_emitter = reactive_triggers.event_sources.register(slack_source)
+    runtime = runtime_for(
+        bots,
+        memberships,
+        slack,
+        reactive_triggers=reactive_triggers,
+        event_source=slack_source,
+        event_source_emitter=slack_emitter,
+    )
     harness_obj = Harness(config, paths, slack, matrix, bots, runtime, reactive_triggers)
     holder.append(harness_obj)
     return harness_obj

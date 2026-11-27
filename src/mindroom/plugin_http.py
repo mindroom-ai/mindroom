@@ -66,7 +66,7 @@ from mindroom.terminal.client import WorkerTerminals
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.terminal.session import TerminalError
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, config_plugins
+from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError, config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
@@ -679,7 +679,12 @@ def event_source_emitter(request: Request, source_id: str) -> EventSourceEmitter
     is not currently registered by this plugin.
     """
     plugin_name = _route_plugin_name(request, "event_source_emitter")
-    plugin_context(request)
+    snapshot = require_api_state(request.app).snapshot
+    if (
+        snapshot.runtime_config is None
+        or config_plugins(snapshot.runtime_config, snapshot.runtime_paths).plugin_entry(plugin_name) is None
+    ):
+        raise PluginInactiveError(plugin_name)
     embedded = ensure_app_state(request.app).embedded
     if embedded is None:
         raise HTTPException(503, "Event sources are unavailable.")
