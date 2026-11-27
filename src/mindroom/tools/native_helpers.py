@@ -87,7 +87,13 @@ def restrict_actions(
         ordered_allowed = list(allowed_actions)
 
     updated_properties = dict(properties)
-    updated_properties["action"] = {**updated_properties["action"], "enum": ordered_allowed}
+    action_property = {**updated_properties["action"], "enum": ordered_allowed}
+    if "default" in action_property and action_property["default"] not in ordered_allowed:
+        if ordered_allowed:
+            action_property["default"] = ordered_allowed[0]
+        else:
+            action_property.pop("default", None)
+    updated_properties["action"] = action_property
     if action_fields is not None:
         keep = {
             "action",
@@ -190,6 +196,20 @@ def require_enabled_action(action: str, enabled: Iterable[str]) -> str | None:
     if action not in allowed:
         return f"Action {action!r} is disabled. Enabled actions: {', '.join(allowed)}"
     return None
+
+
+def reject_unexpected_args(
+    action: str,
+    allowed_fields: Mapping[str, str],
+    provided: Mapping[str, bool],
+) -> str | None:
+    """Return an error string if any argument marked set in ``provided`` is not allowed for ``action``."""
+    allowed = set(allowed_fields.get(action, "").split())
+    unexpected = [name for name, is_set in provided.items() if is_set and name not in allowed]
+    if not unexpected:
+        return None
+    names = ", ".join(f"`{name}`" for name in unexpected)
+    return f"Parameter(s) {names} cannot be used with action={action!r}."
 
 
 def safe_path_segment(value: object, field_name: str) -> str:

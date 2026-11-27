@@ -67,7 +67,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         },
         memory={"backend": "none"},
         tool_approval={
-            "rules": [{"match": name, "action": "require_approval"} for name in ("add", "continue_subagent")],
+            "rules": [{"match": name, "action": "require_approval"} for name in ("calculate", "continue_subagent")],
         }
         if native
         else {},
@@ -79,7 +79,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
     child = ScriptedModel(
         [
             answer("First answer: cobalt"),
-            calls(tool_call("add", "sum", a=1, b=2)),
+            calls(tool_call("calculate", "sum", action="add", a=1, b=2)),
             answer("Follow-up answer: cobalt, 3"),
         ],
     )

@@ -178,11 +178,13 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             )
             for name in {"leader", child_name}
         },
-        tool_approval={"rules": [{"match": "run_subagent" if gate else "add", "action": "require_approval"}]},
+        tool_approval={"rules": [{"match": "run_subagent" if gate else "calculate", "action": "require_approval"}]},
     )
     entity_ids(config, paths)
     identity = _identity()
-    child_model = ScriptedModel([calls(_deferred_call("child-add", "add", a=2, b=3)), answer("Child finished.")])
+    child_model = ScriptedModel(
+        [calls(_deferred_call("child-add", "calculate", action="add", a=2, b=3)), answer("Child finished.")],
+    )
     parent_model = ScriptedModel(
         [
             calls(tool_call("run_subagent", "delegate", agent_name=child_name, task="Add 2 and 3")),
@@ -194,13 +196,13 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
         by_session={identity.session_id or "": parent_model},
     ).install(monkeypatch)
     executed: list[tuple[float, float]] = []
-    original_add = CalculatorTools.add
+    original_calculate = CalculatorTools.calculate
 
-    def add(self: CalculatorTools, a: float, b: float) -> str:
+    def calculate(self: CalculatorTools, action: str, a: float, b: float | None = None) -> str:
         executed.append((a, b))
-        return original_add(self, a, b)
+        return original_calculate(self, action, a, b)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
 
     paused = await respond(
         "leader",
@@ -215,7 +217,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
     assert executed == []
     stored = _stored_parent(config, paths, "parent-run")
     invoking_agent = "leader" if gate else child_name
-    function_name = "run_subagent" if gate else "add"
+    function_name = "run_subagent" if gate else "calculate"
     toolkit_name = "delegate" if gate else "calculator"
     assert paused.toolkit_owners[(invoking_agent, function_name)] == toolkit_name
     call = ApprovalCall(
@@ -257,7 +259,7 @@ async def test_saved_child_approval_preserves_executable_ownership(  # noqa: PLR
             *(child_run.tools or ()),
             ToolExecution(
                 tool_call_id="planted",
-                tool_name="add",
+                tool_name="calculate",
                 tool_args={"a": 40, "b": 2},
                 requires_confirmation=True,
                 confirmed=True,
@@ -324,7 +326,7 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         },
         tool_approval={
             "rules": [
-                {"match": "add", "action": "require_approval"},
+                {"match": "calculate", "action": "require_approval"},
                 *([] if child_pauses else [{"match": "run_subagent", "action": "require_approval"}]),
             ],
         },
@@ -333,14 +335,14 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     identity = _identity()
     child_model = ScriptedModel(
         [
-            *([calls(tool_call("add", "child-add", a=5, b=6))] if child_pauses else []),
+            *([calls(tool_call("calculate", "child-add", action="add", a=5, b=6))] if child_pauses else []),
             answer("Child finished."),
         ],
     )
     parent_model = ScriptedModel(
         [
             calls(
-                tool_call("add", "parent-add", a=1, b=2),
+                tool_call("calculate", "parent-add", action="add", a=1, b=2),
                 tool_call("run_subagent", "delegate", agent_name="child", task="Add 5 and 6"),
             ),
             answer("Parent finished."),
@@ -348,13 +350,13 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     )
     ScriptedAgents({"leader": parent_model, "child": child_model}).install(monkeypatch)
     executed: list[tuple[float, float]] = []
-    original_add = CalculatorTools.add
+    original_calculate = CalculatorTools.calculate
 
-    def add(self: CalculatorTools, a: float, b: float) -> str:
+    def calculate(self: CalculatorTools, action: str, a: float, b: float | None = None) -> str:
         executed.append((a, b))
-        return original_add(self, a, b)
+        return original_calculate(self, action, a, b)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(CalculatorTools, "add", add)
+    monkeypatch.setattr(CalculatorTools, "calculate", calculate)
     executor = approval_executor(config, paths)
 
     result = await respond(
@@ -400,8 +402,8 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
         )
 
     assert isinstance(result, CompletedApprovalRun)
-    first_card = [("child", "add")] if child_pauses else [("leader", "run_subagent")]
-    assert cards == [first_card, [("leader", "add")]]
+    first_card = [("child", "calculate")] if child_pauses else [("leader", "run_subagent")]
+    assert cards == [first_card, [("leader", "calculate")]]
     assert executed == ([(5, 6), (1, 2)] if child_pauses else [(1, 2)])
 
 
@@ -417,11 +419,13 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
             "leader": AgentConfig(display_name="Leader", tools=[], delegate_to=["child"]),
             "child": AgentConfig(display_name="Child", tools=[{"calculator": {"defer": True}}]),
         },
-        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
+        tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}]},
     )
     entity_ids(config, paths)
     identity = _identity()
-    child = ScriptedModel([calls(_deferred_call("child-add", "add", a=2, b=3)), answer("Child finished.")])
+    child = ScriptedModel(
+        [calls(_deferred_call("child-add", "calculate", action="add", a=2, b=3)), answer("Child finished.")],
+    )
     parent = ScriptedModel(
         [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add 2 and 3")), answer("Done.")],
     )
@@ -433,7 +437,7 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
     (pending,) = paused.tools
     call = ApprovalCall(
         tool_call_id=pending.tool_call_id,
-        tool_name="add",
+        tool_name="calculate",
         invoking_agent="child",
         toolkit_name="calculator",
         expires_at_ns=2**62,
@@ -465,10 +469,10 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
     )
 
     assert isinstance(result, CompletedApprovalRun)
-    assert result.response_text == "🔧 `run_subagent` [1]\n\n🔧 `add` [2]\n\nDone."
+    assert result.response_text == "🔧 `run_subagent` [1]\n\n🔧 `calculate` [2]\n\nDone."
     assert [(entry.type, entry.tool_name) for entry in trace] == [
         ("tool_call_completed", "run_subagent"),
-        ("tool_call_completed", "add"),
+        ("tool_call_completed", "calculate"),
     ]
     assert (trace[0].result_preview or "").startswith("Child finished.")
     assert trace[1].result_preview == '{"operation": "addition", "result": 5.0}'

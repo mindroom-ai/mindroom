@@ -322,7 +322,7 @@ def test_restrict_actions_fast_path_ordering_and_pruning() -> None:
         parameters={
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["first", "second", "third"]},
+                "action": {"type": "string", "enum": ["first", "second", "third"], "default": "second"},
                 "shared": {"type": "string"},
                 "alpha": {"type": "string"},
                 "beta": {"type": "string"},
@@ -354,6 +354,7 @@ def test_restrict_actions_fast_path_ordering_and_pruning() -> None:
     assert pruned.parameters["properties"]["action"]["enum"] == ["first", "third"]
     assert set(pruned.parameters["properties"]) == {"action", "shared", "alpha", "gamma"}
     assert pruned.parameters["required"] == ["action", "shared"]
+    assert pruned.parameters["properties"]["action"]["default"] == "first"
     assert "`second`" not in (pruned.description or "")
 
 

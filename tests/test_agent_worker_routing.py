@@ -92,12 +92,12 @@ def _local_execution_sinks(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run_command(*_args: object, **_kwargs: object) -> ShellRunResult:
         return ShellRunResult(message="local:shell")
 
-    def add(self: CalculatorTools, a: float, b: float) -> str:
-        del self, a, b
+    def calculate(self: CalculatorTools, action: str, a: float, b: float | None = None) -> str:
+        del self, action, a, b
         return "local:calculator"
 
     monkeypatch.setattr(shell_module, "run_command", run_command)
-    monkeypatch.setattr(CalculatorTools, "add", tool(add))
+    monkeypatch.setattr(CalculatorTools, "calculate", tool(calculate))
     monkeypatch.delenv("MINDROOM_SANDBOX_SHELL_SUPERVISOR_SOCKET", raising=False)
 
 
@@ -152,7 +152,7 @@ async def test_omitted_worker_tools_honors_environment(
     agent = _create_routing_agent(tmp_path, process_env)
 
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith(expected[0])
-    assert await _invoke(agent, "add", a=1, b=2) == expected[1]
+    assert await _invoke(agent, "calculate", action="add", a=1, b=2) == expected[1]
     if expected == ("local:shell", "local:calculator"):
         assert "Worker-routed tools:" not in agent.prompt.role
         assert "- All tools run in the primary MindRoom runtime." not in agent.prompt.role
@@ -176,7 +176,7 @@ async def test_dedicated_defaults_ignore_static_runner_url(
     agent = _create_routing_agent(tmp_path, process_env)
 
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith("worker:shell")
-    assert await _invoke(agent, "add", a=1, b=2) == "local:calculator"
+    assert await _invoke(agent, "calculate", action="add", a=1, b=2) == "local:calculator"
 
 
 @pytest.mark.asyncio
@@ -241,7 +241,7 @@ async def test_authored_worker_tools_retains_precedence(
     )
 
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith(expected[0])
-    assert await _invoke(agent, "add", a=1, b=2) == expected[1]
+    assert await _invoke(agent, "calculate", action="add", a=1, b=2) == expected[1]
 
 
 @pytest.mark.asyncio
@@ -255,7 +255,7 @@ async def test_runner_mode_keeps_real_agent_tools_local(tmp_path: Path) -> None:
     )
 
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith("local:shell")
-    assert await _invoke(agent, "add", a=1, b=2) == "local:calculator"
+    assert await _invoke(agent, "calculate", action="add", a=1, b=2) == "local:calculator"
 
 
 @pytest.mark.asyncio
@@ -329,7 +329,7 @@ def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_o
         tools=builtin_tool_registry(),
     )
 
-    assert blocking_entrypoint(toolkit, "add")(a=1, b=2) == expected
+    assert blocking_entrypoint(toolkit, "calculate")(action="add", a=1, b=2) == expected
 
 
 @pytest.mark.asyncio
@@ -470,7 +470,7 @@ async def test_unsafe_local_flag_remains_limited_to_default_execution_tools(tmp_
 
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith("local:shell")
     with pytest.raises(RuntimeError, match="MINDROOM_SANDBOX_PROXY_URL"):
-        await _invoke(agent, "add", a=1, b=2)
+        await _invoke(agent, "calculate", action="add", a=1, b=2)
 
 
 @pytest.mark.asyncio

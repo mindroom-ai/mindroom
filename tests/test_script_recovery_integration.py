@@ -266,7 +266,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             owner_user_id="@alice:example.test",
             room_id="!room:example.test",
             source_digest="source-digest",
-            grants=(ScriptToolGrant("calculator", "add"),),
+            grants=(ScriptToolGrant("calculator", "calculate"),),
             token_hash=token_hash,
             worker_key=worker_key,
             worker_backend_locator=backend.cleanup_locator,
@@ -330,7 +330,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         store.claim_call(
             run_id=_RUN_ID,
             call_id="accepted-before-restart",
-            grant=ScriptToolGrant("calculator", "add"),
+            grant=ScriptToolGrant("calculator", "calculate"),
             arguments_digest="arguments-digest",
         )
 

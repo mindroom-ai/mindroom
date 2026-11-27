@@ -1088,14 +1088,14 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
         pytest.param([answer("Disk full.")], "Disk full.", "Disk full.", id="finding"),
         # The replay's own call numbers after the call the stopped attempt showed, as a stream of it would.
         pytest.param(
-            [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("NO_REPLY")],
-            "🔧 `multiply` [2]",
+            [calls(tool_call("calculate", "call-2", action="multiply", a=6, b=7)), answer("NO_REPLY")],
+            "🔧 `calculate` [2]",
             "Done.",
             id="call-then-reports-nothing",
         ),
         pytest.param(
-            [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("Disk full.")],
-            "🔧 `multiply` [2]\n\nDisk full.",
+            [calls(tool_call("calculate", "call-2", action="multiply", a=6, b=7)), answer("Disk full.")],
+            "🔧 `calculate` [2]\n\nDisk full.",
             "Disk full.",
             id="call-then-finding",
         ),

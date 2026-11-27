@@ -1,6 +1,6 @@
 """Daily room-scoped snapshots of thread-tag usage for cache-stable prompts.
 
-The `tag_thread` tool description embeds the most-used short tags for the
+The `thread_tags` tool description embeds the most-used short tags for the
 current room so agents converge on a shared vocabulary without leaking tag
 names between rooms. The ranked list is rebuilt at most once per day at local
 midnight instead of on every tag change.
@@ -309,7 +309,7 @@ async def maybe_rebuild_tag_vocabulary(
 
 
 def format_tag_vocabulary_for_description(snapshot: _TagVocabularySnapshot | None) -> str:
-    """Format the ranked tag list without counts for the tag_thread description."""
+    """Format the ranked tag list without counts for the thread_tags description."""
     if snapshot is None or not snapshot.tags:
         return "No reusable short tags are in use yet; coin sensible new ones."
     ranked_tags = ", ".join(usage.tag for usage in snapshot.tags[:_VOCABULARY_DESCRIPTION_TAG_LIMIT])

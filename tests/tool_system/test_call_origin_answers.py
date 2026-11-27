@@ -223,10 +223,10 @@ async def test_a_cancelled_scheduled_call_whose_body_then_raises_stays_cancelled
 
 class _OAuthCalculator(Toolkit):
     def __init__(self) -> None:
-        super().__init__(name="calculator", tools=[self.add])
+        super().__init__(name="calculator", tools=[self.calculate])
 
-    def add(self, a: int, b: int) -> int:
-        del a, b
+    def calculate(self, action: str, a: float, b: float | None = None) -> str:
+        del action, a, b
         _oauth_required()
 
 

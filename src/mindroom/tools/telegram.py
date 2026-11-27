@@ -214,15 +214,10 @@ class _TelegramTools(Toolkit):
         action: _TelegramReadAction,
         file_id: str | None = None,
     ) -> str:
-        """Read Telegram chat metadata or fetch a file (base64 or an operator-configured download).
+        """Read Telegram chat metadata or fetch a file (base64 or operator-configured download).
 
-        - `get_chat`: none
+        - `get_chat`: chat info
         - `get_file`: `file_id`
-
-        Args:
-            action: Read operation.
-            file_id: Telegram file ID for `get_file`.
-
         """
         if action not in self._read_actions:
             return self._error_json(f"Action '{action}' is disabled.")
@@ -298,21 +293,12 @@ class _TelegramTools(Toolkit):
         """Send to the configured Telegram chat.
 
         - `message`: `message`
-        - `photo`: `media_base64`
-        - `video`: `media_base64`
-        - `animation`: `media_base64`
-        - `document`: `media_base64`, `filename`
-        - `audio`: `media_base64`
-        - `sticker`: `media_base64`
-
-        Args:
-            action: Send operation.
-            message: Text content for `message`.
-            media_base64: Base64-encoded media bytes for non-text actions (local paths are not supported).
-            filename: Display filename for `document`.
-            caption: Optional caption for `photo`, `document`, `video`, `audio`, or `animation`.
-            title: Optional track title for `audio`.
-
+        - `photo`: base64 `media_base64` (`caption`)
+        - `video`: base64 `media_base64` (`caption`)
+        - `animation`: base64 `media_base64` (`caption`)
+        - `document`: base64 `media_base64`, `filename` (`caption`)
+        - `audio`: base64 `media_base64` (`caption`, `title`)
+        - `sticker`: base64 `media_base64`
         """
         if action not in self._send_actions:
             return self._error_json(f"Action '{action}' is disabled.")
@@ -369,20 +355,12 @@ class _TelegramTools(Toolkit):
         emoji: str | None = None,
         disable_notification: bool = False,
     ) -> str:
-        """Edit, delete, react to, or pin a message in the configured Telegram chat.
+        """Manage a message (`message_id`) in the configured Telegram chat.
 
-        - `edit`: `message_id`, `text`
-        - `delete`: `message_id`
-        - `react`: `message_id`, `emoji`
-        - `pin`: `message_id`
-
-        Args:
-            action: Management operation.
-            message_id: Target Telegram message ID.
-            text: Replacement text for `edit`.
-            emoji: Reaction emoji for `react`.
-            disable_notification: Suppress chat notification on `pin`.
-
+        - `edit`: `text`
+        - `delete`: delete message
+        - `react`: `emoji`
+        - `pin`: pin (`disable_notification`)
         """
         if action not in self._manage_actions:
             return self._error_json(f"Action '{action}' is disabled.")

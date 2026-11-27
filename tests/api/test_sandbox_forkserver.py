@@ -730,8 +730,8 @@ def test_forkserver_mode_reuses_one_template_across_tool_calls(
                     runtime_paths,
                     config,
                     tool_name="calculator",
-                    function_name="add",
-                    args=[1, 2],
+                    function_name="calculate",
+                    args=["add", 1, 2],
                     kwargs={},
                 ),
             )
@@ -777,7 +777,14 @@ def test_forkserver_template_ignores_package_planted_in_its_cwd(
     monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
     try:
         response = sandbox_runner_module._execute_request_subprocess_sync(
-            execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
+            execute_call(
+                runtime_paths,
+                config,
+                tool_name="calculator",
+                function_name="calculate",
+                args=["add", 1, 2],
+                kwargs={},
+            ),
         )
     finally:
         manager.shutdown()
@@ -801,7 +808,14 @@ def test_forkserver_timeout_maps_to_worker_failure(
     monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: _TimeoutForkserver())
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
-        execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
+        execute_call(
+            runtime_paths,
+            config,
+            tool_name="calculator",
+            function_name="calculate",
+            args=["add", 1, 2],
+            kwargs={},
+        ),
     )
 
     assert response.ok is False
@@ -836,7 +850,14 @@ def test_forkserver_startup_failure_falls_back_to_spawn_per_call(
     monkeypatch.setattr(sandbox_runner_module, "_run_request_subprocess", _fake_run)
 
     response = sandbox_runner_module._execute_request_subprocess_sync(
-        execute_call(runtime_paths, config, tool_name="calculator", function_name="add", args=[1, 2], kwargs={}),
+        execute_call(
+            runtime_paths,
+            config,
+            tool_name="calculator",
+            function_name="calculate",
+            args=["add", 1, 2],
+            kwargs={},
+        ),
     )
 
     assert response.ok is True

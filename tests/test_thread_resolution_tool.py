@@ -425,7 +425,7 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
         tool_runtime_context(context),
     ):
         resolved = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=standalone_id))
-        tagged = json.loads(await ThreadTagsTools().tag_thread("ops", thread_id=standalone_id))
+        tagged = json.loads(await ThreadTagsTools().thread_tags("tag", tag="ops", thread_id=standalone_id))
         moved = json.loads(await ThreadMoveTools().move_thread(room_id="!dest:localhost", thread_id=standalone_id))
         rejected_state = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=state_event_id))
         rejected_encrypted = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=encrypted_id))

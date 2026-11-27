@@ -59,11 +59,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# How many failed calls the first line of a report names; `get_workflow` lists them all.
+# How many failed calls the first line of a report names; `workflow(action="get", ...)` lists them all.
 _MAX_FAILED_NAMED = 10
 _ABANDONED = "The call that waited was cancelled."
 _TAKEN = "Run {} was resumed by another call."
-_IDLE = "Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call resume_workflow."
+_IDLE = 'Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call workflow(action="resume", run_id=...).'
 # How many attempts in a row an interrupted run is given on its own while none of them finishes a call.
 _MAX_IDLE_RESUMES = 5
 # How long the end of a run waits for its agents' cancelled jobs, all together, before each node is settled as it
@@ -1072,7 +1072,7 @@ class WorkflowEngine:
             return text
         named = ", ".join(failed[:_MAX_FAILED_NAMED]) + (", ..." if len(failed) > _MAX_FAILED_NAMED else "")
         calls = "call" if len(failed) == 1 else "calls"
-        return f'{len(failed)} {calls} failed ({named}); get_workflow(run_id, nodes="failed") shows them.\n\n{text}'
+        return f'{len(failed)} {calls} failed ({named}); workflow(action="get", run_id=..., nodes="failed") shows them.\n\n{text}'
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
         """Return the initial prompt for a live agent node generation, or None once ended/stopped."""

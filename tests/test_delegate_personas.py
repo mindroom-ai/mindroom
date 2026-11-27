@@ -78,7 +78,7 @@ def _config(
             "child": AgentConfig(display_name="Child"),
         },
         knowledge_bases={base_id: KnowledgeBaseConfig(path=f"./{base_id}") for base_id in knowledge_bases},
-        tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
+        tool_approval={"rules": [{"match": "calculate", "action": "require_approval"}] if approval else []},
         models={
             "default": ModelConfig(provider="openai", id="default-model"),
             "haiku": ModelConfig(provider="openai", id="haiku-model"),
@@ -409,7 +409,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
-    model = ScriptedModel([calls(tool_call("add", "approved-add", a=1, b=2)), answer("Sum is 3.")])
+    model = ScriptedModel([calls(tool_call("calculate", "approved-add", action="add", a=1, b=2)), answer("Sum is 3.")])
     parent = ScriptedModel(
         [
             calls(tool_call("run_subagent", "delegate", task="Add 1 and 2", profile="adder")),
@@ -452,7 +452,7 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     assert resumed_knowledge == [("docs",)]
     offered = offered_tools(model)
     assert len(offered) == 2
-    assert all("add" in names and "read_file" not in names for names in offered)
+    assert all("calculate" in names and "read_file" not in names for names in offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(
         source_kind="profile",
         source_name="adder",

@@ -723,19 +723,14 @@ class GithubTools(Toolkit):
         page: int = 1,
         per_page: int = 30,
     ) -> str:
-        """Read GitHub repositories, branches, files, directories, and code search results.
+        """Read GitHub repos, branches, files, or search code. Most repo actions require `repo_name` (`owner/repo`).
 
-        - `list_repositories`: list authenticated user's repository full names
-        - `search_repositories`: search repos by `query` (`sort`, `order`, `page`, `per_page`)
-        - `get_repository`: repository metadata for `repo_name` (`owner/repo`)
-        - `get_repository_with_stats`: detailed stats, languages, PR metrics, and contributors for `repo_name`
-        - `get_repository_languages`: language byte counts for `repo_name`
-        - `get_repository_stars`: star count for `repo_name`
-        - `list_branches`: branch names for `repo_name`
-        - `get_file_content`: decoded file text and SHA for `repo_name` and `path` (optional `ref`)
-        - `get_directory_content`: directory listing for `repo_name` and `path` (optional `ref`)
-        - `get_branch_content`: root directory listing for `repo_name` at `ref` (default `main`)
-        - `search_code`: search code by `query` (optional `repo_name`, `language`, `user`, `path`, `filename`)
+        - `list_repositories`: user's repos
+        - `search_repositories`: `query` (`sort`, `order`, `page`, `per_page`)
+        - `get_repository` / `get_repository_with_stats` / `get_repository_languages` / `get_repository_stars` / `list_branches`: `repo_name`
+        - `get_file_content` / `get_directory_content`: `repo_name`, `path` (optional `ref`; file returns text + SHA)
+        - `get_branch_content`: `repo_name` root at `ref` (default `main`)
+        - `search_code`: `query` (`repo_name`, `language`, `user`, `path`, `filename`)
         """
         if action not in _REPO_READ_ACTIONS:
             return _unsupported_action_error("repo read", action)
@@ -1124,18 +1119,14 @@ class GithubTools(Toolkit):
         page: int = 1,
         per_page: int | None = None,
     ) -> str:
-        """Read and search GitHub issues and pull requests.
+        """Read/search GitHub issues and PRs. All except `search_issues_and_prs` require `repo_name` (`owner/repo`); single-item actions require `number`.
 
-        - `list_issues`: issues in `repo_name` (`state` default `open`, `page`, `per_page` default 20)
-        - `get_issue`: issue details for `repo_name` and `number`
-        - `list_issue_comments`: comments on issue `number` in `repo_name`
-        - `get_pull_requests`: PRs in `repo_name` (`state` default `open`, `sort`, `order`, `page`, `per_page` default 50)
-        - `get_pull_request`: PR metadata for `repo_name` and `number`
-        - `get_pull_request_changes`: changed files and patches for PR `number` in `repo_name`
-        - `get_pull_request_comments`: comments on PR `number` in `repo_name` (`include_issue_comments`)
-        - `get_pull_request_with_details`: full PR details, comments, commits, and files for `repo_name` and `number`
-        - `get_pull_request_count`: count PRs in `repo_name` (`state` default `all`, optional `user` author, `base`, `head`)
-        - `search_issues_and_prs`: search by `query` (optional `repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` default 30)
+        - `list_issues`: `state` (`open`), `page`, `per_page` (20)
+        - `get_issue` / `list_issue_comments` / `get_pull_request` / `get_pull_request_changes` / `get_pull_request_with_details`: `number`
+        - `get_pull_requests`: `state` (`open`), `sort`, `order`, `page`, `per_page` (50)
+        - `get_pull_request_comments`: `number` (`include_issue_comments`)
+        - `get_pull_request_count`: `state` (`all`), `user`, `base`, `head`
+        - `search_issues_and_prs`: `query` (`repo_name`, `state`, `type_filter` `issue`/`pr`, `user`, `label`, `sort`, `order`, `page`, `per_page` 30)
         """
         if action not in _ISSUE_PR_READ_ACTIONS:
             return _unsupported_action_error("issue/PR read", action)
@@ -1268,15 +1259,14 @@ class GithubTools(Toolkit):
         assignees: list[str] | None = None,
         labels: list[str] | None = None,
     ) -> str:
-        """Create, edit, comment on, close, reopen, assign, or label GitHub issues.
+        """Manage GitHub issues in `repo_name`. All except `create_issue` require `issue_number`.
 
-        - `create_issue`: create issue in `repo_name` (`title`, optional `body`)
-        - `edit_issue`: update `title` and/or `body` on `issue_number`
-        - `comment_on_issue`: post `body` comment on `issue_number`
-        - `close_issue`: close `issue_number`
-        - `reopen_issue`: reopen `issue_number`
-        - `assign_issue`: assign `assignees` to `issue_number`
-        - `label_issue`: set `labels` on `issue_number`
+        - `create_issue`: `title` (`body`)
+        - `edit_issue`: `title` and/or `body`
+        - `comment_on_issue`: `body`
+        - `close_issue` / `reopen_issue`: toggle state
+        - `assign_issue`: `assignees`
+        - `label_issue`: `labels`
         """
         if action not in _ISSUE_WRITE_ACTIONS:
             return _unsupported_action_error("issue write", action)
@@ -1411,12 +1401,12 @@ class GithubTools(Toolkit):
         reviewers: list[str] | None = None,
         team_reviewers: list[str] | None = None,
     ) -> str:
-        """Create pull requests, review comments, and review requests on GitHub.
+        """Manage GitHub PRs and reviews in `repo_name`.
 
-        - `create_pull_request`: open PR in `repo_name` (`title`, `body`, `head`, `base`, optional `draft`, `maintainer_can_modify`)
-        - `create_pull_request_comment`: post diff review comment on `pr_number` (`body`, `commit_id`, `path`, `position`)
-        - `edit_pull_request_comment`: update `comment_id` in `repo_name` with `body`
-        - `create_review_request`: request `reviewers` (and optional `team_reviewers`) on `pr_number`
+        - `create_pull_request`: `title`, `body`, `head`, `base` (`draft`, `maintainer_can_modify`)
+        - `create_pull_request_comment`: `pr_number`, `body`, `commit_id`, `path`, `position`
+        - `edit_pull_request_comment`: `comment_id`, `body`
+        - `create_review_request`: `pr_number`, `reviewers` (`team_reviewers`)
         """
         if action not in _PR_WRITE_ACTIONS:
             return _unsupported_action_error("PR write", action)
@@ -1567,15 +1557,13 @@ class GithubTools(Toolkit):
         auto_init: bool = False,
         organization: str | None = None,
     ) -> str:
-        """Create/delete repositories, manage branches, and create/update/delete repository files.
+        """Manage GitHub repos, branches, and files. All except `create_repository` require `repo_name`.
 
-        - `create_repository`: create repo `name` (optional `private`, `description`, `auto_init`, `organization`)
+        - `create_repository`: `name` (`private`, `description`, `auto_init`, `organization`)
         - `delete_repository`: permanently delete `repo_name`
-        - `create_branch`: create `branch` in `repo_name` (optional `source_branch`, defaults to default branch)
-        - `set_default_branch`: set `repo_name` default branch to `branch`
-        - `create_file`: create `path` in `repo_name` (`content`, `message`, optional `branch`)
-        - `update_file`: update `path` in `repo_name` (`content`, `message`, `sha`, optional `branch`)
-        - `delete_file`: delete `path` in `repo_name` (`message`, `sha`, optional `branch`)
+        - `create_branch`: `branch` (`source_branch`, default repo default)
+        - `set_default_branch`: `branch`
+        - `create_file` / `update_file` / `delete_file`: `path`, `message`, optional `branch` (`content` for create/update; `sha` required for update/delete)
         """
         if action not in _REPO_WRITE_ACTIONS:
             return _unsupported_action_error("repo write", action)

@@ -139,7 +139,7 @@ class Deployment:
 
     @property
     def workspace(self) -> Path:
-        """Return the Helper's workspace, where `start_workflow(path=...)` reads a script."""
+        """Return the Helper's workspace, where `workflow(action="start", path=...)` reads a script."""
         return self.directory / "storage" / "agents" / "helper" / "workspace"
 
     def backend(self) -> Backend:
@@ -380,7 +380,7 @@ def start_run(deployment: Deployment, source: str, token: str, dev: Path | None)
     deployment.workspace.mkdir(parents=True, exist_ok=True)
     (deployment.workspace / name).write_text(source)
     root = deployment.ask(
-        f'Call the tool start_workflow with path="{name}" and no other argument. Call it once and only once. '
+        f'Call the tool workflow with action="start" and path="{name}" and no other argument. Call it once and only once. '
         "Reply with the run ID it returns. When the run's result reaches you later, repeat that result word for word.",
         dev,
     )

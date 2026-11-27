@@ -354,27 +354,31 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 }
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
-# Legacy format: scheduler, searxng, memory, todo, Wave 3b native toolkits (gmail, google_calendar, github,
-#   google_drive, google_sheets, homeassistant), Wave 5 native toolkits (file_generation, visualization, unsplash),
-#   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
-#   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
-#   zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify,
-#   reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits (outlook_mail, outlook_calendar,
-#   microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote, microsoft_todo, microsoft_meetings,
-#   microsoft_people), skills, attachments, Google Docs / Google Tasks (google_docs, google_tasks, including prefixed
-#   secondary Google Workspace plugin copies for all Google Workspace toolkits), and runtime/session/thread toolkits
-#   (script, terminal, claude_agent, thread_model, usage_stats) previously exposed individual per-operation function
-#   names that could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Legacy format: scheduler, searxng, memory, todo, Wave 2 native toolkits (calculator, duckduckgo, googlesearch,
+#   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github, google_drive, google_sheets,
+#   homeassistant), Wave 4 native toolkits (exa, trafilatura, brightdata, oxylabs, browserbase, spider), Wave 5 native
+#   toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift,
+#   neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona), Wave 7 comms toolkits (email,
+#   twilio, discord, telegram, whatsapp, webex, zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup,
+#   trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits
+#   (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote,
+#   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, Google Docs /
+#   Google Tasks (google_docs, google_tasks, including prefixed secondary Google Workspace plugin copies for all Google
+#   Workspace toolkits), and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model, usage_stats)
+#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs or
+#   include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
-#   google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659); replacement: unreleased; consolidated into
-#   action-dispatched and risk-scoped functions.
+#   workflow/thread_tags: v2026.11.658; google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659;
+#   Wave 2/4: v2026.11.663); replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired function of a strict-wildcard toolkit (skills, attachments, Microsoft 365,
-#   script, terminal, claude_agent, thread_model, usage_stats) is decided by an approval script or any retired
-#   function's effective decision differs from the replacement's effective decision (regardless of other toolkits); also
-#   reject include_tools or exclude_tools naming retired functions on attachments, terminal, claude_agent, thread_model,
-#   or usage_stats entries, directing operators to the consolidated function names and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired strict-wildcard toolkit function (skills, attachments, Microsoft 365,
+#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, usage_stats) is decided by a wildcard
+#   approval script or any retired function's effective decision differs from the replacement's effective decision
+#   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
+#   consolidated toolkit entry (both authored overrides and stored dashboard settings), directing operators to the
+#   replacement function alongside per-action `enable_*` settings (where available) or `tool_approval.rules` so
+#   permissions are not broadened.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
@@ -382,6 +386,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_tool_approval_grants.py::test_microsoft_365_retired_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_outlook_mail_send_and_reply_migration_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_tool_approval_grants.py::test_runtime_crud_action_scoped_grants_and_fail_closed_migration,
@@ -390,7 +396,10 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
-#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration.
+#   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration,
+#   tests/test_brightdata_tool.py::test_wave4_action_scoped_grants_and_fail_closed_migration.
+
 # LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
 # Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
 # Last legacy release: v2026.11.651; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
@@ -427,6 +436,34 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_memory": "memory",
         "delete_memory": "memory",
     },
+    "calculator": {
+        "add": "calculate",
+        "subtract": "calculate",
+        "multiply": "calculate",
+        "divide": "calculate",
+        "exponentiate": "calculate",
+        "factorial": "calculate",
+        "is_prime": "calculate",
+        "square_root": "calculate",
+    },
+    "duckduckgo": {
+        "web_search": "duckduckgo_search",
+        "search_news": "duckduckgo_search",
+    },
+    "googlesearch": {
+        "web_search": "google_search",
+        "search_news": "google_search",
+    },
+    "serper": {
+        "search_web": "serper_search",
+        "search_news": "serper_search",
+        "search_scholar": "serper_search",
+    },
+    "youtube": {
+        "get_youtube_video_captions": "youtube_video",
+        "get_youtube_video_data": "youtube_video",
+        "get_video_timestamps": "youtube_video",
+    },
     "todo": {
         "plan": "todo",
         "add_todo": "todo",
@@ -434,6 +471,19 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "update_todo": "todo",
         "apply_template": "todo",
         "list_templates": "todo",
+    },
+    "workflow": {
+        "start_workflow": "workflow",
+        "get_workflow": "workflow",
+        "cancel_workflow": "workflow",
+        "resume_workflow": "workflow",
+        "list_workflow_runs": "workflow",
+        "save_workflow": "workflow",
+    },
+    "thread_tags": {
+        "tag_thread": "thread_tags",
+        "untag_thread": "thread_tags",
+        "list_thread_tags": "thread_tags",
     },
     "gmail": {
         "get_latest_emails": "gmail_read",
@@ -700,6 +750,39 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "create_file": "daytona_files",
         "delete_file": "daytona_files",
         "change_directory": "daytona_files",
+    },
+    "exa": {
+        "search_exa": "exa_lookup",
+        "get_contents": "exa_lookup",
+        "find_similar": "exa_lookup",
+        "exa_answer": "exa_lookup",
+    },
+    "trafilatura": {
+        "extract_text": "trafilatura_extract",
+        "extract_metadata_only": "trafilatura_extract",
+        "extract_batch": "trafilatura_extract",
+    },
+    "brightdata": {
+        "scrape_as_markdown": "brightdata",
+        "get_screenshot": "brightdata",
+        "search_engine": "brightdata",
+        "web_data_feed": "brightdata",
+    },
+    "oxylabs": {
+        "search_google": "oxylabs",
+        "get_amazon_product": "oxylabs",
+        "search_amazon_products": "oxylabs",
+        "scrape_website": "oxylabs",
+    },
+    "browserbase": {
+        "navigate_to": "browserbase",
+        "get_page_content": "browserbase",
+        "close_session": "browserbase",
+    },
+    "spider": {
+        "search_web": "spider",
+        "scrape": "spider",
+        "crawl": "spider",
     },
     "file_generation": {
         "generate_json_file": "generate_file",
@@ -1034,6 +1117,19 @@ _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
     {
         "skills",
         "attachments",
+        "calculator",
+        "duckduckgo",
+        "googlesearch",
+        "serper",
+        "youtube",
+        "exa",
+        "trafilatura",
+        "brightdata",
+        "oxylabs",
+        "browserbase",
+        "spider",
+        "workflow",
+        "thread_tags",
         "outlook_mail",
         "outlook_calendar",
         "microsoft_teams",
@@ -1307,9 +1403,38 @@ def retired_stored_tool_setting(
     return None
 
 
-def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
+def retired_tool_override(
+    tool_name: str,
+    overrides: Mapping[str, object],
+    *,
+    has_enable_toggles: bool = False,
+) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if (retired := retired_stored_tool_setting(tool_name, overrides)) is not None:
+        return retired
+    if (renames := RETIRED_CONSOLIDATED_FUNCTIONS.get(tool_name)) is not None and (
+        retired := _retired_function_filter(
+            overrides,
+            renames,
+            guidance_for=(
+                (
+                    lambda _key, new: (
+                        f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+                        f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
+                        f"matching `{new}`) so permissions are not broadened"
+                    )
+                )
+                if has_enable_toggles
+                else (
+                    lambda key, new: (
+                        f"`{new}` is now a consolidated function with an `action` parameter and `{tool_name}` has no "
+                        f"per-action allowlist filter; remove the retired `{key}` entry and use `tool_approval.rules` "
+                        f"matching `{new}` if per-action gating is needed"
+                    )
+                )
+            ),
+        )
+    ) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)
@@ -1380,19 +1505,20 @@ def dynamic_workflow_deprecation_warning(*, ignored_allowed_tools: bool) -> str:
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
-#   functions are `start_workflow`, `resume_workflow`, `save_workflow`, `get_workflow`, and `list_workflow_runs`.
-# Handling: When the config authors `dynamic_workflow`, allow any replacement function already decided by an exact
-#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function's effective approval decision
-#   differs from its replacement's effective decision.
+#   unified function is `workflow`.
+# Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
+#   `match` rule, and otherwise reject `tool_approval.rules` when a retired function is decided by an approval script or
+#   its effective approval decision differs from `workflow`'s effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
+#   tests/test_dynamic_workflow_alias.py::test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
 _RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, tuple[str, ...]] = {
-    "run_workflow": ("start_workflow", "resume_workflow"),
-    "create_workflow": ("save_workflow",),
-    "update_workflow": ("save_workflow",),
-    "get_workflow_run": ("get_workflow",),
-    "list_workflows": ("list_workflow_runs",),
+    "run_workflow": ("workflow",),
+    "create_workflow": ("workflow",),
+    "update_workflow": ("workflow",),
+    "get_workflow_run": ("workflow",),
+    "list_workflows": ("workflow",),
 }
 
 
@@ -1407,4 +1533,5 @@ def retired_dynamic_workflow_approval_error(
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=True,
     )

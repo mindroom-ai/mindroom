@@ -60,7 +60,7 @@ async def test_invalid_media_is_a_tool_failure(tmp_path: Path, monkeypatch: pyte
     config = Config.validate_with_runtime({}, paths)
     request = sandbox_runner.PreparedSandboxRunnerExecuteRequest(
         tool_name="calculator",
-        function_name="add",
+        function_name="calculate",
         kwargs={"a": 1, "b": 2},
     )
 

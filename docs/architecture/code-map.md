@@ -601,7 +601,7 @@ Matrix sync callback
 | `custom_tools/todo_state.py` | Leaf storage, the stored item shape and its strict reader, and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |
-| `custom_tools/calculator.py` | Native calculator toolkit with bounded `factorial()` and `is_prime()` arguments |
+| `custom_tools/calculator.py` | Native calculator toolkit (`calculate`) with bounded `factorial` and `is_prime` arguments |
 | `custom_tools/sleep.py` | Native sleep toolkit with pauses capped at 300 seconds |
 | `thread_export/workspace_sync.py` | Always-on debounced runner that keeps `<workspace>/thread_exports/` current through the live bots' clients and journal principals |
 | `background_tasks.py` | Background task management for non-blocking operations, and `SupervisedLoop`, which restarts a crashed long-running loop with backoff |

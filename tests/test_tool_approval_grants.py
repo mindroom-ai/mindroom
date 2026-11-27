@@ -1155,6 +1155,15 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("memory", "delete_memory", "memory"),
         ("memory", "add_memory", "memory"),
         ("todo", "update_todo", "todo"),
+        ("workflow", "start_workflow", "workflow"),
+        ("workflow", "get_workflow", "workflow"),
+        ("workflow", "cancel_workflow", "workflow"),
+        ("workflow", "resume_workflow", "workflow"),
+        ("workflow", "list_workflow_runs", "workflow"),
+        ("workflow", "save_workflow", "workflow"),
+        ("thread_tags", "tag_thread", "thread_tags"),
+        ("thread_tags", "untag_thread", "thread_tags"),
+        ("thread_tags", "list_thread_tags", "thread_tags"),
         ("scheduler", "schedule", "scheduler"),
         ("searxng", "image_search", "searxng_search"),
         ("searxng", "search_web", "searxng_search"),
@@ -1306,6 +1315,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
                 {"match": "mem0_add", "action": "require_approval"},
                 {"match": "search_web", "action": "require_approval"},
                 {"match": "searxng_search", "action": "auto_approve"},
+                {"match": "serper_search", "action": "auto_approve"},
             ],
         },
     }
@@ -1316,6 +1326,7 @@ def test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_n
         "mem0_add",
         "search_web",
         "searxng_search",
+        "serper_search",
     ]
 
 
@@ -1467,7 +1478,7 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     plugin_root = _write_consolidated_plugin(
         tmp_path,
         plugin_name="custom_plugin",
-        function_name="search_web",
+        function_name="scrape_webpage",
         retired_name=None,
     )
     runtime_paths = test_runtime_paths(tmp_path)
@@ -1489,18 +1500,18 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     registry = refresh_plugins(config, runtime_paths).tools
     assert "serper" in registry.entries
     assert "custom_plugin" in registry.entries
-    assert "search_web" not in registry.entries["serper"].action_scoped_grants
-    assert "search_web" in registry.entries["custom_plugin"].action_scoped_grants
+    assert "scrape_webpage" not in registry.entries["serper"].action_scoped_grants
+    assert "scrape_webpage" in registry.entries["custom_plugin"].action_scoped_grants
 
     # Another toolkit exposing the same function name keeps normal tool-wide grants and scheduled any-arguments.
-    serper_op = grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="serper")
+    serper_op = grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="serper")
     assert serper_op is not None
-    assert serper_op.tool_name == "search_web"
+    assert serper_op.tool_name == "scrape_webpage"
     assert serper_op.mcp_server_id is None
     assert serper_op.mcp_tool_name is None
     assert scheduled_call_offers_any_arguments(
         config,
-        "search_web",
+        "scrape_webpage",
         {"query": "x"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1512,19 +1523,21 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # The owning plugin gets per-action scoping and fails closed when action is missing.
     plugin_op = grant_operation(
         config,
-        "search_web",
+        "scrape_webpage",
         {"action": "read"},
         tools=registry,
         toolkit_name="custom_plugin",
     )
     assert plugin_op is not None
-    assert plugin_op.tool_name == "search_web"
+    assert plugin_op.tool_name == "scrape_webpage"
     assert plugin_op.mcp_server_id == "custom_plugin"
     assert plugin_op.mcp_tool_name == "read"
-    assert grant_operation(config, "search_web", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+    assert (
+        grant_operation(config, "scrape_webpage", {"query": "x"}, tools=registry, toolkit_name="custom_plugin") is None
+    )
     assert not scheduled_call_offers_any_arguments(
         config,
-        "search_web",
+        "scrape_webpage",
         {"action": "read"},
         requester_id="@human:test",
         approver_id="@human:test",
@@ -1536,14 +1549,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
     # timed_grant_operation threads call.toolkit_name into grant_operation.
     serper_tool = ToolExecution(
         tool_call_id="call-serper",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         tool_args={"query": "x"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     serper_call = ApprovalCall(
         tool_call_id="call-serper",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="serper",
@@ -1552,14 +1565,14 @@ def test_plugin_action_scoped_grants_stay_isolated_to_owning_toolkit(tmp_path: P
 
     plugin_tool = ToolExecution(
         tool_call_id="call-plugin",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         tool_args={"action": "read"},
         requires_confirmation=True,
         approval_type="mindroom_policy",
     )
     plugin_call = ApprovalCall(
         tool_call_id="call-plugin",
-        tool_name="search_web",
+        tool_name="scrape_webpage",
         invoking_agent="code",
         expires_at_ns=9_000_000_000_000_000_000,
         toolkit_name="custom_plugin",
@@ -3116,6 +3129,8 @@ async def test_expiring_one_paused_replys_cards_leaves_the_others_waiting(
         ("google_tasks", "google_tasks_write", ("create", "update", "delete")),
         ("homeassistant", "homeassistant_read", ("list_entities", "get_state")),
         ("homeassistant", "homeassistant_control", ("turn_on", "call_service")),
+        ("workflow", "workflow", ("start", "get", "cancel", "resume", "list", "save")),
+        ("thread_tags", "thread_tags", ("tag", "untag", "list")),
     ],
 )
 def test_wave3b_registry_action_scoped_grants_bind_per_action(
@@ -3332,6 +3347,94 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
     error_pattern: str | None,
 ) -> None:
     """Wildcard approval scripts fail closed for retired skills/attachments names until explicit rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
+
+
+@pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        (["serper"], ["skill", "*"], r"check\.py.*serper_search"),
+        (["serper"], ["serper_search", "skill", "*"], None),
+        (["browserbase"], ["skill", "*"], r"check\.py.*browserbase"),
+        (["browserbase"], ["browserbase", "skill", "*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_wave2_and_wave4_toolkits(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired Wave 2/4 function names until explicit rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
+
+
+@pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        (["workflow"], ["*_workflow*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["*workflow*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["*workflow*", "workflow"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["skill", "*"], r"check\.py.*start_workflow.*workflow"),
+        (["workflow"], ["workflow", "*_workflow*"], None),
+        (["workflow"], ["workflow", "*workflow*"], None),
+        (["workflow"], ["workflow", "skill", "*"], None),
+        (["thread_tags"], ["*thread_tags*"], r"now decides thread_tags"),
+        (["thread_tags"], ["*tag*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread*", "thread_tags"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["*thread_tags*", "thread_tags"], r"now decides thread_tags"),
+        (["thread_tags"], ["skill", "*"], r"check\.py.*tag_thread.*thread_tags"),
+        (["thread_tags"], ["thread_tags", "*thread_tags*"], None),
+        (["thread_tags"], ["thread_tags", "*tag*"], None),
+        (["thread_tags"], ["thread_tags", "skill", "*"], None),
+        (["dynamic_workflow"], ["*_workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["run_*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["*workflow*", "workflow"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["skill", "*"], r"check\.py.*run_workflow.*workflow"),
+        (["dynamic_workflow"], ["workflow", "*_workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "*workflow*"], None),
+        (["dynamic_workflow"], ["workflow", "skill", "*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_workflow_and_thread_tags_names(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired workflow/thread_tags/dynamic_workflow names until preceded by exact rules."""
     from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
 
     runtime_paths = test_runtime_paths(tmp_path)

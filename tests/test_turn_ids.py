@@ -179,7 +179,7 @@ async def test_a_delegated_child_s_tool_calls_carry_its_own_turn_id_and_its_call
     parent = ScriptedModel(
         [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add one and two")), answer("Done")],
     )
-    child = ScriptedModel([calls(tool_call("add", "add", a=1, b=2)), answer("Three")])
+    child = ScriptedModel([calls(tool_call("calculate", "add", action="add", a=1, b=2)), answer("Three")])
     ScriptedAgents({"child": child}, by_session={identity.session_id: parent}).install(monkeypatch)
     registry = HookRegistry.from_plugins([_plugin("turn-ids", [before, after])])
     runtime = replace(
@@ -209,8 +209,8 @@ async def test_a_delegated_child_s_tool_calls_carry_its_own_turn_id_and_its_call
     assert child_turn not in {None, "turn-leader"}
     assert seen == [
         ("before", "leader", "run_subagent", "turn-leader", None),
-        ("before", "child", "add", child_turn, "turn-leader"),
-        ("after", "child", "add", child_turn, "turn-leader"),
+        ("before", "child", "calculate", child_turn, "turn-leader"),
+        ("after", "child", "calculate", child_turn, "turn-leader"),
         ("after", "leader", "run_subagent", "turn-leader", None),
     ]
 

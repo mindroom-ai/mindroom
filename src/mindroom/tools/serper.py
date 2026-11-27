@@ -80,7 +80,8 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#serper",
-    function_names=("scrape_webpage", "search_news", "search_scholar", "search_web"),
+    function_names=("scrape_webpage", "serper_search"),
+    action_scoped_grants=("serper_search",),
 )
 def serper_tools() -> type[SerperTools]:
     """Return Serper tools for Google search, news, academic papers, and web scraping."""

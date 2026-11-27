@@ -115,8 +115,8 @@ def test_external_clients_share_dashboard_agent_selection(
                 "arguments": {
                     "agent": "shared",
                     "toolkit": "calculator",
-                    "function": "add",
-                    "arguments": {"a": 1, "b": 2},
+                    "function": "calculate",
+                    "arguments": {"action": "add", "a": 1, "b": 2},
                 },
             },
         },
