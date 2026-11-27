@@ -46,6 +46,7 @@ from mindroom.reactive_triggers.store import (
     ReactiveTriggerStore,
     ReactiveTriggerStoreError,
 )
+from mindroom.script_runs import manager as script_manager_module
 from mindroom.script_runs.models import ScriptRunRecord
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from tests.conftest import bind_runtime_paths
@@ -124,8 +125,9 @@ def _req_cp(store: ReactiveTriggerStore, tid: str) -> ScriptCheckCheckpoint:
     return cp
 
 
-def test_script_check_policy_models_and_access(tmp_path: Path) -> None:
+def test_script_check_policy_models_and_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Policy defaults/validators, spec/checkpoint models, and unified check_script_check_access enforce bounds."""
+    monkeypatch.setattr(script_manager_module, "background_script_supervision_supported", lambda: True)
     pol = ExternalTriggerPolicyConfig()
     assert (pol.script_check_enabled, pol.min_script_check_poll_interval_seconds, pol.max_script_checks_per_owner) == (
         True,
@@ -714,3 +716,63 @@ async def test_script_check_service_slot_freed_wakeup_and_stop_cancels_active_ta
         assert sa2_cancelled.is_set()
     finally:
         await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_script_check_sql_per_owner_selection_with_30_earlier_owner_a_checks(tmp_path: Path) -> None:
+    """Astra follow-up #2: Owner B is returned and admitted immediately even behind 30 earlier due checks for Owner A."""
+    paths = _paths(tmp_path / "fair30", allow_local=True)
+    store = ReactiveTriggerStore(paths)
+    cfg = _cfg(paths, allow_local=True)
+    for idx in range(30):
+        store.create_trigger(
+            _sc_rule(f"a_{idx:02d}", owner=_OWNER),
+            initial_script_check_checkpoint=_sc_cp(next_poll_at=10.0 + idx),
+        )
+    store.create_trigger(
+        _sc_rule("b_00", owner="@bob:example.org", poll_s=60),
+        initial_script_check_checkpoint=_sc_cp(next_poll_at=100.0),
+    )
+
+    due_all = store.list_due_script_check_triggers(now=200.0, limit=20)
+    assert [rule.trigger_id for rule, _ in due_all] == ["a_00", "b_00"]
+    due_excl = store.list_due_script_check_triggers(now=200.0, limit=20, exclude_owners={_OWNER})
+    assert [rule.trigger_id for rule, _ in due_excl] == ["b_00"]
+
+    a_started, release_a = asyncio.Event(), asyncio.Event()
+    b_runs: list[float] = []
+
+    async def runner(
+        rule: ReactiveTriggerRecord,
+        _cp: ScriptCheckCheckpoint,
+        _cfg: Config,
+        now: float,
+    ) -> ScriptCheckTickOutcome:
+        if rule.trigger_id == "a_00":
+            a_started.set()
+            await release_a.wait()
+        elif rule.trigger_id == "b_00":
+            b_runs.append(now)
+        return ScriptCheckTickOutcome(status="ok", run_id=f"run-{rule.trigger_id}-{len(b_runs)}")
+
+    poller = ScriptCheckPoller(
+        store=store,
+        config_provider=lambda: cfg,
+        runtime_paths=paths,
+        tick_runner=runner,
+        max_concurrency=2,
+    )
+    tasks_1 = await poller.admit_due(now=200.0)
+    assert len(tasks_1) == 2
+    await asyncio.wait_for(a_started.wait(), timeout=2.0)
+    await asyncio.wait_for(tasks_1[1], timeout=2.0)
+    assert len(b_runs) == 1
+
+    # While Owner A still occupies slot 1 (with 29 earlier due checks pending), Owner B is admitted again immediately.
+    tasks_2 = await poller.admit_due(now=400.0)
+    assert len(tasks_2) == 1
+    await asyncio.wait_for(tasks_2[0], timeout=2.0)
+    assert len(b_runs) == 2
+
+    release_a.set()
+    await asyncio.wait_for(tasks_1[0], timeout=2.0)

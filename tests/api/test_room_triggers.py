@@ -705,8 +705,15 @@ def test_script_check_trigger_summary_owner_health_and_cross_room_redaction(tmp_
     }
 
 
-def test_script_check_quota_rejected_reenable_preserves_checkpoint(tmp_path: Path) -> None:
+def test_script_check_quota_rejected_reenable_preserves_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Astra fresh #3: quota-rejected PATCH re-enable (409) leaves script_check checkpoint untouched."""
+    monkeypatch.setattr(
+        "mindroom.script_runs.manager.background_script_supervision_supported",
+        lambda: True,
+    )
     h = _Harness(tmp_path, max_script_checks_per_owner=1, allow_local_script_checks=True)
     digest = hashlib.sha256(b"def check():\n    return None\n").hexdigest()
     h.add_reactive(

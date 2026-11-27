@@ -699,23 +699,39 @@ class ReactiveTriggerStore:
                 raise ReactiveTriggerStoreError(msg) from exc
             return True
 
-    def list_due_script_check_triggers(self, *, now: float | None = None, limit: int = 20) -> list[_ScriptCheckDue]:
-        """Return enabled, unexpired script_check triggers whose checkpoint is due for polling."""
+    def list_due_script_check_triggers(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 20,
+        exclude_owners: Collection[str] = (),
+    ) -> list[_ScriptCheckDue]:
+        """Return at most one earliest due enabled, unexpired script_check trigger per eligible owner."""
         if limit <= 0:
             return []
         ts = time.time() if now is None else now
+        excluded_json = json.dumps(sorted(set(exclude_owners)))
         sql = (
+            "SELECT * FROM ("
             "SELECT rt.*, cp.revision AS cp_revision, cp.source_utf8 AS cp_source_utf8, "
             "cp.identity_json AS cp_identity_json, cp.state_json AS cp_state_json, "
             "cp.next_poll_at AS cp_next_poll_at, cp.consecutive_errors AS cp_consecutive_errors, "
             "cp.last_error_code AS cp_last_error_code, cp.last_run_at AS cp_last_run_at, "
-            "cp.updated_at AS cp_updated_at FROM reactive_triggers rt "
+            "cp.updated_at AS cp_updated_at, "
+            "ROW_NUMBER() OVER ("
+            "PARTITION BY rt.owner_user_id ORDER BY cp.next_poll_at ASC, rt.created_at ASC, rt.trigger_id ASC"
+            ") AS owner_rank "
+            "FROM reactive_triggers rt "
             "JOIN script_check_checkpoints cp ON cp.trigger_id = rt.trigger_id "
             "WHERE rt.source_type='script_check' AND rt.enabled=1 AND (rt.expires_at IS NULL OR rt.expires_at>?) "
-            "AND cp.next_poll_at IS NOT NULL AND cp.next_poll_at<=? ORDER BY cp.next_poll_at ASC, rt.trigger_id ASC LIMIT ?"
+            "AND cp.next_poll_at IS NOT NULL AND cp.next_poll_at<=? "
+            "AND rt.owner_user_id NOT IN (SELECT value FROM json_each(?))"
+            ") ranked "
+            "WHERE owner_rank = 1 "
+            "ORDER BY cp_next_poll_at ASC, created_at ASC, trigger_id ASC LIMIT ?"
         )
         with self._read_connection() as conn:
-            rows = conn.execute(sql, (ts, ts, limit)).fetchall()
+            rows = conn.execute(sql, (ts, ts, excluded_json, limit)).fetchall()
         return [
             (rec, _script_check_checkpoint_from_row(r, prefix="cp_"))
             for r in rows

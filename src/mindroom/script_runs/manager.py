@@ -97,6 +97,7 @@ __all__ = [
     "ScriptRuntimeNotReadyError",
     "script_execution_uses_worker",
     "script_gateway_isolated",
+    "unsupported_private_script_worker_scope_message",
     "workflow_placement",
 ]
 
@@ -1184,14 +1185,17 @@ class ScriptRunManager:
         await asyncio.to_thread(_require_script_worker_backend(backend).retire_worker, worker_key)
 
 
+def unsupported_private_script_worker_scope_message(config: Config, agent_name: str) -> str | None:
+    """Return an error sentence if ``agent_name`` is a private agent whose worker scope cannot run background scripts."""
+    agent_config = config.get_agent(agent_name)
+    if agent_config.private is not None and agent_policy(config, agent_name).effective_execution_scope != "user_agent":
+        return "Background-script workers for private agents require private.per=user_agent."
+    return None
+
+
 def _require_supported_private_script_worker_scope(context: ToolRuntimeContext) -> None:
-    agent_config = context.config.get_agent(context.agent_name)
-    if (
-        agent_config.private is not None
-        and agent_policy(context.config, context.agent_name).effective_execution_scope != "user_agent"
-    ):
-        msg = "Background-script workers for private agents require private.per=user_agent."
-        raise ScriptRunManagerError(msg)
+    if message := unsupported_private_script_worker_scope_message(context.config, context.agent_name):
+        raise ScriptRunManagerError(message)
 
 
 def _resolve_script_resource_profile(

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import socket
+import sys
 import time
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
@@ -24,8 +25,9 @@ from mindroom.api.script_gateway import bind_script_tool_broker, serve_script_ga
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.hooks import HookBindings, HookRegistry
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration import script_checks as sc_mod
@@ -74,6 +76,7 @@ _OWNER = "@alice:example.org"
 _ROOM = "!room:example.org"
 _SRC = "def check():\n    return None\n"
 _DIGEST = hashlib.sha256(_SRC.encode()).hexdigest()
+_LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="Local background script supervision requires Linux")
 
 
 def _script_ctx(
@@ -81,6 +84,8 @@ def _script_ctx(
     *,
     tools: list[str],
     policy: dict[str, Any] | None = None,
+    tool_approval: dict[str, Any] | None = None,
+    hook_registry: HookRegistry | None = None,
     allow_local: bool = False,
 ) -> ToolRuntimeContext:
     env = {"MATRIX_HOMESERVER": "https://example.org", "MATRIX_SERVER_NAME": "example.org"}
@@ -91,18 +96,16 @@ def _script_ctx(
         storage_path=tmp_path / "data",
         process_env=env,
     )
-    cfg = bind_runtime_paths(
-        Config.model_validate(
-            {
-                "defaults": {"allow_shell_without_worker": allow_local},
-                "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-                "agents": {"coder": {"display_name": "Coder", "rooms": [_ROOM], "tools": tools, "model": "default"}},
-                "authorization": {"global_users": [_OWNER]},
-                "external_trigger_policy": {"enabled": True, **(policy or {})},
-            },
-        ),
-        paths,
-    )
+    raw_cfg: dict[str, Any] = {
+        "defaults": {"allow_shell_without_worker": allow_local},
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+        "agents": {"coder": {"display_name": "Coder", "rooms": [_ROOM], "tools": tools, "model": "default"}},
+        "authorization": {"global_users": [_OWNER]},
+        "external_trigger_policy": {"enabled": True, **(policy or {})},
+    }
+    if tool_approval is not None:
+        raw_cfg["tool_approval"] = tool_approval
+    cfg = bind_runtime_paths(Config.model_validate(raw_cfg), paths)
     return make_test_tool_runtime_context(
         agent_name="coder",
         target=MessageTarget(
@@ -118,7 +121,7 @@ def _script_ctx(
         runtime_paths=paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hooks=HookBindings(registry=HookRegistry.empty()),
+        hooks=HookBindings(registry=hook_registry or HookRegistry.empty()),
     )
 
 
@@ -193,7 +196,7 @@ def _create_run(
 class _FeedToolkit(Toolkit):
     def __init__(self, items: list[str]) -> None:
         self.items = items
-        super().__init__(name="feed", tools=[self.fetch_items, self.confirm_op])
+        super().__init__(name="feed", tools=[self.fetch_items, self.confirm_op, self.flaky_op])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         return replace(function, gate=ToolGate.CONFIRM) if function.name == "confirm_op" else function
@@ -203,6 +206,10 @@ class _FeedToolkit(Toolkit):
 
     def confirm_op(self) -> str:
         return "confirmed"
+
+    def flaky_op(self) -> str:
+        msg = "HTTP 500 upstream error"
+        raise RuntimeError(msg)
 
 
 class _FakeBot:
@@ -249,8 +256,17 @@ async def _live_harness(
     *,
     tools: list[str],
     policy: dict[str, Any] | None = None,
+    tool_approval: dict[str, Any] | None = None,
+    hook_registry: HookRegistry | None = None,
 ) -> AsyncIterator[SimpleNamespace]:
-    ctx = _script_ctx(tmp_path, tools=tools, policy=policy, allow_local=True)
+    ctx = _script_ctx(
+        tmp_path,
+        tools=tools,
+        policy=policy,
+        tool_approval=tool_approval,
+        hook_registry=hook_registry,
+        allow_local=True,
+    )
     send_log: list[dict[str, Any]] = []
     bot, memberships = _FakeBot(ctx, send_log=send_log), AgentReplyMembershipIndex()
     script_store, resolver = ScriptRunStore(ctx.runtime_paths), _SimpleResolver(ctx)
@@ -422,6 +438,7 @@ async def test_policy_gateway_routes_and_manager_isolation(tmp_path: Path) -> No
         await manager.cancel(ctx_pol, run_id=sc_run.run_id)
 
 
+@_LINUX_ONLY
 @pytest.mark.asyncio
 async def test_live_subprocess_ticks_state_ergonomics_triage_dispatch_and_guards(tmp_path: Path) -> None:
     """Real subprocess runs check(): state ergonomics + tool() + triage + reopen_on_fire + module-load/agent/approval guards."""
@@ -487,6 +504,7 @@ async def test_live_subprocess_ticks_state_ergonomics_triage_dispatch_and_guards
             assert h.resolver.approval_requests == 0
 
 
+@_LINUX_ONLY
 @pytest.mark.asyncio
 async def test_slow_k8s_worker_retirement_preserves_clean_tick_result_and_state(tmp_path: Path) -> None:
     """Astra #1: slow worker retirement (>2-5s) never discards an exit_code==0 tick; observe_process_exit commits immediately."""
@@ -527,6 +545,7 @@ async def test_slow_k8s_worker_retirement_preserves_clean_tick_result_and_state(
             assert outcome.run_id not in {r.run_id for r in h.script_store.list_runs(include_finished=True)}
 
 
+@_LINUX_ONLY
 @pytest.mark.asyncio
 async def test_cold_launch_timeout_releases_slot_immediately_and_execution_timeout(tmp_path: Path) -> None:
     """Astra #2: slow cold launch revokes/returns launch_timeout freeing poller slot; infinite check() hits execution timeout."""
@@ -597,8 +616,9 @@ async def test_cold_launch_timeout_releases_slot_immediately_and_execution_timeo
 
 
 @pytest.mark.asyncio
-async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path) -> None:
+async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """ScriptRuntimeLifecycle revokes script_check runs on policy/tool removal and dispatch rechecks direct agent access."""
+    monkeypatch.setattr("mindroom.script_runs.manager.background_script_supervision_supported", lambda: True)
     ctx_both = _script_ctx(tmp_path / "lc", tools=["triggers", "script", "workflow"], allow_local=True)
     store, bot = ScriptRunStore(ctx_both.runtime_paths), _FakeBot(ctx_both, send_log=[])
     cfg_box = [ctx_both.config]
@@ -646,6 +666,23 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path) -> No
             )
             assert {r.run_id for r in interrupt_m.await_args.args[0]} == expected_ids
 
+    # Workflow-only agent loses script_check eligibility on reload when start_workflow requires approval.
+    cfg_box[0] = _script_ctx(tmp_path / "lc", tools=["triggers", "workflow"], allow_local=True).config
+    cfg_wf_gated = _script_ctx(
+        tmp_path / "lc",
+        tools=["triggers", "workflow"],
+        tool_approval={"default": "auto_approve", "rules": [{"match": "start_workflow", "action": "require_approval"}]},
+        allow_local=True,
+    ).config
+    with patch.object(ScriptRuntimeLifecycle, "_interrupt_runs", AsyncMock()) as interrupt_m:
+        await lifecycle._apply_update(
+            cfg_wf_gated,
+            removed_entities=frozenset(),
+            authorization_changed=False,
+            plugins_changed=False,
+        )
+        assert {r.run_id for r in interrupt_m.await_args.args[0]} == {sc_active.run_id}
+
     rule = ReactiveTriggerRecord(
         trigger_id="sc_disp",
         owner_user_id=_OWNER,
@@ -689,6 +726,7 @@ async def test_reload_lifecycle_and_dispatch_source_access(tmp_path: Path) -> No
         assert result == expected
 
 
+@_LINUX_ONLY
 @pytest.mark.asyncio
 async def test_concurrent_reconcile_durable_lock_does_not_block_observe_process_exit(tmp_path: Path) -> None:
     """Astra follow-up #2: observe_process_exit reads durable exit_code==0 without blocking on reconcile_durable lock."""
@@ -841,6 +879,7 @@ async def test_reconcile_pass_skips_active_runner_owned_script_check_runs(tmp_pa
     assert reconciled_ids == {r_orphan.run_id, r_finished.run_id, r_expired.run_id}
 
 
+@_LINUX_ONLY
 @pytest.mark.asyncio
 async def test_script_check_denied_tool_call_cannot_commit_state_or_fire(tmp_path: Path) -> None:
     """Astra fresh #1: catching a policy-denied tool() error cannot persist state mutations or fire an event."""
@@ -870,3 +909,90 @@ async def test_script_check_denied_tool_call_cannot_commit_state_or_fire(tmp_pat
                 assert (cp.state, cp.last_error_code, cp.consecutive_errors) == ({}, "tool_denied", 1)
                 assert h.trig_store.list_firings(trigger_id=tid) == []
                 h.trig_store.delete_trigger(tid)
+
+
+@_LINUX_ONLY
+@pytest.mark.asyncio
+async def test_script_check_hook_veto_and_approval_script_failure_block_commit_while_ordinary_errors_recover(
+    tmp_path: Path,
+) -> None:
+    """Astra follow-up #1 & P2 #3: hook veto & approval-script failure set tool_denied; ordinary tool errors recover."""
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def veto_fetch(context: ToolBeforeCallContext) -> None:
+        if context.tool_name == "fetch_items":
+            context.decline("Blocked by before_call policy hook")
+
+    hook_plugin = SimpleNamespace(
+        name="script-check-veto-test",
+        discovered_hooks=(veto_fetch,),
+        discovered_automations=(),
+        entry_config=PluginEntryConfig(path="./plugins/script-check-veto-test"),
+        plugin_order=0,
+    )
+    veto_registry = HookRegistry.from_plugins([hook_plugin])
+
+    catch_fetch_src = (
+        "def check():\n"
+        "    try:\n"
+        "        tool('feed', 'fetch_items')\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    state.set('dirty', 1)\n"
+        "    return {'title': 'Bypass attempt', 'data': {'dirty': True}}\n"
+    )
+    recover_flaky_src = (
+        "def check():\n"
+        "    caught = False\n"
+        "    try:\n"
+        "        tool('feed', 'flaky_op')\n"
+        "    except Exception:\n"
+        "        caught = True\n"
+        "    state.set('recovered', caught)\n"
+        "    return {'title': 'Recovered', 'data': {'recovered': caught}}\n"
+    )
+
+    with registered_toolkit("feed", lambda: _FeedToolkit(["a", "b"])):
+        # 1. tool:before_call hook veto caught inside check() -> tool_denied, no state or firing persisted.
+        async with _live_harness(
+            tmp_path / "hook_veto",
+            tools=["triggers", "script", "feed"],
+            hook_registry=veto_registry,
+        ) as h_veto:
+            _create_live_rule(h_veto, "sc_veto", catch_fetch_src)
+            assert await h_veto.service.poll_script_checks_once() == 0
+            cp_veto = h_veto.trig_store.get_script_check_checkpoint("sc_veto")
+            assert cp_veto is not None
+            assert (cp_veto.state, cp_veto.last_error_code, cp_veto.consecutive_errors) == ({}, "tool_denied", 1)
+            assert h_veto.trig_store.list_firings(trigger_id="sc_veto") == []
+
+            # Ordinary recoverable tool error (RuntimeError("HTTP 500")) caught in check() still commits and fires.
+            h_veto.trig_store.delete_trigger("sc_veto")
+            _create_live_rule(h_veto, "sc_recover", recover_flaky_src)
+            assert await h_veto.service.poll_script_checks_once() == 1
+            cp_rec = h_veto.trig_store.get_script_check_checkpoint("sc_recover")
+            assert cp_rec is not None
+            assert (cp_rec.state, cp_rec.last_error_code, cp_rec.consecutive_errors) == ({"recovered": True}, None, 0)
+            assert len(h_veto.trig_store.list_firings(trigger_id="sc_recover")) == 1
+
+        # 2. Approval script raising during evaluate_tool_approval caught inside check() -> tool_denied, no state/firing.
+        script_dir = tmp_path / "approval_fail"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        (script_dir / "broken_approval.py").write_text(
+            "def check(tool_name, arguments, agent_name):\n    raise RuntimeError('approval script crashed')\n",
+            encoding="utf-8",
+        )
+        async with _live_harness(
+            script_dir,
+            tools=["triggers", "script", "feed"],
+            tool_approval={
+                "default": "auto_approve",
+                "rules": [{"match": "fetch_items", "script": "broken_approval.py"}],
+            },
+        ) as h_appr:
+            _create_live_rule(h_appr, "sc_appr_fail", catch_fetch_src)
+            assert await h_appr.service.poll_script_checks_once() == 0
+            cp_appr = h_appr.trig_store.get_script_check_checkpoint("sc_appr_fail")
+            assert cp_appr is not None
+            assert (cp_appr.state, cp_appr.last_error_code, cp_appr.consecutive_errors) == ({}, "tool_denied", 1)
+            assert h_appr.trig_store.list_firings(trigger_id="sc_appr_fail") == []

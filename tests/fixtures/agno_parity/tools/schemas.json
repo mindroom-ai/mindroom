@@ -20957,7 +20957,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Inline Python source code defining def check(): for watch_script."
             },
             "path": {
               "anyOf": [
@@ -20967,7 +20968,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "description": "Workspace-relative .py path defining def check(): for watch_script."
             },
             "source_id": {
               "anyOf": [

@@ -1592,6 +1592,7 @@ visibility = [
     "mindroom.custom_tools.egress_credentials",
     "mindroom.custom_tools.temporary_secrets",
     "mindroom.custom_tools.email_invite",
+    "mindroom.reactive_triggers.script_check",
 ]
 
 [[modules]]
@@ -11639,6 +11640,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.reactive_triggers.script_check"
 depends_on = [
+    "mindroom.approval.tool_approval",
     "mindroom.reactive_triggers.models",
 ]
 

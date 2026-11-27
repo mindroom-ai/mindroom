@@ -8,12 +8,13 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.reactive_triggers.models import (
     ScriptCheckCheckpoint,
     TriggerEvent,
 )
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
-from mindroom.script_runs.manager import workflow_placement
+from mindroom.script_runs.manager import unsupported_private_script_worker_scope_message, workflow_placement
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -209,14 +210,6 @@ def build_script_check_dry_run_event(
     )
 
 
-def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
-    """Return whether ``agent_name`` is configured with triggers plus script or workflow tools."""
-    if agent_name not in config.agents:
-        return False
-    resolved = set(config.resolve_agent(agent_name).tools.tool_names)
-    return "triggers" in resolved and bool({"script", "workflow"} & resolved)
-
-
 @dataclass(frozen=True, slots=True)
 class _ScriptCheckAccessFailure:
     """Shared failure details for script_check policy, capability, owner, and placement checks."""
@@ -224,6 +217,37 @@ class _ScriptCheckAccessFailure:
     code: str
     category: Literal["policy", "agent", "placement"]
     message: str
+
+
+def _script_check_agent_failure(config: Config, agent_name: str) -> _ScriptCheckAccessFailure | None:
+    if agent_name not in config.agents:
+        return _ScriptCheckAccessFailure(
+            "agent_script_check_unavailable",
+            "agent",
+            f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
+        )
+    resolved = set(config.resolve_agent(agent_name).tools.tool_names)
+    if "triggers" not in resolved or not ({"script", "workflow"} & resolved):
+        return _ScriptCheckAccessFailure(
+            "agent_script_check_unavailable",
+            "agent",
+            f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
+        )
+    if "script" not in resolved and tool_may_require_approval(config, "start_workflow"):
+        return _ScriptCheckAccessFailure(
+            "workflow_approval_required",
+            "agent",
+            (
+                f"Agent {agent_name!r} relies on 'workflow' without 'script', and 'start_workflow' may require "
+                "tool approval. Grant 'script' or auto-approve 'start_workflow' to use script_check triggers."
+            ),
+        )
+    return None
+
+
+def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
+    """Return whether ``agent_name`` is configured with triggers plus script or eligible workflow tools."""
+    return _script_check_agent_failure(config, agent_name) is None
 
 
 def check_script_check_access(
@@ -263,14 +287,16 @@ def check_script_check_access(
             "policy",
             "Only human users can own script_check triggers.",
         )
-    elif not _agent_supports_script_check(config, agent_name):
-        failure = _ScriptCheckAccessFailure(
-            "agent_script_check_unavailable",
-            "agent",
-            f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
-        )
-    elif require_placement and (placement := workflow_placement(config, runtime_paths)) not in {"worker", "local"}:
-        failure = _ScriptCheckAccessFailure("placement_unavailable", "placement", placement)
+    elif (agent_failure := _script_check_agent_failure(config, agent_name)) is not None:
+        failure = agent_failure
+    elif require_placement:
+        placement = workflow_placement(config, runtime_paths)
+        if placement not in {"worker", "local"}:
+            failure = _ScriptCheckAccessFailure("placement_unavailable", "placement", placement)
+        elif placement == "worker" and (
+            scope_error := unsupported_private_script_worker_scope_message(config, agent_name)
+        ):
+            failure = _ScriptCheckAccessFailure("unsupported_worker_scope", "placement", scope_error)
     return failure
 
 

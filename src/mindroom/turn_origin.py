@@ -116,6 +116,15 @@ class TurnOrigin:
         """Return whether replay guards may skip this turn when a newer requester prompt exists."""
         return self.may_answer_interactive_prompt
 
+    @property
+    def effective_automation_origin(self) -> str | None:
+        """Return the trusted automation origin for this turn, including internal job follow-up turns."""
+        if self.automation_origin is not None:
+            return self.automation_origin
+        if self.intent is TurnIntent.JOB_FOLLOW_UP:
+            return TurnIntent.JOB_FOLLOW_UP.value
+        return None
+
 
 def classify_turn_origin(
     *,

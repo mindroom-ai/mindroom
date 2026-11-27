@@ -119,10 +119,12 @@ class ScriptCheckPoller:
         fixed_now = now is not None
         current_time = time.time() if now is None else now
         scan_limit = max(20, self._max_concurrency * 5)
+        active_owners = tuple(self._active_owners)
         due = await asyncio.to_thread(
             self._store.list_due_script_check_triggers,
             now=current_time,
             limit=scan_limit,
+            exclude_owners=active_owners,
         )
         if self._stopped or self._tick_runner is None:
             return []

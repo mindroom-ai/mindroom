@@ -18,6 +18,7 @@ from mindroom.approval.tool_approval import (
     ToolApprovalDecision,
     human_gate,
     resolve_tool_approval_approver,
+    tool_may_require_approval,
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -1326,7 +1327,13 @@ def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
     return (
         agent_name in config.agents
         and _agent_has_tool(config, agent_name, "triggers")
-        and (_agent_has_tool(config, agent_name, "script") or _agent_has_tool(config, agent_name, "workflow"))
+        and (
+            _agent_has_tool(config, agent_name, "script")
+            or (
+                _agent_has_tool(config, agent_name, "workflow")
+                and not tool_may_require_approval(config, "start_workflow")
+            )
+        )
     )
 
 

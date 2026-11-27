@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
+    ToolApprovalScriptError,
     evaluate_tool_approval,
     toolkit_approval_alias,
 )
@@ -673,7 +674,12 @@ class ScriptToolBroker:
                 # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
                 await hold("before_receipt")
             if not result.succeeded and not _shell_exit_completes(run, call, result, metadata):
-                self._mark_script_check_tool_denied(run.run_id, when=result.status == "denied")
+                tool_refused = (
+                    result.status in {"denied", "declined"}
+                    or isinstance(result.error, ToolApprovalScriptError)
+                    or (isinstance(result.value, ToolOutcome) and result.value.refused_by is not None)
+                )
+                self._mark_script_check_tool_denied(run.run_id, when=tool_refused)
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
                     "message": sanitize_failure_text(result.failure_text),

@@ -30,27 +30,38 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_sources import event_source_hook_source
-from mindroom.hooks import HookBindings, HookRegistry
+from mindroom.hooks import HookBindings, HookRegistry, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.journal_dispatch import _route_as_message
 from mindroom.matrix_rtc.call_tools import _TEXT_CHAT_REQUIRED_MESSAGE, _refuse_text_chat_functions
 from mindroom.message_target import MessageTarget
-from mindroom.reactive_triggers.models import TriggerEvent
+from mindroom.reactive_triggers.models import (
+    ReactiveTriggerRecord,
+    ScriptCheckCheckpoint,
+    ScriptCheckSourceSpec,
+    TriggerEvent,
+    TriggerTargetSpec,
+)
+from mindroom.reactive_triggers.script_check import check_script_check_access
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.router.relay import _router_handoff_extra_content
+from mindroom.script_runs import manager as script_manager_module
 from mindroom.script_runs.manager import ScriptRunManager
 from mindroom.script_runs.store import ScriptRunStore
 from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.tool_approval_grants import grant_operation
+from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID, ToolCallContext, run_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeSupport, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tools.triggers import _NON_CODE_TRIGGER_ACTIONS
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -73,6 +84,11 @@ _ROOM = "!room:example.org"
 _SRC = "def check():\n    return None\n"
 
 
+@pytest.fixture(autouse=True)
+def _enable_local_script_supervision(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(script_manager_module, "background_script_supervision_supported", lambda: True)
+
+
 def _make_ctx(
     tmp_path: Path,
     *,
@@ -82,27 +98,46 @@ def _make_ctx(
     with_manager: bool = True,
     joined_users: tuple[str, ...] = (_OWNER,),
     tool_approval: ToolApprovalConfig | None = None,
+    worker_placement_mode: bool = False,
+    extra_agents: dict[str, dict[str, Any]] | None = None,
     **ctx_kwargs: object,
 ) -> tuple[ToolRuntimeContext, MagicMock]:
     storage = tmp_path / "data"
     env = {"MATRIX_HOMESERVER": "https://example.org", "MATRIX_SERVER_NAME": "example.org"}
-    if allow_local:
+    if allow_local and not worker_placement_mode:
         env["MINDROOM_ALLOW_UNSAFE_LOCAL_SCRIPTS"] = "1"
+    if worker_placement_mode:
+        env["MINDROOM_SANDBOX_PROXY_URL"] = "http://sandbox-proxy.test"
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env=env)
+    agents: dict[str, dict[str, Any]] = {
+        "coder": {
+            "display_name": "Coder",
+            "rooms": [_ROOM],
+            "tools": ["triggers", "script"],
+            "model": "default",
+        },
+        "planner": {
+            "display_name": "Planner",
+            "rooms": [_ROOM],
+            "tools": ["triggers", "workflow"],
+            "model": "default",
+        },
+        "both": {
+            "display_name": "Both",
+            "rooms": [_ROOM],
+            "tools": ["triggers", "script", "workflow"],
+            "model": "default",
+        },
+        "watcher": {"display_name": "Watcher", "rooms": [_ROOM], "tools": ["triggers"], "model": "default"},
+    }
+    if extra_agents:
+        agents.update(extra_agents)
     cfg = bind_runtime_paths(
         Config.model_validate(
             {
                 "defaults": {"allow_shell_without_worker": allow_local},
                 "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
-                "agents": {
-                    "coder": {
-                        "display_name": "Coder",
-                        "rooms": [_ROOM],
-                        "tools": ["triggers", "script"],
-                        "model": "default",
-                    },
-                    "watcher": {"display_name": "Watcher", "rooms": [_ROOM], "tools": ["triggers"], "model": "default"},
-                },
+                "agents": agents,
                 "teams": {
                     "ops_team": {
                         "display_name": "Ops",
@@ -571,3 +606,235 @@ async def test_approval_alias_grants_non_resumable_and_voice_responder(tmp_path:
             middleware=agent_tool_middleware(voice_trig),
         )
     assert refused.value == _TEXT_CHAT_REQUIRED_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_workflow_only_agent_rejects_script_check_when_workflow_launch_requires_approval(tmp_path: Path) -> None:
+    """Astra fresh P1 #1: workflow-only agents fail closed when start_workflow may require approval."""
+    tool = TriggersTools()
+    for idx, rule_match in enumerate(("start_workflow", "*workflow*")):
+        approval_cfg = ToolApprovalConfig(
+            default="auto_approve",
+            rules=[ApprovalRuleConfig(match=rule_match, action="require_approval")],
+        )
+        ctx_wf, _ = _make_ctx(tmp_path / f"wf_{idx}", agent_name="planner", tool_approval=approval_cfg)
+        err = await _call(tool, ctx_wf, action="watch_script", prompt="Alert", source=_SRC)
+        assert err["status"] == "error"
+        assert "start_workflow" in err["message"]
+        tick_failure = check_script_check_access(
+            ctx_wf.config,
+            ctx_wf.runtime_paths,
+            "planner",
+            owner_user_id=_OWNER,
+            require_placement=False,
+        )
+        assert tick_failure is not None
+        assert (tick_failure.code, tick_failure.category) == ("workflow_approval_required", "agent")
+
+        # Re-enabling a previously stored script_check for that workflow-only agent also fails closed.
+        store = ReactiveTriggerStore(ctx_wf.runtime_paths)
+        store.create_trigger(
+            ReactiveTriggerRecord(
+                trigger_id="sc_wf_reenable",
+                owner_user_id=_OWNER,
+                source=ScriptCheckSourceSpec(
+                    agent="planner",
+                    room_id=_ROOM,
+                    source_digest=hashlib.sha256(_SRC.encode()).hexdigest(),
+                ),
+                target=TriggerTargetSpec(agent="planner", room_id=_ROOM, prompt="Alert"),
+                enabled=False,
+                disabled_reason="manual",
+                created_at=1000.0,
+                updated_at=1000.0,
+            ),
+            initial_script_check_checkpoint=ScriptCheckCheckpoint(
+                source_utf8=_SRC,
+                identity_json={"channel": "matrix"},
+                next_poll_at=1000.0,
+                updated_at=1000.0,
+            ),
+        )
+        reenable_err = await _call(tool, ctx_wf, action="set_enabled", trigger_id="sc_wf_reenable", enabled=True)
+        assert reenable_err["status"] == "error"
+        assert "start_workflow" in reenable_err["message"]
+
+        # An agent that ALSO has 'script' is judged by start_script and remains allowed.
+        ctx_both, _ = _make_ctx(tmp_path / f"both_{idx}", agent_name="both", tool_approval=approval_cfg)
+        ok_both = await _call(tool, ctx_both, action="watch_script", prompt="Alert", source=_SRC)
+        assert ok_both["status"] == "ok"
+
+    # Workflow-only agent succeeds when start_workflow is auto-approved.
+    ctx_wf_ok, _ = _make_ctx(tmp_path / "wf_ok", agent_name="planner")
+    ok_wf = await _call(tool, ctx_wf_ok, action="watch_script", prompt="Alert", source=_SRC)
+    assert ok_wf["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_job_follow_up_envelope_cannot_author_script_check(tmp_path: Path) -> None:
+    """Astra fresh P1 #2: non-silent follow_up_envelope turns (JOB_FOLLOW_UP) cannot author watch_script."""
+    tool = TriggersTools()
+    ctx_base, _ = _make_ctx(tmp_path / "followup")
+    support = ToolRuntimeSupport(
+        runtime=SimpleNamespace(
+            client=ctx_base.client,
+            config=ctx_base.config,
+            orchestrator=ctx_base.orchestrator,
+            agent_reply_memberships=ctx_base.agent_reply_memberships,
+        ),  # type: ignore[arg-type]
+        runtime_paths=ctx_base.runtime_paths,
+        storage_path=ctx_base.storage_path or (tmp_path / "followup" / "data"),
+        agent_name="coder",
+        matrix_id=entity_identity_registry(ctx_base.config, ctx_base.runtime_paths).current_id("coder"),
+        resolver=SimpleNamespace(
+            deps=SimpleNamespace(conversation_reader=ctx_base.conversation_reader, relations=ctx_base.relations),
+            cached_room=lambda _room_id: ctx_base.room,
+        ),  # type: ignore[arg-type]
+        hook_context=SimpleNamespace(bindings=lambda: ctx_base.hooks),  # type: ignore[arg-type]
+        membership=None,  # type: ignore[arg-type]
+    )
+
+    key = ConversationKey(
+        recipient="coder",
+        room_id=_ROOM,
+        thread_id="$thread:example.org",
+        requester_id=_OWNER,
+        silent=False,
+    )
+    env = follow_up_envelope(
+        key,
+        follow_up_id="job-follow-up:1",
+        sender_id="@mindroom_coder:example.org",
+        prompt="Background job completed.",
+    )
+    assert (env.source_kind, env.origin.intent, env.origin.automation_origin) == (
+        "message",
+        TurnIntent.JOB_FOLLOW_UP,
+        "job_follow_up",
+    )
+    follow_up_ctx = support.build_context(ctx_base.target, user_id=_OWNER, source_envelope=env)
+    assert follow_up_ctx is not None
+    assert (follow_up_ctx.source_kind, follow_up_ctx.automation_origin) == ("message", "job_follow_up")
+    err = await _call(tool, follow_up_ctx, action="watch_script", prompt="Alert", source=_SRC)
+    assert err["status"] == "error"
+    assert "unattended automation" in err["message"]
+
+    # Even a pre-upgrade TurnOrigin with intent=JOB_FOLLOW_UP and automation_origin=None is blocked via build_context.
+    legacy_env = replace(env, origin=replace(env.origin, automation_origin=None))
+    legacy_ctx = support.build_context(ctx_base.target, user_id=_OWNER, source_envelope=legacy_env)
+    assert legacy_ctx is not None
+    assert legacy_ctx.automation_origin == "job_follow_up"
+    err_legacy = await _call(tool, legacy_ctx, action="watch_script", prompt="Alert", source=_SRC)
+    assert err_legacy["status"] == "error"
+    assert "unattended automation" in err_legacy["message"]
+
+    # Ordinary direct human MessageEnvelope built through the same ToolRuntimeSupport still succeeds.
+    human_env = MessageEnvelope(
+        source_event_id="$human-ev",
+        target=ctx_base.target,
+        body="Watch this",
+        attachment_ids=(),
+        mentioned_agents=(),
+        agent_name="coder",
+        origin=TurnOrigin(
+            transport_sender_id=_OWNER,
+            requester_id=_OWNER,
+            sender_entity_name=None,
+            requester_entity_name=None,
+            sender_kind=SenderKind.USER,
+            requester_kind=SenderKind.USER,
+            intent=TurnIntent.USER_MESSAGE,
+            source_kind="message",
+            trust=TurnTrust.EXTERNAL,
+        ),
+    )
+    human_ctx = support.build_context(ctx_base.target, user_id=_OWNER, source_envelope=human_env)
+    assert human_ctx is not None
+    assert human_ctx.automation_origin is None
+    ok_human = await _call(tool, human_ctx, action="watch_script", prompt="Alert", source=_SRC)
+    assert ok_human["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_private_per_user_worker_scope_rejected_at_create_and_reenable(tmp_path: Path) -> None:
+    """Astra fresh P2 #4: private.per=user under worker placement fails immediately on create and re-enable."""
+    tool = TriggersTools()
+    private_agents = {
+        "priv_user": {
+            "display_name": "PrivUser",
+            "rooms": [_ROOM],
+            "tools": ["triggers", "script"],
+            "model": "default",
+            "private": {"per": "user"},
+        },
+        "priv_user_agent": {
+            "display_name": "PrivUserAgent",
+            "rooms": [_ROOM],
+            "tools": ["triggers", "script"],
+            "model": "default",
+            "private": {"per": "user_agent"},
+        },
+    }
+    ctx_worker_bad, _ = _make_ctx(
+        tmp_path / "worker_bad",
+        agent_name="priv_user",
+        allow_local=False,
+        worker_placement_mode=True,
+        extra_agents=private_agents,
+    )
+    err_create = await _call(tool, ctx_worker_bad, action="watch_script", prompt="Alert", source=_SRC)
+    assert err_create["status"] == "error"
+    assert "private.per=user_agent" in err_create["message"]
+
+    # Pre-seed a disabled rule and verify both set_enabled and update(enabled=True) reject it immediately.
+    store = ReactiveTriggerStore(ctx_worker_bad.runtime_paths)
+    store.create_trigger(
+        ReactiveTriggerRecord(
+            trigger_id="sc_priv_disabled",
+            owner_user_id=_OWNER,
+            source=ScriptCheckSourceSpec(
+                agent="priv_user",
+                room_id=_ROOM,
+                source_digest=hashlib.sha256(_SRC.encode()).hexdigest(),
+            ),
+            target=TriggerTargetSpec(agent="priv_user", room_id=_ROOM, prompt="Alert"),
+            enabled=False,
+            disabled_reason="manual",
+            created_at=1000.0,
+            updated_at=1000.0,
+        ),
+        initial_script_check_checkpoint=ScriptCheckCheckpoint(
+            source_utf8=_SRC,
+            identity_json={"channel": "matrix"},
+            next_poll_at=1000.0,
+            updated_at=1000.0,
+        ),
+    )
+    err_set = await _call(tool, ctx_worker_bad, action="set_enabled", trigger_id="sc_priv_disabled", enabled=True)
+    err_upd = await _call(tool, ctx_worker_bad, action="update", trigger_id="sc_priv_disabled", enabled=True)
+    assert err_set["status"] == "error"
+    assert "private.per=user_agent" in err_set["message"]
+    assert err_upd["status"] == "error"
+    assert "private.per=user_agent" in err_upd["message"]
+
+    # private.per=user_agent under worker placement succeeds.
+    ctx_worker_ok, _ = _make_ctx(
+        tmp_path / "worker_ok",
+        agent_name="priv_user_agent",
+        allow_local=False,
+        worker_placement_mode=True,
+        extra_agents=private_agents,
+    )
+    ok_worker = await _call(tool, ctx_worker_ok, action="watch_script", prompt="Alert", source=_SRC)
+    assert ok_worker["status"] == "ok"
+
+    # private.per=user under local placement succeeds (no worker placement constraint).
+    ctx_local_ok, _ = _make_ctx(
+        tmp_path / "local_ok",
+        agent_name="priv_user",
+        allow_local=True,
+        worker_placement_mode=False,
+        extra_agents=private_agents,
+    )
+    ok_local = await _call(tool, ctx_local_ok, action="watch_script", prompt="Alert", source=_SRC)
+    assert ok_local["status"] == "ok"
