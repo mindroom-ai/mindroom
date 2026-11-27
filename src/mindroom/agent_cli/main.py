@@ -27,7 +27,6 @@ from mindroom.script_runs.launch_contract import RUN_ID_ENV
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 _CALL_TIMEOUT_SECONDS = 30
-_HTTP_TIMEOUT_SECONDS = 30.0
 # How long a command in a named worker may run when `workers run` names no limit.
 _WORKER_COMMAND_TIMEOUT_SECONDS = 3600
 # `workers run` exits with its command's exit code, so its own failures use codes commands rarely do, as `timeout` and
@@ -237,28 +236,23 @@ def _progress_revision(result: dict[str, object] | None) -> int | None:
 
 def _wait(client: AgentCliClient, call_id: str, result: dict[str, object] | None, timeout: int) -> dict[str, object]:
     """Long-poll a pending receipt until it settles or ``timeout`` seconds pass."""
-    started_at = time.monotonic()
-    deadline = started_at + timeout
+    deadline = time.monotonic() + timeout
     while result is None or _exit_code(result) == 3:
-        if (remaining := deadline - started_at) <= 0:
+        poll_started_at = time.monotonic()
+        if (remaining := deadline - poll_started_at) <= 0:
             break
         after_progress = _progress_revision(result)
         result = client.receipt(
             call_id,
-            timeout=min(remaining + 5.0, _HTTP_TIMEOUT_SECONDS),
+            timeout=remaining + 5.0,
             wait=remaining,
             after_progress=after_progress,
         )
         if _exit_code(result) != 3 or (remaining := deadline - (now := time.monotonic())) <= 0:
             break
         next_progress = _progress_revision(result)
-        if now - started_at < 0.05 and (
-            after_progress is None or next_progress is None or next_progress == after_progress
-        ):
+        if now - poll_started_at < 0.05 and (next_progress is None or next_progress == after_progress):
             time.sleep(min(0.2, remaining))
-            started_at = time.monotonic()
-        else:
-            started_at = now
     return client.receipt(call_id) if result is None else result
 
 

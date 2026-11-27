@@ -367,6 +367,23 @@ def test_calls_wait_long_polls_on_first_request(capsys, monkeypatch) -> None:
     assert polls == [(call_id, {"timeout": 15.0, "wait": 10.0, "after_progress": None})]
 
 
+def test_calls_wait_repolls_once_on_initial_progress_then_backs_off(capsys, monkeypatch) -> None:
+    call_id = "12345678-1234-4234-8234-123456789abc"
+    polls, sleeps = _install_polling_client(
+        monkeypatch,
+        [
+            {"status": "running", "progress_revision": 1},
+            {"status": "running", "progress_revision": 1},
+            {"status": "completed", "outcome": "ok", "progress_revision": 1},
+        ],
+        step=0.01,
+    )
+    assert main(["calls", "wait", call_id, "--timeout", "1"]) == 0
+    assert json.loads(capsys.readouterr().out)["outcome"] == "ok"
+    assert [kwargs["after_progress"] for _, kwargs in polls] == [None, 1, 1]
+    assert sleeps == [pytest.approx(0.2)]
+
+
 def test_unknown_transport_preserves_exact_call_id(capsys, monkeypatch) -> None:
 
     monkeypatch.delenv("MINDROOM_AGENT_CLI_URL", raising=False)

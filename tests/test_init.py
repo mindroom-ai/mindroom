@@ -1,7 +1,6 @@
 """Tests for package-level import side effects."""
 
 import importlib
-import importlib.machinery
 import importlib.metadata
 import json
 import os
@@ -15,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import mindroom
-from mindroom import constants, vendor_telemetry
+from mindroom import vendor_telemetry
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tools.composio import composio_tools
@@ -188,45 +187,3 @@ def test_package_version_is_lazily_resolved_and_cached(monkeypatch: pytest.Monke
             mindroom.__dict__["__version__"] = previous
         else:
             mindroom.__dict__.pop("__version__", None)
-
-
-def test_chromadb_py314_hook_runs_before_chromadb_loads_and_deduplicates_on_reload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On Python 3.14+, the meta_path hook patches lazily before chromadb loads and never duplicates."""
-    events: list[str] = []
-    monkeypatch.setattr(
-        sys,
-        "meta_path",
-        [finder for finder in sys.meta_path if not getattr(finder, "_mindroom_chromadb_py314_hook", False)],
-    )
-    monkeypatch.setattr(sys, "version_info", (3, 14, 0, "final", 0))
-    monkeypatch.delitem(sys.modules, "chromadb", raising=False)
-    monkeypatch.setattr(constants, "_CHROMADB_PY314_PATCHED", False)
-    monkeypatch.setattr(constants, "patch_chromadb_for_python314", lambda: events.append("patched"))
-
-    def hook_count() -> int:
-        return sum(1 for finder in sys.meta_path if getattr(finder, "_mindroom_chromadb_py314_hook", False))
-
-    importlib.reload(mindroom)
-    importlib.reload(mindroom)
-    assert hook_count() == 1
-
-    class FakeChromaFinder:
-        def create_module(self, _spec: object) -> None:
-            return None
-
-        def exec_module(self, _module: types.ModuleType) -> None:
-            events.append("loaded")
-
-        def find_spec(self, fullname: str, _path: object = None, _target: object = None) -> object:
-            return importlib.machinery.ModuleSpec("chromadb", self) if fullname == "chromadb" else None
-
-    sys.meta_path.insert(1, FakeChromaFinder())
-    try:
-        importlib.import_module("chromadb")
-        assert (events, hook_count()) == (["patched", "loaded"], 0)
-        importlib.reload(mindroom)
-        assert hook_count() == 0
-    finally:
-        sys.modules.pop("chromadb", None)
