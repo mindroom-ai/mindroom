@@ -465,6 +465,29 @@ class ExternalTriggerPolicyConfig(BaseModel):
     github_pr_polling_enabled: bool = Field(default=True, description="Enable polling for github_pr watches")
     min_github_pr_poll_interval_seconds: int = Field(default=60, ge=30, le=3600, description="Min PR poll interval (s)")
     max_github_pr_watches_per_owner: int = Field(default=20, ge=1, le=200, description="Max github_pr watches/owner")
+    script_check_enabled: bool = Field(default=True, description="Enable scheduled script_check triggers")
+    min_script_check_poll_interval_seconds: int = Field(
+        default=60, ge=30, le=3600, description="Min script_check poll (s)",
+    )
+    max_script_checks_per_owner: int = Field(
+        default=10, ge=1, le=200, description="Max active script_check triggers/owner",
+    )
+    script_check_timeout_seconds: int = Field(
+        default=30, ge=5, le=120, description="Max runtime per script_check tick (s)",
+    )
+    script_check_allowed_tools: list[str] | None = Field(
+        default=None, description="Optional toolkit allowlist for ticks",
+    )
+
+    @field_validator("script_check_allowed_tools")
+    @classmethod
+    def validate_script_check_allowed_tools(cls, values: list[str] | None) -> list[str] | None:
+        """Require non-empty stripped toolkit names when script_check_allowed_tools is set."""
+        return (
+            None
+            if values is None
+            else _validate_non_empty_list_items(values, field_name="script_check_allowed_tools entry")
+        )
 
     @field_validator("event_sources")
     @classmethod

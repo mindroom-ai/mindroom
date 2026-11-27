@@ -11,8 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationInfo, fi
 
 TRIGGER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_SHA256_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
-SourceType = Literal["room_message", "thread_tag", "external_event", "github_pr"]
+SourceType = Literal["room_message", "thread_tag", "external_event", "github_pr", "script_check"]
 FiringStatus = Literal["pending", "triaged_no", "claimed", "delivered", "failed", "skipped"]
 DisabledReason = Literal["manual", "once_consumed", "pr_closed"]
 GitHubPREventType = Literal["activity", "ci", "merge", "close"]
@@ -150,8 +151,35 @@ class GitHubPRSourceSpec(BaseModel):
         return self
 
 
+class ScriptCheckSourceSpec(BaseModel):
+    """Run a snapshotted Python check() function on a schedule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_type: Literal["script_check"] = "script_check"
+    agent: str
+    room_id: str
+    source_digest: str
+    poll_interval_seconds: StrictInt = Field(default=300, ge=30, le=86400)
+
+    @field_validator("agent", "room_id")
+    @classmethod
+    def validate_non_empty_fields(cls, value: str, info: ValidationInfo) -> str:
+        """Require non-empty agent and room_id values."""
+        return _strip_non_empty(value, field_name=str(info.field_name))
+
+    @field_validator("source_digest")
+    @classmethod
+    def validate_source_digest(cls, value: str) -> str:
+        """Require a 64-character lowercase hexadecimal SHA-256 digest."""
+        if _SHA256_HEX_PATTERN.fullmatch(value) is None:
+            msg = "source_digest must be a 64-character lowercase hex SHA-256 digest"
+            raise ValueError(msg)
+        return value
+
+
 TriggerSourceSpec = Annotated[
-    RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec | GitHubPRSourceSpec,
+    RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec | GitHubPRSourceSpec | ScriptCheckSourceSpec,
     Field(discriminator="source_type"),
 ]
 
@@ -341,6 +369,22 @@ class GitHubPRCheckpoint(BaseModel):
     next_poll_at: float | None = Field(default=None, allow_inf_nan=False)
     consecutive_errors: int = Field(default=0, ge=0)
     state: dict[str, Any] = Field(default_factory=dict)
+    updated_at: float = Field(allow_inf_nan=False)
+
+
+class ScriptCheckCheckpoint(BaseModel):
+    """Durable private checkpoint for a script_check reactive trigger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision: int = Field(default=1, ge=1)
+    source_utf8: str
+    identity_json: dict[str, Any] = Field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
+    next_poll_at: float | None = Field(default=None, allow_inf_nan=False)
+    consecutive_errors: int = Field(default=0, ge=0)
+    last_error_code: str | None = None
+    last_run_at: float | None = Field(default=None, allow_inf_nan=False)
     updated_at: float = Field(allow_inf_nan=False)
 
 

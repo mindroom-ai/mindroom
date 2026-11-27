@@ -11576,6 +11576,12 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.reactive_triggers.script_check"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
 path = "mindroom.reactive_triggers.external_sources"
 depends_on = [
     "mindroom.delivery_replay",
