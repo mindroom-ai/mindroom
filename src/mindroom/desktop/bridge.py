@@ -1071,19 +1071,7 @@ class DesktopBridge:
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
             reject_unexpected_parameters(parameters, allowed=frozenset())
-            status: dict[str, object] = (
-                await asyncio.to_thread(self.provider.status) if self.provider is not None else {"gui_available": False}
-            )
-            folders = self.filesystem.list_folders()["folders"] if self.filesystem is not None else []
-            return _Execution(
-                self._fit_status(
-                    command,
-                    status,
-                    caller_shell_status(self.shell, command, controller_key=controller_key),
-                    cast("list[dict[str, str]]", folders),
-                    controller_key=controller_key,
-                ),
-            )
+            return await self._status_execution(command, controller_key)
         if command.action == "list_apps":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
@@ -1158,6 +1146,29 @@ class DesktopBridge:
             raise DesktopProviderError(permission_error)
         return provider
 
+    async def _status_execution(self, command: DesktopCommand, controller_key: str) -> _Execution:
+        gui_available = self.provider is not None
+        status: dict[str, object]
+        if self.provider is not None:
+            try:
+                status = await asyncio.to_thread(self.provider.status)
+            except (DesktopProviderError, AccessibilityError) as exc:
+                gui_available = False
+                status = {"gui_available": False, "gui_error": str(exc)}
+        else:
+            status = {"gui_available": False}
+        folders = self.filesystem.list_folders()["folders"] if self.filesystem is not None else []
+        return _Execution(
+            self._fit_status(
+                command,
+                status,
+                caller_shell_status(self.shell, command, controller_key=controller_key),
+                cast("list[dict[str, str]]", folders),
+                controller_key=controller_key,
+                gui_available=gui_available,
+            ),
+        )
+
     def _fit_status(
         self,
         command: DesktopCommand,
@@ -1166,6 +1177,7 @@ class DesktopBridge:
         folders: list[dict[str, str]],
         *,
         controller_key: str,
+        gui_available: bool | None = None,
     ) -> dict[str, object]:
         """Keep the fitting prefix of ``folders`` in the remote reply's ``bridge.file_roots``.
 
@@ -1179,7 +1191,7 @@ class DesktopBridge:
             return {
                 **provider_status,
                 "bridge": {
-                    **self._bridge_status(controller_key),
+                    **self._bridge_status(controller_key, gui_available=gui_available),
                     "file_roots": folders[:count],
                     "file_roots_truncated": count < total,
                     "shell": caller_shell,
@@ -1189,21 +1201,26 @@ class DesktopBridge:
         dropped = leftmost_fitting(command, 0, total, reply)
         return reply(dropped)
 
-    def _bridge_status(self, controller_key: str | None = None) -> dict[str, object]:
+    def _bridge_status(
+        self,
+        controller_key: str | None = None,
+        *,
+        gui_available: bool | None = None,
+    ) -> dict[str, object]:
         """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not).
 
         ``gui_mode`` describes only application control; folders and shell access are reported separately.
         """
         control_available = self._control_available(controller_key)
-        gui_available = self.provider is not None
+        resolved_gui_available = self.provider is not None if gui_available is None else gui_available
         status: dict[str, object] = {
             "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
             "control_scope": "computer" if self._computer_scope(controller_key) else "saved_apps",
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
-            "gui_available": gui_available,
-            "gui_permissions_ready": gui_available and not missing_macos_desktop_permissions(),
+            "gui_available": resolved_gui_available,
+            "gui_permissions_ready": resolved_gui_available and not missing_macos_desktop_permissions(),
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }

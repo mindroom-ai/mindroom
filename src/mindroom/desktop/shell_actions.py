@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -10,10 +13,16 @@ from mindroom.desktop.command_parameters import (
     optional_int_parameter,
     optional_str_parameter,
     reject_unexpected_parameters,
+    required_int_parameter,
     required_str_parameter,
 )
 from mindroom.desktop.media import MEDIA_UPLOAD_TIMEOUT_SECONDS, DesktopMediaError, upload_encrypted_media
-from mindroom.desktop.protocol import MAX_INLINE_RESPONSE_BYTES, SHELL_OUTPUT_MIME_TYPE, DesktopProtocolError
+from mindroom.desktop.protocol import (
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    MAX_INLINE_RESPONSE_BYTES,
+    SHELL_OUTPUT_MIME_TYPE,
+    DesktopProtocolError,
+)
 from mindroom.desktop.reply_fitting import fits_inline, leftmost_fitting
 from mindroom.desktop.shell import DesktopShellRequest
 from mindroom.logging_config import get_logger
@@ -27,6 +36,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MAX_WARNING_DETAIL = 500
+_STDOUT_SLICE_KEYS = ("output", "output_truncated", "output_start", "next_offset")
+_STDERR_SLICE_KEYS = ("stderr", "stderr_truncated", "stderr_start", "stderr_next_offset")
+
+
+def _optional_positive_number_parameter(parameters: dict[str, object], key: str) -> float | None:
+    """Return the positive finite numeric parameter ``key``, or ``None`` when absent."""
+    if key not in parameters:
+        return None
+    value = parameters[key]
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+        msg = f"Desktop parameter {key} must be a positive finite number."
+        raise DesktopProtocolError(msg)
+    return float(value)
 
 
 def shell_status(
@@ -80,21 +102,39 @@ async def execute_shell(
         raise DesktopProtocolError(msg)
     parameters = command.parameters
     if command.action == "check_shell":
-        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
+        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset", "stderr_offset"}))
         handle = required_str_parameter(parameters, "handle")
         offset = optional_int_parameter(parameters, "offset")
+        stderr_offset = optional_int_parameter(parameters, "stderr_offset")
         result = shell.check(
             command.requester_id,
             command.agent_name,
             handle,
             offset=offset,
+            stderr_offset=stderr_offset,
             controller_key=controller_key,
         )
-        return await _shell_result(client, command, shell, result, offset=offset)
+        return await _shell_result(client, command, shell, result, offset=offset, stderr_offset=stderr_offset)
     if command.action == "kill_shell":
-        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
-        handle = required_str_parameter(parameters, "handle")
+        reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force", "request_id"}))
+        has_handle = "handle" in parameters
+        has_request_id = "request_id" in parameters
+        if has_handle == has_request_id:
+            msg = "Desktop kill_shell requires exactly one of handle or request_id."
+            raise DesktopProtocolError(msg)
         force = optional_bool_parameter(parameters, "force")
+        if has_request_id:
+            request_id = required_str_parameter(parameters, "request_id")
+            return {
+                "state": shell.cancel_request(
+                    command.requester_id,
+                    command.agent_name,
+                    request_id,
+                    controller_key=controller_key,
+                ),
+                "request_id": request_id,
+            }
+        handle = required_str_parameter(parameters, "handle")
         return {
             "state": shell.kill(
                 command.requester_id,
@@ -105,8 +145,21 @@ async def execute_shell(
             ),
             "handle": handle,
         }
-    reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
+    reject_unexpected_parameters(
+        parameters,
+        allowed=frozenset({"command", "cwd", "timeout_seconds", "max_runtime_seconds", "shell_protocol"}),
+    )
+    if (
+        "shell_protocol" not in parameters
+        or required_int_parameter(parameters, "shell_protocol") != DESKTOP_SHELL_PROTOCOL_VERSION
+    ):
+        msg = (
+            f"Unsupported desktop shell protocol; expected shell_protocol={DESKTOP_SHELL_PROTOCOL_VERSION}. "
+            "Update the MindRoom server and try again."
+        )
+        raise DesktopProtocolError(msg)
     timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
+    max_runtime_seconds = _optional_positive_number_parameter(parameters, "max_runtime_seconds")
     request = DesktopShellRequest(
         request_id=command.request_id,
         requester_id=command.requester_id,
@@ -116,8 +169,30 @@ async def execute_shell(
         expires_at_ms=command.expires_at_ms,
         timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         controller_key=controller_key,
+        max_runtime_seconds=max_runtime_seconds,
     )
     return await _shell_result(client, command, shell, await shell.execute(request))
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamSlice:
+    text: str
+    offset: int | None
+    size: int
+    base_truncated: bool
+    keys: tuple[str, str, str, str]
+
+    def apply(self, cut: int) -> dict[str, object]:
+        text_key, truncated_key, start_key, next_key = self.keys
+        shown = self.text[cut:] if self.offset is None else self.text[: len(self.text) - cut]
+        shown_bytes = len(shown.encode())
+        requested = self.size if self.offset is None else self.size - self.offset
+        return {
+            text_key: shown,
+            truncated_key: self.base_truncated or shown_bytes < requested,
+            start_key: self.size - shown_bytes if self.offset is None else self.offset,
+            next_key: self.size if self.offset is None else self.offset + shown_bytes,
+        }
 
 
 async def _shell_result(
@@ -127,37 +202,90 @@ async def _shell_result(
     result: DesktopShellResult,
     *,
     offset: int | None = None,
+    stderr_offset: int | None = None,
 ) -> dict[str, object]:
     """Reply inline when the encrypted response fits one to-device message, otherwise attach the output.
 
-    Output starts at byte ``offset``; without one, a running command shows its newest output. The returned
-    output covers ``[output_start, next_offset)``, and the next check continues from ``next_offset``.
+    Output starts at byte ``offset`` and stderr at ``stderr_offset``; without one, a running command shows its
+    newest bytes.
     """
     output = result.output
-    size = output.size
     payload: dict[str, object] = {
         "state": result.state,
         "handle": result.handle,
         "exit_code": result.exit_code,
         "output": "",
-        "output_bytes": size,
+        "output_bytes": output.size,
         "output_truncated": output.truncated,
         "output_attachment": None,
         "output_start": offset or 0,
-        "next_offset": size,
+        "next_offset": output.size,
+        "stderr": "",
+        "stderr_bytes": output.stderr_size,
+        "stderr_truncated": output.stderr_truncated,
+        "stderr_attachment": None,
+        "stderr_start": stderr_offset or 0,
+        "stderr_next_offset": output.stderr_size,
     }
+    if result.timed_out:
+        payload["timed_out"] = True
     if result.state == "running":
-        if offset is None:
-            return _fit_output_tail(command, payload, output.tail(MAX_INLINE_RESPONSE_BYTES), requested=size)
-        head = output.read(offset, MAX_INLINE_RESPONSE_BYTES)
-        return _fit_output_head(command, payload, head, offset=offset, requested=size - offset)
+        stdout_raw = (
+            output.tail(MAX_INLINE_RESPONSE_BYTES) if offset is None else output.read(offset, MAX_INLINE_RESPONSE_BYTES)
+        )
+        stderr_raw = (
+            output.tail_stderr(MAX_INLINE_RESPONSE_BYTES)
+            if stderr_offset is None
+            else output.read_stderr(stderr_offset, MAX_INLINE_RESPONSE_BYTES)
+        )
+        return _fit_output(command, payload, stdout_raw, stderr_raw, offset=offset, stderr_offset=stderr_offset)
     try:
-        return await _finished_shell_result(client, command, shell, result, payload, offset or 0)
+        return await _finished_shell_result(client, command, shell, result, payload, offset or 0, stderr_offset or 0)
     except BaseException:
         if command.action == "run_shell":
             # The caller never learned this handle, so nothing could page from it.
             shell.hand_over(result)
         raise
+
+
+async def _upload_attachments(
+    client: nio.AsyncClient,
+    request_id: str,
+    stdout_content: bytes,
+    stderr_content: bytes,
+) -> tuple[dict[str, object] | None, dict[str, object] | None, str | None]:
+    """Upload stdout and stderr concurrently within one shared upload timeout budget."""
+
+    async def _upload(content: bytes, filename: str) -> dict[str, object] | None:
+        if not content:
+            return None
+        media = await upload_encrypted_media(
+            client,
+            content,
+            mime_type=SHELL_OUTPUT_MIME_TYPE,
+            filename=filename,
+            timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
+        )
+        return media.to_content()
+
+    outcomes = await asyncio.gather(
+        _upload(stdout_content, f"shell-{request_id}.txt"),
+        _upload(stderr_content, f"shell-{request_id}-stderr.txt"),
+        return_exceptions=True,
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
+            raise outcome
+    error: str | None = None
+    for outcome in outcomes:
+        if isinstance(outcome, DesktopMediaError):
+            error = error or str(outcome)
+        elif isinstance(outcome, Exception):
+            logger.exception("shell_output_upload_failed", request_id=request_id, exc_info=outcome)
+            error = error or "Shell output upload failed."
+    if error is not None:
+        return None, None, error
+    return cast("dict[str, object] | None", outcomes[0]), cast("dict[str, object] | None", outcomes[1]), None
 
 
 async def _finished_shell_result(
@@ -167,33 +295,28 @@ async def _finished_shell_result(
     result: DesktopShellResult,
     payload: dict[str, object],
     start: int,
+    stderr_start: int,
 ) -> dict[str, object]:
-    """Deliver a finished command's output from ``start``; its handle stays until the rest arrives in full."""
-    content = result.output.read(start)
+    """Deliver a finished command's stdout/stderr from their offsets; its handle stays until the rest arrives."""
+    stdout_content = result.output.read(start)
+    stderr_content = result.output.read_stderr(stderr_start)
     # A run_shell reply names its handle only while that handle stays to page from.
     delivered = payload if command.action == "check_shell" else {**payload, "handle": None}
     # JSON escaping only grows text, so larger output cannot fit and is never decoded here.
-    if len(content) <= MAX_INLINE_RESPONSE_BYTES:
-        inline = {**delivered, "output": content.decode()}
+    if len(stdout_content) + len(stderr_content) <= MAX_INLINE_RESPONSE_BYTES:
+        inline: dict[str, object] = {**delivered, "output": stdout_content.decode(), "stderr": stderr_content.decode()}
         if fits_inline(command, inline):
             shell.hand_over(result)
             return inline
-    try:
-        media = await upload_encrypted_media(
-            client,
-            content,
-            mime_type=SHELL_OUTPUT_MIME_TYPE,
-            filename=f"shell-{command.request_id}.txt",
-            timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
-        )
-    except DesktopMediaError as exc:
-        error = str(exc)
-    except Exception:
-        logger.exception("shell_output_upload_failed", request_id=command.request_id)
-        error = "Shell output upload failed."
-    else:
+    stdout_attachment, stderr_attachment, error = await _upload_attachments(
+        client,
+        command.request_id,
+        stdout_content,
+        stderr_content,
+    )
+    if error is None:
         shell.hand_over(result)
-        return {**delivered, "output_attachment": media.to_content()}
+        return {**delivered, "output_attachment": stdout_attachment, "stderr_attachment": stderr_attachment}
     detail = error[:_MAX_WARNING_DETAIL]
     if result.handle is None:
         # Revocation raced this command's registration, so there is no handle to page from.
@@ -207,56 +330,59 @@ async def _finished_shell_result(
             f"The rest of the output could not be attached ({detail}); this page shows it from output_start. "
             "Continue with check_shell from next_offset."
         )
-    head = content[:MAX_INLINE_RESPONSE_BYTES]
-    return _fit_output_head(
+    return _fit_output(
         command,
         {**payload, "warning": warning},
-        head,
+        stdout_content[:MAX_INLINE_RESPONSE_BYTES],
+        stderr_content[:MAX_INLINE_RESPONSE_BYTES],
         offset=start,
-        requested=len(content),
+        stderr_offset=stderr_start,
     )
 
 
-def _fit_output_tail(
+def _fit_output(
     command: DesktopCommand,
     payload: dict[str, object],
-    tail: bytes,
+    stdout_raw: bytes,
+    stderr_raw: bytes,
     *,
-    requested: int,
+    offset: int | None,
+    stderr_offset: int | None,
 ) -> dict[str, object]:
-    """Show the newest output whose escaped reply still fits inline, marking anything older as omitted."""
-    text = tail.decode(errors="ignore")  # Only the first character can be cut; the spool is UTF-8.
+    """Fit stdout and stderr slices into one inline reply without starving either stream."""
+    stdout_slice = _StreamSlice(
+        stdout_raw.decode(errors="ignore"),
+        offset,
+        cast("int", payload["output_bytes"]),
+        bool(payload["output_truncated"]),
+        _STDOUT_SLICE_KEYS,
+    )
+    stderr_slice = _StreamSlice(
+        stderr_raw.decode(errors="ignore"),
+        stderr_offset,
+        cast("int", payload["stderr_bytes"]),
+        bool(payload["stderr_truncated"]),
+        _STDERR_SLICE_KEYS,
+    )
 
-    def reply(start: int) -> dict[str, object]:
-        shown = text[start:]
-        shown_bytes = len(shown.encode())
-        truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-        output_start = cast("int", payload["next_offset"]) - shown_bytes
-        return {**payload, "output": shown, "output_truncated": truncated, "output_start": output_start}
+    def build(stdout_cut: int, stderr_cut: int) -> dict[str, object]:
+        return {**payload, **stdout_slice.apply(stdout_cut), **stderr_slice.apply(stderr_cut)}
 
-    # Dropping older characters never grows the reply, so search for the fewest to drop.
-    start = leftmost_fitting(command, 0, len(text), reply)
-    return reply(start)
+    full = build(0, 0)
+    if fits_inline(command, full):
+        return full
+    stdout_len = len(stdout_slice.text)
+    stderr_len = len(stderr_slice.text)
+    if stderr_len == 0:
+        return build(leftmost_fitting(command, 0, stdout_len, lambda cut: build(cut, 0)), 0)
+    if stdout_len == 0:
+        return build(0, leftmost_fitting(command, 0, stderr_len, lambda cut: build(0, cut)))
 
-
-def _fit_output_head(
-    command: DesktopCommand,
-    payload: dict[str, object],
-    head: bytes,
-    *,
-    offset: int,
-    requested: int,
-) -> dict[str, object]:
-    """Show the oldest output from ``offset`` whose escaped reply still fits inline, and where to continue."""
-    # The offset starts a character, so only the last one can be cut; ``next_offset`` then points at it.
-    text = head.decode(errors="ignore")
-
-    def reply(dropped: int) -> dict[str, object]:
-        shown = text[: len(text) - dropped]
-        shown_bytes = len(shown.encode())
-        truncated = bool(payload["output_truncated"]) or shown_bytes < requested
-        return {**payload, "output": shown, "output_truncated": truncated, "next_offset": offset + shown_bytes}
-
-    # Dropping newer characters never grows the reply, so search for the fewest to drop.
-    dropped = leftmost_fitting(command, 0, len(text), reply)
-    return reply(dropped)
+    stderr_alone_cut = leftmost_fitting(command, 0, stderr_len, lambda cut: build(stdout_len, cut))
+    stderr_alone_kept = stderr_len - stderr_alone_cut
+    stderr_reserved = min(stderr_len, max(1, stderr_alone_kept // 2)) if stderr_alone_kept > 0 else 0
+    stderr_cut = stderr_len - stderr_reserved
+    stdout_cut = leftmost_fitting(command, 0, stdout_len, lambda cut: build(cut, stderr_cut))
+    if stdout_cut == 0 and stderr_cut > 0:
+        stderr_cut = leftmost_fitting(command, 0, stderr_cut, lambda cut: build(0, cut))
+    return build(stdout_cut, stderr_cut)
