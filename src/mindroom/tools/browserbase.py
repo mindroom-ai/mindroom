@@ -18,17 +18,16 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import error_json, require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import error_json, reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
-_BrowserbaseAction = Literal["navigate", "screenshot", "get_page_content", "close_session"]
+_BrowserbaseAction = Literal["navigate", "get_page_content", "close_session"]
 _ACTION_FIELDS: dict[str, str] = {
     "navigate": "url connect_url",
-    "screenshot": "path full_page connect_url",
     "get_page_content": "connect_url",
     "close_session": "",
 }
@@ -80,14 +79,18 @@ class _BrowserbaseTools(Toolkit):
 
         toggles: dict[_BrowserbaseAction, bool] = {
             "navigate": all or enable_navigate_to,
-            "screenshot": all or enable_screenshot,
             "get_page_content": all or enable_get_page_content,
             "close_session": all or enable_close_session,
         }
         self._enabled_actions: tuple[_BrowserbaseAction, ...] = tuple(
             action for action, enabled in toggles.items() if enabled
         )
-        super().__init__(name="browserbase_tools", tools=(self.browserbase,) if self._enabled_actions else ())
+        tools: list[Any] = []
+        if self._enabled_actions:
+            tools.append(self.browserbase)
+        if all or enable_screenshot:
+            tools.append(self.screenshot)
+        super().__init__(name="browserbase_tools", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Narrow ``browserbase`` schema and parameters to enabled actions."""
@@ -161,56 +164,57 @@ class _BrowserbaseTools(Toolkit):
         self,
         action: _BrowserbaseAction,
         url: str | None = None,
-        path: str | None = None,
-        full_page: bool = True,
         connect_url: str | None = None,
     ) -> str:
         """Control a remote Browserbase headless browser session.
 
         - `navigate`: Open `url` (optional `connect_url`).
-        - `screenshot`: Save page screenshot to `path` (optional `full_page`, `connect_url`).
         - `get_page_content`: Return current page text or HTML (optional `connect_url`).
         - `close_session`: Close and clean up the active browser session.
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
-            return error_json(disabled)
+        error = require_enabled_action(action, self._enabled_actions) or reject_unexpected_args(
+            action,
+            _ACTION_FIELDS,
+            {"url": url is not None, "connect_url": connect_url is not None},
+        )
+        if error is not None:
+            return error_json(error)
         if action == "close_session":
             return await self._close_session()
         if action == "navigate" and not url:
             return error_json("url is required for navigate.")
-        if action == "screenshot" and not path:
-            return error_json("path is required for screenshot.")
         try:
             await self._initialize_browser(connect_url)
-            return await self._run_page_action(action, url=url, path=path, full_page=full_page)
+            return await self._run_page_action(action, url=url)
         except Exception:
             await self._cleanup()
             raise
 
-    async def _run_page_action(
-        self,
-        action: _BrowserbaseAction,
-        *,
-        url: str | None,
-        path: str | None,
-        full_page: bool,
-    ) -> str:
+    async def _run_page_action(self, action: _BrowserbaseAction, *, url: str | None) -> str:
         if action == "navigate":
             assert url is not None
             if self._async_page:
                 await self._async_page.goto(url, wait_until="networkidle")
             title = await self._async_page.title() if self._async_page else ""
             return json.dumps({"status": "complete", "title": title, "url": url})
-        if action == "screenshot":
-            assert path is not None
-            if self._async_page:
-                await self._async_page.screenshot(path=path, full_page=full_page)
-            return json.dumps({"status": "success", "path": path})
         if not self._async_page:
             return ""
         raw_content = await self._async_page.content()
         content = self._extract_text_content(raw_content) if self.parse_html else raw_content
         return self._truncate_content(content)
+
+    async def screenshot(self, path: str, full_page: bool = True, connect_url: str | None = None) -> str:
+        """Capture a screenshot of the current Browserbase page and save it to `path` (`full_page`, optional `connect_url`)."""
+        if not path.strip():
+            return error_json("path is required for screenshot.")
+        try:
+            await self._initialize_browser(connect_url)
+            if self._async_page:
+                await self._async_page.screenshot(path=path, full_page=full_page)
+            return json.dumps({"status": "success", "path": path})
+        except Exception:
+            await self._cleanup()
+            raise
 
     async def _close_session(self) -> str:
         try:
@@ -279,7 +283,7 @@ class _BrowserbaseTools(Toolkit):
     ],
     dependencies=["browserbase", "playwright"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browserbase",
-    function_names=("browserbase",),
+    function_names=("browserbase", "screenshot"),
     action_scoped_grants=("browserbase",),
 )
 def browserbase_tools() -> type[Toolkit]:

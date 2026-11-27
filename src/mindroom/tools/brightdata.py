@@ -21,7 +21,7 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -172,6 +172,23 @@ class _BrightDataTools(Toolkit):
         """
         if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
             return disabled
+        if (
+            unexpected := reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {
+                    "url": url is not None,
+                    "query": query is not None,
+                    "engine": engine != "google",
+                    "num_results": num_results != 10,
+                    "language": language is not None,
+                    "country_code": country_code is not None,
+                    "source_type": source_type is not None,
+                    "num_of_reviews": num_of_reviews is not None,
+                },
+            )
+        ) is not None:
+            return f"Error: {unexpected}"
         if action == "scrape_markdown":
             return self._scrape_markdown(url or "")
         if action == "screenshot":

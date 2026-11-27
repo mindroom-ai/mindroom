@@ -597,6 +597,10 @@ def test_wave2_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
                 runtime_paths,
             )
         override_error = str(exc_info.value)
-        assert "enable_*" in override_error
         assert "tool_approval.rules" in override_error
         assert f"include_tools: [{replacement}]" not in override_error
+        if toolkit == "calculator":
+            assert "enable_*" not in override_error
+            assert "no per-action allowlist filter" in override_error
+        else:
+            assert "enable_*" in override_error

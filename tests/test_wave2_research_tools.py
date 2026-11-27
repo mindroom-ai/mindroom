@@ -312,6 +312,7 @@ def test_youtube_enable_flags_and_all() -> None:
     assert set(offered_data.parameters["properties"]) == {"action", "url"}
     assert "`captions`" not in (offered_data.description or "")
     assert "disabled" in data_only.youtube_video("captions", "https://youtu.be/abc123").lower()
+    assert "languages" in data_only.youtube_video("data", "https://youtu.be/abc123", languages=["en"])
 
     captions_only = tool_class(enable_get_video_data=False, enable_get_video_timestamps=False)
     offered_captions = adapt_toolkit(captions_only).functions[0]

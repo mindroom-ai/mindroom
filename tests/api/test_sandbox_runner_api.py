@@ -8463,7 +8463,12 @@ def test_builtin_subprocess_tool_does_not_import_plugins_in_child(
     resp = runner_client.post(
         "/api/sandbox-runner/execute",
         headers=SANDBOX_HEADERS,
-        json={"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "calculator", "function_name": "add", "args": [2, 3]},
+        json={
+            "protocol": WORKER_PROTOCOL_VERSION,
+            "tool_name": "calculator",
+            "function_name": "calculate",
+            "args": ["add", 2, 3],
+        },
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["ok"] is True

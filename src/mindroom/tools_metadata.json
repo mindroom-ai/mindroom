@@ -10973,7 +10973,8 @@
       "executes_code": false,
       "file_access": "unconfined",
       "function_names": [
-        "browserbase"
+        "browserbase",
+        "screenshot"
       ],
       "helper_text": null,
       "icon": "FaChrome",

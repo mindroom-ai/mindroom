@@ -16,7 +16,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -78,13 +78,33 @@ class _SpiderTools(Toolkit):
         - `scrape`: Scrape `url` as Markdown.
         - `crawl`: Crawl `url` as Markdown (optional `limit`, default 10).
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
-            return f"Error: {disabled}"
+        error = require_enabled_action(action, self._enabled_actions) or reject_unexpected_args(
+            action,
+            _ACTION_FIELDS,
+            {
+                "query": query is not None,
+                "url": url is not None,
+                "max_results": max_results is not None,
+                "limit": limit is not None,
+            },
+        )
+        if error is not None:
+            return f"Error: {error}"
         if action == "search" and not query:
             return "Error: query is required for search."
         if action in {"scrape", "crawl"} and not url:
             return f"Error: url is required for {action}."
+        return self._run_action(action, query=query, url=url, max_results=max_results, limit=limit)
 
+    def _run_action(
+        self,
+        action: _SpiderAction,
+        *,
+        query: str | None,
+        url: str | None,
+        max_results: int | None,
+        limit: int | None,
+    ) -> str:
         from spider import Spider
 
         app = Spider()

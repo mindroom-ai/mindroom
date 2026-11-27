@@ -16,7 +16,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -229,6 +229,21 @@ class _ExaTools(Toolkit):
         """
         if (disabled := require_enabled_action(action, self._lookup_actions)) is not None:
             return f"Error: {disabled}"
+        if (
+            unexpected := reject_unexpected_args(
+                action,
+                _LOOKUP_ACTION_FIELDS,
+                {
+                    "query": query is not None,
+                    "url": url is not None,
+                    "urls": urls is not None,
+                    "num_results": num_results is not None,
+                    "category": category is not None,
+                    "text": text,
+                },
+            )
+        ) is not None:
+            return f"Error: {unexpected}"
         if action == "search":
             return self._run_search(query, num_results=num_results, category=category)
         if action == "contents":

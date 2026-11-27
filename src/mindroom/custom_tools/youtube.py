@@ -13,7 +13,7 @@ from youtube_transcript_api.proxies import GenericProxyConfig
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 
 if TYPE_CHECKING:
     from youtube_transcript_api import FetchedTranscript
@@ -187,8 +187,12 @@ class YouTubeTools(Toolkit):
         - `data`: JSON oEmbed metadata (`title`, `author_name`, `thumbnail_url`, etc.).
         - `timestamps`: Timestamped `M:SS - text` lines (optional `languages` override).
         """
-        if (disabled := require_enabled_action(action, self._enabled_actions)) is not None:
-            return disabled
+        if (error := require_enabled_action(action, self._enabled_actions)) is not None or (
+            (unexpected := reject_unexpected_args(action, _ACTION_FIELDS, {"languages": languages is not None}))
+            is not None
+            and (error := f"Error: {unexpected}")
+        ):
+            return error
         logger.debug("Running YouTube video action", action=action, url=url)
         try:
             video_id = self._require_video_id(url)

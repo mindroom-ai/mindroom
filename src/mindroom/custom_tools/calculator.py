@@ -8,6 +8,7 @@ from typing import Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tools.native_helpers import reject_unexpected_args
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,15 @@ _BINARY_OPERATIONS: dict[str, str] = {
     "multiply": "multiplication",
     "divide": "division",
     "exponentiate": "exponentiation",
+}
+_UNARY_OPERATIONS: dict[str, str] = {
+    "factorial": "factorial",
+    "is_prime": "prime_check",
+    "square_root": "square_root",
+}
+_ACTION_FIELDS: dict[str, str] = {
+    **dict.fromkeys(_BINARY_OPERATIONS, "b"),
+    **dict.fromkeys(_UNARY_OPERATIONS, ""),
 }
 
 
@@ -77,11 +87,13 @@ class CalculatorTools(Toolkit):
         """
         if action in _BINARY_OPERATIONS:
             return self._calculate_binary(action, _BINARY_OPERATIONS[action], a, b)
-        if action == "factorial":
-            return self._calculate_factorial(a)
-        if action == "is_prime":
-            return self._calculate_is_prime(a)
-        if action == "square_root":
+        if (operation := _UNARY_OPERATIONS.get(action)) is not None:
+            if (unexpected := reject_unexpected_args(action, _ACTION_FIELDS, {"b": b is not None})) is not None:
+                return json.dumps({"operation": operation, "error": unexpected})
+            if action == "factorial":
+                return self._calculate_factorial(a)
+            if action == "is_prime":
+                return self._calculate_is_prime(a)
             return self._calculate_square_root(a)
         return json.dumps({"operation": action, "error": f"Unsupported action: {action}"})
 

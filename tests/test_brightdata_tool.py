@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from types import ModuleType, SimpleNamespace
@@ -93,6 +94,9 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
     assert set(bd_fn.parameters["properties"]) == {"action", "url"}
     assert "`screenshot`" not in (bd_fn.description or "")
     assert "disabled" in str(bd_only_md.brightdata("screenshot", url="https://example.com")).lower()
+    assert "cannot be used" in str(bd_only_md.brightdata("scrape_markdown", url="https://example.com", engine="bing"))
+    bd_full = brightdata_tools()(api_key="k")
+    assert "cannot be used" in str(bd_full.brightdata("search_engine", query="q", url="https://example.com"))
     assert (
         list(
             brightdata_tools()(
@@ -109,6 +113,8 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
     fake_bb_mod = ModuleType("browserbase")
     fake_bb_mod.Browserbase = lambda **_kwargs: SimpleNamespace()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "browserbase", fake_bb_mod)
+    bb_default = browserbase_tools()(api_key="k", project_id="p")
+    assert list(bb_default.functions) == ["browserbase", "screenshot"]
     bb_close_only = browserbase_tools()(
         api_key="k",
         project_id="p",
@@ -116,10 +122,31 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
         enable_screenshot=False,
         enable_get_page_content=False,
     )
+    assert list(bb_close_only.functions) == ["browserbase"]
     bb_fn = adapt_toolkit(bb_close_only).functions[0]
     assert bb_fn.parameters["properties"]["action"]["enum"] == ["close_session"]
     assert set(bb_fn.parameters["properties"]) == {"action"}
     assert "`navigate`" not in (bb_fn.description or "")
+    assert (
+        "cannot be used"
+        in json.loads(
+            asyncio.run(bb_close_only.browserbase("close_session", connect_url="wss://example.test")),
+        )["error"]
+    )
+    assert (
+        "cannot be used"
+        in json.loads(
+            asyncio.run(bb_default.browserbase("get_page_content", url="https://example.test")),
+        )["error"]
+    )
+    bb_screenshot_only = browserbase_tools()(
+        api_key="k",
+        project_id="p",
+        enable_navigate_to=False,
+        enable_get_page_content=False,
+        enable_close_session=False,
+    )
+    assert list(bb_screenshot_only.functions) == ["screenshot"]
 
     spider_scrape = spider_tools()(enable_search=False, enable_crawl=False)
     spider_fn = adapt_toolkit(spider_scrape).functions[0]
@@ -165,6 +192,8 @@ def test_oxylabs_and_spider_actions_preserve_payloads(monkeypatch: pytest.Monkey
     assert prod_out["product_info"]["found"] is True
     assert "Invalid ASIN" in json.loads(ox.oxylabs("amazon_product", asin="bad"))["error"]
     assert "Invalid URL" in json.loads(ox.oxylabs("scrape", url="ftp://bad"))["error"]
+    assert "cannot be used" in json.loads(ox.oxylabs("scrape", url="https://example.com", domain_code="de"))["error"]
+    assert "cannot be used" in json.loads(ox.oxylabs("search_google", query="q", markdown=True))["error"]
 
     fake_spider_mod = ModuleType("spider")
     seen_spider: list[tuple[str, str, dict[str, Any]]] = []
@@ -191,6 +220,10 @@ def test_oxylabs_and_spider_actions_preserve_payloads(monkeypatch: pytest.Monkey
     assert json.loads(sp.spider("crawl", url="https://example.com", limit=4)) == [{"url": "https://example.com"}]
     assert seen_spider[0][2]["num"] == 3
     assert seen_spider[2][2]["limit"] == 4
+    spider_calls_before = len(seen_spider)
+    assert "cannot be used" in sp.spider("scrape", url="https://example.com", max_results=3)
+    assert "cannot be used" in sp.spider("search", query="python", url="https://example.com")
+    assert len(seen_spider) == spider_calls_before
 
 
 def test_wave4_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:
@@ -226,7 +259,30 @@ def test_wave4_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
             is None
         )
 
+    bb_screenshot_op = grant_operation(
+        config,
+        "screenshot",
+        {"path": str(tmp_path / "page.png")},
+        tools=registry,
+        toolkit_name="browserbase",
+    )
+    assert bb_screenshot_op is not None
+    assert bb_screenshot_op.mcp_tool_name is None
+
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    # Separate Browserbase screenshot keeps its standalone approval rule boundary.
+    loaded_screenshot_rule = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "agents": {"researcher": {"display_name": "Researcher", "tools": ["browserbase"]}},
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [{"match": "screenshot", "action": "require_approval"}],
+            },
+        },
+        runtime_paths,
+    )
+    assert loaded_screenshot_rule.tool_approval.rules[0].match == "screenshot"
     for toolkit, retired, replacement in (
         ("exa", "search_exa", "exa_lookup"),
         ("trafilatura", "extract_batch", "trafilatura_extract"),
@@ -261,6 +317,10 @@ def test_wave4_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
                 runtime_paths,
             )
         override_error = str(exc_info.value)
-        assert "enable_*" in override_error
         assert "tool_approval.rules" in override_error
         assert f"include_tools: [{replacement}]" not in override_error
+        if toolkit == "oxylabs":
+            assert "enable_*" not in override_error
+            assert "no per-action allowlist filter" in override_error
+        else:
+            assert "enable_*" in override_error

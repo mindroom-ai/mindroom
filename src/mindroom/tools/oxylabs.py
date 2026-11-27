@@ -17,6 +17,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tools.native_helpers import reject_unexpected_args
 
 logger = get_logger(__name__)
 
@@ -25,6 +26,12 @@ _ASIN_LEN = 10
 _MAX_PARSED_HTML_LEN = 1000
 
 _OxylabsAction = Literal["search_google", "amazon_product", "search_amazon", "scrape"]
+_ACTION_FIELDS: dict[str, str] = {
+    "search_google": "query domain_code",
+    "amazon_product": "asin domain_code",
+    "search_amazon": "query domain_code",
+    "scrape": "url render_javascript markdown",
+}
 
 
 def _field(obj: Any, key: str, default: Any = "") -> Any:  # noqa: ANN401
@@ -142,6 +149,21 @@ class _OxylabsTools(Toolkit):
         - `search_amazon`: Search Amazon products for `query` on `domain_code`.
         - `scrape`: Scrape `url` (http/https; optional `render_javascript`, `markdown`).
         """
+        if (
+            unexpected := reject_unexpected_args(
+                action,
+                _ACTION_FIELDS,
+                {
+                    "query": query is not None,
+                    "asin": asin is not None,
+                    "url": url is not None,
+                    "domain_code": domain_code != "com",
+                    "render_javascript": render_javascript,
+                    "markdown": markdown is not None,
+                },
+            )
+        ) is not None:
+            return self._error_response(action, unexpected)
         if action == "search_google":
             return self._search_google(query or "", domain_code)
         if action == "amazon_product":

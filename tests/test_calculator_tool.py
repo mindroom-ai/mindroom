@@ -67,6 +67,9 @@ def test_calculator_operations_and_error_cases() -> None:
         ("is_prime", 7.2, None, "prime_check"),
         ("is_prime", False, None, "prime_check"),
         ("is_prime", math.nan, None, "prime_check"),
+        ("factorial", 5, 2, "factorial"),
+        ("is_prime", 7, 2, "prime_check"),
+        ("square_root", 9, 2, "square_root"),
     ],
 )
 def test_calculator_operand_validation(

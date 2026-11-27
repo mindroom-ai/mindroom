@@ -22,7 +22,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import reject_unexpected_args, require_enabled_action, restrict_actions
 from mindroom.trafilatura_call_limit import CALL_SECONDS
 
 if TYPE_CHECKING:
@@ -339,6 +339,19 @@ class _TrafilaturaTools(Toolkit):
         """
         if (disabled := require_enabled_action(action, self._extract_actions)) is not None:
             return f"Error: {disabled}"
+        if (
+            unexpected := reject_unexpected_args(
+                action,
+                _EXTRACT_ACTION_FIELDS,
+                {
+                    "url": url is not None,
+                    "urls": urls is not None,
+                    "output_format": output_format is not None,
+                    "as_json": not as_json,
+                },
+            )
+        ) is not None:
+            return f"Error: {unexpected}"
         if action == "batch":
             return "Error: urls is required for batch extraction." if urls is None else self._extract_batch(urls)
         if not url:

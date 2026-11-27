@@ -386,6 +386,7 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_brightdata_tool.py::test_wave4_action_scoped_grants_and_fail_closed_migration.
+
 # LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
 # Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
 # Last legacy release: v2026.11.651; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
@@ -736,7 +737,6 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
     "browserbase": {
         "navigate_to": "browserbase",
-        "screenshot": "browserbase",
         "get_page_content": "browserbase",
         "close_session": "browserbase",
     },
@@ -1201,7 +1201,12 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
 }
 
 
-def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
+def retired_tool_override(
+    tool_name: str,
+    overrides: Mapping[str, object],
+    *,
+    has_enable_toggles: bool = False,
+) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None and (
         retired := checker(overrides)
@@ -1211,10 +1216,22 @@ def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tu
         retired := _retired_function_filter(
             overrides,
             renames,
-            guidance_for=lambda _key, new: (
-                f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
-                f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
-                f"matching `{new}`) so permissions are not broadened"
+            guidance_for=(
+                (
+                    lambda _key, new: (
+                        f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+                        f"disable unwanted actions via `{tool_name}`'s `enable_*` settings (or `tool_approval.rules` "
+                        f"matching `{new}`) so permissions are not broadened"
+                    )
+                )
+                if has_enable_toggles
+                else (
+                    lambda key, new: (
+                        f"`{new}` is now a consolidated function with an `action` parameter and `{tool_name}` has no "
+                        f"per-action allowlist filter; remove the retired `{key}` entry and use `tool_approval.rules` "
+                        f"matching `{new}` if per-action gating is needed"
+                    )
+                )
             ),
         )
     ) is not None:

@@ -442,6 +442,18 @@ def test_trafilatura_extract_toggles_narrow_schema_and_guard_disabled_actions() 
     assert set(offered.parameters["properties"]) == {"action", "urls"}
     assert "`text`" not in (offered.description or "")
     assert "disabled" in batch_only.trafilatura_extract("text", url="https://example.com").lower()
+    full_extract = trafilatura_tools()()
+    assert "cannot be used" in full_extract.trafilatura_extract(
+        "text",
+        url="https://example.com",
+        urls=["https://example.com"],
+    )
+    assert "cannot be used" in full_extract.trafilatura_extract("text", url="https://example.com", as_json=False)
+    assert "cannot be used" in full_extract.trafilatura_extract(
+        "batch",
+        urls=["https://example.com"],
+        output_format="markdown",
+    )
 
     none_extract = trafilatura_tools()(
         enable_extract_text=False,

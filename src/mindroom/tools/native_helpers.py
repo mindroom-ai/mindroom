@@ -180,6 +180,20 @@ def require_enabled_action(action: str, enabled: Iterable[str]) -> str | None:
     return None
 
 
+def reject_unexpected_args(
+    action: str,
+    allowed_fields: Mapping[str, str],
+    provided: Mapping[str, bool],
+) -> str | None:
+    """Return an error string if any argument marked set in ``provided`` is not allowed for ``action``."""
+    allowed = set(allowed_fields.get(action, "").split())
+    unexpected = [name for name, is_set in provided.items() if is_set and name not in allowed]
+    if not unexpected:
+        return None
+    names = ", ".join(f"`{name}`" for name in unexpected)
+    return f"Parameter(s) {names} cannot be used with action={action!r}."
+
+
 def safe_path_segment(value: object, field_name: str) -> str:
     """Validate and URL-encode a single REST path segment, rejecting traversal and delimiters."""
     if (

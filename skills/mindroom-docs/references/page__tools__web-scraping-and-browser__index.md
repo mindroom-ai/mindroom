@@ -268,7 +268,7 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 
 ### [`oxylabs`]
 
-`oxylabs` exposes `oxylabs(action, ...)` with actions `search_google`, `amazon_product`, `search_amazon`, and `scrape_website`.
+`oxylabs` exposes `oxylabs(action, ...)` with actions `search_google`, `amazon_product`, `search_amazon`, and `scrape`.
 `action="search_google"` returns organic results with title, URL, description, and position.
 Pass `domain_code`, such as `com` or `de`, to choose the regional Google or Amazon domain.
 It requires both a username and password.
@@ -277,7 +277,7 @@ It requires both a username and password.
 | --- | --- | --- | --- |
 | `username` | `text` | `null` | Falls back to `OXYLABS_USERNAME`. |
 | `password` | `password` | `null` | Falls back to `OXYLABS_PASSWORD`. |
-| `markdown` | `boolean` | `false` | Return `action="scrape_website"` content as Markdown instead of parsed HTML. |
+| `markdown` | `boolean` | `false` | Return `action="scrape"` content as Markdown instead of parsed HTML. |
 
 ## Browser Tools
 
@@ -310,7 +310,7 @@ agents:
 
 ### [`browserbase`]
 
-`browserbase` exposes `browserbase(action, ...)` with actions `navigate`, `screenshot`, `page_content`, and `close_session` against a hosted Browserbase session that it creates automatically.
+`browserbase` exposes `browserbase(action, ...)` (`navigate`, `get_page_content`, `close_session`) and `screenshot(path, full_page=True, connect_url=None)` against a hosted Browserbase session that it creates automatically.
 It still needs local Playwright to connect to the remote browser.
 It requires an API key and project ID.
 Use it when you need remote navigation, screenshots, and page reads without the full action set of `browser`.
@@ -321,8 +321,8 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 | `project_id` | `text` | `null` | Falls back to `BROWSERBASE_PROJECT_ID`. |
 | `base_url` | `url` | `null` | Browserbase API endpoint, not the site to visit; falls back to `BROWSERBASE_BASE_URL`. |
 | `enable_navigate_to` | `boolean` | `true` | Enable `action="navigate"`. |
-| `enable_screenshot` | `boolean` | `true` | Enable `action="screenshot"`. |
-| `enable_get_page_content` | `boolean` | `true` | Enable `action="page_content"`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `screenshot()`. |
+| `enable_get_page_content` | `boolean` | `true` | Enable `action="get_page_content"`. |
 | `enable_close_session` | `boolean` | `true` | Enable `action="close_session"`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `parse_html` | `boolean` | `true` | Return visible text instead of raw HTML. |
