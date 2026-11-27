@@ -102,11 +102,13 @@ def bind_response_owner(
                     owner.end_run_for_reload()
                 raise CliCatalogReloadedError(_RELOADED) from exc
 
+        if isinstance(key, str) and (prepared := current.prepared_single_key(key)) is not None:
+            key = prepared
         # Before binding, so a refused catalog builds no deferred toolkit.
         check_authority(key)
         binding = None if isinstance(key, str) else bindings.get((id(current), key))
         if binding is None:
-            binding = await current.bind(key)
+            binding = await current.bind(key, check_current=lambda: check_authority(key))
             bindings[(id(current), binding.key)] = binding
         # Again after the bind's awaits, so the same check in the call below, which runs first, never refuses.
         check_authority(binding.key)

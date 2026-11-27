@@ -2355,27 +2355,34 @@ async def test_shorthand_describe_and_nonblocking_call_do_not_wait_on_running_to
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", LocalClient)
     try:
         async with owner._window("bash"):
-            slow_receipt = await owner.operation(
-                window="bash",
-                operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="slow", function="block"),
-            )
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                await started.wait()
-                described = await owner.operation(
+            try:
+                slow_receipt = await owner.operation(
                     window="bash",
-                    operation=ToolDescribeOperation(operation="tools.describe", toolkit="fast"),
+                    operation=ToolCallOperation(
+                        operation="tools.call",
+                        call_id=uuid4(),
+                        toolkit="slow",
+                        function="block",
+                    ),
                 )
-                assert (described["toolkit"], described["function"]) == ("fast", "ping")
-                assert await asyncio.to_thread(cli_main, ["tools", "call", "fast", "--timeout", "0"]) == 3
-                queued = json.loads(capsys.readouterr().out)
-                assert (queued["toolkit"], queued["function"], queued["status"]) == ("fast", "ping", "queued")
-                assert not release.is_set()
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    await started.wait()
+                    described = await owner.operation(
+                        window="bash",
+                        operation=ToolDescribeOperation(operation="tools.describe", toolkit="fast"),
+                    )
+                    assert (described["toolkit"], described["function"]) == ("fast", "ping")
+                    assert await asyncio.to_thread(cli_main, ["tools", "call", "fast", "--timeout", "0"]) == 3
+                    queued = json.loads(capsys.readouterr().out)
+                    assert (queued["toolkit"], queued["function"], queued["status"]) == ("fast", "ping", "queued")
+                    assert not release.is_set()
 
+                    release.set()
+                    slow_done = await settled_receipt(owner, slow_receipt["call_id"])
+                    fast_done = await settled_receipt(owner, queued["call_id"])
+            finally:
                 release.set()
-                slow_done = await settled_receipt(owner, slow_receipt["call_id"])
-                fast_done = await settled_receipt(owner, queued["call_id"])
     finally:
-        release.set()
         await owner.close()
 
     assert (slow_done["status"], slow_done["outcome"]) == ("completed", "unblocked")

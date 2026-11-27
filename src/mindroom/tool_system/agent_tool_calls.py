@@ -266,6 +266,14 @@ class PreparedAgentToolCatalog:
             for item in self._deferred.values()
         ]
 
+    def prepared_single_key(self, toolkit: str) -> ToolKey | None:
+        """Return the sole already-prepared key for ``toolkit``, or None if deferred, missing, or multi-function."""
+        self._check_open()
+        if toolkit in self._deferred:
+            return None
+        matches = [known for known in self._bindings if known.toolkit == toolkit]
+        return matches[0] if len(matches) == 1 else None
+
     def _lookup_binding(self, key: ToolKey | str) -> PreparedAgentToolBinding:
         if isinstance(key, str):
             matches = [binding for known, binding in self._bindings.items() if known.toolkit == key]

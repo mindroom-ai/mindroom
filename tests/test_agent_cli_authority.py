@@ -521,3 +521,62 @@ def test_protocol_allows_omitted_describe_function_and_still_requires_call_funct
         parse_operation(base_call)
     with pytest.raises(ValidationError):
         parse_operation({**base_call, "function": None})
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_unrelated_approval_reload_allows_prepared_singleton_shorthand_but_refuses_deferred(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_context(tmp_path)
+    current = runtime.config.model_copy(deep=True)
+    current.tool_approval.rules = [
+        ApprovalRuleConfig(match="google_drive_*", agents="other_agent", action="require_approval"),
+    ]
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current,
+    )
+    catalog = _catalog(runtime)
+
+    def attachment() -> str:
+        return "ok"
+
+    await catalog.prepare([adapt_toolkit(Toolkit(name="attachments", tools=[attachment]), key="attachments")])
+
+    factory_calls = 0
+
+    async def deferred_factory() -> AdaptedToolkit:
+        nonlocal factory_calls
+        factory_calls += 1
+        return adapt_toolkit(Toolkit(name="pull_requests", tools=[attachment]))
+
+    catalog.add_deferred(DeferredAgentToolkit("pull_requests", "PRs", deferred_factory))
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=True)
+        async with owner._window("bash"):
+            explicit = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(
+                    operation="tools.describe",
+                    toolkit="attachments",
+                    function="attachment",
+                ),
+            )
+            shorthand = await owner.operation(
+                window="bash",
+                operation=ToolDescribeOperation(operation="tools.describe", toolkit="attachments"),
+            )
+            assert (explicit["toolkit"], explicit["function"]) == ("attachments", "attachment")
+            assert (shorthand["toolkit"], shorthand["function"]) == ("attachments", "attachment")
+            assert owner.control_calls == []
+
+            with pytest.raises(CliCatalogReloadedError, match="configuration was reloaded"):
+                await owner.operation(
+                    window="bash",
+                    operation=ToolDescribeOperation(operation="tools.describe", toolkit="pull_requests"),
+                )
+
+    assert factory_calls == 0
+    assert [call.tool_name for call in owner.control_calls] == [CONFIG_RELOAD_CALL]
