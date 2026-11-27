@@ -1924,6 +1924,160 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
     assert payload["instructions"] == {"shared": "Use alpha.\n\nUse beta."}
 
 
+def test_tool_search_verbose_docstring_does_not_hijack_queries() -> None:
+    """BM25 length normalization and multi-term noise pruning stop verbose tools from hijacking searches."""
+    verbose_body = (
+        "Render interactive charts, dashboards, and widgets in the side panel for web previews and share flows. "
+        + " ".join(f"canvas layout detail {index}" for index in range(130))
+        + " Supports web embeds, web theming, and team share views inside the panel."
+    )
+
+    @tool(name="show_canvas", description=verbose_body)
+    def show_canvas(html: str) -> str:
+        return html
+
+    @tool(name="serper_search", description="Search the web using Serper.")
+    def serper_search(query: str) -> str:
+        return query
+
+    @tool(name="serper_scrape", description="Scrape a web page.")
+    def serper_scrape(url: str) -> str:
+        return url
+
+    @tool(name="publish_report", description="Publish a report and get a public share link.")
+    def publish_report(markdown: str) -> str:
+        return markdown
+
+    deferred = (
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas]), "Interactive chat side panels"),
+        _deferred(Toolkit(name="serper", tools=[serper_search, serper_scrape]), "Web search and scraping"),
+        _deferred(Toolkit(name="report_publishing", tools=[publish_report]), "Publish reports to public links"),
+    )
+
+    serper_matches = _tool_payload(_search_toolkit(*deferred).tool_search("serper search web scrape"))["matches"]
+    assert {match["name"] for match in serper_matches} == {"serper_search", "serper_scrape"}
+
+    report_matches = _tool_payload(_search_toolkit(*deferred).tool_search("report publishing public link share"))[
+        "matches"
+    ]
+    assert [match["name"] for match in report_matches] == ["publish_report"]
+
+    web_matches = _tool_payload(_search_toolkit(*deferred).tool_search("web"))["matches"]
+    assert {match["name"] for match in web_matches[:2]} == {"serper_search", "serper_scrape"}
+    assert web_matches[-1]["name"] == "show_canvas"
+
+
+def test_tool_search_stemming_camelcase_aliases_and_stop_words() -> None:
+    """Search stems plurals, splits camelCase, expands toolkit aliases, and handles stop-word-only queries."""
+
+    @tool(name="show_canvas", description="Render a panel.")
+    def show_canvas() -> str:
+        return "ok"
+
+    @tool(name="html_parser", description="Parse markup.")
+    def html_parser() -> str:
+        return "ok"
+
+    @tool(name="run_query", description="Execute a database query.")
+    def run_query() -> str:
+        return "ok"
+
+    @tool(name="web_search", description="Search pages.")
+    def web_search() -> str:
+        return "ok"
+
+    @tool(name="check_access", description="Inspect access class.")
+    def check_access() -> str:
+        return "ok"
+
+    @tool(name="read_file", description="Read contents from disk.")
+    def read_file() -> str:
+        return "ok"
+
+    deferred = (
+        _deferred(_JiraTools(), "Jira"),
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas]), "Chat panels"),
+        _deferred(
+            Toolkit(name="web_tools", tools=[html_parser, run_query, web_search, check_access]),
+            "Web helpers",
+        ),
+        _deferred(Toolkit(name="filesystem", tools=[read_file]), "Workspace files"),
+    )
+
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("issues"))["matches"][0]["name"] == "create_issue"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("queries"))["matches"][0]["name"] == "run_query"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("searches"))["matches"][0]["name"] == "web_search"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("classes"))["matches"][0]["name"] == "check_access"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("access"))["matches"][0]["name"] == "check_access"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("showCanvas"))["matches"][0]["name"] == "show_canvas"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("HTMLParser"))["matches"][0]["name"] == "html_parser"
+    assert _tool_payload(_search_toolkit(*deferred).tool_search("coding read"))["matches"][0]["name"] == "read_file"
+
+    stop_only = _tool_payload(_search_toolkit(*deferred).tool_search("the and of"))
+    assert stop_only["matches"] == []
+    assert "functions" not in stop_only
+
+
+def test_tool_search_within_turn_dedup_stubs_repeats_and_omits_repeated_instructions() -> None:
+    """Exploratory repeat searches stub already-returned schemas and omit already-sent domain instructions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+
+    first = _tool_payload(toolkit.tool_search("crm", max_results=1))
+    assert first["matches"][0]["name"] == "crm_lookup"
+    assert "description" in first["matches"][0]
+    assert "parameters" in first["matches"][0]
+    assert "already_returned" not in first["matches"][0]
+    assert first["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+    second = _tool_payload(toolkit.tool_search("crm", max_results=2))
+    assert second["matches"][0] == {"name": "crm_lookup", "toolkit": "crm", "already_returned": True}
+    assert second["matches"][1]["name"] == "crm_notes"
+    assert "description" in second["matches"][1]
+    assert "parameters" in second["matches"][1]
+    assert "already_returned" not in second["matches"][1]
+    assert "instructions" not in second
+    assert "call_tool(name, arguments)" in second["usage"]
+    assert "exact name" in second["usage"]
+
+    third = _tool_payload(toolkit.tool_search("customer lookup"))
+    assert third["matches"] == [
+        {"name": "crm_lookup", "toolkit": "crm", "already_returned": True},
+        {"name": "crm_notes", "toolkit": "crm", "already_returned": True},
+    ]
+    assert "instructions" not in third
+
+
+def test_tool_search_exact_name_query_bypasses_dedup_and_returns_instructions() -> None:
+    """Exact bare or dotted function-name queries always re-emit the full schema and domain instructions."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+    _tool_payload(toolkit.tool_search("crm"))
+
+    for exact_query in ("crm_lookup", "crm.crm_lookup"):
+        payload = _tool_payload(toolkit.tool_search(exact_query))
+        exact_match = payload["matches"][0]
+        assert exact_match["name"] == "crm_lookup"
+        assert exact_match["description"] == "Look up one customer record by ID."
+        assert set(exact_match["parameters"]["properties"]) == {"customer_id"}
+        assert "already_returned" not in exact_match
+        assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+        if len(payload["matches"]) > 1:
+            assert payload["matches"][1] == {"name": "crm_notes", "toolkit": "crm", "already_returned": True}
+
+
+def test_tool_search_fresh_toolkit_instance_has_no_cross_turn_dedup() -> None:
+    """Each turn gets a fresh DynamicToolsToolkit, so dedup state never leaks across turns."""
+    deferred = (_deferred(_CrmTools(), "Customer records"),)
+
+    turn_one = _search_toolkit(*deferred)
+    _tool_payload(turn_one.tool_search("crm"))
+
+    turn_two = _search_toolkit(*deferred)
+    payload = _tool_payload(turn_two.tool_search("crm"))
+    assert [match["name"] for match in payload["matches"]] == ["crm_lookup", "crm_notes"]
+    assert all("parameters" in match and "already_returned" not in match for match in payload["matches"])
+    assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+
 def test_call_tool_fallback_accepts_non_object_arguments() -> None:
     """An unresolved call with list arguments still gets the retry guidance, not a validation error."""
     function = toolkit_offers(_search_toolkit(), "call_tool")
