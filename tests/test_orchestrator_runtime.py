@@ -6144,15 +6144,15 @@ async def test_startup_maintenance_starts_after_first_syncs_and_before_runtime_r
     real_wait = orchestrator._wait_for_first_syncs
     real_start = orchestrator._startup_maintenance.start
 
-    async def tracked_wait(shutdown: asyncio.Event, bots: list[Any]) -> bool:
+    async def tracked_wait(shutdown: asyncio.Event, bots: list[Any], *, deadline: float | None = None) -> bool:
         slow.first_sync_complete = True
-        result = await real_wait(shutdown, bots)
+        result = await real_wait(shutdown, bots, deadline=deadline)
         events.append("wait_for_first_syncs")
         return result
 
-    def tracked_start(bots: list[Any], cfg: Config) -> None:
+    def tracked_start(bots: list[Any], cfg: Config, *, first_sync_deadline: float | None = None) -> None:
         events.append("startup_maintenance_start")
-        real_start(bots, cfg)
+        real_start(bots, cfg, first_sync_deadline=first_sync_deadline)
 
     ready = asyncio.Event()
 
@@ -6241,6 +6241,57 @@ async def test_startup_maintenance_waits_for_first_syncs_when_membership_refresh
                     await runtime_task
 
     assert events == ["set_runtime_ready", "cleanup_orphaned_bots", "setup_rooms"]
+
+
+@pytest.mark.asyncio
+async def test_unsynced_bot_shares_one_first_sync_deadline_between_readiness_and_maintenance(tmp_path: Path) -> None:
+    """When needs_refresh=True and a bot never syncs, readiness and maintenance share ONE deadline, not two."""
+    orchestrator, _config, stuck = _startup_waiting_for_first_sync(tmp_path)
+    ready = asyncio.Event()
+    cleanup_called = asyncio.Event()
+    timeout_calls = 0
+    sleeps_after_ready = 0
+    real_sleep = asyncio.sleep
+
+    def short_timeout(_runtime_paths: object) -> float:
+        nonlocal timeout_calls
+        timeout_calls += 1
+        return 0.08
+
+    async def tracked_sleep(delay: float) -> None:
+        nonlocal sleeps_after_ready
+        if ready.is_set():
+            sleeps_after_ready += 1
+        await real_sleep(delay)
+
+    async def tracked_cleanup(_cfg: Config) -> None:
+        cleanup_called.set()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch("mindroom.orchestrator.matrix_sync_startup_timeout_seconds", side_effect=short_timeout),
+        patch("mindroom.orchestrator.asyncio.sleep", side_effect=tracked_sleep),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=ready.set),
+        patch.object(orchestrator._startup_maintenance, "cleanup_orphaned_bots", side_effect=tracked_cleanup),
+    ):
+        runtime_task = asyncio.create_task(orchestrator.start())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            maintenance_task = orchestrator._startup_maintenance.task
+            assert maintenance_task is not None
+            await asyncio.wait_for(maintenance_task, timeout=SETTLE_TIMEOUT_SECONDS)
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
+
+    assert not stuck.first_sync_complete
+    assert cleanup_called.is_set()
+    assert timeout_calls == 1
+    assert sleeps_after_ready == 0
 
 
 def _startup_waiting_for_first_sync(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, MagicMock]:

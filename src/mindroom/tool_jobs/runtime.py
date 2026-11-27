@@ -608,6 +608,7 @@ class ToolJobRuntime:
         self._follow_up_revisions: dict[FollowUpKey, int] = {}
         self._candidate_revision = 0
         self._ended_room_counts: dict[tuple[str, str], int] = {}
+        # Refreshed after deletions; expire_ended is the sole delete path for cold rows.
         self._cold_ended_rooms: frozenset[tuple[str, str]] = frozenset()
         self._lock = asyncio.Lock()
         self._admissions: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()

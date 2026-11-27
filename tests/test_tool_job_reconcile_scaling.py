@@ -51,6 +51,7 @@ from tests.tool_job_helpers import (
     intercept_job_saves,
     job_coordinator,
     job_owner,
+    saved_jobs,
     start_job,
     tool_job_journal,
     tool_job_runtime,
@@ -131,7 +132,17 @@ def _scan_candidates(jobs: Sequence[BackgroundJob]) -> dict[FollowUpKey, list[Ba
     return buckets
 
 
-def _assert_indexes(rt: ToolJobRuntime) -> None:
+async def _expected_ended_rooms(storage: Path, retained: Sequence[BackgroundJob]) -> frozenset[tuple[str, str]]:
+    """Derive expected ended rooms independently from saved snapshots plus hot in-memory snapshots."""
+    all_jobs = {**(await saved_jobs(storage)), **{j.job_id: j for j in retained}}
+    return frozenset(
+        (j.owner.recipient, j.owner.room_id)
+        for j in all_jobs.values()
+        if j.status in TERMINAL_STATUSES and j.owner.room_id is not None
+    )
+
+
+async def _assert_indexes(rt: ToolJobRuntime, storage: Path) -> None:
     retained = rt.retained_jobs()
     live = {j.job_id for j in retained if j.status not in TERMINAL_STATUSES}
     assert {j.job_id for j in rt.live_jobs()} == live == set(rt._live)
@@ -142,7 +153,7 @@ def _assert_indexes(rt: ToolJobRuntime) -> None:
         (j.owner.recipient, j.owner.room_id) for j in retained if j.status in TERMINAL_STATUSES and j.owner.room_id
     )
     assert rt._ended_room_counts == dict(rooms)
-    assert rt.ended_rooms() == frozenset(rooms) | rt._cold_ended_rooms
+    assert rt.ended_rooms() == await _expected_ended_rooms(storage, retained)
     cands = {k: {j.job_id for j in g} for k, g in _scan_candidates(retained).items()}
     revs = rt.follow_up_candidate_revisions()
     assert set(revs) == set(cands)
@@ -358,12 +369,12 @@ async def test_index_transitions_lifecycle_claims_and_expiry(tmp_path: Path) -> 
         await rt.set_awaiting_approval("job-a", awaiting=True)
         await rt.set_awaiting_approval("job-a", awaiting=False)
         async with rt.human_decision_wait("job-a"):
-            _assert_indexes(rt)
+            await _assert_indexes(rt, tmp_path)
         await rt.save_adapter("job-a", v=2)
 
         grants["job-a"] = "pending"
         assert (await rt.wait("job-a", owner=owner_a, depth=0, claim=claim_a)).claim is None
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
         grants["job-a"] = "allowed"
         _, claim_a = await rt.start(
             "job-a",
@@ -385,7 +396,7 @@ async def test_index_transitions_lifecycle_claims_and_expiry(tmp_path: Path) -> 
         await wait_for_status(rt, "job-cancel", "cancelled")
         claim_ack = (await rt.wait("job-a", owner=owner_a, depth=0)).claim
         await rt.acknowledge_waits((AcknowledgeWait("job-a", claim_ack),))
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
 
         b_key = (owner_b.recipient, "!rb:t", owner_b.resolved_thread_id, str(owner_b.requester_id), False)
         old_rev = rt.follow_up_candidate_revisions()[b_key]
@@ -393,12 +404,12 @@ async def test_index_transitions_lifecycle_claims_and_expiry(tmp_path: Path) -> 
         expired = await rt.expire_ended(now=datetime.now(UTC), source_finished=AsyncMock(return_value=True))
         assert [j.job_id for j in expired] == ["job-cancel"]
         assert (owner_b.recipient, "!rb:t") not in rt._ended_room_counts
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
 
         await _launch(rt, "job-b2", owner_b, _fast_ok)
         await wait_for_status(rt, "job-b2", "completed")
         assert rt.follow_up_candidate_revisions()[b_key] > old_rev
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
     finally:
         gate_a.set()
         gate_cancel.set()
@@ -430,14 +441,14 @@ async def test_index_transitions_save_failure_and_retry(tmp_path: Path, monkeypa
         gate_fail.set()
         await wait_for_status(rt, "job-fail", "failed")
         assert not rt._outcome_saved("job-fail")
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
         fail_save = False
         await rt.cancel("job-fail", owner=owner_a, depth=0)
         if (drain := rt._entries["job-fail"].drain) is not None:
             await drain
         assert rt._outcome_saved("job-fail")
         intercept_job_saves(monkeypatch)
-        _assert_indexes(rt)
+        await _assert_indexes(rt, tmp_path)
     finally:
         gate_fail.set()
         await rt.shutdown()
@@ -462,7 +473,7 @@ async def test_index_transitions_recovery_and_continuation(tmp_path: Path) -> No
         assert {j.job_id for j in rt2.awaiting_continuation()} == {"cont-relaunch", "cont-outcome", "cont-none"}
         assert (tj := rt2.retained_job("tool-running")) is not None
         assert tj.status == "interrupted"
-        _assert_indexes(rt2)
+        await _assert_indexes(rt2, tmp_path / "restart")
 
         async def resumed() -> BackgroundOutcome:
             await gate.wait()
@@ -473,10 +484,10 @@ async def test_index_transitions_recovery_and_continuation(tmp_path: Path) -> No
         await rt2.continue_stopped("cont-outcome", BackgroundOutcome("completed", "direct"))
         await rt2.continue_stopped("cont-none", None)
         assert rt2.awaiting_continuation() == ()
-        _assert_indexes(rt2)
+        await _assert_indexes(rt2, tmp_path / "restart")
         gate.set()
         await wait_for_status(rt2, "cont-relaunch", "completed")
-        _assert_indexes(rt2)
+        await _assert_indexes(rt2, tmp_path / "restart")
     finally:
         gate.set()
         await rt2.shutdown()
@@ -627,12 +638,19 @@ class _FullScanOracle:
     admitted: set[str] = field(default_factory=set)
     sent_notices: dict[str, frozenset[str]] = field(default_factory=dict)
 
-    def publish(self, rt: ToolJobRuntime, bots: dict[str, MagicMock]) -> list[tuple[str, str, dict[str, object]]]:
+    async def publish(
+        self,
+        rt: ToolJobRuntime,
+        bots: dict[str, MagicMock],
+        *,
+        storage: Path,
+    ) -> list[tuple[str, str, dict[str, object]]]:
         retained = rt.retained_jobs()
+        ended_rooms = await _expected_ended_rooms(storage, retained)
         awaited = frozenset(jid for jid, e in rt._entries.items() if e.claim is not None)
         writes: list[tuple[str, str, dict[str, object]]] = []
         groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in self.published}
-        for pair in rt._cold_ended_rooms:
+        for pair in ended_rooms:
             groups.setdefault(pair, [])
         for job in retained:
             if job.owner.room_id is not None:
@@ -641,7 +659,7 @@ class _FullScanOracle:
             pub = self.published.get((agent, room_id))
             listed = set() if pub is None else {str(item["job_id"]) for item in pub["jobs"]}  # type: ignore[attr-defined]
             content = _jobs_state_content(group, awaited=awaited, listed_before=listed)
-            has_terminal = (agent, room_id) in rt._cold_ended_rooms or any(j.status in TERMINAL_STATUSES for j in group)
+            has_terminal = (agent, room_id) in ended_rooms
             if pub is None and not has_terminal:
                 pub = _EMPTY
             if pub != content and (bot := bots.get(agent)) is not None and room_id in bot.client.rooms:
@@ -801,7 +819,7 @@ class _EquivalenceHarness:
             bot.admit_job_follow_up.reset_mock()
         self.sent_notices.clear()
         await self.coord._reconcile()
-        _assert_indexes(self.rt)
+        await _assert_indexes(self.rt, self.storage)
 
         actual_w = [
             (a, c.kwargs["room_id"], c.kwargs["content"])
@@ -809,7 +827,7 @@ class _EquivalenceHarness:
             for c in b.client.room_put_state.await_args_list
         ]
         actual_a = [(c.args[0], c.args[1]) for b in self.bots.values() for c in b.admit_job_follow_up.await_args_list]
-        oracle_w = self.oracle.publish(self.rt, self.bots)
+        oracle_w = await self.oracle.publish(self.rt, self.bots, storage=self.storage)
         oracle_a, oracle_n = await self.oracle.admit_follow_ups(self.rt, self.bots)
         wk, ak = (lambda x: (x[0], x[1])), (lambda x: (_key_order(x[0]), x[1]))
         assert sorted(actual_w, key=wk) == sorted(oracle_w, key=wk)
@@ -857,7 +875,7 @@ class _EquivalenceHarness:
         elif op == "reconcile" or idx % 15 == 0:
             await self.verify_reconcile()
             return
-        _assert_indexes(self.rt)
+        await _assert_indexes(self.rt, self.storage)
 
 
 @pytest.mark.asyncio

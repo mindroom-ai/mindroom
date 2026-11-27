@@ -24,6 +24,7 @@ from mindroom.event_journal import (
 )
 from mindroom.event_journal import tool_jobs as event_journal_tool_jobs
 from mindroom.event_journal.schema import SQLITE_DIALECT, render, schema_statements
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from tests.approval_card_helpers import pending_card, terminal_edit
 
 if TYPE_CHECKING:
@@ -488,3 +489,8 @@ def test_tool_jobs_cold_queries_use_targeted_indexes_without_stat1(tmp_path: Pat
     assert "USING INDEX sqlite_autoindex_tool_jobs_1" in plans["load_by_id"][0], plans["load_by_id"]
     assert "USING INDEX sqlite_autoindex_tool_jobs_1" in plans["backfill_cursor"][0], plans["backfill_cursor"]
     assert "USE TEMP B-TREE" not in plans["backfill_cursor"][0], plans["backfill_cursor"]
+
+
+def test_event_journal_terminal_statuses_match_tool_job_runtime() -> None:
+    """Event journal cold-classification statuses never drift from ToolJobRuntime.TERMINAL_STATUSES."""
+    assert event_journal_tool_jobs._TERMINAL_STATUSES == TERMINAL_STATUSES
