@@ -6417,7 +6417,7 @@ def _proxied_shell(
         ("shell", "run_shell_command", {"args": "make"}, 150.0),
         ("browser", "browser_read", {"action": "status"}, 150.0),
         ("browser", "browser_control", {"action": "start"}, 150.0),
-        ("trafilatura", "crawl_website", {"homepage_url": "https://example.com/"}, 210.0),
+        ("trafilatura", "trafilatura_crawl_website", {"homepage_url": "https://example.com/"}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "batch", "urls": ["https://example.com/"]}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "text", "url": "https://example.com/"}, 120.0),
     ],

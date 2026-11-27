@@ -70,7 +70,7 @@ class _Neo4jTools(Toolkit):
         if self._inspect_actions:
             tools.append(self.neo4j_inspect)
         if enable_all or resolve_bool_toggle(enable_run_cypher, default=True):
-            tools.append(self.run_cypher_query)
+            tools.append(self.neo4j_run_cypher_query)
 
         super().__init__(name="neo4j_tools", tools=tools)
 
@@ -112,7 +112,7 @@ class _Neo4jTools(Toolkit):
             return f"Error inspecting Neo4j ({action}): {exc}"
         return f"Unsupported action: {action}"
 
-    def run_cypher_query(self, query: str) -> str:
+    def neo4j_run_cypher_query(self, query: str) -> str:
         """Execute a Cypher query against the Neo4j database and return JSON records."""
         try:
             from neo4j import GraphDatabase
@@ -183,7 +183,7 @@ class _Neo4jTools(Toolkit):
     ],
     dependencies=["neo4j"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#neo4j",
-    function_names=("neo4j_inspect", "run_cypher_query"),
+    function_names=("neo4j_inspect", "neo4j_run_cypher_query"),
     action_scoped_grants=("neo4j_inspect",),
 )
 def neo4j_tools() -> type[Toolkit]:

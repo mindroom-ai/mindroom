@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["requests"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#modelslabs",
-    function_names=("generate_media",),
+    function_names=("modelslabs_generate_media",),
 )
 def modelslabs_tools() -> type[ModelsLabTools]:
     """Return ModelsLabs tool for AI-powered media generation."""

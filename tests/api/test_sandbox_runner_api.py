@@ -1343,10 +1343,10 @@ def test_execute_request_subprocess_sync_marks_subprocess_timeouts_as_worker_fai
 @pytest.mark.parametrize(
     ("tool_name", "function_name", "kwargs", "expected_timeout"),
     [
-        ("trafilatura", "crawl_website", {}, 210.0),
+        ("trafilatura", "trafilatura_crawl_website", {}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "batch"}, 210.0),
         ("trafilatura", "trafilatura_extract", {"action": "text"}, 120.0),
-        ("firecrawl", "crawl_website", {}, 120.0),
+        ("firecrawl", "firecrawl_crawl_website", {}, 120.0),
     ],
 )
 def test_execute_request_subprocess_sync_lets_a_call_with_its_own_time_limit_run_past_the_runner_limit(

@@ -48,9 +48,9 @@ class SerpApiTools(Toolkit):
 
         super().__init__(name="serpapi_tools")
         if not (all or enable_search_google):
-            self.functions.pop(self.search_google.__name__, None)
+            self.functions.pop(self.serpapi_search_google.__name__, None)
         if not (all or enable_search_youtube):
-            self.functions.pop(self.search_youtube.__name__, None)
+            self.functions.pop(self.serpapi_search_youtube.__name__, None)
 
     def _redact_api_key(self, text: str) -> str:
         """Remove raw or URL-encoded API key values from returned error text."""
@@ -86,7 +86,7 @@ class SerpApiTools(Toolkit):
         return json.dumps(filtered_results)
 
     @tool
-    def search_google(self, query: str, num_results: int = 10) -> str:
+    def serpapi_search_google(self, query: str, num_results: int = 10) -> str:
         """Search Google using the Serpapi API. Returns the search results.
 
         Args:
@@ -112,7 +112,7 @@ class SerpApiTools(Toolkit):
         )
 
     @tool
-    def search_youtube(self, query: str) -> str:
+    def serpapi_search_youtube(self, query: str) -> str:
         """Search Youtube using the Serpapi API. Returns the search results.
 
         Args:

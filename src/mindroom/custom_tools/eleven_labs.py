@@ -87,11 +87,11 @@ class ElevenLabsTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_get_voices:
-            tools.append(self.get_voices)
+            tools.append(self.eleven_labs_get_voices)
         if all or enable_generate_sound_effect:
-            tools.append(self.generate_sound_effect)
+            tools.append(self.eleven_labs_generate_sound_effect)
         if all or enable_text_to_speech:
-            tools.append(self.text_to_speech)
+            tools.append(self.eleven_labs_text_to_speech)
         super().__init__(name="eleven_labs", tools=tools)
 
     def _collect_audio(self, audio_generator: Iterator[bytes]) -> bytes:
@@ -105,7 +105,7 @@ class ElevenLabsTools(Toolkit):
             output_path.write_bytes(audio_data)
         return audio_data
 
-    def get_voices(self) -> str:
+    def eleven_labs_get_voices(self) -> str:
         """List available ElevenLabs voices with ID, name, and description."""
         try:
             voices = self.eleven_labs_client.voices.get_all()
@@ -117,7 +117,7 @@ class ElevenLabsTools(Toolkit):
             logger.exception("Failed to fetch ElevenLabs voices")
             return f"Error: {exc}"
 
-    def generate_sound_effect(self, prompt: str, duration_seconds: float | None = None) -> ToolValue:
+    def eleven_labs_generate_sound_effect(self, prompt: str, duration_seconds: float | None = None) -> ToolValue:
         """Generate a sound effect from a text prompt.
 
         Args:
@@ -137,7 +137,7 @@ class ElevenLabsTools(Toolkit):
             logger.exception("Failed to generate sound effect with ElevenLabs")
             return ToolValue(content=f"Error: {exc}")
 
-    def text_to_speech(self, prompt: str) -> ToolValue:
+    def eleven_labs_text_to_speech(self, prompt: str) -> ToolValue:
         """Convert text to speech audio using ElevenLabs.
 
         Args:

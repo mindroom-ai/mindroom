@@ -92,7 +92,7 @@ class _Newspaper4kTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_read_article:
-            tools.append(self.read_article)
+            tools.append(self.newspaper_read_article)
 
         super().__init__(name="newspaper4k_tools", tools=tools)
 
@@ -127,7 +127,7 @@ class _Newspaper4kTools(Toolkit):
         else:
             return article_data
 
-    def read_article(self, url: str) -> str:
+    def newspaper_read_article(self, url: str) -> str:
         """Use this function to read an article from a URL.
 
         Args:
@@ -174,7 +174,7 @@ class _Newspaper4kTools(Toolkit):
     ],
     dependencies=["newspaper4k", "lxml_html_clean"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#newspaper",
-    function_names=("get_article_data", "read_article"),
+    function_names=("newspaper_read_article",),
 )
 def newspaper4k_tools() -> type[Toolkit]:
     """Return Newspaper4k tools whose downloads follow the server-fetch policy."""

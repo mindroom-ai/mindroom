@@ -28,7 +28,7 @@ class WikipediaTools(Toolkit):
         super().__init__(name="wikipedia_tools")
 
     @tool
-    def search_wikipedia(self, query: str) -> str:
+    def wikipedia_search(self, query: str) -> str:
         """Searches Wikipedia for a query.
 
         Args:

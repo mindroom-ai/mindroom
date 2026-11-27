@@ -81,7 +81,7 @@ def test_exa_configures_sdk_timeout_and_runs_research_via_agent_runs(monkeypatch
         "properties": {"summary": {"type": "string"}},
         "required": ["summary"],
     }
-    raw_result = tool.research("Summarize Matrix federation", output_schema=output_schema)
+    raw_result = tool.exa_research("Summarize Matrix federation", output_schema=output_schema)
     parsed = json.loads(raw_result)
 
     assert len(captured_clients) == 1
@@ -125,7 +125,7 @@ def test_exa_research_handles_text_output_failed_and_timeout(monkeypatch: pytest
     )
 
     tool = exa_module.exa_tools()(api_key="exa-secret", enable_research=True)
-    text_result = json.loads(tool.research("Explain Exa"))
+    text_result = json.loads(tool.exa_research("Explain Exa"))
     assert text_runs.create_calls == [{"query": "Explain Exa", "effort": "auto"}]
     assert text_result == {
         "id": "run_text",
@@ -143,7 +143,7 @@ def test_exa_research_handles_text_output_failed_and_timeout(monkeypatch: pytest
         ),
     )
     tool.exa = _FakeExaClient("exa-secret", timeout=30, runs=failed_runs)
-    assert json.loads(tool.research("Explain Exa")) == {"error": "Upstream budget exceeded"}
+    assert json.loads(tool.exa_research("Explain Exa")) == {"error": "Upstream budget exceeded"}
 
     class _TimeoutRuns(_FakeAgentRuns):
         def poll_until_finished(self, run_id: str, *, timeout_ms: int | None = None) -> AgentRun:
@@ -159,7 +159,7 @@ def test_exa_research_handles_text_output_failed_and_timeout(monkeypatch: pytest
             terminal_run=AgentRun(id="run_to", status="completed"),
         ),
     )
-    assert json.loads(tool.research("Explain Exa")) == {"error": "Research task timed out"}
+    assert json.loads(tool.exa_research("Explain Exa")) == {"error": "Research task timed out"}
 
 
 def test_exa_lookup_actions_option_whitelists_and_toggle_narrowing(monkeypatch: pytest.MonkeyPatch) -> None:

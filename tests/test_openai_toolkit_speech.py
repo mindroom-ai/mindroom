@@ -26,7 +26,7 @@ async def test_realtime_speech_returns_wav_audio(synthesize: AsyncMock) -> None:
     """A Realtime model's speech comes back as one WAV audio attachment."""
     toolkit = OpenAITools(api_key="sk-test", text_to_speech_model="gpt-realtime-2.1-mini")
 
-    result = await toolkit.generate_speech("Read this.")
+    result = await toolkit.openai_generate_speech("Read this.")
 
     assert isinstance(result, ToolValue)
     synthesize.assert_awaited_once_with("Read this.", model="gpt-realtime-2.1-mini", voice="alloy", api_key="sk-test")
@@ -44,7 +44,7 @@ async def test_realtime_speech_pcm_returns_raw_pcm(synthesize: AsyncMock) -> Non
         text_to_speech_format="pcm",
     )
 
-    result = await toolkit.generate_speech("Read this.")
+    result = await toolkit.openai_generate_speech("Read this.")
 
     assert len(result.audios) == 1
     assert result.audios[0].mime_type == "audio/pcm"
@@ -61,7 +61,7 @@ async def test_realtime_speech_rejects_other_formats(synthesize: AsyncMock) -> N
         text_to_speech_format="mp3",
     )
 
-    result = await toolkit.generate_speech("Read this.")
+    result = await toolkit.openai_generate_speech("Read this.")
 
     assert result.content.startswith("Failed to generate speech:")
     assert "wav" in result.content
@@ -76,7 +76,7 @@ async def test_realtime_speech_failure_is_a_tool_failure(synthesize: AsyncMock) 
     synthesize.side_effect = RuntimeError("socket closed")
     toolkit = OpenAITools(api_key="sk-test", text_to_speech_model="gpt-realtime-2.1-mini")
 
-    result = await toolkit.generate_speech("Read this.")
+    result = await toolkit.openai_generate_speech("Read this.")
 
     assert result.content == "Failed to generate speech: socket closed"
     assert not result.audios
@@ -102,7 +102,7 @@ async def test_non_realtime_model_keeps_speech_endpoint(
         text_to_speech_format="mp3",
     )
 
-    result = await toolkit.generate_speech("Read this.")
+    result = await toolkit.openai_generate_speech("Read this.")
 
     assert calls == [{"model": "gpt-4o-mini-tts", "voice": "alloy", "input": "Read this.", "response_format": "mp3"}]
     assert len(result.audios) == 1
@@ -118,4 +118,4 @@ def test_disabled_speech_offers_no_generate_speech() -> None:
         text_to_speech_model="gpt-realtime-2.1-mini",
     )
 
-    assert "generate_speech" not in toolkit.functions
+    assert "openai_generate_speech" not in toolkit.functions

@@ -192,7 +192,7 @@ def test_embed_captions_preserves_glyph_pixels_and_background(
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", inspect_frame)
     (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
+    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).moviepy_video_tools_embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),
@@ -230,7 +230,7 @@ def _captioned_render_peak(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, line
     toolkit = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path)
     tracemalloc.start()
     try:
-        result = toolkit.embed_captions("input.mp4", srt_path.name, f"captioned-{line_count}.mp4")
+        result = toolkit.moviepy_video_tools_embed_captions("input.mp4", srt_path.name, f"captioned-{line_count}.mp4")
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -361,7 +361,7 @@ def test_oversized_captions_preserve_existing_output(
     monkeypatch.setattr(CompositeVideoClip, "write_videofile", unexpected_render)
     (tmp_path / "input.mp4").write_bytes(b"input video")
 
-    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).embed_captions(
+    result = adapter.MoviePyVideoTools(tool_output_workspace_root=tmp_path).moviepy_video_tools_embed_captions(
         "input.mp4",
         str(srt_path),
         str(output),

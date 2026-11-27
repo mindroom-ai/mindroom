@@ -120,7 +120,7 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
     fake_bb_mod.Browserbase = lambda **_kwargs: SimpleNamespace()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "browserbase", fake_bb_mod)
     bb_default = browserbase_tools()(api_key="k", project_id="p")
-    assert list(bb_default.functions) == ["browserbase", "screenshot"]
+    assert list(bb_default.functions) == ["browserbase", "browserbase_screenshot"]
     bb_close_only = browserbase_tools()(
         api_key="k",
         project_id="p",
@@ -152,7 +152,7 @@ def test_brightdata_browserbase_and_spider_toggle_narrowing(monkeypatch: pytest.
         enable_get_page_content=False,
         enable_close_session=False,
     )
-    assert list(bb_screenshot_only.functions) == ["screenshot"]
+    assert list(bb_screenshot_only.functions) == ["browserbase_screenshot"]
 
     spider_scrape = spider_tools()(enable_search=False, enable_crawl=False)
     spider_fn = adapt_toolkit(spider_scrape).functions[0]
@@ -284,7 +284,7 @@ def test_wave4_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
 
     bb_screenshot_op = grant_operation(
         config,
-        "screenshot",
+        "browserbase_screenshot",
         {"path": str(tmp_path / "page.png")},
         tools=registry,
         toolkit_name="browserbase",
@@ -300,12 +300,12 @@ def test_wave4_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) ->
             "agents": {"researcher": {"display_name": "Researcher", "tools": ["browserbase"]}},
             "tool_approval": {
                 "default": "auto_approve",
-                "rules": [{"match": "screenshot", "action": "require_approval"}],
+                "rules": [{"match": "browserbase_screenshot", "action": "require_approval"}],
             },
         },
         runtime_paths,
     )
-    assert loaded_screenshot_rule.tool_approval.rules[0].match == "screenshot"
+    assert loaded_screenshot_rule.tool_approval.rules[0].match == "browserbase_screenshot"
     for toolkit, retired, replacement in (
         ("exa", "search_exa", "exa_lookup"),
         ("trafilatura", "extract_batch", "trafilatura_extract"),

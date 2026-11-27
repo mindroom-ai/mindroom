@@ -138,11 +138,11 @@ def test_sql_end_to_end_and_explicit_none_toggles(tmp_path: Path) -> None:
         assert json.loads(tool.sql_inspect("list_tables")) == ["orders"]
         cols = json.loads(tool.sql_inspect("describe_table", table_name="orders"))
         assert [c["name"] for c in cols] == ["id", "item"]
-        assert len(json.loads(tool.run_sql_query("SELECT * FROM orders ORDER BY id", limit=2))) == 2
-        assert len(json.loads(tool.run_sql_query("SELECT * FROM orders ORDER BY id", limit=None))) == 3
-        assert json.loads(tool.run_sql_query("SELECT * FROM orders", limit=0)) == []
-        assert json.loads(tool.run_sql_query("INSERT INTO orders VALUES (4, 'd')")) == []
-        assert len(json.loads(tool.run_sql_query("SELECT * FROM orders", limit=None))) == 4
+        assert len(json.loads(tool.sql_run_query("SELECT * FROM orders ORDER BY id", limit=2))) == 2
+        assert len(json.loads(tool.sql_run_query("SELECT * FROM orders ORDER BY id", limit=None))) == 3
+        assert json.loads(tool.sql_run_query("SELECT * FROM orders", limit=0)) == []
+        assert json.loads(tool.sql_run_query("INSERT INTO orders VALUES (4, 'd')")) == []
+        assert len(json.loads(tool.sql_run_query("SELECT * FROM orders", limit=None))) == 4
     finally:
         tool.db_engine.dispose()
 
@@ -187,7 +187,7 @@ def test_postgres_scoped_credentials_read_only_and_export(
 
     monkeypatch.setattr(psycopg, "connect", fake_connect)
     unconfigured = pg_cls(host="db.internal", db_name="app", user="u")
-    assert "requires configured credentials: password" in unconfigured.run_query("SELECT 1")
+    assert "requires configured credentials: password" in unconfigured.postgres_run_query("SELECT 1")
     assert connect_calls == []
 
     tool = pg_cls(
@@ -215,12 +215,12 @@ def test_postgres_scoped_credentials_read_only_and_export(
     # Ambient PGSERVICE and PGHOSTADDR both fail closed before reaching libpq.
     monkeypatch.setenv("PGSERVICE", "host_prod")
     connect_calls.clear()
-    assert "PGSERVICE" in tool.run_query("SELECT 1")
+    assert "PGSERVICE" in tool.postgres_run_query("SELECT 1")
     assert connect_calls == []
     monkeypatch.delenv("PGSERVICE")
 
     monkeypatch.setenv("PGHOSTADDR", "10.0.0.5")
-    assert "PGHOSTADDR" in tool.run_query("SELECT 1")
+    assert "PGHOSTADDR" in tool.postgres_run_query("SELECT 1")
     assert connect_calls == []
     monkeypatch.delenv("PGHOSTADDR")
 
@@ -238,10 +238,10 @@ def test_postgres_scoped_credentials_read_only_and_export(
     )
     export_tool = pg_cls(connection=export_conn, table_schema="public")
     out_csv = tmp_path / "users.csv"
-    assert "Successfully exported" in export_tool.export_table_to_path("users", str(out_csv))
+    assert "Successfully exported" in export_tool.postgres_export_table_to_path("users", str(out_csv))
     assert out_csv.read_text(encoding="utf-8").splitlines() == ["id,name", "1,alice"]
     assert export_conn.rolled_back is False
-    assert "Error exporting table:" in export_tool.export_table_to_path(
+    assert "Error exporting table:" in export_tool.postgres_export_table_to_path(
         "users",
         str(tmp_path / "missing_dir" / "users.csv"),
     )
@@ -269,7 +269,7 @@ def test_redshift_scoped_credentials_ssl_default_and_operations(
     monkeypatch.setattr(redshift_connector, "connect", fake_connect)
 
     iam_missing = rs_cls(host="rs.example", database="dev", iam=True)
-    assert "IAM authentication requires" in iam_missing.run_query("SELECT 1")
+    assert "IAM authentication requires" in iam_missing.redshift_run_query("SELECT 1")
     assert connect_calls == []
 
     assert rs_cls(host="rs.example", database="dev", ssl=None).ssl is True
@@ -283,7 +283,7 @@ def test_redshift_scoped_credentials_ssl_default_and_operations(
         table_schema="reporting",
     )
     out_csv = tmp_path / "orders.csv"
-    assert "Successfully exported" in tool.export_table_to_path('my"orders', str(out_csv))
+    assert "Successfully exported" in tool.redshift_export_table_to_path('my"orders', str(out_csv))
     assert out_csv.read_text(encoding="utf-8").splitlines() == ["id,total", "1,42"]
     assert '"reporting"."my""orders"' in str(fake_conn.cursor_obj.executed[0][0])
     assert fake_conn.closed is False
@@ -315,7 +315,7 @@ def test_neo4j_scoped_credentials_lazy_driver_and_toggles(monkeypatch: pytest.Mo
 
     assert json.loads(tool.neo4j_inspect("list_labels")) == ["Person"]
     assert json.loads(tool.neo4j_inspect("list_relationship_types")) == ["KNOWS"]
-    assert json.loads(tool.run_cypher_query("MATCH (n) RETURN count(n) AS n")) == [{"n": 1}]
+    assert json.loads(tool.neo4j_run_cypher_query("MATCH (n) RETURN count(n) AS n")) == [{"n": 1}]
     assert all(drv.closed for drv in created_drivers)
     assert driver_calls[0] == ("bolt://graph.internal:7687", ("neo4j", _DUMMY_SECRET))
 
@@ -391,7 +391,7 @@ def test_postgres_real_conninfo_and_libpq_connect_without_service_error(monkeypa
         user="u",
         password=_DUMMY_SECRET,
     )
-    err = tool.run_query("SELECT 1")
+    err = tool.postgres_run_query("SELECT 1")
     assert 'definition of service "" not found' not in err
     assert "Connection refused" in err or "connection failed" in err
 
@@ -578,13 +578,13 @@ def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_sem
     tool = rs_cls(host="rs.example", database="dev", user="admin", password=_DUMMY_SECRET)
     assert connections == []
 
-    assert tool.run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
+    assert tool.redshift_run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
     assert len(connections) == 1
     assert connections[0].committed is False
     assert connections[0].closed is False
 
     # Subsequent call reuses the same connection so temp-table state survives.
-    assert tool.run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
+    assert tool.redshift_run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
     assert len(connections) == 1
 
     # inspect_query keeps semicolons inside string literals intact.
@@ -594,16 +594,19 @@ def test_redshift_reuses_connection_without_autocommit_and_preserves_explain_sem
     assert run_connection(tool) is not None
 
     # redshift_connector.Error rolls back the active transaction without closing the reused connection.
-    assert "Error executing query: redshift boom" in tool.run_query("FAIL AFTER STAGING")
+    assert "Error executing query: redshift boom" in tool.redshift_run_query("FAIL AFTER STAGING")
     assert connections[0].rolled_back is True
     assert connections[0].committed is False
     assert connections[0].closed is False
 
     # Failed export_table_to_path also rolls back so subsequent queries succeed on the reused connection.
     connections[0].rolled_back = False
-    assert "Error exporting table: redshift boom" in tool.export_table_to_path("broken_export", str(tmp_path / "x.csv"))
+    assert "Error exporting table: redshift boom" in tool.redshift_export_table_to_path(
+        "broken_export",
+        str(tmp_path / "x.csv"),
+    )
     assert connections[0].rolled_back is True
-    assert tool.run_query("CREATE TEMP TABLE t2 AS SELECT 1") == "Query executed successfully."
+    assert tool.redshift_run_query("CREATE TEMP TABLE t2 AS SELECT 1") == "Query executed successfully."
 
     # close() closes and clears the cached run-scoped connection.
     tool.close()
@@ -695,7 +698,7 @@ def test_postgres_commits_search_path_before_failed_query_rollback(
         table_schema="analytics",
     )
 
-    assert "Error executing query: syntax error at or near broken" in tool.run_query("SELECT broken")
+    assert "Error executing query: syntax error at or near broken" in tool.postgres_run_query("SELECT broken")
     assert len(connections) == 1
     conn = connections[0]
     assert conn.events == [
@@ -708,7 +711,7 @@ def test_postgres_commits_search_path_before_failed_query_rollback(
     assert conn.current_search_path == "analytics"
 
     # Reused connection still has the committed search_path after the rollback.
-    assert tool.run_query("SHOW search_path") == "search_path\nanalytics"
+    assert tool.postgres_run_query("SHOW search_path") == "search_path\nanalytics"
     assert len(connections) == 1
 
     tool.close()
@@ -797,14 +800,14 @@ def test_redshift_local_csv_export_failure_does_not_rollback_connection(
     monkeypatch.setattr(redshift_connector, "connect", fake_connect)
     tool = rs_cls(host="rs.example", database="dev", user="admin", password=_DUMMY_SECRET)
 
-    assert tool.run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
+    assert tool.redshift_run_query("CREATE TEMP TABLE t AS SELECT 1") == "Query executed successfully."
     assert len(connections) == 1
 
     missing_path = tmp_path / "missing_dir" / "t.csv"
-    assert "Error exporting table:" in tool.export_table_to_path("t", str(missing_path))
+    assert "Error exporting table:" in tool.redshift_export_table_to_path("t", str(missing_path))
     assert connections[0].rolled_back is False
     # Uncommitted temp-table state remains usable because the connection was not rolled back.
-    assert tool.run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
+    assert tool.redshift_run_query("SELECT id, name FROM t") == "id,name\n1,alpha"
 
     tool.close()
     assert connections[0].closed is True

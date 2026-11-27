@@ -36,16 +36,16 @@ def test_eleven_labs_voices_tts_and_sfx(tmp_path: Path, monkeypatch: pytest.Monk
     out_dir = tmp_path / "audio"
     toolkit = ElevenLabsTools(api_key="el-key", target_directory=str(out_dir))
 
-    voices = json.loads(toolkit.get_voices())
+    voices = json.loads(toolkit.eleven_labs_get_voices())
     assert voices == [{"id": "v1", "name": "Rachel", "description": "Calm"}]
 
-    tts = toolkit.text_to_speech("Hello")
+    tts = toolkit.eleven_labs_text_to_speech("Hello")
     assert isinstance(tts, ToolValue)
     assert len(tts.audios) == 1
     assert tts.audios[0].content == b"aabb"
     assert tts.audios[0].mime_type == "audio/mpeg"
 
-    sfx = toolkit.generate_sound_effect("Thunder", duration_seconds=2.5)
+    sfx = toolkit.eleven_labs_generate_sound_effect("Thunder", duration_seconds=2.5)
     assert len(sfx.audios) == 1
     assert sfx.audios[0].content == b"sfx"
     assert len(list(out_dir.glob("*.mp3"))) == 2
@@ -111,16 +111,16 @@ def test_cartesia_voices_tts_and_localize(monkeypatch: pytest.MonkeyPatch) -> No
     )
     toolkit = CartesiaTools(api_key="ct-key", enable_localize_voice=True)
 
-    listed = json.loads(toolkit.list_voices())
+    listed = json.loads(toolkit.cartesia_list_voices())
     assert listed == [{"id": "c1", "name": "Sonic", "description": "Clear", "language": "en"}]
 
-    speech = toolkit.text_to_speech("Bonjour")
+    speech = toolkit.cartesia_text_to_speech("Bonjour")
     assert isinstance(speech, ToolValue)
     assert len(speech.audios) == 1
     assert speech.audios[0].content == b"mp3-data"
     assert speech.audios[0].mime_type == "audio/mpeg"
 
-    localized = json.loads(toolkit.localize_voice("French", "Desc", "fr", "female", accent="parisian"))
+    localized = json.loads(toolkit.cartesia_localize_voice("French", "Desc", "fr", "female", accent="parisian"))
     assert localized["id"] == "c2"
     assert localized["language"] == "fr"
 
@@ -149,7 +149,7 @@ def test_giphy_search_returns_image_artifacts(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(giphy_module.httpx, "get", Mock(return_value=response))
     toolkit = GiphyTools(api_key="g-key", limit=2)
 
-    result = toolkit.search_gifs("happy cat")
+    result = toolkit.giphy_search_gifs("happy cat")
 
     assert isinstance(result, ToolValue)
     assert len(result.images) == 1

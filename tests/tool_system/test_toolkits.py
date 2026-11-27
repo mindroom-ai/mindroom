@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -72,6 +73,109 @@ def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path
 
     assert set(SCHEMAS) == registered - support.UNBUILDABLE
     assert set(ALL_ENABLED_SCHEMAS) == switched
+
+
+_WIRE_FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_CORE_BARE_FUNCTION_TOOLKITS = frozenset(
+    {
+        "approved_egress",
+        "attachments",
+        "browser_mcp",
+        "calculator",
+        "callback_manager",
+        "chat_ui",
+        "config_manager",
+        "delegate",
+        "desktop",
+        "dynamic_tools",
+        "egress_credentials",
+        "file_generation",
+        "filesystem",
+        "oauth_connections",
+        "reasoning",
+        "report_publishing",
+        "scheduler",
+        "self_config",
+        "shell",
+        "stop_reply",
+        "temporary_secrets",
+        "thread_move",
+        "thread_summary",
+        "update_awareness",
+        "visualization",
+    },
+)
+_PREFIX_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "atlassian": ("jira_", "confluence_"),
+    "baidusearch": ("baidu_",),
+    "email": ("smtp_",),
+    "financial_datasets_api": ("financial_datasets_",),
+    "googlesearch": ("google_",),
+}
+
+
+def _catalog_functions() -> list[tuple[str, str, str]]:
+    return [
+        (catalog_name, toolkit_name, function["name"])
+        for catalog_name, catalog in (("schemas.json", SCHEMAS), ("schemas_all_enabled.json", ALL_ENABLED_SCHEMAS))
+        for toolkit_name, entry in catalog.items()
+        for function in entry["functions"]
+    ]
+
+
+def test_catalog_function_names_are_valid_wire_names() -> None:
+    """Every built-in function name must satisfy provider wire-name rules (no dots or double underscores)."""
+    invalid = [
+        (catalog_name, toolkit_name, function_name)
+        for catalog_name, toolkit_name, function_name in _catalog_functions()
+        if not _WIRE_FUNCTION_NAME_RE.fullmatch(function_name) or "__" in function_name
+    ]
+    assert invalid == []
+
+
+def test_catalog_function_names_are_globally_unique() -> None:
+    """Built-in toolkits must never collide on wire function names across default or all-enabled schemas."""
+    owners: dict[str, set[str]] = {}
+    intra_toolkit_duplicates: list[tuple[str, str, list[str]]] = []
+    for catalog_name, catalog in (("schemas.json", SCHEMAS), ("schemas_all_enabled.json", ALL_ENABLED_SCHEMAS)):
+        for toolkit_name, entry in catalog.items():
+            names = [function["name"] for function in entry["functions"]]
+            if len(names) != len(set(names)):
+                intra_toolkit_duplicates.append((catalog_name, toolkit_name, names))
+            for function_name in names:
+                owners.setdefault(function_name, set()).add(toolkit_name)
+    duplicates = {name: sorted(toolkits) for name, toolkits in sorted(owners.items()) if len(toolkits) > 1}
+    assert intra_toolkit_duplicates == []
+    assert duplicates == {}
+
+
+def test_catalog_function_names_follow_toolkit_scoping_rules() -> None:
+    """Every non-allowlisted built-in toolkit must scope its functions to `<toolkit>` or `<toolkit>_*`."""
+    schema_toolkits = set(SCHEMAS)
+    assert _CORE_BARE_FUNCTION_TOOLKITS.issubset(schema_toolkits)
+    assert set(_PREFIX_EXCEPTIONS).issubset(schema_toolkits)
+    assert _CORE_BARE_FUNCTION_TOOLKITS.isdisjoint(_PREFIX_EXCEPTIONS)
+
+    violations: list[tuple[str, str, str, tuple[str, ...]]] = []
+    bare_toolkits_in_use: set[str] = set()
+    prefix_exceptions_in_use: set[tuple[str, str]] = set()
+    for catalog_name, toolkit_name, function_name in _catalog_functions():
+        is_default_scoped = function_name == toolkit_name or function_name.startswith(f"{toolkit_name}_")
+        if toolkit_name in _CORE_BARE_FUNCTION_TOOLKITS:
+            if not is_default_scoped:
+                bare_toolkits_in_use.add(toolkit_name)
+            continue
+        expected_prefixes = _PREFIX_EXCEPTIONS.get(toolkit_name, (f"{toolkit_name}_",))
+        if function_name != toolkit_name and not function_name.startswith(expected_prefixes):
+            violations.append((catalog_name, toolkit_name, function_name, expected_prefixes))
+        elif toolkit_name in _PREFIX_EXCEPTIONS and not is_default_scoped:
+            for prefix in expected_prefixes:
+                if function_name.startswith(prefix):
+                    prefix_exceptions_in_use.add((toolkit_name, prefix))
+    assert violations == []
+    assert _CORE_BARE_FUNCTION_TOOLKITS - bare_toolkits_in_use == set()
+    expected_exception_pairs = {(tk, prefix) for tk, prefixes in _PREFIX_EXCEPTIONS.items() for prefix in prefixes}
+    assert expected_exception_pairs - prefix_exceptions_in_use == set()
 
 
 @pytest.mark.parametrize("tool_name", sorted(SCHEMAS))

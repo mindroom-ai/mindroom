@@ -129,11 +129,11 @@ class MoviePyVideoTools(Toolkit):
         self._file_access = file_access
         tools: list[Callable[..., Any]] = []
         if enable_process_video or all:
-            tools.append(self.extract_audio)
+            tools.append(self.moviepy_video_tools_extract_audio)
         if enable_generate_captions or all:
-            tools.append(self.create_srt)
+            tools.append(self.moviepy_video_tools_create_srt)
         if enable_embed_captions or all:
-            tools.append(self.embed_captions)
+            tools.append(self.moviepy_video_tools_embed_captions)
         super().__init__(name="moviepy_video_tools", tools=tools)
 
     def _stage_input(self, raw_path: str, field_name: str, staging: Path, max_bytes: int) -> str:
@@ -371,7 +371,7 @@ class MoviePyVideoTools(Toolkit):
         )
         return CompositeVideoClip([bg_clip, *word_clips], size=(width, bg_height))
 
-    def extract_audio(self, video_path: str, output_path: str) -> str:
+    def moviepy_video_tools_extract_audio(self, video_path: str, output_path: str) -> str:
         """Extract the audio track from a video file.
 
         Args:
@@ -395,7 +395,7 @@ class MoviePyVideoTools(Toolkit):
             return f"Failed to extract audio: {exc}"
         return output_path
 
-    def create_srt(self, transcription: str, output_path: str) -> str:
+    def moviepy_video_tools_create_srt(self, transcription: str, output_path: str) -> str:
         """Write SRT-formatted subtitle text to a file.
 
         Args:
@@ -410,7 +410,7 @@ class MoviePyVideoTools(Toolkit):
             return f"Failed to create SRT file: {exc}"
         return output_path
 
-    def embed_captions(
+    def moviepy_video_tools_embed_captions(
         self,
         video_path: str,
         srt_path: str,

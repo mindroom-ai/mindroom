@@ -36,7 +36,7 @@ def test_batch2_action_scoped_grants_and_no_env_leak(monkeypatch: pytest.MonkeyP
         bitbucket_tools()(workspace="w", repo_slug="r")
     assert "API key" in cal_com_tools()().cal_com_read(action="upcoming_bookings")
     assert "required" in json.loads(shopify_tools()().shopify_store(action="shop_info"))["error"]
-    assert "required" in json.loads(zendesk_tools()().search_zendesk("help"))["error"]
+    assert "required" in json.loads(zendesk_tools()().zendesk_search("help"))["error"]
 
 
 def test_bitbucket_read_create_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,7 +272,7 @@ def test_zendesk_validation_toggles_and_search(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(httpx, "get", fake_get)
     toolkit = zendesk_tools()(username="u", password="p", company_name="acme")  # noqa: S106
-    assert json.loads(toolkit.search_zendesk("reset password")) == ["Reset here"]
+    assert json.loads(toolkit.zendesk_search("reset password")) == ["Reset here"]
 
 
 def test_bitbucket_pr_diff_follows_same_origin_redirect_and_rejects_cross_origin(

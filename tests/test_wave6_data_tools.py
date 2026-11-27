@@ -43,7 +43,7 @@ def test_csv_inspect_and_query_end_to_end(tmp_path: Path) -> None:
     assert len(json.loads(tool.csv_inspect("read", "my-orders"))) == 2
     assert len(json.loads(tool.csv_inspect("read", "my-orders", row_limit=1))) == 1
 
-    queried = tool.query_csv_file(
+    queried = tool.csv_query(
         "my-orders",
         'SELECT item FROM "my-orders" WHERE price >= 4 ORDER BY id; DROP TABLE x',
     )
@@ -52,7 +52,7 @@ def test_csv_inspect_and_query_end_to_end(tmp_path: Path) -> None:
     # Unconfigured CSV stems and raw paths are refused.
     assert "not found" in tool.csv_inspect("read", "secret")
     assert "not found" in tool.csv_inspect("read", str(secret))
-    assert "not found" in tool.query_csv_file("secret", "SELECT * FROM secret")
+    assert "not found" in tool.csv_query("secret", "SELECT * FROM secret")
 
 
 def test_csv_query_dotted_stem_and_preserves_persistent_duckdb_table(tmp_path: Path) -> None:
@@ -65,14 +65,14 @@ def test_csv_query_dotted_stem_and_preserves_persistent_duckdb_table(tmp_path: P
     try:
         con.execute('CREATE TABLE "sales.2025" AS SELECT 999 AS persistent_col')
         tool = csv_cls(csvs=[sales], duckdb_connection=con)
-        queried = tool.query_csv_file("sales.2025", 'SELECT id, amount FROM "sales.2025" ORDER BY id')
+        queried = tool.csv_query("sales.2025", 'SELECT id, amount FROM "sales.2025" ORDER BY id')
         assert queried == "id,amount\n1,100\n2,250"
         # Existing persistent table on the supplied connection stays intact and unshadowed.
         assert con.sql('SELECT persistent_col FROM "sales.2025"').fetchall() == [(999,)]
 
         # Existing caller-owned TEMP table of the same name is never overwritten or dropped on collision.
         con.execute('CREATE TEMP TABLE "sales.2025" AS SELECT 777 AS caller_temp_col')
-        err = tool.query_csv_file("sales.2025", 'SELECT * FROM "sales.2025"')
+        err = tool.csv_query("sales.2025", 'SELECT * FROM "sales.2025"')
         assert "Error querying csv" in err
         assert "already exists" in err
         assert con.sql('SELECT caller_temp_col FROM temp.main."sales.2025"').fetchall() == [(777,)]
@@ -105,16 +105,16 @@ def test_pandas_lifecycle_and_private_attr_blocking(tmp_path: Path) -> None:
     pandas_cls = cast("Any", builtin_tool_registry().factory("pandas")())
     tool = pandas_cls()
 
-    assert tool.create_pandas_dataframe("sales", "read_csv", {"filepath_or_buffer": str(data)}) == "sales"
-    assert "already exists" in tool.create_pandas_dataframe("sales", "read_csv", {"filepath_or_buffer": str(data)})
-    assert "10" in tool.run_dataframe_operation("sales", "head", {"n": 1})
-    assert tool.run_dataframe_operation("sales", "shape") == "(2, 2)"
-    assert "Dataframe not found" in tool.run_dataframe_operation("missing", "head")
+    assert tool.pandas_create_dataframe("sales", "read_csv", {"filepath_or_buffer": str(data)}) == "sales"
+    assert "already exists" in tool.pandas_create_dataframe("sales", "read_csv", {"filepath_or_buffer": str(data)})
+    assert "10" in tool.pandas_run_operation("sales", "head", {"n": 1})
+    assert tool.pandas_run_operation("sales", "shape") == "(2, 2)"
+    assert "Dataframe not found" in tool.pandas_run_operation("missing", "head")
 
     # Private/dunder names are rejected.
-    assert "Invalid pandas function" in tool.create_pandas_dataframe("x", "__import__", {"name": "os"})
-    assert "Invalid dataframe operation" in tool.run_dataframe_operation("sales", "__class__")
-    assert "Invalid dataframe operation" in tool.run_dataframe_operation("sales", "iloc.__class__")
+    assert "Invalid pandas function" in tool.pandas_create_dataframe("x", "__import__", {"name": "os"})
+    assert "Invalid dataframe operation" in tool.pandas_run_operation("sales", "__class__")
+    assert "Invalid dataframe operation" in tool.pandas_run_operation("sales", "iloc.__class__")
 
     # Explicit None disables tools instead of defaulting to True.
     disabled = pandas_cls(enable_create_pandas_dataframe=None, enable_run_dataframe_operation=None)
@@ -130,7 +130,7 @@ def test_duckdb_inspect_query_and_manage_lifecycle(tmp_path: Path) -> None:
     tool = duckdb_cls(init_commands=["CREATE TABLE seed (n INTEGER)", "INSERT INTO seed VALUES (7)"])
 
     assert "seed" in tool.duckdb_inspect("show_tables")
-    assert tool.run_query("SELECT n FROM seed") == "n\n7"
+    assert tool.duckdb_run_query("SELECT n FROM seed") == "n\n7"
 
     # Reserved keyword stem gets suffixed to stay SQL-safe.
     loaded_table = tool.duckdb_manage("load_path", path=str(csv_file))
@@ -152,12 +152,12 @@ def test_duckdb_inspect_query_and_manage_lifecycle(tmp_path: Path) -> None:
     # Persistent read-only database refuses writes.
     db_path = tmp_path / "ro.duckdb"
     writer = duckdb_cls(db_path=str(db_path))
-    writer.run_query("CREATE TABLE items (x INTEGER);")
+    writer.duckdb_run_query("CREATE TABLE items (x INTEGER);")
     writer.connection.close()
 
     reader = duckdb_cls(db_path=str(db_path), read_only=True)
     assert "items" in reader.duckdb_inspect("show_tables")
-    assert "read-only" in reader.run_query("INSERT INTO items VALUES (1)").lower()
+    assert "read-only" in reader.duckdb_run_query("INSERT INTO items VALUES (1)").lower()
     reader.connection.close()
 
 

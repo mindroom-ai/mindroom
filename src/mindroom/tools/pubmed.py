@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/research-sources/#pubmed",
-    function_names=("search_pubmed",),
+    function_names=("pubmed_search",),
 )
 def pubmed_tools() -> type[PubmedTools]:
     """Return PubMed tools for medical research and literature search."""

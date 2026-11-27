@@ -34,8 +34,8 @@ def test_jina_omits_timeout_kwarg_when_timeout_is_none(monkeypatch: pytest.Monke
 
     tool = jina_tools()(api_key="jina-key", enable_search_query=True)
 
-    read_result = tool.read_url("https://example.com")
-    search_result = tool.search_query("mindroom")
+    read_result = tool.jina_read_url("https://example.com")
+    search_result = tool.jina_search_query("mindroom")
 
     assert "hello" in read_result
     assert "result" in search_result
@@ -65,8 +65,8 @@ def test_jina_passes_explicit_timeout_when_configured(monkeypatch: pytest.Monkey
 
     tool = jina_tools()(api_key="jina-key", timeout=15, enable_search_query=True)
 
-    tool.read_url("https://example.com")
-    tool.search_query("mindroom")
+    tool.jina_read_url("https://example.com")
+    tool.jina_search_query("mindroom")
 
     assert get_calls[0]["kwargs"]["timeout"] == 15
     assert get_calls[0]["kwargs"]["headers"]["X-Timeout"] == "15"

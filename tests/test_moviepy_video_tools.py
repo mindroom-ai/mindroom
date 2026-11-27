@@ -90,7 +90,7 @@ def test_embed_captions_applies_styles_to_text_clips(
     srt_path.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello world\n", encoding="utf-8")
     output_path = tmp_path / "captioned.mp4"
 
-    result = toolkit.embed_captions("input.mp4", str(srt_path), str(output_path), **styles)
+    result = toolkit.moviepy_video_tools_embed_captions("input.mp4", str(srt_path), str(output_path), **styles)
 
     assert result == str(output_path)
     assert output_path.read_bytes() == b"rendered"
@@ -148,7 +148,7 @@ def test_embed_captions_publishes_complete_output_and_closes_media(
     if failure == "publish":
         monkeypatch.setattr(os, "replace", reject_publication)
 
-    result = toolkit.embed_captions("input.mp4", str(srt_path), str(output_path))
+    result = toolkit.moviepy_video_tools_embed_captions("input.mp4", str(srt_path), str(output_path))
 
     if failure is None:
         assert result == str(output_path)
@@ -191,7 +191,7 @@ def test_embed_captions_keeps_styles_independent_between_calls(
         text_clip.reset_mock()
         output_path = tmp_path / f"captioned-{index}.mp4"
 
-        result = toolkit.embed_captions("input.mp4", str(srt_path), str(output_path), **style)
+        result = toolkit.moviepy_video_tools_embed_captions("input.mp4", str(srt_path), str(output_path), **style)
 
         assert result == str(output_path)
         assert output_path.read_bytes() == b"rendered"
@@ -242,13 +242,17 @@ def test_media_paths_follow_file_access(
     (tmp_path / "captions.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
     (tmp_path / "linked.srt").symlink_to(config)
 
-    assert toolkit.create_srt("administrators: [attacker]\n", "config.yaml") == "config.yaml"
+    assert toolkit.moviepy_video_tools_create_srt("administrators: [attacker]\n", "config.yaml") == "config.yaml"
     assert (tmp_path / "config.yaml").read_text(encoding="utf-8") == "administrators: [attacker]\n"
     for output_path in (str(config), os.path.relpath(config, tmp_path), "linked.srt"):
-        assert toolkit.create_srt("x", output_path).startswith("Failed to create SRT file:"), output_path
-    assert toolkit.extract_audio(str(config), "audio.wav").startswith("Failed to extract audio:")
-    assert toolkit.embed_captions("http://127.0.0.1:8765/api/config", "captions.srt").startswith("Failed")
-    assert toolkit.embed_captions("input.mp4", str(config)).startswith("Failed to embed captions:")
+        assert toolkit.moviepy_video_tools_create_srt("x", output_path).startswith("Failed to create SRT file:"), (
+            output_path
+        )
+    assert toolkit.moviepy_video_tools_extract_audio(str(config), "audio.wav").startswith("Failed to extract audio:")
+    assert toolkit.moviepy_video_tools_embed_captions("http://127.0.0.1:8765/api/config", "captions.srt").startswith(
+        "Failed",
+    )
+    assert toolkit.moviepy_video_tools_embed_captions("input.mp4", str(config)).startswith("Failed to embed captions:")
 
     assert config.read_text(encoding="utf-8") == "administrators: []\n"
     assert [entry.name for entry in primary.iterdir()] == ["config.yaml"]
@@ -277,7 +281,7 @@ def test_default_caption_output_lands_next_to_the_input(
         (tmp_path / name).write_bytes(b"input video")
     (tmp_path / "empty.srt").write_text("", encoding="utf-8")
 
-    assert toolkit.embed_captions(video_path, "empty.srt") == expected_output
+    assert toolkit.moviepy_video_tools_embed_captions(video_path, "empty.srt") == expected_output
     assert (tmp_path / expected_output).read_bytes() == b"rendered"
     assert sorted(path.name for path in tmp_path.glob("*_captioned.mp4")) == (
         ["input_captioned.mp4"] if expected_output == "input_captioned.mp4" else []
@@ -298,8 +302,14 @@ def test_oversized_inputs_fail_before_staging_past_the_limit(
         with (tmp_path / name).open("wb") as sparse:
             sparse.truncate(8 << 20)
 
-    assert "video_path 'big.mp4' exceeds the 1 MiB input limit" in toolkit.extract_audio("big.mp4", "audio.wav")
-    assert "srt_path 'big.srt' exceeds the 1 MiB input limit" in toolkit.embed_captions("input.mp4", "big.srt")
+    assert "video_path 'big.mp4' exceeds the 1 MiB input limit" in toolkit.moviepy_video_tools_extract_audio(
+        "big.mp4",
+        "audio.wav",
+    )
+    assert "srt_path 'big.srt' exceeds the 1 MiB input limit" in toolkit.moviepy_video_tools_embed_captions(
+        "input.mp4",
+        "big.srt",
+    )
     assert [Path(call.args[0]).name for call in factories["VideoFileClip"].call_args_list] == ["video_path.mp4"]
     assert not (tmp_path / "audio.wav").exists()
     assert not (tmp_path / "input_captioned.mp4").exists()
@@ -331,8 +341,8 @@ def test_outputs_publish_without_buffering_the_rendered_file(
 
     tracemalloc.start()
     try:
-        assert toolkit.extract_audio("input.mp4", "audio.wav") == "audio.wav"
-        assert toolkit.embed_captions("input.mp4", "empty.srt", "captioned.mp4") == "captioned.mp4"
+        assert toolkit.moviepy_video_tools_extract_audio("input.mp4", "audio.wav") == "audio.wav"
+        assert toolkit.moviepy_video_tools_embed_captions("input.mp4", "empty.srt", "captioned.mp4") == "captioned.mp4"
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -399,12 +409,14 @@ def test_video_inputs_refuse_playlists_and_manifests(
     )
 
     # Plain media still works, so only inputs FFmpeg would open as manifests are refused.
-    assert toolkit.extract_audio("clip.mp4", "clip.wav") == "clip.wav"
+    assert toolkit.moviepy_video_tools_extract_audio("clip.mp4", "clip.wav") == "clip.wav"
     # FFmpeg detects DASH by content, so a manifest named like a video is refused too.
     for name, text in (("playlist.m3u8", playlist), ("manifest.mp4", manifest)):
-        assert toolkit.create_srt(text, name) == name
-        assert toolkit.extract_audio(name, "leak.wav").startswith("Failed to extract audio:"), name
-        assert toolkit.embed_captions(name, "empty.srt", "leak.mp4").startswith("Failed to embed captions:"), name
+        assert toolkit.moviepy_video_tools_create_srt(text, name) == name
+        assert toolkit.moviepy_video_tools_extract_audio(name, "leak.wav").startswith("Failed to extract audio:"), name
+        assert toolkit.moviepy_video_tools_embed_captions(name, "empty.srt", "leak.mp4").startswith(
+            "Failed to embed captions:",
+        ), name
 
     assert sorted(entry.name for entry in tmp_path.iterdir()) == [
         "clip.mp4",

@@ -370,7 +370,7 @@ class WebsiteTools(Toolkit):
         super().__init__(name="website_tools")
 
     @tool
-    def read_url(self, url: str) -> str:
+    def website_read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""
         website = _MindRoomWebsiteReader()
 

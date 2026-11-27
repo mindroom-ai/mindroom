@@ -25,9 +25,9 @@ from mindroom.tools.youtube import youtube_tools
 @pytest.mark.parametrize(
     ("factory", "expected_name", "expected_functions"),
     [
-        (wikipedia_tools, "wikipedia_tools", ["search_wikipedia"]),
-        (arxiv_tools, "arxiv_tools", ["search_arxiv_and_return_articles", "read_arxiv_papers"]),
-        (pubmed_tools, "pubmed", ["search_pubmed"]),
+        (wikipedia_tools, "wikipedia_tools", ["wikipedia_search"]),
+        (arxiv_tools, "arxiv_tools", ["arxiv_search", "arxiv_read_papers"]),
+        (pubmed_tools, "pubmed", ["pubmed_search"]),
         (hackernews_tools, "hackers_news", ["hackernews"]),
         (youtube_tools, "youtube_tools", ["youtube_video"]),
     ],
@@ -62,16 +62,16 @@ def test_wikipedia_search_success_disambiguation_and_error(monkeypatch: pytest.M
     monkeypatch.setattr(wikipedia, "summary", fake_summary)
     toolkit = wikipedia_tools()(auto_suggest=False)
 
-    assert json.loads(toolkit.search_wikipedia("Python")) == {
+    assert json.loads(toolkit.wikipedia_search("Python")) == {
         "name": "Python",
         "meta_data": {},
         "content": "Python is a programming language.",
     }
-    assert json.loads(toolkit.search_wikipedia("Mercury")) == {
+    assert json.loads(toolkit.wikipedia_search("Mercury")) == {
         "disambiguation": "Mercury",
         "options": ["Mercury (planet)", "Mercury (element)"],
     }
-    assert json.loads(toolkit.search_wikipedia("boom")) == {"error": "service unavailable"}
+    assert json.loads(toolkit.wikipedia_search("boom")) == {"error": "service unavailable"}
     assert seen == [("Python", False), ("Mercury", False), ("boom", False)]
 
 

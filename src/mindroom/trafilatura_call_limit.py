@@ -22,7 +22,7 @@ def trafilatura_request_budget_seconds(
     """Return how long a process relaying this call waits for its answer, or 0 for a call without a limit of its own."""
     if tool_name != "trafilatura":
         return 0.0
-    if function_name == "crawl_website":
+    if function_name == "trafilatura_crawl_website":
         return CALL_SECONDS + _RELAY_GRACE_SECONDS
     if function_name == "trafilatura_extract":
         action = kwargs.get("action") if kwargs and "action" in kwargs else (args[0] if args else None)

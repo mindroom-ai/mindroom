@@ -30,10 +30,10 @@ class _ResendTools(Toolkit):
         self._from_email = from_email
         super().__init__()
         if not (all or enable_send_email):
-            self.functions.pop("send_email")
+            self.functions.pop("resend_send_email")
 
     @tool
-    def send_email(self, to_email: str, subject: str, body: str) -> str:
+    def resend_send_email(self, to_email: str, subject: str, body: str) -> str:
         """Send an HTML email via Resend.
 
         Args:
@@ -92,7 +92,7 @@ class _ResendTools(Toolkit):
     ],
     dependencies=["resend"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#resend",
-    function_names=("send_email",),
+    function_names=("resend_send_email",),
 )
 def resend_tools() -> type[_ResendTools]:
     """Return the native resend toolkit."""

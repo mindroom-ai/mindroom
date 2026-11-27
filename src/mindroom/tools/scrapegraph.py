@@ -55,15 +55,15 @@ class _ScrapeGraphTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_smartscraper:
-            tools.append(self.smartscraper)
+            tools.append(self.scrapegraph_smartscraper)
         if all or enable_markdownify:
-            tools.append(self.markdownify)
+            tools.append(self.scrapegraph_markdownify)
         if all or enable_searchscraper:
-            tools.append(self.searchscraper)
+            tools.append(self.scrapegraph_searchscraper)
         if all or enable_crawl:
-            tools.append(self.crawl)
+            tools.append(self.scrapegraph_crawl)
         if all or enable_scrape:
-            tools.append(self.scrape)
+            tools.append(self.scrapegraph_scrape)
 
         super().__init__(name="scrapegraph_tools", tools=tools)
 
@@ -77,7 +77,7 @@ class _ScrapeGraphTools(Toolkit):
             config_kwargs["headers"] = self.headers
         return FetchConfig(**config_kwargs) if config_kwargs else None
 
-    def smartscraper(self, url: str, prompt: str) -> str:
+    def scrapegraph_smartscraper(self, url: str, prompt: str) -> str:
         """Extract structured data from a webpage using an AI prompt.
 
         Args:
@@ -98,7 +98,7 @@ class _ScrapeGraphTools(Toolkit):
         except Exception as error:
             return f"Error extracting from {url}: {type(error).__name__}: {error}"
 
-    def markdownify(self, url: str) -> str:
+    def scrapegraph_markdownify(self, url: str) -> str:
         """Convert a webpage to markdown.
 
         Args:
@@ -126,7 +126,7 @@ class _ScrapeGraphTools(Toolkit):
         except Exception as error:
             return f"Error converting {url} to markdown: {type(error).__name__}: {error}"
 
-    def searchscraper(self, query: str) -> str:
+    def scrapegraph_searchscraper(self, query: str) -> str:
         """Search the web and extract information from the top results.
 
         Args:
@@ -145,7 +145,7 @@ class _ScrapeGraphTools(Toolkit):
         except Exception as error:
             return f"Error searching: {type(error).__name__}: {error}"
 
-    def crawl(
+    def scrapegraph_crawl(
         self,
         url: str,
         prompt: str,
@@ -198,7 +198,7 @@ class _ScrapeGraphTools(Toolkit):
         except Exception as error:
             return f"Error crawling {url}: {type(error).__name__}: {error}"
 
-    def scrape(self, url: str) -> str:
+    def scrapegraph_scrape(self, url: str) -> str:
         """Get raw HTML content from a webpage.
 
         Args:
@@ -267,7 +267,13 @@ class _ScrapeGraphTools(Toolkit):
     ],
     dependencies=["scrapegraph-py"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#scrapegraph",
-    function_names=("crawl", "markdownify", "scrape", "searchscraper", "smartscraper"),
+    function_names=(
+        "scrapegraph_crawl",
+        "scrapegraph_markdownify",
+        "scrapegraph_scrape",
+        "scrapegraph_searchscraper",
+        "scrapegraph_smartscraper",
+    ),
 )
 def scrapegraph_tools() -> type[Toolkit]:
     """Return ScrapeGraph tools for web data extraction."""

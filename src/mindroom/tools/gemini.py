@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     dependencies=["google-genai"],
     docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#gemini",
-    function_names=("generate_image", "generate_video"),
+    function_names=("gemini_generate_image", "gemini_generate_video"),
 )
 def gemini_tools() -> type[GeminiTools]:
     """Return Gemini tools for image and video generation."""

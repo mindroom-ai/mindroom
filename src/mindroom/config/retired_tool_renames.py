@@ -53,7 +53,7 @@ from __future__ import annotations
 #   tests/test_wave6_sandbox_tools.py::test_wave6_batch4_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave2_search_tools.py::test_wave2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_brightdata_tool.py::test_wave4_action_scoped_grants_and_fail_closed_migration.
-RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
+_CONSOLIDATED_TOOLKIT_RENAMES: dict[str, dict[str, str]] = {
     "scheduler": {
         "schedule": "scheduler",
         "edit_schedule": "scheduler",
@@ -872,6 +872,196 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
 }
 
+# LEGACY_COMPAT: Bare integration toolkit function names normalized to single-underscore `<toolkit>_<verb>`.
+# Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
+#   naming bare function names of the 42 non-allowlisted integration toolkits (such as `read_url`, `run_query`,
+#   `run_sql_query`, `send_email`, `generate_image`, `search_wikipedia`, etc.).
+# Last legacy release: v2026.11.674; replacement: unreleased; every function is prefixed with `<toolkit>_` so the
+#   built-in catalog has zero duplicate wire names and explicit toolkit scoping.
+# Handling: Checked per enabled toolkit so overlapping retired names (like `run_query` or `read_url`) never fire
+#   for unenabled toolkits, while naming every enabled replacement when multiple enabled toolkits share a retired
+#   name; reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
+#   replacement) and reject retired names in include_tools/exclude_tools with in-place replacement hints.
+# Coverage:
+#   tests/test_tool_approval_grants.py::test_normalized_integration_tool_names_fail_closed_and_stay_toolkit_scoped,
+#   tests/test_tool_approval_grants.py::test_shared_retired_bare_name_reports_all_enabled_replacements.
+_NORMALIZED_INTEGRATION_RENAMES: dict[str, dict[str, str]] = {
+    "agentql": {
+        "scrape_website": "agentql_scrape_website",
+        "custom_scrape_website": "agentql_custom_scrape_website",
+    },
+    "airflow": {
+        "save_dag_file": "airflow_save_dag_file",
+        "read_dag_file": "airflow_read_dag_file",
+    },
+    "arxiv": {
+        "search_arxiv_and_return_articles": "arxiv_search",
+        "read_arxiv_papers": "arxiv_read_papers",
+    },
+    "aws_lambda": {
+        "list_functions": "aws_lambda_list_functions",
+        "invoke_function": "aws_lambda_invoke_function",
+    },
+    "aws_ses": {
+        "send_email": "aws_ses_send_email",
+    },
+    "browserbase": {
+        "screenshot": "browserbase_screenshot",
+    },
+    "cartesia": {
+        "text_to_speech": "cartesia_text_to_speech",
+        "list_voices": "cartesia_list_voices",
+        "localize_voice": "cartesia_localize_voice",
+    },
+    "crawl4ai": {
+        "crawl": "crawl4ai_crawl",
+    },
+    "csv": {
+        "query_csv_file": "csv_query",
+    },
+    "custom_api": {
+        "make_request": "custom_api_request",
+    },
+    "duckdb": {
+        "run_query": "duckdb_run_query",
+    },
+    "eleven_labs": {
+        "get_voices": "eleven_labs_get_voices",
+        "generate_sound_effect": "eleven_labs_generate_sound_effect",
+        "text_to_speech": "eleven_labs_text_to_speech",
+    },
+    "exa": {
+        "research": "exa_research",
+    },
+    "fal": {
+        "generate_media": "fal_generate_media",
+        "image_to_image": "fal_image_to_image",
+    },
+    "firecrawl": {
+        "scrape_website": "firecrawl_scrape_website",
+        "crawl_website": "firecrawl_crawl_website",
+        "map_website": "firecrawl_map_website",
+        "search_web": "firecrawl_search_web",
+    },
+    "gemini": {
+        "generate_image": "gemini_generate_image",
+        "generate_video": "gemini_generate_video",
+    },
+    "giphy": {
+        "search_gifs": "giphy_search_gifs",
+    },
+    "google_bigquery": {
+        "run_sql_query": "google_bigquery_run_sql_query",
+    },
+    "google_scholar": {
+        "search_google_scholar": "google_scholar_search",
+    },
+    "groq": {
+        "transcribe_audio": "groq_transcribe_audio",
+        "translate_audio": "groq_translate_audio",
+        "generate_speech": "groq_generate_speech",
+    },
+    "jina": {
+        "read_url": "jina_read_url",
+        "search_query": "jina_search_query",
+    },
+    "linkup": {
+        "web_search_with_linkup": "linkup_search",
+    },
+    "lumalabs": {
+        "generate_video": "lumalabs_generate_video",
+        "image_to_video": "lumalabs_image_to_video",
+    },
+    "modelslabs": {
+        "generate_media": "modelslabs_generate_media",
+    },
+    "moviepy_video_tools": {
+        "extract_audio": "moviepy_video_tools_extract_audio",
+        "create_srt": "moviepy_video_tools_create_srt",
+        "embed_captions": "moviepy_video_tools_embed_captions",
+    },
+    "neo4j": {
+        "run_cypher_query": "neo4j_run_cypher_query",
+    },
+    "newspaper": {
+        "read_article": "newspaper_read_article",
+    },
+    "openai": {
+        "transcribe_audio": "openai_transcribe_audio",
+        "generate_image": "openai_generate_image",
+        "generate_speech": "openai_generate_speech",
+    },
+    "pandas": {
+        "create_pandas_dataframe": "pandas_create_dataframe",
+        "run_dataframe_operation": "pandas_run_operation",
+    },
+    "postgres": {
+        "run_query": "postgres_run_query",
+        "export_table_to_path": "postgres_export_table_to_path",
+    },
+    "pubmed": {
+        "search_pubmed": "pubmed_search",
+    },
+    "redshift": {
+        "run_query": "redshift_run_query",
+        "export_table_to_path": "redshift_export_table_to_path",
+    },
+    "replicate": {
+        "generate_media": "replicate_generate_media",
+    },
+    "resend": {
+        "send_email": "resend_send_email",
+    },
+    "scrapegraph": {
+        "smartscraper": "scrapegraph_smartscraper",
+        "markdownify": "scrapegraph_markdownify",
+        "searchscraper": "scrapegraph_searchscraper",
+        "crawl": "scrapegraph_crawl",
+        "scrape": "scrapegraph_scrape",
+    },
+    "serpapi": {
+        "search_google": "serpapi_search_google",
+        "search_youtube": "serpapi_search_youtube",
+    },
+    "sql": {
+        "run_sql_query": "sql_run_query",
+    },
+    "tavily": {
+        "web_search_using_tavily": "tavily_search",
+        "web_search_with_tavily": "tavily_search_context",
+        "extract_url_content": "tavily_extract",
+    },
+    "trafilatura": {
+        "html_to_text": "trafilatura_html_to_text",
+        "crawl_website": "trafilatura_crawl_website",
+    },
+    "website": {
+        "read_url": "website_read_url",
+    },
+    "wikipedia": {
+        "search_wikipedia": "wikipedia_search",
+    },
+    "zendesk": {
+        "search_zendesk": "zendesk_search",
+    },
+}
+
+
+def _merge_toolkit_renames(
+    base: dict[str, dict[str, str]],
+    extra: dict[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    merged = {toolkit: dict(renames) for toolkit, renames in base.items()}
+    for toolkit, renames in extra.items():
+        merged.setdefault(toolkit, {}).update(renames)
+    return merged
+
+
+RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = _merge_toolkit_renames(
+    _CONSOLIDATED_TOOLKIT_RENAMES,
+    _NORMALIZED_INTEGRATION_RENAMES,
+)
+
 # LEGACY_COMPAT: Mega-tools split 1-to-N into separate read and write/control functions.
 # Legacy format: `triggers`, `desktop`, `workflow`, and `matrix_api` were previously single multi-action functions,
 #   and `browser_control` previously served both read and control actions (read actions moved to `browser_read` while
@@ -939,5 +1129,21 @@ STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
         "hackernews",
         "google_bigquery",
         "usage_stats",
+    },
+)
+
+STRICT_WILDCARD_SCRIPT_RENAMES: dict[str, frozenset[str]] = {
+    toolkit: frozenset(renames) for toolkit, renames in _NORMALIZED_INTEGRATION_RENAMES.items()
+}
+
+SINGLE_VERB_RENAMED_TARGETS: frozenset[str] = frozenset(
+    {
+        "contacts_read",
+        "email_invite_read",
+        "shared_directories_read",
+        "google_docs_read",
+        "claude_agent_read",
+        "twilio_send",
+        *(new for renames in _NORMALIZED_INTEGRATION_RENAMES.values() for new in renames.values()),
     },
 )

@@ -9168,7 +9168,7 @@ agents:
     tools:
       - arxiv:
           include_tools:
-            - search_arxiv_and_return_articles
+            - arxiv_search
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.
@@ -10042,7 +10042,7 @@ Create one `MindRoomTools` instance and call tools by toolkit name, function nam
 from mindroom.script_sdk import MindRoomTools
 
 tools = MindRoomTools()
-result = tools.call("website", "read_url", url="https://example.org/status.txt")
+result = tools.call("website", "website_read_url", url="https://example.org/status.txt")
 print(result, flush=True)
 ```
 
@@ -10062,7 +10062,7 @@ An `indeterminate` call means MindRoom accepted the call but cannot prove whethe
 A script, or a program it starts, can also call tools with the [agent CLI](https://docs.mindroom.chat/tools/agent-cli/) through the same access:
 
 ```bash
-mindroom-agent tools call website read_url '{"url": "https://example.org/status.txt"}'
+mindroom-agent tools call website website_read_url '{"url": "https://example.org/status.txt"}'
 ```
 
 Inside a background script, `mindroom-agent` offers only `tools call`, which waits until the call finishes and does not accept `--call-id` or `--timeout`.
@@ -10093,11 +10093,11 @@ POLL_SECONDS = 15
 
 def main() -> None:
     tools = MindRoomTools()
-    previous = tools.call("website", "read_url", url=STATUS_URL)
+    previous = tools.call("website", "website_read_url", url=STATUS_URL)
 
     while True:
         time.sleep(POLL_SECONDS)
-        current = tools.call("website", "read_url", url=STATUS_URL)
+        current = tools.call("website", "website_read_url", url=STATUS_URL)
         if current == previous:
             continue
 
@@ -12297,8 +12297,8 @@ Missing Python dependencies install automatically on first use; see [Automatic D
 
 ## [`sql`]
 
-`sql` provides `sql_inspect(action, table_name=None)` (actions `list_tables`, `describe_table`) and `run_sql_query(query, limit=10)`.
-`run_sql_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
+`sql` provides `sql_inspect(action, table_name=None)` (actions `list_tables`, `describe_table`) and `sql_run_query(query, limit=10)`.
+`sql_run_query()` returns 10 rows unless the call passes another `limit`, or `limit=None` for all rows.
 Connect with `db_url`, or let MindRoom assemble a URL from `dialect`, `user`, `password`, `host`, `port`, and `schema`.
 The assembled URL uses `schema` as the database name and also as the schema for table inspection, so use `db_url` for dialects where those differ.
 For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift`](#redshift) tools add query plans and exports.
@@ -12315,15 +12315,15 @@ PostgreSQL URLs require an explicit host (including Unix-socket `?host=...`), us
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
 | `enable_list_tables` | `boolean` | `true` | Enable the `list_tables` action on `sql_inspect()`. |
 | `enable_describe_table` | `boolean` | `true` | Enable the `describe_table` action on `sql_inspect()`. |
-| `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
+| `enable_run_sql_query` | `boolean` | `true` | Enable `sql_run_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`postgres`]
 
-`postgres` provides `postgres_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
+`postgres` provides `postgres_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `postgres_run_query()`, and `postgres_export_table_to_path()`.
 The connection is read-only, so queries cannot modify the database.
-`postgres_inspect(action="inspect_query", ...)` runs `EXPLAIN`, which is a cheap check before a large `run_query()`.
-`export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
+`postgres_inspect(action="inspect_query", ...)` runs `EXPLAIN`, which is a cheap check before a large `postgres_run_query()`.
+`postgres_export_table_to_path()` writes a table as CSV to a path on the machine running MindRoom.
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -12347,7 +12347,7 @@ agents:
 
 ## [`redshift`]
 
-`redshift` provides `redshift_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `run_query()`, and `export_table_to_path()`.
+`redshift` provides `redshift_inspect(action, table=None, query=None)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`), `redshift_run_query()`, and `redshift_export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
 Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
 These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
@@ -12386,7 +12386,7 @@ agents:
 
 ## [`neo4j`]
 
-`neo4j` provides `neo4j_inspect(action)` (actions `list_labels`, `list_relationship_types`, `get_schema`) and `run_cypher_query()`.
+`neo4j` provides `neo4j_inspect(action)` (actions `list_labels`, `list_relationship_types`, `get_schema`) and `neo4j_run_cypher_query()`.
 Set `enable_run_cypher: false` to give an agent schema visibility without free-form graph queries.
 
 | Option | Type | Required | Default | Notes |
@@ -12398,7 +12398,7 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 | `enable_list_labels` | `boolean` | no | `true` | Enable the `list_labels` action on `neo4j_inspect()`. |
 | `enable_list_relationships` | `boolean` | no | `true` | Enable the `list_relationship_types` action on `neo4j_inspect()`. |
 | `enable_get_schema` | `boolean` | no | `true` | Enable the `get_schema` action on `neo4j_inspect()`. |
-| `enable_run_cypher` | `boolean` | no | `true` | Enable `run_cypher_query()`. |
+| `enable_run_cypher` | `boolean` | no | `true` | Enable `neo4j_run_cypher_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
 ```yaml
@@ -12415,7 +12415,7 @@ agents:
 ## [`duckdb`]
 
 `duckdb` is the best choice for repeatable local analytics over files.
-It provides `duckdb_inspect(action, ...)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`, `full_text_search`), `run_query()`, and `duckdb_manage(action, ...)` (actions `load_path`, `export_table`, `create_fts_index`).
+It provides `duckdb_inspect(action, ...)` (actions `show_tables`, `describe_table`, `summarize_table`, `inspect_query`, `full_text_search`), `duckdb_run_query()`, and `duckdb_manage(action, ...)` (actions `load_path`, `export_table`, `create_fts_index`).
 Without `db_path`, the database lives in memory and is not saved.
 `duckdb_manage(action="export_table", ...)` writes Parquet unless the call passes `CSV` or `JSON`.
 
@@ -12435,14 +12435,14 @@ agents:
 
 ```python
 duckdb_manage("load_path", path="/workspace/data/orders.parquet", table="orders", replace=True)
-run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
+duckdb_run_query("SELECT customer_id, COUNT(*) AS orders FROM orders GROUP BY 1 ORDER BY orders DESC LIMIT 10")
 duckdb_manage("export_table", table="orders", file_format="CSV", path="/tmp")
 ```
 
 ## [`csv`]
 
-`csv` provides `csv_inspect(action, csv_name=None, row_limit=None)` (actions `list`, `columns`, `read`) and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
-`query_csv_file()` runs only the first SQL statement it receives.
+`csv` provides `csv_inspect(action, csv_name=None, row_limit=None)` (actions `list`, `columns`, `read`) and `csv_query()` over the CSV files listed in `csvs`, each named by its filename stem.
+`csv_query()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12451,37 +12451,37 @@ duckdb_manage("export_table", table="orders", file_format="CSV", path="/tmp")
 | `enable_read_csv_file` | `boolean` | `true` | Enable the `read` action on `csv_inspect()`. |
 | `enable_list_csv_files` | `boolean` | `true` | Enable the `list` action on `csv_inspect()`. |
 | `enable_get_columns` | `boolean` | `true` | Enable the `columns` action on `csv_inspect()`. |
-| `enable_query_csv_file` | `boolean` | `true` | Enable `query_csv_file()`. |
+| `enable_query_csv_file` | `boolean` | `true` | Enable `csv_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`pandas`]
 
-`pandas` provides `create_pandas_dataframe()` and `run_dataframe_operation()`.
-`create_pandas_dataframe()` calls a Pandas constructor such as `read_csv` or `read_json` and stores the result under a name, rejecting empty dataframes and names already in use.
-`run_dataframe_operation()` calls a dataframe method such as `head`, `describe`, or `groupby` on a stored dataframe.
+`pandas` provides `pandas_create_dataframe()` and `pandas_run_operation()`.
+`pandas_create_dataframe()` calls a Pandas constructor such as `read_csv` or `read_json` and stores the result under a name, rejecting empty dataframes and names already in use.
+`pandas_run_operation()` calls a dataframe method such as `head`, `describe`, or `groupby` on a stored dataframe.
 Dataframes live only in memory and are lost on restart.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_create_pandas_dataframe` | `boolean` | `true` | Enable `create_pandas_dataframe()`. |
-| `enable_run_dataframe_operation` | `boolean` | `true` | Enable `run_dataframe_operation()`. |
+| `enable_create_pandas_dataframe` | `boolean` | `true` | Enable `pandas_create_dataframe()`. |
+| `enable_run_dataframe_operation` | `boolean` | `true` | Enable `pandas_run_operation()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ```python
-create_pandas_dataframe("sales", "read_csv", {"filepath_or_buffer": "/workspace/data/sales.csv"})
-run_dataframe_operation("sales", "describe", {})
+pandas_create_dataframe("sales", "read_csv", {"filepath_or_buffer": "/workspace/data/sales.csv"})
+pandas_run_operation("sales", "describe", {})
 ```
 
 ## [`google_bigquery`]
 
-`google_bigquery` provides `google_bigquery_inspect(action, table_id=None)` (actions `list_tables`, `describe_table`) and `run_sql_query(query)` for the configured dataset.
+`google_bigquery` provides `google_bigquery_inspect(action, table_id=None)` (actions `list_tables`, `describe_table`) and `google_bigquery_run_sql_query(query)` for the configured dataset.
 The dataset is only the default for unqualified table names, so queries can still reference other datasets that the account can read.
 It runs as the [Google Cloud connection](https://docs.mindroom.chat/deployment/google-services-oauth/#providers) for the agent's credential scope, or as the service account in `GOOGLE_SERVICE_ACCOUNT_FILE` when that is configured, never as the MindRoom process's Application Default Credentials.
 That account needs IAM access to read the data and to run query jobs in the project, such as the BigQuery Data Viewer and BigQuery Job User roles.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
 The tool always runs in the primary runtime, even when `worker_tools` lists it.
 
-`run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
+`google_bigquery_run_sql_query` accepts exactly one `SELECT` or `WITH` statement, with an optional trailing `;`.
 It refuses DML, DDL, scripts, and multiple statements with `Only a single read-only SELECT query is allowed`.
 It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `true` when more than `max_rows` rows were available.
 
@@ -12490,10 +12490,10 @@ It returns JSON with `columns`, `rows`, and `truncated`, and `truncated` is `tru
 | `project` | `text` | yes | `null` | Google Cloud project ID. |
 | `dataset` | `text` | yes | `null` | Dataset name. |
 | `location` | `text` | yes | `null` | Location such as `US` or `EU`. |
-| `max_rows` | `number` | no | `100` | Most rows `run_sql_query` returns, from `1` to `1000`. |
+| `max_rows` | `number` | no | `100` | Most rows `google_bigquery_run_sql_query` returns, from `1` to `1000`. |
 | `list_tables` | `boolean` | no | `true` | Enable the `list_tables` action on `google_bigquery_inspect()`. |
 | `describe_table` | `boolean` | no | `true` | Enable the `describe_table` action on `google_bigquery_inspect()`. |
-| `run_sql_query` | `boolean` | no | `true` | Enable `run_sql_query()`. |
+| `run_sql_query` | `boolean` | no | `true` | Enable `google_bigquery_run_sql_query()`. |
 | `all` | `boolean` | no | `false` | Enable every function. |
 
 ```yaml
@@ -12790,19 +12790,19 @@ agents:
 ## [`tavily`]
 
 `tavily` searches current information through the Tavily API and can extract page content from URLs.
-It provides one search function, `web_search_using_tavily(query, max_results=5)` by default or `web_search_with_tavily(query)` when `enable_search_context: true`, plus `extract_url_content(urls)` when `enable_extract: true`.
-`web_search_using_tavily()` returns results and, with `include_answer`, a synthesized answer, as Markdown or JSON according to `format`.
-`web_search_with_tavily()` returns one compact context block instead of a result list.
-`extract_url_content()` accepts one URL or a comma-separated list and returns page content as Markdown or plain text according to `extract_format`.
+It provides one search function, `tavily_search(query, max_results=5)` by default or `tavily_search_context(query)` when `enable_search_context: true`, plus `tavily_extract(urls)` when `enable_extract: true`.
+`tavily_search()` returns results and, with `include_answer`, a synthesized answer, as Markdown or JSON according to `format`.
+`tavily_search_context()` returns one compact context block instead of a result list.
+`tavily_extract()` accepts one URL or a comma-separated list and returns page content as Markdown or plain text according to `extract_format`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Tavily API key; required unless `TAVILY_API_KEY` is set. |
 | `api_base_url` | `url` | `null` | API base URL override. |
 | `enable_search` | `boolean` | `true` | Enable the search function. |
-| `enable_search_context` | `boolean` | `false` | Provide `web_search_with_tavily()` instead of `web_search_using_tavily()`. |
-| `enable_extract` | `boolean` | `false` | Enable `extract_url_content()`. |
-| `all` | `boolean` | `false` | Enable search and `extract_url_content()`; `enable_search_context` still selects the search function. |
+| `enable_search_context` | `boolean` | `false` | Provide `tavily_search_context()` instead of `tavily_search()`. |
+| `enable_extract` | `boolean` | `false` | Enable `tavily_extract()`. |
+| `all` | `boolean` | `false` | Enable search and `tavily_extract()`; `enable_search_context` still selects the search function. |
 | `max_tokens` | `number` | `6000` | Output budget for search results and context mode. |
 | `include_answer` | `boolean` | `true` | Include Tavily's answer in search output. |
 | `search_depth` | `text` | `advanced` | `basic`, `advanced`, `fast`, or `ultra-fast`. |
@@ -12823,7 +12823,7 @@ It provides one search function, `web_search_using_tavily(query, max_results=5)`
 | `include_images` | `boolean` | `false` | Requests images from Tavily during extraction, but the returned content does not include them. |
 | `include_favicon` | `boolean` | `false` | Requests favicons from Tavily during extraction, but the returned content does not include them. |
 
-The filters from `topic` through `chunks_per_source` apply only to `web_search_using_tavily()`, not to context mode.
+The filters from `topic` through `chunks_per_source` apply only to `tavily_search()`, not to context mode.
 
 ```yaml
 agents:
@@ -12838,7 +12838,7 @@ agents:
 ## [`exa`]
 
 `exa` is the research-oriented search toolkit.
-It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=None)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
+It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=None)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `exa_research(instructions, output_schema=None)`.
 Search results include title, author, published date, URL, and page text truncated to `text_length_limit`.
 
 | Option | Type | Default | Notes |
@@ -12848,7 +12848,7 @@ Search results include title, author, published date, URL, and page text truncat
 | `enable_get_contents` | `boolean` | `true` | Enable `exa_lookup(action="contents")`. |
 | `enable_find_similar` | `boolean` | `true` | Enable `exa_lookup(action="similar")`. |
 | `enable_answer` | `boolean` | `true` | Enable `exa_lookup(action="answer")`. |
-| `enable_research` | `boolean` | `false` | Enable `research()`. |
+| `enable_research` | `boolean` | `false` | Enable `exa_research()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `text` | `boolean` | `true` | Include page text in results. |
 | `text_length_limit` | `number` | `1000` | Maximum text length per result. |
@@ -12869,7 +12869,7 @@ Search results include title, author, published date, URL, and page text truncat
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
 | `model` | `text` | `null` | Model for `exa_lookup(action="answer")` only: `exa` or `exa-pro`. |
-| `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
+| `research_model` | `text` | `exa-research` | Model for `exa_research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
 | `show_results` | `boolean` | `false` | Log raw parsed results. |
 
@@ -12890,15 +12890,15 @@ agents:
 
 ## [`serpapi`]
 
-`serpapi` provides `search_google(query, num_results=10)` and, when enabled, `search_youtube(query)` through SerpApi.
-`search_google()` returns organic results plus recipes, shopping, knowledge graph, and related questions.
-`search_youtube()` returns video, movie, and channel results.
+`serpapi` provides `serpapi_search_google(query, num_results=10)` and, when enabled, `serpapi_search_youtube(query)` through SerpApi.
+`serpapi_search_google()` returns organic results plus recipes, shopping, knowledge graph, and related questions.
+`serpapi_search_youtube()` returns video, movie, and channel results.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | SerpApi key; required unless `SERP_API_KEY` is set. |
-| `enable_search_google` | `boolean` | `true` | Enable `search_google()`. |
-| `enable_search_youtube` | `boolean` | `false` | Enable `search_youtube()`. |
+| `enable_search_google` | `boolean` | `true` | Enable `serpapi_search_google()`. |
+| `enable_search_youtube` | `boolean` | `false` | Enable `serpapi_search_youtube()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml
@@ -12966,7 +12966,7 @@ agents:
 
 ## [`linkup`]
 
-`linkup` provides `web_search_with_linkup(query, depth=None, output_type=None)`, which returns Linkup's response as a result list or a sourced answer.
+`linkup` provides `linkup_search(query, depth=None, output_type=None)`, which returns Linkup's response as a result list or a sourced answer.
 The configured `depth` and `output_type` apply when a call does not pass its own.
 
 | Option | Type | Default | Notes |
@@ -12974,7 +12974,7 @@ The configured `depth` and `output_type` apply when a call does not pass its own
 | `api_key` | `password` | `null` | Linkup API key; required unless `LINKUP_API_KEY` is set. |
 | `depth` | `text` | `standard` | `standard` or `deep`. |
 | `output_type` | `text` | `searchResults` | `searchResults` or `sourcedAnswer`. |
-| `enable_web_search_with_linkup` | `boolean` | `true` | Enable `web_search_with_linkup()`. |
+| `enable_web_search_with_linkup` | `boolean` | `true` | Enable `linkup_search()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml
@@ -13047,7 +13047,7 @@ WebRTC cannot send UDP from these browsers.
 
 ### [`website`]
 
-`website` exposes `read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
+`website` exposes `website_read_url(url)` and returns JSON page documents from MindRoom's WebsiteReader variant, which drops search UI, navigation, headers, footers, sidebars, hidden content, and modals before choosing the page text.
 Pages larger than 2 MiB fail.
 
 ```yaml
@@ -13059,9 +13059,9 @@ agents:
 
 ### [`trafilatura`]
 
-`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=None)` (`text`, `metadata`, `batch`), `html_to_text()`, and `crawl_website()`.
+`trafilatura` exposes `trafilatura_extract(action, url=None, urls=None, output_format=None, as_json=None)` (`text`, `metadata`, `batch`), `trafilatura_html_to_text()`, and `trafilatura_crawl_website()`.
 `trafilatura_extract(action="batch")` returns one JSON payload listing successes and failures.
-`crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that; `extract_content=True` reports each refused page it tries to extract.
+`trafilatura_crawl_website()` fails when its start page or that page's redirect is refused, and skips a refused link it finds after that; `extract_content=True` reports each refused page it tries to extract.
 `trafilatura_extract(action="batch")` takes at most 10 URLs per call, and a crawl or batch extract stops downloading after 180 seconds and returns what it gathered.
 A crawl stops visiting new pages after 90 seconds, so the pages it found can still be extracted in the rest of that time.
 
@@ -13083,9 +13083,9 @@ A crawl stops visiting new pages after 90 seconds, so the pages it found can sti
 | `max_known_urls` | `number` | `100000` | Maximum discovered URLs tracked per crawl. |
 | `enable_extract_text` | `boolean` | `true` | Enable `trafilatura_extract(action="text")`. |
 | `enable_extract_metadata_only` | `boolean` | `true` | Enable `trafilatura_extract(action="metadata")`. |
-| `enable_html_to_text` | `boolean` | `true` | Enable `html_to_text()`. |
+| `enable_html_to_text` | `boolean` | `true` | Enable `trafilatura_html_to_text()`. |
 | `enable_extract_batch` | `boolean` | `true` | Enable `trafilatura_extract(action="batch")`. |
-| `enable_crawl_website` | `boolean` | `true` | Enable `crawl_website()`. |
+| `enable_crawl_website` | `boolean` | `true` | Enable `trafilatura_crawl_website()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
@@ -13100,19 +13100,19 @@ agents:
 
 ### [`newspaper`]
 
-`newspaper` exposes `read_article(url)` and returns JSON with whichever of title, authors, text, and publish date were extracted.
+`newspaper` exposes `newspaper_read_article(url)` and returns JSON with whichever of title, authors, text, and publish date were extracted.
 It is tuned for article pages, not arbitrary sites, and returns no image fields.
 Use `newspaper` in `tools:`, not `newspaper4k`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `article_length` | `number` | `null` | Truncate article text to this many characters. |
-| `enable_read_article` | `boolean` | `true` | Enable `read_article()`. |
+| `enable_read_article` | `boolean` | `true` | Enable `newspaper_read_article()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ### [`crawl4ai`]
 
-`crawl4ai` exposes `crawl(url, search_query=None)`, where `url` is one URL or a list, and returns readable text for each page from a local headless browser.
+`crawl4ai` exposes `crawl4ai_crawl(url, search_query=None)`, where `url` is one URL or a list, and returns readable text for each page from a local headless browser.
 With `search_query`, the text is filtered toward that query; without one, `use_pruning` trims noisy content.
 Results skip Crawl4AI's cache and are truncated to `max_length`.
 
@@ -13125,7 +13125,7 @@ Results skip Crawl4AI's cache and are truncated to `max_length`.
 | `bm25_threshold` | `number` | `1.0` | Query-filter threshold when `search_query` is given. |
 | `headless` | `boolean` | `true` | Run the browser headless. |
 | `wait_until` | `text` | `domcontentloaded` | Playwright wait condition before extraction. |
-| `enable_crawl` | `boolean` | `true` | Enable `crawl()`. |
+| `enable_crawl` | `boolean` | `true` | Enable `crawl4ai_crawl()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ```yaml
@@ -13140,36 +13140,36 @@ agents:
 
 ### [`jina`]
 
-`jina` exposes `read_url(url)` through Jina Reader and, when enabled, `search_query(query)`.
+`jina` exposes `jina_read_url(url)` through Jina Reader and, when enabled, `jina_search_query(query)`.
 It works without a key for public reads; a key helps with paid plans and rate limits.
 Returned content is truncated to `max_content_length`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Optional; falls back to `JINA_API_KEY`. |
-| `base_url` | `url` | `https://r.jina.ai/` | Reader endpoint for `read_url()`. |
-| `search_url` | `url` | `https://s.jina.ai/` | Search endpoint for `search_query()`. |
+| `base_url` | `url` | `https://r.jina.ai/` | Reader endpoint for `jina_read_url()`. |
+| `search_url` | `url` | `https://s.jina.ai/` | Search endpoint for `jina_search_query()`. |
 | `max_content_length` | `number` | `10000` | Maximum returned characters. |
 | `timeout` | `number` | `null` | Jina timeout in seconds. |
 | `search_query_content` | `boolean` | `true` | Include full page content in search results; `false` returns summaries only. |
-| `enable_read_url` | `boolean` | `true` | Enable `read_url()`. |
-| `enable_search_query` | `boolean` | `false` | Enable `search_query()`. |
+| `enable_read_url` | `boolean` | `true` | Enable `jina_read_url()`. |
+| `enable_search_query` | `boolean` | `false` | Enable `jina_search_query()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## Hosted Scraping APIs
 
 ### [`firecrawl`]
 
-`firecrawl` exposes `scrape_website()`, `crawl_website()`, `map_website()`, and `search_web()`.
+`firecrawl` exposes `firecrawl_scrape_website()`, `firecrawl_crawl_website()`, `firecrawl_map_website()`, and `firecrawl_search_web()`.
 It requires `api_key` or `FIRECRAWL_API_KEY`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `FIRECRAWL_API_KEY`. |
-| `enable_scrape` | `boolean` | `true` | Enable `scrape_website()`. |
-| `enable_crawl` | `boolean` | `false` | Enable `crawl_website()`. |
-| `enable_mapping` | `boolean` | `false` | Enable `map_website()`. |
-| `enable_search` | `boolean` | `false` | Enable `search_web()`. |
+| `enable_scrape` | `boolean` | `true` | Enable `firecrawl_scrape_website()`. |
+| `enable_crawl` | `boolean` | `false` | Enable `firecrawl_crawl_website()`. |
+| `enable_mapping` | `boolean` | `false` | Enable `firecrawl_map_website()`. |
+| `enable_search` | `boolean` | `false` | Enable `firecrawl_search_web()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 | `formats` | `string[]` | `null` | Output formats for scrape, crawl, and search, such as `markdown` or `html`; check them against your plan. |
 | `limit` | `number` | `10` | Default result cap for crawl and search. |
@@ -13204,7 +13204,7 @@ It requires `SPIDER_API_KEY` in the process environment, which the `.env` does n
 ### [`scrapegraph`]
 
 `scrapegraph` turns pages into structured answers from natural-language prompts.
-`smartscraper(url, prompt)` extracts data from one page, `markdownify()` converts a page to Markdown, `crawl()` applies a prompt and JSON schema across a crawl, `searchscraper()` searches the web before extracting, and `scrape()` returns raw HTML.
+`scrapegraph_smartscraper(url, prompt)` extracts data from one page, `scrapegraph_markdownify()` converts a page to Markdown, `scrapegraph_crawl()` applies a prompt and JSON schema across a crawl, `scrapegraph_searchscraper()` searches the web before extracting, and `scrapegraph_scrape()` returns raw HTML.
 It requires `api_key` or `SGAI_API_KEY`.
 Keep at least one function enabled, or set `all: true`.
 The upstream `headers` option is not supported in `config.yaml`.
@@ -13212,12 +13212,12 @@ The upstream `headers` option is not supported in `config.yaml`.
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `SGAI_API_KEY`. |
-| `enable_smartscraper` | `boolean` | `true` | Enable `smartscraper()`. |
-| `enable_markdownify` | `boolean` | `false` | Enable `markdownify()`. |
-| `enable_crawl` | `boolean` | `false` | Enable `crawl()`. |
-| `enable_searchscraper` | `boolean` | `false` | Enable `searchscraper()`. |
-| `enable_scrape` | `boolean` | `false` | Enable `scrape()`. |
-| `render_heavy_js` | `boolean` | `false` | Render heavy JavaScript in `scrape()` only. |
+| `enable_smartscraper` | `boolean` | `true` | Enable `scrapegraph_smartscraper()`. |
+| `enable_markdownify` | `boolean` | `false` | Enable `scrapegraph_markdownify()`. |
+| `enable_crawl` | `boolean` | `false` | Enable `scrapegraph_crawl()`. |
+| `enable_searchscraper` | `boolean` | `false` | Enable `scrapegraph_searchscraper()`. |
+| `enable_scrape` | `boolean` | `false` | Enable `scrapegraph_scrape()`. |
+| `render_heavy_js` | `boolean` | `false` | Render heavy JavaScript in `scrapegraph_scrape()` only. |
 | `crawl_poll_interval` | `number` | `3` | Seconds between crawl status checks. |
 | `crawl_max_wait` | `number` | `180` | Maximum seconds to wait for a crawl. |
 | `all` | `boolean` | `false` | Enable every function. |
@@ -13277,18 +13277,18 @@ It requires both a username and password.
 
 ### [`agentql`]
 
-`agentql` exposes `scrape_website(url)`, which extracts generic page text, and `custom_scrape_website(url)`, which runs your `agentql_query` and returns the extracted values as JSON.
-Setting `agentql_query` registers `custom_scrape_website()` even when `enable_custom_scrape_website` is `false`.
+`agentql` exposes `agentql_scrape_website(url)`, which extracts generic page text, and `agentql_custom_scrape_website(url)`, which runs your `agentql_query` and returns the extracted values as JSON.
+Setting `agentql_query` registers `agentql_custom_scrape_website()` even when `enable_custom_scrape_website` is `false`.
 It opens only HTTP(S) URLs and launches a visible browser window, so it needs a GUI-capable runtime or virtual display.
 It requires `api_key` or `AGENTQL_API_KEY`; AgentQL SDK settings and CLI credential files do not override that key.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `AGENTQL_API_KEY`. |
-| `enable_scrape_website` | `boolean` | `true` | Enable `scrape_website()`. |
-| `enable_custom_scrape_website` | `boolean` | `false` | Enable `custom_scrape_website()`. |
+| `enable_scrape_website` | `boolean` | `true` | Enable `agentql_scrape_website()`. |
+| `enable_custom_scrape_website` | `boolean` | `false` | Enable `agentql_custom_scrape_website()`. |
 | `all` | `boolean` | `false` | Enable every function. |
-| `agentql_query` | `text` | `""` | AgentQL query for `custom_scrape_website()`. |
+| `agentql_query` | `text` | `""` | AgentQL query for `agentql_custom_scrape_website()`. |
 
 ```yaml
 agents:
@@ -13304,7 +13304,7 @@ agents:
 
 ### [`browserbase`]
 
-`browserbase` exposes `browserbase(action, ...)` (`navigate`, `get_page_content`, `close_session`) and `screenshot(path, full_page=True, connect_url=None)` against a hosted Browserbase session that it creates automatically.
+`browserbase` exposes `browserbase(action, ...)` (`navigate`, `get_page_content`, `close_session`) and `browserbase_screenshot(path, full_page=True, connect_url=None)` against a hosted Browserbase session that it creates automatically.
 It still needs local Playwright to connect to the remote browser.
 It requires an API key and project ID.
 Use it when you need remote navigation, screenshots, and page reads without the full action set of `browser`.
@@ -13315,7 +13315,7 @@ Use it when you need remote navigation, screenshots, and page reads without the 
 | `project_id` | `text` | `null` | Falls back to `BROWSERBASE_PROJECT_ID`. |
 | `base_url` | `url` | `null` | Browserbase API endpoint, not the site to visit; falls back to `BROWSERBASE_BASE_URL`. |
 | `enable_navigate_to` | `boolean` | `true` | Enable `action="navigate"`. |
-| `enable_screenshot` | `boolean` | `true` | Enable `screenshot()`. |
+| `enable_screenshot` | `boolean` | `true` | Enable `browserbase_screenshot()`. |
 | `enable_get_page_content` | `boolean` | `true` | Enable `action="get_page_content"`. |
 | `enable_close_session` | `boolean` | `true` | Enable `action="close_session"`. |
 | `all` | `boolean` | `false` | Enable every function. |
@@ -13448,13 +13448,13 @@ Use [Web Search](https://docs.mindroom.chat/tools/web-search/) for broader web d
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_search_arxiv` | `boolean` | `true` | Enable `search_arxiv_and_return_articles(query, num_articles=10)`. |
-| `enable_read_arxiv_papers` | `boolean` | `true` | Enable `read_arxiv_papers(id_list, pages_to_read=None)`. |
+| `enable_search_arxiv` | `boolean` | `true` | Enable `arxiv_search(query, num_articles=10)`. |
+| `enable_read_arxiv_papers` | `boolean` | `true` | Enable `arxiv_read_papers(id_list, pages_to_read=None)`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 | `download_dir` | `text` | unset | Directory that retains downloaded PDFs when set; when unset, PDFs use a writable temporary directory that is cleaned up after extraction. |
 
 Search returns JSON with each paper's title, ID, authors, categories, publish date, PDF URL, summary, and comment.
-`read_arxiv_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
+`arxiv_read_papers()` takes ArXiv IDs such as `2103.03404v1`, not a search query, and returns the same metadata plus the text of each page; `pages_to_read=None` reads every page.
 
 ```yaml
 agents:
@@ -13466,7 +13466,7 @@ agents:
 
 ## [`google_scholar`]
 
-`google_scholar` provides `search_google_scholar(query, max_results=None)`, which returns a JSON list with title, authors, year, venue, abstract, citation count, publication URL, and PDF URL when available.
+`google_scholar` provides `google_scholar_search(query, max_results=None)`, which returns a JSON list with title, authors, year, venue, abstract, citation count, publication URL, and PDF URL when available.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -13478,7 +13478,7 @@ Prefer `arxiv` or `pubmed` when they cover the topic, and use Google Scholar for
 
 ## [`wikipedia`]
 
-`wikipedia` provides `search_wikipedia(query)`, which returns the Wikipedia summary for the query as JSON.
+`wikipedia` provides `wikipedia_search(query)`, which returns the Wikipedia summary for the query as JSON.
 An ambiguous query returns a list of candidate page titles instead of a summary, so retry with one of them or a more specific query.
 
 | Option | Type | Default | Notes |
@@ -13495,7 +13495,7 @@ agents:
 
 ## [`pubmed`]
 
-`pubmed` provides `search_pubmed(query, max_results=None)` through NCBI E-utilities and returns a JSON list of formatted text results.
+`pubmed` provides `pubmed_search(query, max_results=None)` through NCBI E-utilities and returns a JSON list of formatted text results.
 By default each result has the title, publication year, and a summary truncated to about 200 characters.
 With `results_expanded: true`, each result has the full abstract plus the first author, journal, publication type, DOI, PubMed URL, full-text URL when available, keywords, and MeSH terms.
 
@@ -13504,7 +13504,7 @@ With `results_expanded: true`, each result has the full abstract plus the first 
 | `email` | `text` | `your_email@example.com` | Contact email sent to NCBI with each request; set a real address. |
 | `max_results` | `number` | unset | Result cap when the call does not pass `max_results`; 10 results when neither sets it. |
 | `results_expanded` | `boolean` | `false` | Return the full abstract and the expanded metadata described above. |
-| `enable_search_pubmed` | `boolean` | `true` | Enable `search_pubmed()`. |
+| `enable_search_pubmed` | `boolean` | `true` | Enable `pubmed_search()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `timeout` | `number` | `30` | Per-request HTTP timeout in seconds. |
 
@@ -13568,22 +13568,22 @@ Generated media is attached to the agent's reply.
 
 ## `openai`
 
-`openai` provides `transcribe_audio(audio_path)`, `generate_image(prompt)`, and `generate_speech(text_input)`.
-`transcribe_audio()` takes a local file path, not a URL.
+`openai` provides `openai_transcribe_audio(audio_path)`, `openai_generate_image(prompt)`, and `openai_generate_speech(text_input)`.
+`openai_transcribe_audio()` takes a local file path, not a URL.
 The path follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): with the default `workspace` it must be a regular file inside the agent workspace, and relative paths resolve from there.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `OPENAI_API_KEY`. |
-| `enable_transcription` | `boolean` | `true` | Enable `transcribe_audio()`. |
-| `enable_image_generation` | `boolean` | `true` | Enable `generate_image()`. |
-| `enable_speech_generation` | `boolean` | `true` | Enable `generate_speech()`. |
+| `enable_transcription` | `boolean` | `true` | Enable `openai_transcribe_audio()`. |
+| `enable_image_generation` | `boolean` | `true` | Enable `openai_generate_image()`. |
+| `enable_speech_generation` | `boolean` | `true` | Enable `openai_generate_speech()`. |
 | `all` | `boolean` | `false` | Enable all three functions. |
-| `transcription_model` | `text` | `gpt-transcribe` | Model for `transcribe_audio()`. |
-| `text_to_speech_voice` | `text` | `alloy` | Voice for `generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
-| `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
+| `transcription_model` | `text` | `gpt-transcribe` | Model for `openai_transcribe_audio()`. |
+| `text_to_speech_voice` | `text` | `alloy` | Voice for `openai_generate_speech()`; `gpt-realtime` models offer `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, and `cedar`. |
+| `text_to_speech_model` | `text` | `gpt-realtime-2.1-mini` | Model for `openai_generate_speech()`; `gpt-realtime` models use the OpenAI Realtime API. |
 | `text_to_speech_format` | `text` | `wav` | Speech format; `gpt-realtime` models return only `wav` or `pcm` (24 kHz mono), and speech-endpoint models also take `mp3`, `opus`, `aac`, or `flac`. |
-| `image_model` | `text` | `gpt-image-2.6-sunburst` | Model for `generate_image()`. |
+| `image_model` | `text` | `gpt-image-2.6-sunburst` | Model for `openai_generate_image()`. |
 | `image_quality` | `text` | `null` | Passed through to the image API. |
 | `image_size` | `text` | `null` | Passed through to the image API. |
 | `image_style` | `text` | `null` | Passed through to the image API. |
@@ -13598,25 +13598,25 @@ agents:
 ```
 
 The `dalle` toolkit no longer exists, and a config that lists it fails with `Unknown tool 'dalle'.`
-Replace the whole `dalle` block with the image-only `openai` block above, move supported overrides to the `image_*` options, and change instructions that call `create_image()` to `generate_image()`.
+Replace the whole `dalle` block with the image-only `openai` block above, move supported overrides to the `image_*` options, and change instructions that call `create_image()` to `openai_generate_image()`.
 The `desi_vocal` toolkit also no longer exists; use `openai` or `eleven_labs` for speech.
 
 ## `gemini`
 
-`gemini` provides `generate_image(prompt)` and `generate_video(prompt)`.
+`gemini` provides `gemini_generate_image(prompt)` and `gemini_generate_video(prompt)`.
 Generated images are square (1:1).
-`generate_video()` works only in Vertex AI mode and otherwise returns `Video generation requires Vertex AI mode.`
+`gemini_generate_video()` works only in Vertex AI mode and otherwise returns `Video generation requires Vertex AI mode.`
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` (or `1`) in the runtime environment or `.env` also enables it unless `vertexai` is set explicitly. Required for `gemini_generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
-| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |
-| `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `generate_video()` (Veo 3.1). |
-| `enable_generate_image` | `boolean` | `true` | Enable `generate_image()`. |
-| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
+| `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `gemini_generate_image()` (Nano Banana 2.1). |
+| `video_generation_model` | `text` | `veo-3.1-generate-001` | Model for `gemini_generate_video()` (Veo 3.1). |
+| `enable_generate_image` | `boolean` | `true` | Enable `gemini_generate_image()`. |
+| `enable_generate_video` | `boolean` | `true` | Enable `gemini_generate_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 One `gemini` toolkit uses a single Vertex location for both functions.
@@ -13644,89 +13644,89 @@ agents:
 
 ## `groq`
 
-`groq` provides `transcribe_audio(audio_source)`, `translate_audio(audio_source)`, and `generate_speech(text_input)`.
-`transcribe_audio()` and `translate_audio()` accept a public `http` or `https` URL or a local file path.
+`groq` provides `groq_transcribe_audio(audio_source)`, `groq_translate_audio(audio_source)`, and `groq_generate_speech(text_input)`.
+`groq_transcribe_audio()` and `groq_translate_audio()` accept a public `http` or `https` URL or a local file path.
 A local path follows the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): with the default `workspace` it must be a regular file inside the agent workspace, and relative paths resolve from there.
-`translate_audio()` translates the audio to English.
-`generate_speech()` always returns WAV audio.
+`groq_translate_audio()` translates the audio to English.
+`groq_generate_speech()` always returns WAV audio.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `GROQ_API_KEY`. |
-| `transcription_model` | `text` | `whisper-large-v3` | Model for `transcribe_audio()`. |
-| `translation_model` | `text` | `whisper-large-v3` | Model for `translate_audio()`. |
-| `tts_model` | `text` | `canopylabs/orpheus-v1-english` | Model for `generate_speech()`. |
-| `tts_voice` | `text` | `troy` | Voice for `generate_speech()`. |
-| `enable_transcribe_audio` | `boolean` | `true` | Enable `transcribe_audio()`. |
-| `enable_translate_audio` | `boolean` | `true` | Enable `translate_audio()`. |
-| `enable_generate_speech` | `boolean` | `true` | Enable `generate_speech()`. |
+| `transcription_model` | `text` | `whisper-large-v3` | Model for `groq_transcribe_audio()`. |
+| `translation_model` | `text` | `whisper-large-v3` | Model for `groq_translate_audio()`. |
+| `tts_model` | `text` | `canopylabs/orpheus-v1-english` | Model for `groq_generate_speech()`. |
+| `tts_voice` | `text` | `troy` | Voice for `groq_generate_speech()`. |
+| `enable_transcribe_audio` | `boolean` | `true` | Enable `groq_transcribe_audio()`. |
+| `enable_translate_audio` | `boolean` | `true` | Enable `groq_translate_audio()`. |
+| `enable_generate_speech` | `boolean` | `true` | Enable `groq_generate_speech()`. |
 | `all` | `boolean` | `false` | Enable all three functions. |
 
 ## `replicate`
 
-`replicate` provides `generate_media(prompt)`, which runs the configured Replicate model with only a `prompt` input.
+`replicate` provides `replicate_generate_media(prompt)`, which runs the configured Replicate model with only a `prompt` input.
 It works only with models that accept a single `prompt` field and return files whose URLs end in an image or video extension.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `REPLICATE_API_KEY`. `REPLICATE_API_TOKEN` is not read. |
 | `model` | `text` | `minimax/h3` | Replicate model reference. |
-| `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
-| `all` | `boolean` | `false` | Enable `generate_media()`. |
+| `enable_generate_media` | `boolean` | `true` | Enable `replicate_generate_media()`. |
+| `all` | `boolean` | `false` | Enable `replicate_generate_media()`. |
 
 ## `fal`
 
-`fal` provides `generate_media(prompt)` and, when enabled, `image_to_image(prompt, image_url)`.
-`generate_media()` runs the configured `model` with only a `prompt` input.
-`image_to_image()` edits the image at `image_url` with [Fal's FLUX.2 edit model](https://fal.ai/models/fal-ai/flux-2/edit/api), regardless of `model`.
+`fal` provides `fal_generate_media(prompt)` and, when enabled, `fal_image_to_image(prompt, image_url)`.
+`fal_generate_media()` runs the configured `model` with only a `prompt` input.
+`fal_image_to_image()` edits the image at `image_url` with [Fal's FLUX.2 edit model](https://fal.ai/models/fal-ai/flux-2/edit/api), regardless of `model`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `FAL_API_KEY` or `FAL_KEY`. |
-| `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `generate_media()`. |
-| `enable_generate_media` | `boolean` | `true` | Enable `generate_media()`. |
-| `enable_image_to_image` | `boolean` | `false` | Enable `image_to_image()`. |
+| `model` | `text` | `fal-ai/hunyuan-video-v1.5/text-to-video` | Model for `fal_generate_media()`. |
+| `enable_generate_media` | `boolean` | `true` | Enable `fal_generate_media()`. |
+| `enable_image_to_image` | `boolean` | `false` | Enable `fal_image_to_image()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ## `cartesia`
 
-`cartesia` provides `list_voices()`, `localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `text_to_speech(transcript, voice_id=None)`.
-`localize_voice()` creates a new voice in another language from an existing one.
-Both `localize_voice()` and `text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
-`text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
+`cartesia` provides `cartesia_list_voices()`, `cartesia_localize_voice(name, description, language, original_speaker_gender, accent, voice_id=None)`, and `cartesia_text_to_speech(transcript, voice_id=None)`.
+`cartesia_localize_voice()` creates a new voice in another language from an existing one.
+Both `cartesia_localize_voice()` and `cartesia_text_to_speech()` use `default_voice_id` unless the call passes `voice_id`.
+`cartesia_text_to_speech()` always returns MP3 audio at 44.1 kHz and 128 kbps.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `CARTESIA_API_KEY`. |
-| `model_id` | `text` | `sonic-3.6` | Model for `text_to_speech()`. |
+| `model_id` | `text` | `sonic-3.6` | Model for `cartesia_text_to_speech()`. |
 | `default_voice_id` | `text` | `78ab82d5-25be-4f7d-82b3-7ad64e5b85b2` | Voice used when a call passes no `voice_id`. |
-| `enable_text_to_speech` | `boolean` | `true` | Enable `text_to_speech()`. |
-| `enable_list_voices` | `boolean` | `true` | Enable `list_voices()`. |
-| `enable_localize_voice` | `boolean` | `false` | Enable `localize_voice()`. |
+| `enable_text_to_speech` | `boolean` | `true` | Enable `cartesia_text_to_speech()`. |
+| `enable_list_voices` | `boolean` | `true` | Enable `cartesia_list_voices()`. |
+| `enable_localize_voice` | `boolean` | `false` | Enable `cartesia_localize_voice()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ## `eleven_labs`
 
-`eleven_labs` provides `get_voices()`, `generate_sound_effect(prompt, duration_seconds=None)`, and `text_to_speech(prompt)`.
+`eleven_labs` provides `eleven_labs_get_voices()`, `eleven_labs_generate_sound_effect(prompt, duration_seconds=None)`, and `eleven_labs_text_to_speech(prompt)`.
 The default [Eleven v4 model](https://elevenlabs.io/docs/overview/models) accepts up to 10,000 characters per request.
-`text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `generate_sound_effect()` returns MP3 (`audio/mpeg`).
+`eleven_labs_text_to_speech()` labels audio attachments to match `output_format` (`audio/mpeg` for MP3, `audio/pcm` for PCM, and `audio/basic` for µ-law); `eleven_labs_generate_sound_effect()` returns MP3 (`audio/mpeg`).
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Falls back to `ELEVEN_LABS_API_KEY`. |
-| `voice_id` | `text` | `JBFqnCBsd6RMkjVDRZzb` | Voice for `text_to_speech()`. |
-| `model_id` | `text` | `eleven_v4` | Model for `text_to_speech()`. |
+| `voice_id` | `text` | `JBFqnCBsd6RMkjVDRZzb` | Voice for `eleven_labs_text_to_speech()`. |
+| `model_id` | `text` | `eleven_v4` | Model for `eleven_labs_text_to_speech()`. |
 | `output_format` | `text` | `mp3_44100_64` | Codec and bitrate preset. |
 | `target_directory` | `text` | `null` | Also save generated audio files to this directory. |
-| `enable_get_voices` | `boolean` | `true` | Enable `get_voices()`. |
-| `enable_generate_sound_effect` | `boolean` | `true` | Enable `generate_sound_effect()`. |
-| `enable_text_to_speech` | `boolean` | `true` | Enable `text_to_speech()`. |
+| `enable_get_voices` | `boolean` | `true` | Enable `eleven_labs_get_voices()`. |
+| `enable_generate_sound_effect` | `boolean` | `true` | Enable `eleven_labs_generate_sound_effect()`. |
+| `enable_text_to_speech` | `boolean` | `true` | Enable `eleven_labs_text_to_speech()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ## `lumalabs`
 
-`lumalabs` provides `generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
-`image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
+`lumalabs` provides `lumalabs_generate_video(prompt, loop=False, aspect_ratio="16:9", keyframes=None)` and `lumalabs_image_to_video(prompt, start_image_url, end_image_url=None, loop=False, aspect_ratio="16:9")`.
+`lumalabs_image_to_video()` takes remote image URLs (`start_image_url` and optional `end_image_url`); local file paths are not accepted.
 Both functions wait for the video until it finishes or `max_wait_time` passes.
 Keep `wait_for_completion: true`, because `false` returns `Async generation unsupported` without a job handle.
 
@@ -13737,13 +13737,13 @@ Keep `wait_for_completion: true`, because `false` returns `Async generation unsu
 | `wait_for_completion` | `boolean` | `true` | Wait for the finished video. |
 | `poll_interval` | `number` | `3` | Seconds between status checks. |
 | `max_wait_time` | `number` | `300` | Seconds to wait before timing out. |
-| `enable_generate_video` | `boolean` | `true` | Enable `generate_video()`. |
-| `enable_image_to_video` | `boolean` | `true` | Enable `image_to_video()`. |
+| `enable_generate_video` | `boolean` | `true` | Enable `lumalabs_generate_video()`. |
+| `enable_image_to_video` | `boolean` | `true` | Enable `lumalabs_image_to_video()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ## `modelslabs`
 
-`modelslabs` provides `generate_media(prompt)`, and `file_type` decides what it generates:
+`modelslabs` provides `modelslabs_generate_media(prompt)`, and `file_type` decides what it generates:
 
 | `file_type` | Output | Default model |
 | --- | --- | --- |
@@ -13811,11 +13811,11 @@ Missing Python dependencies install on first use (see [Automatic Dependency Inst
 
 ### What It Does
 
-- `extract_audio(video_path, output_path)` saves a video's audio track to `output_path`.
-- `create_srt(transcription, output_path)` writes the given text to disk unchanged, so the text must already be SRT-formatted.
-- `embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)` renders an MP4 with word-by-word highlighted captions from an SRT file.
+- `moviepy_video_tools_extract_audio(video_path, output_path)` saves a video's audio track to `output_path`.
+- `moviepy_video_tools_create_srt(transcription, output_path)` writes the given text to disk unchanged, so the text must already be SRT-formatted.
+- `moviepy_video_tools_embed_captions(video_path, srt_path, output_path=None, font_size=24, font_color="white", stroke_color="black", stroke_width=1)` renders an MP4 with word-by-word highlighted captions from an SRT file.
 
-In `embed_captions()`, `font_size` is the caption text size in pixels and `font_color` is the base text color, while the word being spoken is always yellow.
+In `moviepy_video_tools_embed_captions()`, `font_size` is the caption text size in pixels and `font_color` is the base text color, while the word being spoken is always yellow.
 `stroke_color` and `stroke_width` set the text outline, and `stroke_width=0` removes it.
 Captions sit at the bottom of the video, and a word or caption line too large to fit at the requested size returns an error.
 Without `output_path`, the output is `<video>_captioned.mp4` next to the input, where `<video>` is the input file name without its extension.
@@ -13833,9 +13833,9 @@ Real audio and video processing needs FFmpeg in the runtime that executes the to
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enable_process_video` | `boolean` | `true` | Enable `extract_audio()`. |
-| `enable_generate_captions` | `boolean` | `true` | Enable `create_srt()`. |
-| `enable_embed_captions` | `boolean` | `true` | Enable `embed_captions()`. |
+| `enable_process_video` | `boolean` | `true` | Enable `moviepy_video_tools_extract_audio()`. |
+| `enable_generate_captions` | `boolean` | `true` | Enable `moviepy_video_tools_create_srt()`. |
+| `enable_embed_captions` | `boolean` | `true` | Enable `moviepy_video_tools_embed_captions()`. |
 | `all` | `boolean` | `false` | Enable all three functions regardless of the `enable_*` options. |
 
 ### Example
@@ -13849,13 +13849,13 @@ agents:
 ```
 
 ```python
-create_srt(transcription_srt, "clips/demo.srt")
-embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
+moviepy_video_tools_create_srt(transcription_srt, "clips/demo.srt")
+moviepy_video_tools_embed_captions("clips/demo.mp4", "clips/demo.srt", output_path="clips/demo_captioned.mp4")
 ```
 
 ## [`giphy`]
 
-`giphy` provides `search_gifs(query)`, which returns Giphy-hosted GIF URLs and attaches the GIFs as images to the tool result.
+`giphy` provides `giphy_search_gifs(query)`, which returns Giphy-hosted GIF URLs and attaches the GIFs as images to the tool result.
 The number of GIFs per search is set by `limit`, not per call.
 A Giphy API key is needed for searches to succeed, even though the field is marked optional.
 
@@ -13863,7 +13863,7 @@ A Giphy API key is needed for searches to succeed, even though the field is mark
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Giphy API key; falls back to `GIPHY_API_KEY`. |
 | `limit` | `number` | `1` | GIFs returned per search. |
-| `enable_search_gifs` | `boolean` | `true` | Enable `search_gifs()`. |
+| `enable_search_gifs` | `boolean` | `true` | Enable `giphy_search_gifs()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml
@@ -14912,7 +14912,7 @@ Send to room IDs, not room titles.
 
 ## [`resend`]
 
-`resend` sends transactional email through Resend with `send_email()`, using the message body as HTML.
+`resend` sends transactional email through Resend with `resend_send_email()`, using the message body as HTML.
 Every message comes from `from_email`, which usually must be a sender verified in Resend.
 Use `gmail` instead when the agent needs to read or reply within a mailbox.
 
@@ -14920,7 +14920,7 @@ Use `gmail` instead when the agent needs to read or reply within a mailbox.
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Resend API key, or `RESEND_API_KEY`; required. |
 | `from_email` | `text` | `null` | Sender address for every message. |
-| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
+| `enable_send_email` | `boolean` | `true` | Enable `resend_send_email()`. |
 | `all` | `boolean` | `false` | Enable every function. |
 
 ## [`email`]
@@ -15325,7 +15325,7 @@ agents:
 
 ## [`zendesk`]
 
-`zendesk` searches Help Center articles with `search_zendesk()` and returns their body text without titles, URLs, or HTML.
+`zendesk` searches Help Center articles with `zendesk_search()` and returns their body text without titles, URLs, or HTML.
 It cannot read or update tickets.
 
 | Option | Type | Required | Default | Notes |
@@ -15333,7 +15333,7 @@ It cannot read or update tickets.
 | `username` | `text` | `no` | `null` | Zendesk username; required unless `ZENDESK_USERNAME` is set. |
 | `password` | `password` | `no` | `null` | Zendesk password; required unless `ZENDESK_PASSWORD` is set. |
 | `company_name` | `text` | `no` | `null` | Zendesk subdomain, as in `<company_name>.zendesk.com`, not the display name; required unless `ZENDESK_COMPANY_NAME` is set. |
-| `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `search_zendesk()`. |
+| `enable_search_zendesk` | `boolean` | `no` | `true` | Enable `zendesk_search()`. |
 | `all` | `boolean` | `no` | `false` | Enable every function regardless of the flag above. |
 | `timeout` | `number` | `no` | `30` | Per-request HTTP timeout in seconds. |
 
@@ -17343,15 +17343,15 @@ Toolkits with an `all` option enable every function when `all: true`, regardless
 
 ## [`aws_lambda`]
 
-`aws_lambda` provides `list_functions()` and `invoke_function(function_name, payload="{}")` in one AWS region.
-`invoke_function()` sends `payload` as a JSON string and returns the Lambda status code and the decoded response payload.
-`list_functions()` returns only the first page of results that AWS sends, so it is meant for simple invocation workflows rather than administering large accounts.
+`aws_lambda` provides `aws_lambda_list_functions()` and `aws_lambda_invoke_function(function_name, payload="{}")` in one AWS region.
+`aws_lambda_invoke_function()` sends `payload` as a JSON string and returns the Lambda status code and the decoded response payload.
+`aws_lambda_list_functions()` returns only the first page of results that AWS sends, so it is meant for simple invocation workflows rather than administering large accounts.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `region_name` | `text` | `us-east-1` | AWS region. |
-| `enable_list_functions` | `boolean` | `true` | Enable `list_functions()`. |
-| `enable_invoke_function` | `boolean` | `true` | Enable `invoke_function()`. |
+| `enable_list_functions` | `boolean` | `true` | Enable `aws_lambda_list_functions()`. |
+| `enable_invoke_function` | `boolean` | `true` | Enable `aws_lambda_invoke_function()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
@@ -17364,7 +17364,7 @@ agents:
 
 ## [`aws_ses`]
 
-`aws_ses` provides `send_email(subject, body, receiver_email)`, which sends a plain-text email from `sender_name <sender_email>` to one recipient.
+`aws_ses` provides `aws_ses_send_email(subject, body, receiver_email)`, which sends a plain-text email from `sender_name <sender_email>` to one recipient.
 Empty subjects and bodies are refused.
 It does not support HTML, templates, or attachments.
 Verify the sender identity in SES before use, and set both `sender_email` and `sender_name`, because an unset name appears literally as `None` in the sender.
@@ -17374,8 +17374,8 @@ Verify the sender identity in SES before use, and set both `sender_email` and `s
 | `sender_email` | `text` | `null` | Sender address; required in practice. |
 | `sender_name` | `text` | `null` | Sender display name. |
 | `region_name` | `text` | `us-east-1` | AWS region of the SES identity. |
-| `enable_send_email` | `boolean` | `true` | Enable `send_email()`. |
-| `all` | `boolean` | `false` | Enable `send_email()`. |
+| `enable_send_email` | `boolean` | `true` | Enable `aws_ses_send_email()`. |
+| `all` | `boolean` | `false` | Enable `aws_ses_send_email()`. |
 
 ```yaml
 agents:
@@ -17389,18 +17389,18 @@ agents:
 
 ## [`airflow`]
 
-`airflow` provides `read_dag_file(dag_file)` and `save_dag_file(contents, dag_file)` for editing DAG source files.
+`airflow` provides `airflow_read_dag_file(dag_file)` and `airflow_save_dag_file(contents, dag_file)` for editing DAG source files.
 It does not talk to the Airflow scheduler or REST API, so it cannot trigger runs or inspect task state.
 `dag_file` paths are relative to `dags_dir`, which defaults to the agent workspace and resolves relative to it.
-`save_dag_file()` creates missing parent directories, and `read_dag_file()` refuses files larger than 64 MiB.
+`airflow_save_dag_file()` creates missing parent directories, and `airflow_read_dag_file()` refuses files larger than 64 MiB.
 DAG paths follow the agent's [`file_access`](https://docs.mindroom.chat/architecture/security-posture/#file-access): with the default `workspace`, files outside the agent workspace are refused, so a DAG folder elsewhere needs `file_access: unrestricted`.
 Point `dags_dir` at the folder your Airflow deployment actually watches.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `dags_dir` | `text` | `null` | DAG directory; relative values resolve from the agent workspace. |
-| `enable_save_dag_file` | `boolean` | `true` | Enable `save_dag_file()`. |
-| `enable_read_dag_file` | `boolean` | `true` | Enable `read_dag_file()`. |
+| `enable_save_dag_file` | `boolean` | `true` | Enable `airflow_save_dag_file()`. |
+| `enable_read_dag_file` | `boolean` | `true` | Enable `airflow_read_dag_file()`. |
 | `all` | `boolean` | `false` | Enable both functions. |
 
 ```yaml
@@ -17519,7 +17519,7 @@ agents:
 
 ## [`custom_api`]
 
-`custom_api` provides `make_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)` for public HTTP(S) APIs that have no dedicated MindRoom tool.
+`custom_api` provides `custom_api_request(endpoint, method="GET", params=None, data=None, headers=None, json_data=None)` for public HTTP(S) APIs that have no dedicated MindRoom tool.
 `method` accepts `GET`, `POST`, `PUT`, `DELETE`, or `PATCH`.
 With `base_url` set, `endpoint` is a path joined to it; without `base_url`, `endpoint` must be a full URL.
 Localhost, loopback, private-network, cloud metadata, and non-HTTP(S) destinations are refused, including through redirects, and there is no setting to allow them.
@@ -17547,8 +17547,8 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
 | `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
-| `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
-| `all` | `boolean` | `false` | Enable `make_request()`. |
+| `enable_make_request` | `boolean` | `true` | Enable `custom_api_request()`. |
+| `all` | `boolean` | `false` | Enable `custom_api_request()`. |
 
 ```yaml
 agents:
@@ -22793,7 +22793,7 @@ def check():
 Users normally describe what they want in plain language in chat and let the agent author the `check()` function and call `triggers_write(action="watch_script", ...)`:
 
 - **Email watching + cheap triage (`gmail`):** *"Whenever I get an unread email from my accountant or about an invoice, summarize it and draft a reply."* The check polls `tool("gmail", "gmail_read", action="search_emails", query=...)`, tracks `seen_ids` in `state` so idle ticks cost zero LLM tokens, and optionally attaches `triage_instructions` + a cheap `triage_model` to filter out noise before waking the main agent. Write tools configured to require approval under `tool_approval` (such as `gmail_send`) stay blocked inside the background tick, while the woken turn can still ask you to approve sending a reply.
-- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
+- **Web page, price, or availability monitoring (`website`):** *"Check this booking or product page every 5 minutes and wake me only when it changes."* Hash or extract the target text from `tool("website", "website_read_url", url=...)`, compare against `state.get("last_hash")`, return `None` when unchanged, and pair with `once=True` or `cooldown_seconds`.
 - **Smart home threshold alerts (`homeassistant`):** *"Alert me if the garage door stays open for more than 15 minutes."* Read `tool("homeassistant", "homeassistant_read", action="get_state", entity_id="cover.garage_door")`, compare Home Assistant's `last_changed` timestamp against the current UTC time, and track `alerted_for` in `state` so each open event alerts once:
 
   ```python
@@ -22814,7 +22814,7 @@ Users normally describe what they want in plain language in chat and let the age
       return {"title": "Garage door open >15m", "data": {"minutes_open": round(minutes_open, 1)}}
   ```
 
-- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
+- **Ops, database, GitHub, calendar, and finance checks (`postgres`, `github`, `google_calendar`, `yfinance`):** Poll read-only SQL queue depth (`tool("postgres", "postgres_run_query", ...)`), GitHub issue searches (`tool("github", "github_read_issues_prs", action="search_issues_and_prs", ...)`), upcoming calendar changes (`tool("google_calendar", "google_calendar_read", ...)`), or price thresholds (`tool("yfinance", "yfinance_get", action="stock_price", ...)`), returning `None` until a threshold or diff triggers.
 - **Cross-agent wakeups & thread workflows:** Any `watch_script` runs with the authoring agent's credentials, but can wake a different agent or team (`target_agent`), post into a fresh thread (`new_thread=True`, optional `thread_key`), or reopen a resolved thread (`reopen_on_fire=True`).
 
 #### `check()` authoring contract
@@ -25251,7 +25251,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds | `120` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `trafilatura_crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_read(action="download_attachment")` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
@@ -25289,7 +25289,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `trafilatura_crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
 

@@ -1782,6 +1782,7 @@ class Config(BaseModel):
             raise ToolConfigOverrideError(action_arg_error)
 
         # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
+        toolkit_checks: list[tuple[str, dict[str, str], bool | None]] = []
         for toolkit_name in sorted(enabled_toolkits | {"skills"}):
             if (
                 split_only_error := retired_split_approval_only_error(
@@ -1815,18 +1816,19 @@ class Config(BaseModel):
             if not builtin_renames and not declared_renames and not has_split:
                 continue
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
-            if (
-                consolidated_error := retired_consolidated_approval_error(
-                    strict_toolkit,
-                    self.tool_approval.rules,
-                    self.tool_approval.default,
-                    self.tool_approval.timeout_days,
-                    renames=renames,
-                    reject_wildcard_scripts=True if declared_renames and not prefixed_builtin else None,
-                    agent_names=self.agents.keys(),
-                )
-            ) is not None:
-                raise ToolConfigOverrideError(consolidated_error)
+            toolkit_checks.append(
+                (strict_toolkit, renames, True if declared_renames and not prefixed_builtin else None),
+            )
+        if (
+            consolidated_error := retired_consolidated_approval_error(
+                toolkit_checks,
+                self.tool_approval.rules,
+                self.tool_approval.default,
+                self.tool_approval.timeout_days,
+                agent_names=self.agents.keys(),
+            )
+        ) is not None:
+            raise ToolConfigOverrideError(consolidated_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

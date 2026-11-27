@@ -118,7 +118,7 @@ agents:
     tools:
       - arxiv:
           include_tools:
-            - search_arxiv_and_return_articles
+            - arxiv_search
 ```
 
 A name the toolkit does not provide fails when the tool loads with `Included tool(s) not present in the toolkit: <names>` or `Excluded tool(s) not present in the toolkit: <names>`.

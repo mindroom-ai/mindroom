@@ -47,12 +47,12 @@ class _AirflowTools(Toolkit):
         enable_all = resolve_toggle(all, default=False)
         tools: list[Any] = []
         if resolve_toggle(enable_save_dag_file, default=True, enable_all=enable_all):
-            tools.append(self.save_dag_file)
+            tools.append(self.airflow_save_dag_file)
         if resolve_toggle(enable_read_dag_file, default=True, enable_all=enable_all):
-            tools.append(self.read_dag_file)
+            tools.append(self.airflow_read_dag_file)
         super().__init__(name="airflow", tools=tools)
 
-    def save_dag_file(self, contents: str, dag_file: str) -> str:
+    def airflow_save_dag_file(self, contents: str, dag_file: str) -> str:
         """Write Python DAG `contents` to `dag_file` under the DAG directory and return its path."""
         try:
             file_path = write_agent_file(
@@ -66,7 +66,7 @@ class _AirflowTools(Toolkit):
             return f"Error saving to file: {exc}"
         return str(file_path)
 
-    def read_dag_file(self, dag_file: str) -> str:
+    def airflow_read_dag_file(self, dag_file: str) -> str:
         """Read and return the contents of `dag_file` under the DAG directory."""
         try:
             authorized = resolve_agent_file(
@@ -106,7 +106,7 @@ class _AirflowTools(Toolkit):
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#airflow",
-    function_names=("read_dag_file", "save_dag_file"),
+    function_names=("airflow_read_dag_file", "airflow_save_dag_file"),
 )
 def airflow_tools() -> type[Toolkit]:
     """Return Airflow tools whose DAG files follow the agent's file_access."""

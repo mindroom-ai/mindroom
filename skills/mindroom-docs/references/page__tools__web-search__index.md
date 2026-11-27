@@ -106,19 +106,19 @@ agents:
 ## [`tavily`]
 
 `tavily` searches current information through the Tavily API and can extract page content from URLs.
-It provides one search function, `web_search_using_tavily(query, max_results=5)` by default or `web_search_with_tavily(query)` when `enable_search_context: true`, plus `extract_url_content(urls)` when `enable_extract: true`.
-`web_search_using_tavily()` returns results and, with `include_answer`, a synthesized answer, as Markdown or JSON according to `format`.
-`web_search_with_tavily()` returns one compact context block instead of a result list.
-`extract_url_content()` accepts one URL or a comma-separated list and returns page content as Markdown or plain text according to `extract_format`.
+It provides one search function, `tavily_search(query, max_results=5)` by default or `tavily_search_context(query)` when `enable_search_context: true`, plus `tavily_extract(urls)` when `enable_extract: true`.
+`tavily_search()` returns results and, with `include_answer`, a synthesized answer, as Markdown or JSON according to `format`.
+`tavily_search_context()` returns one compact context block instead of a result list.
+`tavily_extract()` accepts one URL or a comma-separated list and returns page content as Markdown or plain text according to `extract_format`.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Tavily API key; required unless `TAVILY_API_KEY` is set. |
 | `api_base_url` | `url` | `null` | API base URL override. |
 | `enable_search` | `boolean` | `true` | Enable the search function. |
-| `enable_search_context` | `boolean` | `false` | Provide `web_search_with_tavily()` instead of `web_search_using_tavily()`. |
-| `enable_extract` | `boolean` | `false` | Enable `extract_url_content()`. |
-| `all` | `boolean` | `false` | Enable search and `extract_url_content()`; `enable_search_context` still selects the search function. |
+| `enable_search_context` | `boolean` | `false` | Provide `tavily_search_context()` instead of `tavily_search()`. |
+| `enable_extract` | `boolean` | `false` | Enable `tavily_extract()`. |
+| `all` | `boolean` | `false` | Enable search and `tavily_extract()`; `enable_search_context` still selects the search function. |
 | `max_tokens` | `number` | `6000` | Output budget for search results and context mode. |
 | `include_answer` | `boolean` | `true` | Include Tavily's answer in search output. |
 | `search_depth` | `text` | `advanced` | `basic`, `advanced`, `fast`, or `ultra-fast`. |
@@ -139,7 +139,7 @@ It provides one search function, `web_search_using_tavily(query, max_results=5)`
 | `include_images` | `boolean` | `false` | Requests images from Tavily during extraction, but the returned content does not include them. |
 | `include_favicon` | `boolean` | `false` | Requests favicons from Tavily during extraction, but the returned content does not include them. |
 
-The filters from `topic` through `chunks_per_source` apply only to `web_search_using_tavily()`, not to context mode.
+The filters from `topic` through `chunks_per_source` apply only to `tavily_search()`, not to context mode.
 
 ```yaml
 agents:
@@ -154,7 +154,7 @@ agents:
 ## [`exa`]
 
 `exa` is the research-oriented search toolkit.
-It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=None)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `research(instructions, output_schema=None)`.
+It provides `exa_lookup(action, query=None, url=None, urls=None, num_results=None, category=None, text=None)` (`search`, `contents`, `similar`, `answer`) and, only when `enable_research: true`, the long-running `exa_research(instructions, output_schema=None)`.
 Search results include title, author, published date, URL, and page text truncated to `text_length_limit`.
 
 | Option | Type | Default | Notes |
@@ -164,7 +164,7 @@ Search results include title, author, published date, URL, and page text truncat
 | `enable_get_contents` | `boolean` | `true` | Enable `exa_lookup(action="contents")`. |
 | `enable_find_similar` | `boolean` | `true` | Enable `exa_lookup(action="similar")`. |
 | `enable_answer` | `boolean` | `true` | Enable `exa_lookup(action="answer")`. |
-| `enable_research` | `boolean` | `false` | Enable `research()`. |
+| `enable_research` | `boolean` | `false` | Enable `exa_research()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 | `text` | `boolean` | `true` | Include page text in results. |
 | `text_length_limit` | `number` | `1000` | Maximum text length per result. |
@@ -185,7 +185,7 @@ Search results include title, author, published date, URL, and page text truncat
 | `end_crawl_date` | `text` | `null` | Deprecated; Exa ignores it. |
 | `livecrawl` | `text` | `null` | Live-crawl mode such as `always`, `fallback`, or `never`, deprecated by Exa. Unset sends none; a saved value, `always` included, now takes effect. |
 | `model` | `text` | `null` | Model for `exa_lookup(action="answer")` only: `exa` or `exa-pro`. |
-| `research_model` | `text` | `exa-research` | Model for `research()` only: `exa-research` or `exa-research-pro`. |
+| `research_model` | `text` | `exa-research` | Model for `exa_research()` only: `exa-research` or `exa-research-pro`. |
 | `timeout` | `number` | `30` | API timeout in seconds. |
 | `show_results` | `boolean` | `false` | Log raw parsed results. |
 
@@ -206,15 +206,15 @@ agents:
 
 ## [`serpapi`]
 
-`serpapi` provides `search_google(query, num_results=10)` and, when enabled, `search_youtube(query)` through SerpApi.
-`search_google()` returns organic results plus recipes, shopping, knowledge graph, and related questions.
-`search_youtube()` returns video, movie, and channel results.
+`serpapi` provides `serpapi_search_google(query, num_results=10)` and, when enabled, `serpapi_search_youtube(query)` through SerpApi.
+`serpapi_search_google()` returns organic results plus recipes, shopping, knowledge graph, and related questions.
+`serpapi_search_youtube()` returns video, movie, and channel results.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | SerpApi key; required unless `SERP_API_KEY` is set. |
-| `enable_search_google` | `boolean` | `true` | Enable `search_google()`. |
-| `enable_search_youtube` | `boolean` | `false` | Enable `search_youtube()`. |
+| `enable_search_google` | `boolean` | `true` | Enable `serpapi_search_google()`. |
+| `enable_search_youtube` | `boolean` | `false` | Enable `serpapi_search_youtube()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml
@@ -282,7 +282,7 @@ agents:
 
 ## [`linkup`]
 
-`linkup` provides `web_search_with_linkup(query, depth=None, output_type=None)`, which returns Linkup's response as a result list or a sourced answer.
+`linkup` provides `linkup_search(query, depth=None, output_type=None)`, which returns Linkup's response as a result list or a sourced answer.
 The configured `depth` and `output_type` apply when a call does not pass its own.
 
 | Option | Type | Default | Notes |
@@ -290,7 +290,7 @@ The configured `depth` and `output_type` apply when a call does not pass its own
 | `api_key` | `password` | `null` | Linkup API key; required unless `LINKUP_API_KEY` is set. |
 | `depth` | `text` | `standard` | `standard` or `deep`. |
 | `output_type` | `text` | `searchResults` | `searchResults` or `sourcedAnswer`. |
-| `enable_web_search_with_linkup` | `boolean` | `true` | Enable `web_search_with_linkup()`. |
+| `enable_web_search_with_linkup` | `boolean` | `true` | Enable `linkup_search()`. |
 | `all` | `boolean` | `false` | Enable all functions. |
 
 ```yaml

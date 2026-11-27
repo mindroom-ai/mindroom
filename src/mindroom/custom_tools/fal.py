@@ -44,9 +44,9 @@ class FalTools(Toolkit):
 
         tools: list[Callable[..., Any]] = []
         if all or enable_generate_media:
-            tools.append(self.generate_media)
+            tools.append(self.fal_generate_media)
         if all or enable_image_to_image:
-            tools.append(self.image_to_image)
+            tools.append(self.fal_image_to_image)
         super().__init__(name="fal", tools=tools)
 
     def on_queue_update(self, update: object) -> None:
@@ -58,7 +58,7 @@ class FalTools(Toolkit):
                     logger.info("fal_queue_log", message=message)
                     self.seen_logs.add(message)
 
-    def generate_media(self, prompt: str) -> ToolValue:
+    def fal_generate_media(self, prompt: str) -> ToolValue:
         """Generate an image or video with the configured Fal model.
 
         Args:
@@ -80,7 +80,7 @@ class FalTools(Toolkit):
             logger.exception("Failed to run Fal model", model=self.model)
             return ToolValue(content=f"Error: {exc}")
 
-    def image_to_image(self, prompt: str, image_url: str | None = None) -> ToolValue:
+    def fal_image_to_image(self, prompt: str, image_url: str | None = None) -> ToolValue:
         """Edit an input image according to a text prompt using Fal Flux 2.
 
         Args:

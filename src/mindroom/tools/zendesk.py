@@ -54,10 +54,10 @@ class _ZendeskTools(Toolkit):
         enable_all = resolve_toggle(all, default=False)
         tools: list[Any] = []
         if resolve_toggle(enable_search_zendesk, default=True, enable_all=enable_all):
-            tools.append(self.search_zendesk)
+            tools.append(self.zendesk_search)
         super().__init__(name="zendesk", tools=tools)
 
-    def search_zendesk(self, search_string: str) -> str:
+    def zendesk_search(self, search_string: str) -> str:
         """Search Zendesk Help Center articles matching `search_string`."""
         if not (self.username and self.password and self.company_name):
             return error_json("Zendesk username, password, and company_name are required.")
@@ -125,7 +125,7 @@ class _ZendeskTools(Toolkit):
     ],
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/project-management/#zendesk",
-    function_names=("search_zendesk",),
+    function_names=("zendesk_search",),
 )
 def zendesk_tools() -> type[Toolkit]:
     """Return Zendesk tools for searching help center articles."""

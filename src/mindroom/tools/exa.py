@@ -133,7 +133,7 @@ class _ExaTools(Toolkit):
         if self._lookup_actions:
             tools.append(self.exa_lookup)
         if all or enable_research:
-            tools.append(self.research)
+            tools.append(self.exa_research)
 
         super().__init__(name="exa", tools=tools)
 
@@ -352,7 +352,7 @@ class _ExaTools(Toolkit):
             "citations": citations,
         }
 
-    def research(self, instructions: str, output_schema: dict[str, Any] | None = None) -> str:
+    def exa_research(self, instructions: str, output_schema: dict[str, Any] | None = None) -> str:
         """Perform deep research on `instructions` with optional `output_schema` JSON schema and return JSON data and citations."""
         try:
             logger.debug("exa_research_create_run", instructions=instructions, has_schema=output_schema is not None)
@@ -536,7 +536,7 @@ class _ExaTools(Toolkit):
     ],
     dependencies=["exa_py"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#exa",
-    function_names=("exa_lookup", "research"),
+    function_names=("exa_lookup", "exa_research"),
     action_scoped_grants=("exa_lookup",),
 )
 def exa_tools() -> type[Toolkit]:

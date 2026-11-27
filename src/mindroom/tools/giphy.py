@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#giphy",
-    function_names=("search_gifs",),
+    function_names=("giphy_search_gifs",),
 )
 def giphy_tools() -> type[GiphyTools]:
     """Return Giphy tools for GIF search and integration."""

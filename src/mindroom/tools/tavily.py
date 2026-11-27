@@ -87,15 +87,15 @@ class _TavilyTools(Toolkit):
         tools: list[Callable[..., Any]] = []
         if enable_search or all:
             if enable_search_context:
-                tools.append(self.web_search_with_tavily)
+                tools.append(self.tavily_search_context)
             else:
-                tools.append(self.web_search_using_tavily)
+                tools.append(self.tavily_search)
         if enable_extract or all:
-            tools.append(self.extract_url_content)
+            tools.append(self.tavily_extract)
 
         super().__init__(name="tavily_tools", tools=tools)
 
-    def web_search_using_tavily(self, query: str, max_results: int = 5) -> str:
+    def tavily_search(self, query: str, max_results: int = 5) -> str:
         """Use this function to search the web for a given query.
 
         This function uses the Tavily API to provide realtime online information about the query.
@@ -159,7 +159,7 @@ class _TavilyTools(Toolkit):
             markdown += f"### [{result['title']}]({result['url']})\n{result['content']}\n\n"
         return markdown
 
-    def web_search_with_tavily(self, query: str) -> str:
+    def tavily_search_context(self, query: str) -> str:
         """Use this function to search the web for a given query.
 
         This function uses the Tavily API to provide realtime online information about the query.
@@ -173,7 +173,7 @@ class _TavilyTools(Toolkit):
         """
         return self.client.get_search_context(query=query, search_depth=self.search_depth, max_tokens=self.max_tokens)
 
-    def extract_url_content(self, urls: str) -> str:
+    def tavily_extract(self, urls: str) -> str:
         """Extract content from one or more URLs using Tavily's Extract API.
 
         This function retrieves the main content from web pages in markdown or text format.
@@ -406,7 +406,7 @@ class _TavilyTools(Toolkit):
     ],
     dependencies=["tavily-python"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#tavily",
-    function_names=("extract_url_content", "web_search_using_tavily", "web_search_with_tavily"),
+    function_names=("tavily_extract", "tavily_search", "tavily_search_context"),
 )
 def tavily_tools() -> type[Toolkit]:
     """Return Tavily tools for real-time web search."""

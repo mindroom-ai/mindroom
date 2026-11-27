@@ -35,7 +35,7 @@ def test_search_google_scholar_returns_publication_summaries(monkeypatch: pytest
         lambda _query: iter([_PUBLICATION]),
     )
 
-    result = GoogleScholarTools().search_google_scholar("attention is all you need")
+    result = GoogleScholarTools().google_scholar_search("attention is all you need")
 
     publications = json.loads(result)
     assert publications == [
@@ -61,9 +61,9 @@ def test_search_google_scholar_limits_results(monkeypatch: pytest.MonkeyPatch) -
     )
 
     tools = GoogleScholarTools(max_results=3)
-    assert len(json.loads(tools.search_google_scholar("attention"))) == 3
-    assert len(json.loads(tools.search_google_scholar("attention", max_results=2))) == 2
-    assert json.loads(tools.search_google_scholar("attention", max_results=0)) == []
+    assert len(json.loads(tools.google_scholar_search("attention"))) == 3
+    assert len(json.loads(tools.google_scholar_search("attention", max_results=2))) == 2
+    assert json.loads(tools.google_scholar_search("attention", max_results=0)) == []
 
 
 def test_search_google_scholar_reports_rate_limiting(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,5 +74,5 @@ def test_search_google_scholar_reports_rate_limiting(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(google_scholar_module.scholarly, "search_pubs", raise_blocked)
 
-    result = GoogleScholarTools().search_google_scholar("attention")
+    result = GoogleScholarTools().google_scholar_search("attention")
     assert result == google_scholar_module._RATE_LIMIT_MESSAGE
