@@ -379,7 +379,11 @@ class _MultiAgentOrchestrator:
             lambda: self.agent_bots.values(),
         )
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
-        self._plugin_lifespans = PluginLifespans(self.runtime_paths, lambda: self.config)
+        self._plugin_lifespans = PluginLifespans(
+            self.runtime_paths,
+            lambda: self.config,
+            event_sources=self.reactive_triggers.event_sources,
+        )
         self.turn_recovery = TurnJournalRecovery(
             config=lambda: self.config,
             bots=lambda: self.agent_bots,
@@ -706,7 +710,7 @@ class _MultiAgentOrchestrator:
             return
         from mindroom.api import main as api_main  # noqa: PLC0415
 
-        bind_integrations(api_main.app, self.agent_bots, self.agent_reply_memberships)
+        bind_integrations(api_main.app, self.agent_bots, self.agent_reply_memberships, self.reactive_triggers)
 
     def _unbind_integrations(self) -> list[tuple[str, object]]:
         """Refuse new integration events and return each unbound runtime by name, which owns its running deliveries."""
@@ -1492,6 +1496,7 @@ class _MultiAgentOrchestrator:
             script_worker_keepalive=self._script_runtime.touch_live_workers,
             call_transcripts=self._call_transcripts_runtime.service,
             agent_call_room=self._call_transcripts_runtime.agent_call_room,
+            reactive_triggers=self.reactive_triggers,
         )
 
     def event_journal_store(self) -> EventJournalStore:

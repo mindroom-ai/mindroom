@@ -15,6 +15,15 @@ from mindroom.automations import Ask, AutomationContext, Done, automation, autom
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, resolve_config_relative_path
 from mindroom.entity_directory import ManagedEntity, entity_directory
+from mindroom.event_sources import (
+    EventSource,
+    EventSourceAccessDenial,
+    EventSourceContext,
+    EventSourceDescriptor,
+    EventSourceEmitter,
+    EventSourceInactiveError,
+    ValidatedSubscription,
+)
 from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
@@ -202,6 +211,12 @@ __all__ = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "EventSource",
+    "EventSourceAccessDenial",
+    "EventSourceContext",
+    "EventSourceDescriptor",
+    "EventSourceEmitter",
+    "EventSourceInactiveError",
     "File",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
@@ -259,6 +274,7 @@ __all__ = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "ValidatedSubscription",
     "Video",
     "WorkerService",
     "WorkerServiceError",

@@ -90,7 +90,7 @@ Have the agent retry with a smaller payload, such as saving large content to a w
 ## Tools That Cannot Pause for Approval
 
 The [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) has no approval cards, so it hides every tool function that matches a required-approval rule, including script rules.
-Skill and knowledge-search functions such as `get_skill_script` and `search_knowledge_base` cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
+Skill and knowledge-search functions (`skill` and `search_knowledge_base`) cannot pause for approval on any channel, so they are hidden when a required-approval rule or `default: require_approval` applies to them.
 Add an `auto_approve` rule for such a function to keep it available.
 
 ## Who Posts the Card

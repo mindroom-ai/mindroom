@@ -381,7 +381,7 @@ def test_a_created_agent_chooses_from_its_creators_granted_tools(tmp_path: Path)
 def test_a_tool_that_brings_others_keeps_the_creators_settings_for_them(tmp_path: Path) -> None:
     """matrix_message brings attachments, so choosing it alone still gives the creator's restricted attachments."""
     data = deepcopy(BASE)
-    restricted = {"include_tools": ["list_attachments"]}
+    restricted = {"include_tools": ["attachment"]}
     data["agents"]["creator"]["tools"] = ["matrix_message", {"attachments": restricted}]
     edits = GeneratedAgentEdits(display_name="Research", tools=["matrix_message"])
     config = _load(tmp_path, data, created=[_created(edits=edits)])

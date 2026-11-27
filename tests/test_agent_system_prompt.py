@@ -226,6 +226,7 @@ def test_matrix_automation_facts_absent_outside_matrix_and_for_personas(
         ({"tools": ["filesystem", "skill_manage"]}, False, "standard", False),
         ({"tools": ["filesystem"], "skill_learning": {"enabled": True}}, False, "standard", False),
         ({"tools": [{"shell": {"defer": True}}, "skill_manage"]}, False, "minimal", False),
+        ({"tools": [{"shell": {"defer": True}}, {"skill_manage": {"defer": True}}]}, False, "minimal", False),
     ],
 )
 def test_workspace_skill_authoring_gating(
@@ -248,6 +249,7 @@ def test_workspace_skill_authoring_gating(
         (["filesystem"], set(), ("write_file", "edit_file"), "standard", False),
         ([{"shell": {"defer": True}}], set(), ("run_shell_command",), "minimal", False),
         (["filesystem", "skill_manage"], set(), ("skill_manage",), "standard", True),
+        ([{"shell": {"defer": True}}, {"skill_manage": {"defer": True}}], set(), ("skill_manage",), "minimal", True),
         ([{"filesystem": {"defer": True}}], {"tool_search", "call_tool"}, (), "standard", False),
     ],
 )
@@ -449,7 +451,6 @@ def test_skills_deduplication_diagnostics_overrides_and_cache_stability(
                 tmp_path / "skills",
                 monkeypatch,
                 agent_cfg={"tools": ["filesystem"]},
-                approval_matches=("get_skill_script",),
             )
 
         before, _ = build_skills()
@@ -462,12 +463,11 @@ def test_skills_deduplication_diagnostics_overrides_and_cache_stability(
 
     assert SKILLS_TOOL_USAGE_PROMPT in before.prompt.instructions
     assert before.prompt.skills_block == (
-        "<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n"
+        "<skills_system>\nAvailable skills (load via skill tool, not callable directly):\n"
         "<skill>\n  <name>release-check</name>\n  <description>Verify release notes.</description>\n</skill>\n"
         "</skills_system>"
     )
     joined = "\n".join(before.prompt.instructions)
-    assert "These skill functions are not available to you: get_skill_script." in joined
     assert "Workspace skill `skills/broken-skill/SKILL.md` did not load." in joined
     assert before_stable.content == after_stable.content
     assert "checklist.md" not in str(after_stable.content)

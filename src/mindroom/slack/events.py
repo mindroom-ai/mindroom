@@ -11,9 +11,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from mindroom.config.slack import SlackAnsweringAgent
-    from mindroom.slack.watches import SlackWatch
-
 _SIGNATURE_WINDOW_SECONDS = 300
 _TIMESTAMP = re.compile(r"[0-9]{1,15}")
 # Tuples, not sets: a list or object in the payload must compare unequal, not raise `TypeError` as an unhashable key.
@@ -130,53 +127,3 @@ def is_direct_message(event: SlackMessageEvent) -> bool:
 def project_thread_key(team_id: str, channel_id: str, root_ts: str) -> str:
     """Return the key of a project agent's Slack thread, named by its team, channel and root message."""
     return f"{team_id}:{channel_id}:{root_ts}"
-
-
-def watch_thread_key(watch_id: str, event: SlackMessageEvent) -> str:
-    """Return the key of the Slack thread an event belongs to for one watch; a direct message conversation is one thread."""
-    if is_direct_message(event):
-        return f"{watch_id}:{event.channel_id}"
-    return f"{watch_id}:{event.channel_id}:{event.thread_ts or event.ts}"
-
-
-def project_wake_agent(
-    event: SlackMessageEvent,
-    answering: tuple[SlackAnsweringAgent, ...],
-) -> SlackAnsweringAgent | None:
-    """Return the agent that answers the event's channel; delivery wakes it for an app mention or a bound reply."""
-    return next((agent for agent in answering if event.channel_id in agent.channels), None)
-
-
-def _watch_wants(watch: SlackWatch, event: SlackMessageEvent, *, bound: bool) -> bool:
-    """Apply everything about a watch and an event that needs no lookup.
-
-    A direct message counts when the watch takes direct messages, and a mention of the owner when it takes mentions.
-    A reply in a thread where the owner was mentioned always counts, but never outside the watch's channels.
-    The watch's channels limit channel messages only.
-    """
-    if watch.team_id != event.team_id or watch.slack_user_id == event.user_id:
-        return False
-    mentioned = watch.mentions and watch.slack_user_id in mentioned_user_ids(event.text)
-    if is_direct_message(event):
-        return watch.direct_messages or mentioned
-    if watch.channels and event.channel_id not in watch.channels:
-        return False
-    return bound or mentioned
-
-
-def watch_candidates(
-    event: SlackMessageEvent,
-    watches: tuple[SlackWatch, ...],
-    *,
-    bound_watch_ids: frozenset[str],
-) -> tuple[SlackWatch, ...]:
-    """Return the watches an event may be for, without asking Slack who can see it.
-
-    Only a candidate is worth an authorizations lookup, and `watch_accepts` makes the final decision.
-    """
-    return tuple(watch for watch in watches if _watch_wants(watch, event, bound=watch.watch_id in bound_watch_ids))
-
-
-def watch_accepts(watch: SlackWatch, event: SlackMessageEvent, *, bound: bool, visible_to: frozenset[str]) -> bool:
-    """Return whether an event is delivered to a watch, given the Slack users who can see it."""
-    return watch.slack_user_id in visible_to and _watch_wants(watch, event, bound=bound)

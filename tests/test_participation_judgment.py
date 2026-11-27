@@ -811,7 +811,7 @@ async def test_omitted_inline_file_notes_reach_the_judge_without_names_or_ids(
         "att_file2",
         "Inline file attachment omitted",
         "Omitted files",
-        "get_attachment",
+        'attachment(action="get"',
     ):
         assert private not in wire
     assert [message["content"] for message in posted[0]["input"]] == [

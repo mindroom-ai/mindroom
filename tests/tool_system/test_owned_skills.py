@@ -117,13 +117,13 @@ def test_the_prompt_block_equals_the_prompt_golden(tmp_path: Path) -> None:
     block = _build(tmp_path).prompt_block()
 
     assert block == system_message[start:end]
-    assert "Available skills (load via skill tools, not callable directly):" in block
+    assert "Available skills (load via skill tool, not callable directly):" in block
     assert "get_skill_instructions" not in block
     assert "execute" not in block
 
 
 def test_the_prompt_block_names_no_scripts_or_references(tmp_path: Path) -> None:
-    """A skill's files are listed by ``get_skill_instructions``, so a new file leaves the system prompt unchanged."""
+    """A skill's files are listed by ``skill(action="instructions", ...)``, so a new file leaves the system prompt unchanged."""
     skills_root = _workspace(tmp_path) / "skills"
     tooling = _write_skill(skills_root, "tooling", "Uses scripts.")
     _write_file(tooling / "scripts" / "run.sh", "#!/bin/sh\n")
@@ -166,21 +166,24 @@ def _functions(toolkit: SkillsToolkit) -> dict[str, ToolFunction]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("workspace_skill", [True, False], ids=["workspace", "configured"])
 async def test_scripts_are_read_and_never_run(tmp_path: Path, workspace_skill: bool) -> None:
-    """get_skill_script returns a listed script's text, and a call that asks to run it fails without running it."""
+    """skill(action="script") returns a listed script's text, and a call that asks to run it fails without running it."""
     root = _workspace(tmp_path) / "skills" if workspace_skill else tmp_path / "global"
     skill_dir = _write_skill(root, "scripted", "Scripted skill")
     marker = tmp_path / "script-ran"
     script = f"#!/bin/sh\ntouch {marker}\n"
     _write_file(skill_dir / "scripts" / "hello.sh", script)
     (skill_dir / "scripts" / "hello.sh").chmod(0o755)
-    function = _functions(_build(tmp_path, configured=None if workspace_skill else ["scripted"]))["get_skill_script"]
+    function = _functions(_build(tmp_path, configured=None if workspace_skill else ["scripted"]))["skill"]
 
-    assert set(function.parameters["properties"]) == {"skill_name", "script_path"}
-    assert await _call(function, {"skill_name": "scripted", "script_path": "hello.sh"}) == (
+    assert set(function.parameters["properties"]) == {"action", "name", "path"}
+    assert await _call(function, {"action": "script", "name": "scripted", "path": "hello.sh"}) == (
         False,
         {"skill_name": "scripted", "script_path": "hello.sh", "content": script},
     )
-    failed, _ = await _call(function, {"skill_name": "scripted", "script_path": "hello.sh", "execute": True})
+    failed, _ = await _call(
+        function,
+        {"action": "script", "name": "scripted", "path": "hello.sh", "execute": True},
+    )
     assert failed
     assert not marker.exists()
 
@@ -201,19 +204,19 @@ async def test_workspace_files_are_read_without_following_links(tmp_path: Path) 
     assert skill.references == ("guide.md", "swapped.md")
     (references / "swapped.md").unlink()
     (references / "swapped.md").symlink_to(secret)
-    function = _functions(toolkit)["get_skill_reference"]
+    function = _functions(toolkit)["skill"]
 
-    assert await _call(function, {"skill_name": "docs", "reference_path": "guide.md"}) == (
+    assert await _call(function, {"action": "reference", "name": "docs", "path": "guide.md"}) == (
         False,
         {"skill_name": "docs", "reference_path": "guide.md", "content": "own guide"},
     )
-    _, swapped = await _call(function, {"skill_name": "docs", "reference_path": "swapped.md"})
+    _, swapped = await _call(function, {"action": "reference", "name": "docs", "path": "swapped.md"})
     assert swapped == {
         "skill_name": "docs",
         "reference_path": "swapped.md",
         "error": "Error reading workspace skill file swapped.md: OSError",
     }
-    _, planted = await _call(function, {"skill_name": "docs", "reference_path": "planted.md"})
+    _, planted = await _call(function, {"action": "reference", "name": "docs", "path": "planted.md"})
     assert planted == {
         "error": "Reference 'planted.md' not found in skill 'docs'",
         "available_references": ["guide.md", "swapped.md"],
@@ -228,13 +231,13 @@ async def test_configured_skill_files_linked_outside_their_directory_are_refused
     secret.write_text("operator secret", encoding="utf-8")
     _write_file(skill_dir / "references" / "guide.md", "shared guide")
     (skill_dir / "references" / "outside.md").symlink_to(secret)
-    function = _functions(_build(tmp_path, configured=["shared"]))["get_skill_reference"]
+    function = _functions(_build(tmp_path, configured=["shared"]))["skill"]
 
-    assert await _call(function, {"skill_name": "shared", "reference_path": "guide.md"}) == (
+    assert await _call(function, {"action": "reference", "name": "shared", "path": "guide.md"}) == (
         False,
         {"skill_name": "shared", "reference_path": "guide.md", "content": "shared guide"},
     )
-    assert await _call(function, {"skill_name": "shared", "reference_path": "outside.md"}) == (
+    assert await _call(function, {"action": "reference", "name": "shared", "path": "outside.md"}) == (
         False,
         {"error": "Invalid reference path: 'outside.md'", "skill_name": "shared"},
     )
@@ -280,23 +283,30 @@ async def test_skill_functions_answer_unknown_skills_and_files_with_their_listin
     _write_file(skill_dir / "scripts" / "run.sh", "#!/bin/sh\n")
     functions = _functions(_build(tmp_path))
 
-    assert await _call(functions["get_skill_instructions"], {"skill_name": "other"}) == (
+    assert await _call(functions["skill"], {"action": "instructions", "name": "other"}) == (
         False,
         {"error": "Skill 'other' not found", "available_skills": "docs"},
     )
-    assert await _call(functions["get_skill_script"], {"skill_name": "docs"}) == (
+    assert await _call(functions["skill"], {"action": "instructions", "name": "docs", "path": "run.sh"}) == (
         False,
         {
-            "error": "A script_path is required to read a script from skill 'docs'",
+            "error": "Parameter 'path' must be omitted when action is 'instructions'",
+            "skill_name": "docs",
+        },
+    )
+    assert await _call(functions["skill"], {"action": "script", "name": "docs"}) == (
+        False,
+        {
+            "error": "A path is required to read a script from skill 'docs'",
             "skill_name": "docs",
             "available_scripts": ["run.sh"],
         },
     )
-    assert await _call(functions["get_skill_script"], {"skill_name": "docs", "script_path": "other.sh"}) == (
+    assert await _call(functions["skill"], {"action": "script", "name": "docs", "path": "other.sh"}) == (
         False,
         {"error": "Script 'other.sh' not found in skill 'docs'", "available_scripts": ["run.sh"]},
     )
-    assert await _call(functions["get_skill_instructions"], {"skill_name": "docs"}) == (
+    assert await _call(functions["skill"], {"action": "instructions", "name": "docs"}) == (
         False,
         {
             "skill_name": "docs",
@@ -317,10 +327,10 @@ async def test_workspace_loads_record_usage_and_configured_skills_do_not(tmp_pat
     functions = _functions(_build(tmp_path, configured=["shared"]))
     usage_path = workspace_skills / ".usage.json"
 
-    await _call(functions["get_skill_reference"], {"skill_name": "local", "reference_path": "notes.md"})
+    await _call(functions["skill"], {"action": "reference", "name": "local", "path": "notes.md"})
     read = json.loads(usage_path.read_text(encoding="utf-8"))["local"]["last_used_at"]
-    await _call(functions["get_skill_instructions"], {"skill_name": "local"})
-    await _call(functions["get_skill_instructions"], {"skill_name": "shared"})
+    await _call(functions["skill"], {"action": "instructions", "name": "local"})
+    await _call(functions["skill"], {"action": "instructions", "name": "shared"})
 
     usage = json.loads(usage_path.read_text(encoding="utf-8"))
     assert usage["local"]["last_used_at"] > read
