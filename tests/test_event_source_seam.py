@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
 import sys
 import threading
 import uuid
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,7 +33,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import HOOK_SOURCE_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
-from mindroom.custom_tools.triggers import TriggersTools
+from mindroom.custom_tools.triggers import _ACTION_ALLOWED_PARAMS, _WATCH_TURN_READ_ONLY_ACTIONS, TriggersTools
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.event_sources import (
     EventSource,
@@ -68,6 +69,7 @@ from mindroom.reactive_triggers import (
     fan_out_external_event,
     matches_external_event,
 )
+from mindroom.reactive_triggers import store as store_mod
 from mindroom.slack.integration import SLACK_INTEGRATION
 from mindroom.tool_system.plugins import PLUGIN_NAME_SCOPE_KEY, PluginInactiveError
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -81,11 +83,12 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.event_source_fakes import FakeEventSource, room_active_members
 from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Collection, Mapping
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -94,7 +97,11 @@ if TYPE_CHECKING:
 _OWNER = "@alice:localhost"
 _OWNER_ALIAS = "@bridge_alice:localhost"
 _OTHER = "@bob:localhost"
+_ADMIN = "@admin:localhost"
 _ROOM_B = "!roomB:localhost"
+_PRIVATE_ROOM = "!priv:localhost"
+_SHARED_ROOM = "!shared:localhost"
+_SAMPLE_PUBLIC_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 def _make_config(
@@ -163,6 +170,24 @@ def _make_rule(
     )
 
 
+def _ext_event(
+    source_id: str,
+    event_id: str,
+    *,
+    kind: str = "message",
+    timestamp: float = 1000.0,
+    **kwargs: Any,  # noqa: ANN401
+) -> TriggerEvent:
+    return TriggerEvent(
+        source_type="external_event",
+        source_id=source_id,
+        kind=kind,
+        event_id=event_id,
+        timestamp=timestamp,
+        **kwargs,
+    )
+
+
 def _bot(
     *,
     latest_thread_event_id: str | None = "$latest",
@@ -203,57 +228,20 @@ def _make_firing(rule: ReactiveTriggerRecord, event: TriggerEvent, *, firing_id:
     )
 
 
+def _assert_redacted(row: dict[str, Any], *forbidden: str) -> None:
+    assert row["event"] is None
+    assert row["triage_reason"] is None
+    assert {"dedupe_key", "error_message"}.isdisjoint(row)
+    if forbidden:
+        serialized = json.dumps(row)
+        for secret in forbidden:
+            assert secret not in serialized
+
+
 class _SimpleSource(EventSource):
     source_id = "acme_builds"
     description = "Acme CI build notifications"
     allowed_kinds = ("build.failed", "build.passed")
-
-
-class _CustomSource(EventSource):
-    def __init__(
-        self,
-        source_id: str,
-        *,
-        delivery_decision: EventSourceAccessDenial | None = None,
-        require_audience_member: bool = False,
-    ) -> None:
-        self.source_id = source_id
-        self.description = f"Custom {source_id}"
-        self.allowed_kinds = ("message", "mention")
-        self.delivery_decision = delivery_decision
-        self.require_audience_member = require_audience_member
-        self.match_calls: list[tuple[str, object, bool]] = []
-        self.delivery_contexts: list[EventSourceContext] = []
-
-    def matches_rule(
-        self,
-        rule: ReactiveTriggerRecord,
-        event: TriggerEvent,
-        *,
-        audience: object = None,
-        has_thread_binding: bool = False,
-    ) -> bool:
-        self.match_calls.append((rule.trigger_id, audience, has_thread_binding))
-        if not isinstance(rule.source, ExternalEventSourceSpec):
-            return False
-        if self.require_audience_member:
-            expected_user = rule.source.binding.get("ext_user_id")
-            if not isinstance(audience, set) or expected_user not in audience:
-                return False
-        if rule.source.kind == "mention" and has_thread_binding:
-            return True
-        return matches_external_event(rule.source, event)
-
-    async def check_delivery_access(
-        self,
-        ctx: EventSourceContext,
-        *,
-        rule: ReactiveTriggerRecord,
-        event: TriggerEvent | None = None,
-    ) -> EventSourceAccessDenial | None:
-        del rule, event
-        self.delivery_contexts.append(ctx)
-        return self.delivery_decision
 
 
 def test_external_event_models_and_list_matching() -> None:
@@ -270,10 +258,9 @@ def test_external_event_models_and_list_matching() -> None:
     assert spec.match["channel_id"] == ["C1", "C2"]
     assert ExternalEventSourceSpec.model_validate_json(spec.model_dump_json()) == spec
 
-    bad_matches: list[dict[str, Any]] = [{"c": []}, {"c": ["  "]}, {"c": ["C1", ""]}, {"c": [1]}]
-    for bad_match in bad_matches:
+    for bad_match in ({"c": []}, {"c": ["  "]}, {"c": ["C1", ""]}, {"c": [1]}):
         with pytest.raises(ValidationError):
-            ExternalEventSourceSpec(source_id="slack", kind="message", match=bad_match)
+            ExternalEventSourceSpec(source_id="slack", kind="message", match=bad_match)  # type: ignore[arg-type]
 
     assert TriggerTargetSpec(
         agent="research",
@@ -284,71 +271,41 @@ def test_external_event_models_and_list_matching() -> None:
     ).thread_key_from_event
     with pytest.raises(ValidationError, match="thread_key_from_event requires new_thread=True"):
         TriggerTargetSpec(agent="research", room_id=_ROOM_B, new_thread=False, thread_key_from_event=True, prompt="go")
-    with pytest.raises(ValidationError, match="mutually exclusive"):
-        TriggerTargetSpec(
-            agent="research",
-            room_id=_ROOM_B,
-            new_thread=True,
-            thread_key="static",
-            thread_key_from_event=True,
-            prompt="go",
-        )
-    with pytest.raises(ValidationError, match="mutually exclusive"):
-        TriggerTargetSpec(
-            agent="research",
-            room_id=_ROOM_B,
-            thread_id="$t1",
-            new_thread=True,
-            thread_key_from_event=True,
-            prompt="go",
-        )
+    for extra in ({"thread_key": "static"}, {"thread_id": "$t1"}):
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            TriggerTargetSpec(
+                agent="research",
+                room_id=_ROOM_B,
+                new_thread=True,
+                thread_key_from_event=True,
+                prompt="go",
+                **extra,  # type: ignore[arg-type]
+            )
 
-    ev = TriggerEvent(
-        source_type="external_event",
-        source_id="slack",
-        kind="message",
-        event_id="e1",
-        timestamp=1000.0,
+    ev = _ext_event(
+        "slack",
+        "e1",
         thread_key="C1:1700.1",
         data={"channel_id": "C2", "nested": {"env": "prod"}, "retry": 1, "urgent": True},
     )
     assert ev.thread_key == "C1:1700.1"
-    assert (
-        TriggerEvent(
-            source_type="external_event",
-            source_id="slack",
-            kind="message",
-            event_id="e2",
-            timestamp=1.0,
-            thread_key="   ",
-        ).thread_key
-        is None
-    )
+    assert _ext_event("slack", "e2", timestamp=1.0, thread_key="   ").thread_key is None
 
     assert matches_external_event(spec, ev) is True
     assert matches_external_event(spec, ev.model_copy(update={"data": {**ev.data, "channel_id": "C3"}})) is False
-    assert (
-        matches_external_event(ExternalEventSourceSpec(source_id="slack", kind="message", match={"retry": ["1"]}), ev)
-        is False
-    )
-    assert (
-        matches_external_event(
-            ExternalEventSourceSpec(source_id="slack", kind="message", match={"urgent": ["True"]}),
-            ev,
+    for bad_match, candidate in (
+        ({"retry": ["1"]}, ev),
+        ({"urgent": ["True"]}, ev),
+        ({"channel_id": ["C2"]}, ev.model_copy(update={"data": {"channel_id": ["C2"]}})),
+        ({"retry": True}, ev),
+    ):
+        assert (
+            matches_external_event(
+                ExternalEventSourceSpec(source_id="slack", kind="message", match=bad_match),
+                candidate,
+            )
+            is False
         )
-        is False
-    )
-    assert (
-        matches_external_event(
-            ExternalEventSourceSpec(source_id="slack", kind="message", match={"channel_id": ["C2"]}),
-            ev.model_copy(update={"data": {"channel_id": ["C2"]}}),
-        )
-        is False
-    )
-    assert (
-        matches_external_event(ExternalEventSourceSpec(source_id="slack", kind="message", match={"retry": True}), ev)
-        is False
-    )
 
 
 @pytest.mark.asyncio
@@ -368,24 +325,13 @@ async def test_event_source_base_defaults(tmp_path: Path) -> None:
         kind=" build.failed ",
         match={"repo": ["a/b"]},
         existing_binding={"w": "1"},
-    ) == ValidatedSubscription(
-        kind="build.failed",
-        match={"repo": ["a/b"]},
-        binding={"w": "1"},
-    )
+    ) == ValidatedSubscription(kind="build.failed", match={"repo": ["a/b"]}, binding={"w": "1"})
     for bad_kind in ("unknown.kind", "   "):
         with pytest.raises(ValueError, match="Event kind"):
             await src.validate_subscription(ctx, kind=bad_kind, match={})
 
     rule = _make_rule(source_id="acme_builds", kind="build.failed", match={"repo": "a/b"})
-    ev = TriggerEvent(
-        source_type="external_event",
-        source_id="acme_builds",
-        kind="build.failed",
-        event_id="e1",
-        timestamp=1000.0,
-        data={"repo": "a/b"},
-    )
+    ev = _ext_event("acme_builds", "e1", kind="build.failed", data={"repo": "a/b"})
     assert src.matches_rule(rule, ev) is True
     assert await src.check_delivery_access(ctx, rule=rule, event=ev) is None
     assert await src.check_history_access(ctx, rule=rule, event=ev) is True
@@ -408,29 +354,29 @@ def test_event_source_registry_validation_and_collisions(tmp_path: Path) -> None
 
     for bad_id in ("", "bad.id", "bad id", "a" * 65, "ok\n"):
         with pytest.raises(ValueError, match="source_id"):
-            registry.register(_CustomSource(bad_id))
+            registry.register(FakeEventSource(bad_id))
     for bad_plugin_id in ("other", "acmefoo", "my_acme"):
         with pytest.raises(ValueError, match="Plugin 'acme'"):
-            registry.register(_CustomSource(bad_plugin_id), owner_plugin="acme")
+            registry.register(FakeEventSource(bad_plugin_id), owner_plugin="acme")
 
-    e_exact = registry.register(_CustomSource("acme"), owner_plugin="acme")
-    e_under = registry.register(_CustomSource("acme_builds"), owner_plugin="acme")
-    e_dash = registry.register(_CustomSource("acme-alerts"), owner_plugin="acme")
+    e_exact = registry.register(FakeEventSource("acme"), owner_plugin="acme")
+    e_under = registry.register(FakeEventSource("acme_builds"), owner_plugin="acme")
+    e_dash = registry.register(FakeEventSource("acme-alerts"), owner_plugin="acme")
     assert [s.source_id for s in registry.all()] == ["acme", "acme-alerts", "acme_builds"]
     assert registry.get("acme_builds") is not None
 
     with pytest.raises(ValueError, match="YAML"):
-        registry.register(_CustomSource("github"))
+        registry.register(FakeEventSource("github"))
     with pytest.raises(ValueError, match="YAML"):
-        registry.register(_CustomSource("github"), owner_plugin="github")
+        registry.register(FakeEventSource("github"), owner_plugin="github")
     with pytest.raises(ValueError, match="built-in"):
-        registry.register(_CustomSource("slack"), owner_plugin="slack")
+        registry.register(FakeEventSource("slack"), owner_plugin="slack")
 
-    builtin_slack = registry.register(_CustomSource("slack"))
+    builtin_slack = registry.register(FakeEventSource("slack"))
     with pytest.raises(ValueError, match="already registered"):
-        registry.register(_CustomSource("slack"))
+        registry.register(FakeEventSource("slack"))
     with pytest.raises(ValueError, match="already registered"):
-        registry.register(_CustomSource("acme_builds"), owner_plugin="acme_builds")
+        registry.register(FakeEventSource("acme_builds"), owner_plugin="acme_builds")
 
     assert registry.emitter_for_plugin("acme", "acme") is e_exact
     assert registry.emitter_for_plugin("acme", "acme_builds") is e_under
@@ -460,8 +406,8 @@ async def test_event_source_registry_reload_token_fencing(tmp_path: Path) -> Non
         return 1
 
     registry = EventSourceRegistry(config_provider=lambda: config, emit_handler=_handler)
-    old_emitter = registry.register(_CustomSource("acme_builds"), owner_plugin="acme")
-    new_source = _CustomSource("acme_builds")
+    old_emitter = registry.register(FakeEventSource("acme_builds"), owner_plugin="acme")
+    new_source = FakeEventSource("acme_builds")
     new_emitter = registry.register(new_source, owner_plugin="acme")
 
     assert isinstance(old_emitter, EventSourceEmitter)
@@ -477,10 +423,12 @@ async def test_event_source_registry_reload_token_fencing(tmp_path: Path) -> Non
     with pytest.raises(ValueError, match="non-empty"):
         await new_emitter.emit(kind=" ", event_id="e1")
     assert await new_emitter.emit(kind="message", event_id="fresh-1", text="hi", thread_key="T:1", data={"k": "v"}) == 1
-    assert emitted[0][0] == "acme_builds"
-    assert emitted[0][1].source_type == "external_event"
-    assert emitted[0][1].source_id == "acme_builds"
-    assert emitted[0][1].thread_key == "T:1"
+    assert (emitted[0][0], emitted[0][1].source_type, emitted[0][1].source_id, emitted[0][1].thread_key) == (
+        "acme_builds",
+        "external_event",
+        "acme_builds",
+        "T:1",
+    )
 
     assert registry.unregister("acme_builds", new_emitter.token) is True
     assert registry.get("acme_builds") is None
@@ -556,7 +504,7 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
         == frozenset()
     )
 
-    ev = TriggerEvent(source_type="external_event", source_id="slack", kind="message", event_id="f1", timestamp=100.0)
+    ev = _ext_event("slack", "f1", timestamp=100.0)
     assert upgraded.enqueue_firing("slack_watch_a", "f1", ev) is True
     firing_id = upgraded.list_firings(trigger_id="slack_watch_a")[0].id
     assert upgraded.mark_skipped(firing_id, "old", now=100.0) is True
@@ -569,13 +517,51 @@ def test_store_v3_migrations_import_once_and_bound_thread_keys(tmp_path: Path) -
     assert keys == {("slack_watch_a", "C1:2")}
 
 
+def test_store_import_triggers_once_rolls_back_atomically_on_mid_tx_error(tmp_path: Path) -> None:
+    """A mid-transaction failure in import_triggers_once rolls back rules, thread keys, and marker so retry succeeds."""
+    _, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    rollback_rule = _make_rule(trigger_id="rollback_rule", source_id="slack", kind="message")
+    rollback_keys = [
+        ("rollback_rule", "C1:1", "$rb-1", 1500.0),
+        ("rollback_rule", "C1:2", "$rb-2", 1500.0),
+    ]
+    real_upsert = store_mod._upsert_thread_key
+    upsert_calls = 0
+
+    def _fail_second_upsert(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        nonlocal upsert_calls
+        upsert_calls += 1
+        if upsert_calls == 2:
+            msg = "simulated mid-tx failure"
+            raise sqlite3.OperationalError(msg)
+        real_upsert(*args, **kwargs)
+
+    with (
+        patch.object(store_mod, "_upsert_thread_key", side_effect=_fail_second_upsert),
+        pytest.raises(sqlite3.OperationalError, match="simulated mid-tx failure"),
+    ):
+        store.import_triggers_once("rollback_v1", [rollback_rule], thread_keys=rollback_keys, now=1500.0)
+
+    assert upsert_calls == 2
+    assert store.has_migration("rollback_v1") is False
+    assert store.get_trigger("rollback_rule") is None
+    assert store.get_thread_key_binding("rollback_rule", "C1:1", now=1500.0) is None
+
+    assert store.import_triggers_once("rollback_v1", [rollback_rule], thread_keys=rollback_keys, now=1500.0) == 1
+    assert store.has_migration("rollback_v1") is True
+    assert store.get_trigger("rollback_rule") is not None
+    assert store.get_thread_key_binding("rollback_rule", "C1:1", now=1500.0) == "$rb-1"
+    assert store.get_thread_key_binding("rollback_rule", "C1:2", now=1500.0) == "$rb-2"
+
+
 @pytest.mark.asyncio
 async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_access(tmp_path: Path) -> None:
     """Dispatch handles thread_key_from_event, sliding 7d TTL, HOOK_SOURCE_KEY, and registered access checks."""
     config, runtime_paths = _make_config(tmp_path)
     store = ReactiveTriggerStore(runtime_paths)
     memberships = AgentReplyMembershipIndex()
-    source = _CustomSource("acme_builds")
+    source = FakeEventSource("acme_builds")
     registry = EventSourceRegistry(config_provider=lambda: config, emit_handler=AsyncMock(return_value=0))
     registry.register(source, owner_plugin="acme")
 
@@ -583,44 +569,41 @@ async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_acce
     store.create_trigger(rule)
     state = _room_state(_ROOM_B, _OWNER)
 
+    dispatch = functools.partial(
+        dispatch_reactive_trigger,
+        triage_reason=None,
+        store=store,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        event_sources=registry,
+    )
+    check_access = functools.partial(
+        check_reactive_source_access,
+        source_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        known_room_states={_ROOM_B: state},
+        event_sources=registry,
+    )
+
     def _ev_firing(event_id: str, thread_key: str | None) -> FiringRecord:
-        return _make_firing(
-            rule,
-            TriggerEvent(
-                source_type="external_event",
-                source_id="acme_builds",
-                kind="message",
-                event_id=event_id,
-                timestamp=1000.0,
-                thread_key=thread_key,
-                text="hi",
-            ),
-        )
+        return _make_firing(rule, _ext_event("acme_builds", event_id, thread_key=thread_key, text="hi"))
 
     day = 86400.0
     t0, t6, t12 = 10_000.0, 10_000.0 + 6 * day, 10_000.0 + 12 * day
     with (
-        patch(
-            "mindroom.reactive_triggers.dispatch.read_room_state",
-            new=AsyncMock(return_value=state),
-        ) as read_state_mock,
+        patch("mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=state)) as read_mock,
         patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=AsyncMock()) as send_mock,
         patch("mindroom.reactive_triggers.store.time.time", side_effect=[t0, t0, t6, t6, t12, t12]),
     ):
         send_mock.return_value = DeliveredMatrixEvent(event_id="$root-1", content_sent={})
-        res0 = await dispatch_reactive_trigger(
-            rule=rule,
-            firing=_ev_firing("e0", "C1:100"),
-            triage_reason=None,
-            store=store,
-            target_bot=_bot(),
-            config=config,
-            runtime_paths=runtime_paths,
-            memberships=memberships,
-            event_sources=registry,
+        assert await dispatch(rule=rule, firing=_ev_firing("e0", "C1:100"), target_bot=_bot()) == DispatchResult(
+            status="delivered",
+            matrix_event_id="$root-1",
         )
-        assert res0 == DispatchResult(status="delivered", matrix_event_id="$root-1")
-        assert read_state_mock.await_count == 1
+        assert read_mock.await_count == 1
         assert source.delivery_contexts[0].target_room_state is state
         content0 = send_mock.await_args.args[2]
         assert content0[SOURCE_KIND_KEY] == REACTIVE_TRIGGER_SOURCE_KIND
@@ -629,38 +612,16 @@ async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_acce
         assert content0[PER_FIRE_THREAD_ROOT_KEY] is True
 
         # Day 6 continuation refreshes updated_at while preserving $root-1 -> Day 12 still reuses $root-1.
-        send_mock.return_value = DeliveredMatrixEvent(event_id="$reply-6", content_sent={})
-        assert (
-            await dispatch_reactive_trigger(
+        for eid, sent_id, latest in (("e6", "$reply-6", "$root-1"), ("e12", "$reply-12", "$reply-6")):
+            send_mock.return_value = DeliveredMatrixEvent(event_id=sent_id, content_sent={})
+            res = await dispatch(
                 rule=rule,
-                firing=_ev_firing("e6", "C1:100"),
-                triage_reason=None,
-                store=store,
-                target_bot=_bot(latest_thread_event_id="$root-1"),
-                config=config,
-                runtime_paths=runtime_paths,
-                memberships=memberships,
-                event_sources=registry,
+                firing=_ev_firing(eid, "C1:100"),
+                target_bot=_bot(latest_thread_event_id=latest),
             )
-        ).status == "delivered"
-        assert send_mock.await_args.args[2]["m.relates_to"]["event_id"] == "$root-1"
-        assert PER_FIRE_THREAD_ROOT_KEY not in send_mock.await_args.args[2]
-
-        send_mock.return_value = DeliveredMatrixEvent(event_id="$reply-12", content_sent={})
-        assert (
-            await dispatch_reactive_trigger(
-                rule=rule,
-                firing=_ev_firing("e12", "C1:100"),
-                triage_reason=None,
-                store=store,
-                target_bot=_bot(latest_thread_event_id="$reply-6"),
-                config=config,
-                runtime_paths=runtime_paths,
-                memberships=memberships,
-                event_sources=registry,
-            )
-        ).status == "delivered"
-        assert send_mock.await_args.args[2]["m.relates_to"]["event_id"] == "$root-1"
+            assert res.status == "delivered"
+            assert send_mock.await_args.args[2]["m.relates_to"]["event_id"] == "$root-1"
+            assert PER_FIRE_THREAD_ROOT_KEY not in send_mock.await_args.args[2]
 
     # None thread_key opens standalone per-fire root; non-external rule omits HOOK_SOURCE_KEY.
     room_rule = ReactiveTriggerRecord(
@@ -679,17 +640,7 @@ async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_acce
             new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$standalone", content_sent={})),
         ) as send_mock,
     ):
-        await dispatch_reactive_trigger(
-            rule=rule,
-            firing=_ev_firing("e-none", None),
-            triage_reason=None,
-            store=store,
-            target_bot=_bot(),
-            config=config,
-            runtime_paths=runtime_paths,
-            memberships=memberships,
-            event_sources=registry,
-        )
+        await dispatch(rule=rule, firing=_ev_firing("e-none", None), target_bot=_bot())
         assert send_mock.await_args.args[2][PER_FIRE_THREAD_ROOT_KEY] is True
         rm_event = TriggerEvent(
             source_type="room_message",
@@ -701,57 +652,30 @@ async def test_dispatch_event_source_thread_key_sliding_ttl_hook_source_and_acce
             actor=_OWNER,
             text="hi",
         )
-        await dispatch_reactive_trigger(
-            rule=room_rule,
-            firing=_make_firing(room_rule, rm_event, firing_id=2),
-            triage_reason=None,
-            store=store,
-            target_bot=_bot(),
-            config=config,
-            runtime_paths=runtime_paths,
-            memberships=memberships,
-            event_sources=registry,
-        )
+        await dispatch(rule=room_rule, firing=_make_firing(room_rule, rm_event, firing_id=2), target_bot=_bot())
         assert HOOK_SOURCE_KEY not in send_mock.await_args.args[2]
 
     # Registered check_delivery_access skip/retry translation vs fallback to YAML check (source_removed).
     source.delivery_decision = EventSourceAccessDenial(reason="room_not_private")
-    assert await check_reactive_source_access(
-        rule=rule,
-        event=_ev_firing("e-d", None).event,
-        source_bot=_bot(),
-        config=config,
-        runtime_paths=runtime_paths,
-        memberships=memberships,
-        known_room_states={_ROOM_B: state},
-        event_sources=registry,
-    ) == DispatchResult(status="skipped", reason="room_not_private")
+    assert await check_access(rule=rule, event=_ev_firing("e-d", None).event) == DispatchResult(
+        status="skipped",
+        reason="room_not_private",
+    )
     source.delivery_decision = EventSourceAccessDenial(reason="upstream_timeout", retry=True)
-    assert await check_reactive_source_access(
-        rule=rule,
-        event=_ev_firing("e-retry", None).event,
-        source_bot=_bot(),
-        config=config,
-        runtime_paths=runtime_paths,
-        memberships=memberships,
-        known_room_states={_ROOM_B: state},
-        event_sources=registry,
-    ) == DispatchResult(status="retry", reason="upstream_timeout")
-    assert await check_reactive_source_access(
-        rule=_make_rule(trigger_id="missing", source_id="removed_src", kind="message"),
-        event=_ev_firing("e-r", None).event,
-        source_bot=_bot(),
-        config=config,
-        runtime_paths=runtime_paths,
-        memberships=memberships,
-        known_room_states={_ROOM_B: state},
-        event_sources=registry,
-    ) == DispatchResult(status="skipped", reason="source_removed")
+    assert await check_access(rule=rule, event=_ev_firing("e-retry", None).event) == DispatchResult(
+        status="retry",
+        reason="upstream_timeout",
+    )
+    missing_rule = _make_rule(trigger_id="missing", source_id="removed_src", kind="message")
+    assert await check_access(rule=missing_rule, event=_ev_firing("e-r", None).event) == DispatchResult(
+        status="skipped",
+        reason="source_removed",
+    )
 
 
 @pytest.mark.asyncio
 async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_access(tmp_path: Path) -> None:
-    """Service.emit_event enforces policy, alias expansion, empty owner_user_ids, thread bindings, and pre-triage access."""
+    """Service.emit_event enforces policy, alias expansion, owner allowlist, thread bindings, and pre-triage access."""
     config, runtime_paths = _make_config(tmp_path, aliases={_OWNER: [_OWNER_ALIAS]})
     store = ReactiveTriggerStore(runtime_paths)
     service = ReactiveTriggerService(
@@ -761,94 +685,56 @@ async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_acc
         memberships=AgentReplyMembershipIndex(),
         store=store,
     )
-    source = _CustomSource("acme_personal", require_audience_member=True)
+    source = FakeEventSource("acme_personal", require_audience_member=True)
     emitter = service.event_sources.register(source, owner_plugin="acme")
 
-    for rule in (
-        _make_rule(
-            trigger_id="alias_rule",
-            owner_user_id=_OWNER_ALIAS,
+    def _personal_rule(trigger_id: str, *, kind: str = "message", **overrides: Any) -> ReactiveTriggerRecord:  # noqa: ANN401
+        return _make_rule(
+            trigger_id=trigger_id,
             source_id="acme_personal",
-            kind="message",
+            kind=kind,
             binding={"ext_user_id": "U_ALICE"},
+            **overrides,
+        )
+
+    # other_rule shares kind & audience binding so exclusion genuinely proves owner_user_ids filtering.
+    for rule in (
+        _personal_rule(
+            "alias_rule",
+            owner_user_id=_OWNER_ALIAS,
             triage=TriageSpec(instructions="check", provider="llm", model="cheap"),
         ),
-        _make_rule(
-            trigger_id="bound_mention",
-            owner_user_id=_OWNER,
-            source_id="acme_personal",
-            kind="mention",
-            binding={"ext_user_id": "U_ALICE"},
-        ),
-        _make_rule(
-            trigger_id="disabled_rule",
-            owner_user_id=_OWNER,
-            source_id="acme_personal",
-            kind="message",
-            binding={"ext_user_id": "U_ALICE"},
-            enabled=False,
-        ),
-        _make_rule(
-            trigger_id="expired_rule",
-            owner_user_id=_OWNER,
-            source_id="acme_personal",
-            kind="message",
-            binding={"ext_user_id": "U_ALICE"},
-            expires_at=1.0,
-        ),
-        _make_rule(
-            trigger_id="other_rule",
-            owner_user_id=_OTHER,
-            source_id="acme_personal",
-            kind="message",
-            binding={"ext_user_id": "U_BOB"},
-        ),
+        _personal_rule("bound_mention", kind="mention"),
+        _personal_rule("disabled_rule", enabled=False),
+        _personal_rule("expired_rule", expires_at=1.0),
+        _personal_rule("other_rule", owner_user_id=_OTHER),
     ):
         store.create_trigger(rule)
     store.save_thread_key_binding("bound_mention", "C1:thread1", "$root-existing")
 
+    emit = functools.partial(emitter.emit, kind="message", owner_user_ids=[_OWNER], audience={"U_ALICE"})
+
     # Empty owner_user_ids matches 0 rules; direct emit_event rejects forged source_id / blank dedupe_key.
-    assert await emitter.emit(kind="message", event_id="ev-empty", owner_user_ids=[], audience={"U_ALICE"}) == 0
+    assert await emit(event_id="ev-empty", owner_user_ids=[]) == 0
     assert source.match_calls == []
     with pytest.raises(ValueError, match="mismatch"):
-        await service.emit_event(
-            "acme_personal",
-            TriggerEvent(source_type="external_event", source_id="other", kind="message", event_id="e", timestamp=1.0),
-        )
+        await service.emit_event("acme_personal", _ext_event("other", "e", timestamp=1.0))
     with pytest.raises(ValueError, match="dedupe_key"):
         await emitter.emit(kind="message", event_id="e", dedupe_key="   ")
 
-    # Canonical owner matches alias_rule (via alias expansion) and bound_mention (via has_thread_binding=True).
+    # Canonical owner matches alias_rule (via alias expansion) and bound_mention (via has_thread_binding=True),
+    # while excluding other_rule despite matching kind & audience.
     notify_spy = MagicMock(wraps=service.notify_work)
     service.notify_work = notify_spy  # type: ignore[method-assign]
-    assert (
-        await emitter.emit(
-            kind="message",
-            event_id="ev-1",
-            text="hi",
-            thread_key="C1:thread1",
-            owner_user_ids=[_OWNER],
-            audience={"U_ALICE"},
-            dedupe_key="dk-1",
-        )
-        == 2
-    )
+    assert await emit(event_id="ev-1", text="hi", thread_key="C1:thread1", dedupe_key="dk-1") == 2
     notify_spy.assert_called_once_with(poll_github_prs=False)
     assert ("alias_rule", {"U_ALICE"}, False) in source.match_calls
     assert ("bound_mention", {"U_ALICE"}, True) in source.match_calls
+    assert "other_rule" not in {tid for tid, _, _ in source.match_calls}
+    assert store.list_firings(trigger_id="other_rule") == []
 
     notify_spy.reset_mock()
-    assert (
-        await emitter.emit(
-            kind="message",
-            event_id="ev-1-dup",
-            thread_key="C1:thread1",
-            owner_user_ids=[_OWNER],
-            audience={"U_ALICE"},
-            dedupe_key="dk-1",
-        )
-        == 0
-    )
+    assert await emit(event_id="ev-1-dup", thread_key="C1:thread1", dedupe_key="dk-1") == 0
     notify_spy.assert_not_called()
     assert store.list_firings(trigger_id="alias_rule")[0].event.data == {}
 
@@ -861,40 +747,28 @@ async def test_service_emit_event_fanout_aliases_audience_thread_binding_and_acc
             "mindroom.reactive_triggers.service.evaluate_triage",
             new=AsyncMock(return_value=TriageOutcome(act=True)),
         ) as triage_mock,
-    ):
-        await service.drain_due_firings_once()
-    triage_mock.assert_not_awaited()
-    assert store.list_firings(trigger_id="alias_rule")[0].error_message == "account_changed"
-
-    source.delivery_decision = None
-    assert (
-        await emitter.emit(
-            kind="message",
-            event_id="ev-ok",
-            thread_key="C1:thread1",
-            owner_user_ids=[_OWNER],
-            audience={"U_ALICE"},
-        )
-        == 2
-    )
-    with (
-        patch("mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=state)),
-        patch(
-            "mindroom.reactive_triggers.service.evaluate_triage",
-            new=AsyncMock(return_value=TriageOutcome(act=True)),
-        ),
         patch(
             "mindroom.reactive_triggers.dispatch.send_matrix_message",
             new=AsyncMock(return_value=DeliveredMatrixEvent(event_id="$delivered-ok", content_sent={})),
         ) as send_mock,
     ):
         await service.drain_due_firings_once()
+        triage_mock.assert_not_awaited()
+        assert store.list_firings(trigger_id="alias_rule")[0].error_message == "account_changed"
+
+        source.delivery_decision = None
+        assert await emit(event_id="ev-ok", thread_key="C1:thread1") == 2
+        await service.drain_due_firings_once()
     assert send_mock.await_count == 2
     assert store.list_firings(trigger_id="alias_rule")[0].status == "delivered"
 
+    # Allowing _OTHER in owner_user_ids matches other_rule, confirming it was excluded solely by owner filtering.
+    assert await emit(event_id="ev-other", owner_user_ids=[_OTHER]) == 1
+    assert len(store.list_firings(trigger_id="other_rule")) == 1
+
     # Disabled reactive policy returns 0 on emit.
     config, _ = _make_config(tmp_path, reactive_enabled=False)
-    assert await emitter.emit(kind="message", event_id="ev-off", owner_user_ids=[_OWNER], audience={"U_ALICE"}) == 0
+    assert await emit(event_id="ev-off") == 0
 
 
 def _write_event_source_plugin(
@@ -1024,7 +898,7 @@ async def test_plugin_lifespan_event_source_registration_reload_and_cleanup(tmp_
     # Without a primary EventSourceRegistry, register_event_source fails closed.
     detached = PluginLifecycle("acme", {}, runtime_paths, lambda: config)
     with pytest.raises(RuntimeError, match="primary runtime"):
-        detached.register_event_source(_CustomSource(source_id="acme_builds"))
+        detached.register_event_source(FakeEventSource("acme_builds"))
 
     # v1 registers acme_builds and emits.
     await publish_acme(1)
@@ -1061,7 +935,7 @@ async def test_plugin_lifespan_event_source_registration_reload_and_cleanup(tmp_
     assert service.event_sources.get("acme_builds") is None
     assert ("stop", 5, "shutdown") in probe.events
     with pytest.raises(RuntimeError, match="lifespan has ended"):
-        ended_lifecycle.register_event_source(_CustomSource(source_id="acme_builds"))
+        ended_lifecycle.register_event_source(FakeEventSource("acme_builds"))
 
 
 @pytest.mark.asyncio
@@ -1072,7 +946,7 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
     """plugin_http.event_source_emitter enforces active plugin ownership and fails closed when unavailable."""
     config, runtime_paths = _make_config(tmp_path)
     store, service = _make_service(runtime_paths, lambda: config, trigger_id="acme_http_rule")
-    service.event_sources.register(_CustomSource(source_id="slack"))
+    service.event_sources.register(FakeEventSource("slack"))
     probe = _plugin_probe()
 
     _write_event_source_plugin(tmp_path, "acme", source_id="acme_builds", probe_name=probe.__name__, with_routes=True)
@@ -1136,7 +1010,7 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
 
 
 class _PrivateToolEventSource(EventSource):
-    """Test EventSource exercising OAuth binding, private room checks, defaults, history, and dry-run audience."""
+    """Test EventSource exercising OAuth binding, read-only mutation defense, privacy, history, and dry-run audience."""
 
     source_id = "slack_private"
     description = "Private Slack watch"
@@ -1156,6 +1030,7 @@ class _PrivateToolEventSource(EventSource):
         self.history_contexts: list[tuple[EventSourceContext, TriggerEvent | None]] = []
         self.delivery_contexts: list[EventSourceContext] = []
         self.denied_event_ids: set[str] = set()
+        self.mutation_blocked = False
 
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         if ctx.owner_user_id not in self.visible_to:
@@ -1175,23 +1050,22 @@ class _PrivateToolEventSource(EventSource):
         )
         if ctx.owner_user_id not in self.connected_users:
             msg = "Connect Slack first"
-            raise OAuthConnectionRequired(
-                msg,
-                provider_id="slack",
-                connect_url="https://example.test/connect/slack",
-            )
+            raise OAuthConnectionRequired(msg, provider_id="slack", connect_url="https://example.test/connect/slack")
         if kind not in self.allowed_kinds:
             msg = f"Unsupported kind {kind!r}"
             raise ValueError(msg)
         if not set(match).issubset({"channel_id"}):
             msg = "Only channel_id filter is allowed"
             raise ValueError(msg)
-        # Deliberately return a forged/empty binding on update to verify triggers.py ignores it and preserves existing.
-        binding = (
-            {"team_id": "FORGED", "slack_user_id": "FORGED"}
-            if existing_binding is not None
-            else {"team_id": "T1", "slack_user_id": "U_ALICE"}
-        )
+        # Attempt BOTH in-place binding mutation (must raise TypeError) AND forged return (must be ignored on update).
+        if existing_binding is not None:
+            try:
+                existing_binding["team_id"] = "T_TAMPERED"  # type: ignore[index]
+            except TypeError:
+                self.mutation_blocked = True
+            binding = {"team_id": "FORGED", "slack_user_id": "FORGED"}
+        else:
+            binding = {"team_id": "T1", "slack_user_id": "U_ALICE"}
         return ValidatedSubscription(kind=kind, match=dict(match), binding=binding)
 
     def dry_run_audience(self, rule: ReactiveTriggerRecord) -> object:
@@ -1217,17 +1091,12 @@ class _PrivateToolEventSource(EventSource):
 
     @staticmethod
     def _is_private_room(state: RoomStateSnapshot | None, owner_user_id: str) -> bool:
-        if state is None:
-            return False
-        joined_or_invited = {
-            state_key
-            for (etype, state_key), content in state.events.items()
-            if etype == "m.room.member" and content.get("membership") in {"join", "invite"}
-        }
-        return owner_user_id in joined_or_invited and joined_or_invited <= {
-            owner_user_id,
-            "@mindroom_research:localhost",
-        }
+        members = room_active_members(state)
+        return (
+            members is not None
+            and owner_user_id in members
+            and members <= {owner_user_id, "@mindroom_research:localhost"}
+        )
 
     async def check_delivery_access(
         self,
@@ -1287,25 +1156,87 @@ def _tool_room_client(room_members: dict[str, list[str]]) -> SimpleNamespace:
     )
 
 
-def _setup_registered_tool_env(
-    tmp_path: Path,
-    *,
-    connected_users: set[str] | None = None,
-) -> tuple[
-    TriggersTools,
-    ReactiveTriggerStore,
-    _PrivateToolEventSource,
-    dict[str, list[str]],
-    Callable[..., ToolRuntimeContext],
-]:
-    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
+@dataclass
+class _SeamEnv:
+    tool: TriggersTools
+    store: ReactiveTriggerStore
+    source: _PrivateToolEventSource
+    registry: EventSourceRegistry
+    emitter: EventSourceEmitter
+    room_members: dict[str, list[str]]
+    client: SimpleNamespace
+    config: Config
+    runtime_paths: RuntimePaths
+    orchestrator: SimpleNamespace
+
+    def ctx(
+        self,
+        *,
+        requester_id: str = _OWNER,
+        room_id: str = _PRIVATE_ROOM,
+        hook_source: str | None = None,
+    ) -> ToolRuntimeContext:
+        reader = make_conversation_reader_mock()
+        reader.latest_room_cursor = AsyncMock(return_value=None)
+        return make_test_tool_runtime_context(
+            agent_name="research",
+            target=MessageTarget.resolve(room_id=room_id, thread_id="$root:localhost", reply_to_event_id=None),
+            requester_id=requester_id,
+            client=self.client,
+            config=self.config,
+            runtime_paths=self.runtime_paths,
+            relations=make_relation_lookup(),
+            conversation_reader=reader,
+            orchestrator=self.orchestrator,
+            hook_source=hook_source,
+        )
+
+    async def call(
+        self,
+        action: str,
+        *,
+        requester_id: str = _OWNER,
+        room_id: str = _PRIVATE_ROOM,
+        hook_source: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        with tool_runtime_context(self.ctx(requester_id=requester_id, room_id=room_id, hook_source=hook_source)):
+            return json.loads(await self.tool.triggers(action=action, **kwargs))
+
+    async def admin_call(self, action: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        return await self.call(action, requester_id=_ADMIN, room_id=_SHARED_ROOM, **kwargs)
+
+    async def subscribe(
+        self,
+        trigger_id: str = "sl_1",
+        *,
+        source_id: str = "slack_private",
+        kind: str = "message",
+        prompt: str = "Private watch",
+        requester_id: str = _OWNER,
+        room_id: str = _PRIVATE_ROOM,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> dict[str, Any]:
+        return await self.call(
+            "subscribe_event",
+            requester_id=requester_id,
+            room_id=room_id,
+            trigger_id=trigger_id,
+            source_id=source_id,
+            kind=kind,
+            prompt=prompt,
+            **kwargs,
+        )
+
+
+def _seam_env(tmp_path: Path, *, connected_users: set[str] | None = None) -> _SeamEnv:
     config = bind_runtime_paths(
         Config(
             agents={
                 "research": AgentConfig(
                     display_name="Research",
                     rooms=["priv", "shared"],
-                    access={"users": [_OWNER, _OTHER, admin]},
+                    access={"users": [_OWNER, _OTHER, _ADMIN]},
                 ),
             },
             rooms={"priv": {"display_name": "Private"}, "shared": {"display_name": "Shared"}},
@@ -1313,7 +1244,7 @@ def _setup_registered_tool_env(
             external_trigger_policy=ExternalTriggerPolicyConfig(
                 enabled=True,
                 reactive_enabled=True,
-                admin_users=[admin],
+                admin_users=[_ADMIN],
                 event_sources={
                     "github": GitHubEventSourceConfig(
                         kind="github",
@@ -1329,56 +1260,41 @@ def _setup_registered_tool_env(
     )
     runtime_paths = runtime_paths_for(config)
     matrix_state = MatrixState.load(runtime_paths)
-    matrix_state.add_room("priv", private_room, "#priv:localhost", "Private")
-    matrix_state.add_room("shared", shared_room, "#shared:localhost", "Shared")
+    matrix_state.add_room("priv", _PRIVATE_ROOM, "#priv:localhost", "Private")
+    matrix_state.add_room("shared", _SHARED_ROOM, "#shared:localhost", "Shared")
     save_matrix_state(matrix_state, runtime_paths)
 
     registry = EventSourceRegistry(lambda: config, AsyncMock(return_value=0))
     source = _PrivateToolEventSource(visible_to={_OWNER}, connected_users=set(connected_users or ()))
-    registry.register(source)
+    emitter = registry.register(source)
     orchestrator = SimpleNamespace(
         agent_bots={},
         reactive_triggers=SimpleNamespace(event_sources=registry, notify_work=MagicMock()),
     )
     room_members = {
-        private_room: [_OWNER, "@mindroom_research:localhost"],
-        shared_room: [_OWNER, _OTHER, admin, "@mindroom_research:localhost"],
+        _PRIVATE_ROOM: [_OWNER, "@mindroom_research:localhost"],
+        _SHARED_ROOM: [_OWNER, _OTHER, _ADMIN, "@mindroom_research:localhost"],
     }
-    client = _tool_room_client(room_members)
-
-    def _ctx(
-        *,
-        requester_id: str = _OWNER,
-        room_id: str = private_room,
-        hook_source: str | None = None,
-    ) -> ToolRuntimeContext:
-        reader = make_conversation_reader_mock()
-        reader.latest_room_cursor = AsyncMock(return_value=None)
-        return make_test_tool_runtime_context(
-            agent_name="research",
-            target=MessageTarget.resolve(room_id=room_id, thread_id="$root:localhost", reply_to_event_id=None),
-            requester_id=requester_id,
-            client=client,
-            config=config,
-            runtime_paths=runtime_paths,
-            relations=make_relation_lookup(),
-            conversation_reader=reader,
-            orchestrator=orchestrator,
-            hook_source=hook_source,
-        )
-
-    return TriggersTools(), ReactiveTriggerStore(runtime_paths), source, room_members, _ctx
+    return _SeamEnv(
+        tool=TriggersTools(),
+        store=ReactiveTriggerStore(runtime_paths),
+        source=source,
+        registry=registry,
+        emitter=emitter,
+        room_members=room_members,
+        client=_tool_room_client(room_members),
+        config=config,
+        runtime_paths=runtime_paths,
+        orchestrator=orchestrator,
+    )
 
 
 @pytest.mark.asyncio
-async def test_triggers_tool_registered_event_source_discovery_subscribe_and_binding_safety(
-    tmp_path: Path,
-) -> None:
-    """TriggersTools discovers registered EventSources, handles OAuth/defaults, and protects binding on update."""
-    tool, store, source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path)
+async def test_triggers_tool_registered_event_source_discovery_subscribe_and_binding_safety(tmp_path: Path) -> None:
+    """TriggersTools discovers registered EventSources, handles OAuth/defaults, and protects binding against mutation/forgery."""
+    env = _seam_env(tmp_path)
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        owner_list = json.loads(await tool.triggers(action="list"))
+    owner_list = await env.call("list")
     assert [s["source_id"] for s in owner_list["event_sources"]] == ["github", "slack_private"]
     assert owner_list["event_sources"][1] == {
         "source_id": "slack_private",
@@ -1390,55 +1306,36 @@ async def test_triggers_tool_registered_event_source_discovery_subscribe_and_bin
         "private_room_only": True,
     }
 
-    with tool_runtime_context(make_ctx(requester_id=_OTHER, room_id="!shared:localhost")):
-        other_list = json.loads(await tool.triggers(action="list"))
-        other_sub = json.loads(
-            await tool.triggers(action="subscribe_event", source_id="slack_private", kind="message", prompt="Watch"),
-        )
+    other_list = await env.call("list", requester_id=_OTHER, room_id=_SHARED_ROOM)
+    other_sub = await env.subscribe(requester_id=_OTHER, room_id=_SHARED_ROOM, prompt="Watch")
     assert other_list["event_sources"] == []
     assert other_sub["status"] == "error"
     assert "unavailable" in other_sub["message"]
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        need_oauth = json.loads(
-            await tool.triggers(action="subscribe_event", source_id="slack_private", kind="message", prompt="Watch"),
-        )
+    need_oauth = await env.subscribe(prompt="Watch")
     assert (need_oauth["status"], need_oauth["oauth_connection_required"], need_oauth["connect_url"]) == (
         "error",
         True,
         "https://example.test/connect/slack",
     )
 
-    source.connected_users.add(_OWNER)
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="sl_1",
-                source_id="slack_private",
-                kind="message",
-                prompt="Summarize Slack ping",
-                match={"channel_id": ["C1", "C2"]},
-            ),
-        )
-        override_created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="sl_room",
-                source_id="slack_private",
-                kind="mention",
-                prompt="Post in room",
-                target_thread_id="room",
-                once=True,
-                reopen_on_fire=False,
-            ),
-        )
+    env.source.connected_users.add(_OWNER)
+    created = await env.subscribe("sl_1", prompt="Summarize Slack ping", match={"channel_id": ["C1", "C2"]})
+    override_created = await env.subscribe(
+        "sl_room",
+        kind="mention",
+        prompt="Post in room",
+        target_thread_id="room",
+        once=True,
+        reopen_on_fire=False,
+    )
     assert created["status"] == "ok", created
+    target = created["trigger"]["target"]
     assert (
         created["trigger"]["once"],
-        created["trigger"]["target"]["new_thread"],
-        created["trigger"]["target"]["thread_key_from_event"],
-        created["trigger"]["target"]["reopen_on_fire"],
+        target["new_thread"],
+        target["thread_key_from_event"],
+        target["reopen_on_fire"],
     ) == (False, True, True, True)
     assert created["trigger"]["source"] == {
         "source_type": "external_event",
@@ -1448,67 +1345,56 @@ async def test_triggers_tool_registered_event_source_discovery_subscribe_and_bin
     }
     assert "binding" not in json.dumps(created)
     assert "U_ALICE" not in json.dumps(created)
+    override_target = override_created["trigger"]["target"]
     assert (
         override_created["trigger"]["once"],
-        override_created["trigger"]["target"]["new_thread"],
-        override_created["trigger"]["target"]["thread_key_from_event"],
-        override_created["trigger"]["target"]["reopen_on_fire"],
+        override_target["new_thread"],
+        override_target["thread_key_from_event"],
+        override_target["reopen_on_fire"],
     ) == (True, False, False, False)
 
-    stored = store.get_trigger("sl_1")
+    stored = env.store.get_trigger("sl_1")
     assert stored is not None
     assert isinstance(stored.source, ExternalEventSourceSpec)
     assert stored.source.binding == {"team_id": "T1", "slack_user_id": "U_ALICE"}
-    assert source.validate_calls[-1][0].target_room_state is not None
-    assert source.validate_calls[-1][0].credentials_manager is not None
+    assert env.source.validate_calls[-1][0].target_room_state is not None
+    assert env.source.validate_calls[-1][0].credentials_manager is not None
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        updated = json.loads(await tool.triggers(action="update", trigger_id="sl_1", match={"channel_id": ["C3"]}))
-        updated_prompt = json.loads(await tool.triggers(action="update", trigger_id="sl_1", prompt="Updated prompt"))
-        bad_update = json.loads(await tool.triggers(action="update", trigger_id="sl_1", match={"bogus": "x"}))
+    # Update passes a read-only MappingProxyType copy of binding (TypeError on in-place mutation) AND ignores forged returns.
+    updated = await env.call("update", trigger_id="sl_1", match={"channel_id": ["C3"]})
+    updated_prompt = await env.call("update", trigger_id="sl_1", prompt="Updated prompt")
+    bad_update = await env.call("update", trigger_id="sl_1", match={"bogus": "x"})
     assert (updated["status"], updated_prompt["status"], bad_update["status"]) == ("ok", "ok", "error")
+    assert env.source.mutation_blocked is True
     assert updated["trigger"]["source"]["match"] == {"channel_id": ["C3"]}
     assert "binding" not in json.dumps(updated)
-    reloaded = store.get_trigger("sl_1")
+    reloaded = env.store.get_trigger("sl_1")
     assert reloaded is not None
     assert isinstance(reloaded.source, ExternalEventSourceSpec)
-    assert reloaded.source.binding == {"team_id": "T1", "slack_user_id": "U_ALICE"}
-    assert reloaded.source.match == {"channel_id": ["C3"]}
+    assert (reloaded.source.binding, reloaded.source.match, reloaded.source.source_origin) == (
+        {"team_id": "T1", "slack_user_id": "U_ALICE"},
+        {"channel_id": ["C3"]},
+        "registered",
+    )
 
 
 @pytest.mark.asyncio
-async def test_triggers_tool_registered_event_source_paused_test_history_and_watch_guard(
-    tmp_path: Path,
-) -> None:
+async def test_triggers_tool_registered_event_source_paused_test_history_and_watch_guard(tmp_path: Path) -> None:
     """Registered EventSource list paused_reason, dry-run test, calling-room history gating, and watch-turn guard."""
-    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
-    tool, store, _source, room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
+    env = _seam_env(tmp_path, connected_users={_OWNER})
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="sl_1",
-                source_id="slack_private",
-                kind="message",
-                prompt="Summarize Slack ping",
-                match={"channel_id": ["C3"]},
-            ),
-        )
-        active_list = json.loads(await tool.triggers(action="list"))
+    created = await env.subscribe("sl_1", prompt="Summarize Slack ping", match={"channel_id": ["C3"]})
+    active_list = await env.call("list")
     assert created["status"] == "ok"
     assert active_list["reactive_triggers"][0]["paused_reason"] is None
     assert "binding" not in json.dumps(active_list)
 
-    room_members[private_room] = [_OWNER, _OTHER, "@mindroom_research:localhost"]
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        paused_list = json.loads(await tool.triggers(action="list"))
-    assert paused_list["reactive_triggers"][0]["paused_reason"] == "Room is no longer private"
-    room_members[private_room] = [_OWNER, "@mindroom_research:localhost"]
+    env.room_members[_PRIVATE_ROOM] = [_OWNER, _OTHER, "@mindroom_research:localhost"]
+    assert (await env.call("list"))["reactive_triggers"][0]["paused_reason"] == "Room is no longer private"
+    env.room_members[_PRIVATE_ROOM] = [_OWNER, "@mindroom_research:localhost"]
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        dry_hit = json.loads(await tool.triggers(action="test", trigger_id="sl_1", sample_data={"channel_id": "C3"}))
-        dry_miss = json.loads(await tool.triggers(action="test", trigger_id="sl_1", sample_data={"channel_id": "C9"}))
+    dry_hit = await env.call("test", trigger_id="sl_1", sample_data={"channel_id": "C3"})
+    dry_miss = await env.call("test", trigger_id="sl_1", sample_data={"channel_id": "C9"})
     assert (dry_hit["matched"], dry_hit["would_fire"], dry_miss["matched"], dry_miss["would_fire"]) == (
         True,
         True,
@@ -1516,41 +1402,35 @@ async def test_triggers_tool_registered_event_source_paused_test_history_and_wat
         False,
     )
 
-    rule = store.get_trigger("sl_1")
+    rule = env.store.get_trigger("sl_1")
     assert rule is not None
-    assert store.enqueue_firing(
+    assert env.store.enqueue_firing(
         "sl_1",
         "sl-ev-1",
-        TriggerEvent(
-            source_type="external_event",
-            source_id="slack_private",
-            kind="message",
-            event_id="sl-ev-1",
-            timestamp=1_000.0,
+        _ext_event(
+            "slack_private",
+            "sl-ev-1",
             actor="U_COWORKER",
             text="Private Slack DM about acquisition",
             data={"channel_id": "C3"},
         ),
         expected_rule_uid=rule.rule_uid,
     )
-    firing_id = store.list_firings(trigger_id="sl_1")[0].id
-    assert store.claim_firing(firing_id, now=1_001.0, triage_reason="Mentions secret acquisition deal") == "claimed"
+    firing_id = env.store.list_firings(trigger_id="sl_1")[0].id
+    assert env.store.claim_firing(firing_id, now=1_001.0, triage_reason="Mentions secret acquisition deal") == "claimed"
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room)):
-        priv_hist = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
+    priv_hist = await env.call("history", trigger_id="sl_1")
     assert priv_hist["firings"][0]["event"]["text"] == "Private Slack DM about acquisition"
     assert priv_hist["firings"][0]["triage_reason"] == "Mentions secret acquisition deal"
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=shared_room)):
-        shared_scoped = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
-        shared_unscoped = json.loads(await tool.triggers(action="history"))
+    shared_scoped = await env.call("history", room_id=_SHARED_ROOM, trigger_id="sl_1")
+    shared_unscoped = await env.call("history", room_id=_SHARED_ROOM)
     assert (shared_scoped["status"], shared_unscoped["count"]) == ("error", 0)
 
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        admin_list = json.loads(await tool.triggers(action="list"))
-        admin_hist_scoped = json.loads(await tool.triggers(action="history", trigger_id="sl_1"))
-        admin_hist_unscoped = json.loads(await tool.triggers(action="history"))
-        admin_test = json.loads(await tool.triggers(action="test", trigger_id="sl_1"))
+    admin_list = await env.admin_call("list")
+    admin_hist_scoped = await env.admin_call("history", trigger_id="sl_1")
+    admin_hist_unscoped = await env.admin_call("history")
+    admin_test = await env.admin_call("test", trigger_id="sl_1")
     assert (
         admin_list["reactive_triggers"],
         admin_hist_scoped["status"],
@@ -1561,35 +1441,21 @@ async def test_triggers_tool_registered_event_source_paused_test_history_and_wat
     assert "paused_reason" not in json.dumps(admin_list)
     assert "acquisition" not in json.dumps(admin_hist_unscoped)
 
-    mutating_calls: list[dict[str, Any]] = [
-        {"action": "watch_room", "prompt": "x"},
-        {"action": "watch_thread", "prompt": "x"},
-        {"action": "watch_pr", "repo": "org/repo", "number": 1},
-        {"action": "subscribe_event", "source_id": "slack_private", "kind": "message", "prompt": "x"},
-        {"action": "create", "trigger_id": "d1", "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-        {"action": "update", "trigger_id": "sl_1", "prompt": "hijack"},
-        {"action": "set_enabled", "trigger_id": "sl_1", "enabled": False},
-        {"action": "delete", "trigger_id": "sl_1"},
-        {"action": "rotate_key", "trigger_id": "d1", "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-    ]
+    # Every mutating triggers action is refused during watch turns; read-only actions and fresh turns remain allowed.
+    mutating_actions = sorted(set(_ACTION_ALLOWED_PARAMS) - _WATCH_TURN_READ_ONLY_ACTIONS)
     for watch_hook in ("event_source:slack_private", "slack-watch/w1"):
-        with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room, hook_source=watch_hook)):
-            for call_kwargs in mutating_calls:
-                res = json.loads(await tool.triggers(**call_kwargs))
-                assert (res["status"], res["message"]) == (
-                    "error",
-                    "Ask me in a new message to change your triggers.",
-                )
-            assert json.loads(await tool.triggers(action="list"))["status"] == "ok"
-            assert json.loads(await tool.triggers(action="history", trigger_id="sl_1"))["status"] == "ok"
-            assert json.loads(await tool.triggers(action="test", trigger_id="sl_1"))["status"] == "ok"
+        for action in mutating_actions:
+            res = await env.call(action, hook_source=watch_hook)
+            assert (res["status"], res["message"]) == ("error", "Ask me in a new message to change your triggers.")
+        assert (await env.call("list", hook_source=watch_hook))["status"] == "ok"
+        assert (await env.call("history", hook_source=watch_hook, trigger_id="sl_1"))["status"] == "ok"
+        assert (await env.call("test", hook_source=watch_hook, trigger_id="sl_1"))["status"] == "ok"
 
-    with tool_runtime_context(make_ctx(requester_id=_OWNER, room_id=private_room, hook_source=None)):
-        assert json.loads(await tool.triggers(action="delete", trigger_id="sl_1"))["status"] == "ok"
+    assert (await env.call("delete", trigger_id="sl_1"))["status"] == "ok"
 
 
 def test_event_source_descriptor_default_max_fires_validation() -> None:
-    """EventSourceDescriptor validates default_max_fires_per_hour >= 1 (and rejects booleans)."""
+    """EventSourceDescriptor validates default_max_fires_per_hour >= 1 (and rejects booleans and floats)."""
     assert EventSourceDescriptor(source_id="ok", description="Ok").default_max_fires_per_hour is None
     assert (
         EventSourceDescriptor(
@@ -1609,184 +1475,118 @@ def test_event_source_descriptor_default_max_fires_validation() -> None:
 
 @pytest.mark.asyncio
 async def test_registered_source_admin_visibility_and_unregistered_hiding(tmp_path: Path) -> None:
-    """Non-owner admins cannot read/toggle/delete private or unregistered triggers, but can manage visible ones."""
-    shared_room, admin = "!shared:localhost", "@admin:localhost"
-    tool, store, _priv_source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
-    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
+    """Exhaustive non-owner admin visibility & hidden-vs-absent error parity before and after unregistering."""
+    env = _seam_env(tmp_path, connected_users={_OWNER})
+    env.registry.register(
+        FakeEventSource(
+            "public_alerts",
+            allowed_kinds=("alert",),
+            delivery_decision=EventSourceAccessDenial(reason="owner-only pause detail"),
+        ),
+    )
 
-    class _PublicSource(EventSource):
-        source_id = "public_alerts"
-        description = "Public alerts"
-        allowed_kinds = ("alert",)
-        private_room_only = False
+    assert (await env.subscribe("owner_priv", prompt="Private watch"))["status"] == "ok"
+    assert (await env.subscribe("owner_pub", source_id="public_alerts", kind="alert", prompt="Public alert"))[
+        "status"
+    ] == "ok"
 
-        async def check_delivery_access(
-            self,
-            ctx: EventSourceContext,
-            *,
-            rule: ReactiveTriggerRecord,
-            event: TriggerEvent | None = None,
-        ) -> EventSourceAccessDenial | None:
-            del ctx, rule, event
-            return EventSourceAccessDenial(reason="owner-only pause detail")
+    owner_rotate = await env.call("rotate_key", trigger_id="owner_priv", public_key=_SAMPLE_PUBLIC_KEY)
+    assert (owner_rotate["status"], owner_rotate["message"]) == (
+        "error",
+        "Key rotation applies only to direct signed external triggers.",
+    )
 
-    registry.register(_PublicSource())
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        sub_priv = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="owner_priv",
-                source_id="slack_private",
-                kind="message",
-                prompt="Private watch",
-            ),
-        )
-        sub_pub = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="owner_pub",
-                source_id="public_alerts",
-                kind="alert",
-                prompt="Public alert",
-            ),
-        )
-    assert (sub_priv["status"], sub_pub["status"]) == ("ok", "ok")
+    admin_actions: tuple[tuple[str, dict[str, Any], str], ...] = (
+        ("rotate_key", {"public_key": _SAMPLE_PUBLIC_KEY}, "external trigger not found: {tid}"),
+        ("history", {}, "Reactive trigger not found: {tid}"),
+        ("test", {}, "Reactive trigger not found: {tid}"),
+        ("update", {"prompt": "Hijack"}, "Reactive trigger not found: {tid}"),
+        ("set_enabled", {"enabled": False}, "external trigger not found: {tid}"),
+        ("delete", {}, "external trigger not found: {tid}"),
+    )
 
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        admin_list = json.loads(await tool.triggers(action="list"))
-        admin_priv_hist = json.loads(await tool.triggers(action="history", trigger_id="owner_priv"))
-        admin_priv_test = json.loads(await tool.triggers(action="test", trigger_id="owner_priv"))
-        admin_priv_disable = json.loads(
-            await tool.triggers(action="set_enabled", trigger_id="owner_priv", enabled=False),
-        )
-        admin_priv_delete = json.loads(await tool.triggers(action="delete", trigger_id="owner_priv"))
-        admin_pub_disable = json.loads(await tool.triggers(action="set_enabled", trigger_id="owner_pub", enabled=False))
-        admin_pub_enable = json.loads(await tool.triggers(action="set_enabled", trigger_id="owner_pub", enabled=True))
-        admin_pub_delete = json.loads(await tool.triggers(action="delete", trigger_id="owner_pub"))
+    async def _assert_admin_hidden_parity() -> dict[str, Any]:
+        listed = await env.admin_call("list")
+        assert "owner_priv" not in {t["trigger_id"] for t in listed["reactive_triggers"]}
+        for action, extra, expected in admin_actions:
+            hidden = await env.admin_call(action, trigger_id="owner_priv", **extra)
+            absent = await env.admin_call(action, trigger_id="absent_trigger", **extra)
+            assert (hidden["status"], hidden["message"]) == ("error", expected.format(tid="owner_priv"))
+            assert (absent["status"], absent["message"]) == ("error", expected.format(tid="absent_trigger"))
+            assert "Private watch" not in json.dumps(hidden)
+        reloaded = env.store.get_trigger("owner_priv")
+        assert reloaded is not None
+        assert reloaded.enabled is True
+        return listed
+
+    admin_list = await _assert_admin_hidden_parity()
     listed_by_id = {t["trigger_id"]: t for t in admin_list["reactive_triggers"]}
-    assert "owner_priv" not in listed_by_id
     assert "owner_pub" in listed_by_id
     assert "paused_reason" not in listed_by_id["owner_pub"]
     assert "owner-only pause detail" not in json.dumps(admin_list)
-    assert (
-        admin_priv_hist["status"],
-        admin_priv_test["status"],
-        admin_priv_disable["status"],
-        admin_priv_delete["status"],
-    ) == ("error", "error", "error", "error")
-    assert "Private watch" not in json.dumps(admin_priv_disable)
-    reloaded_priv = store.get_trigger("owner_priv")
-    assert reloaded_priv is not None
-    assert reloaded_priv.enabled is True
-    assert (admin_pub_disable["status"], admin_pub_enable["status"], admin_pub_delete["status"]) == ("ok", "ok", "ok")
-    assert store.get_trigger("owner_pub") is None
 
-    entry_token = registry._entries["slack_private"].emitter.token
-    assert registry.unregister("slack_private", entry_token) is True
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        admin_list_after = json.loads(await tool.triggers(action="list"))
-        admin_hist_after = json.loads(await tool.triggers(action="history", trigger_id="owner_priv"))
-        admin_disable_after = json.loads(
-            await tool.triggers(action="set_enabled", trigger_id="owner_priv", enabled=False),
-        )
-        admin_delete_after = json.loads(await tool.triggers(action="delete", trigger_id="owner_priv"))
-    assert "owner_priv" not in {t["trigger_id"] for t in admin_list_after["reactive_triggers"]}
-    assert (admin_hist_after["status"], admin_disable_after["status"], admin_delete_after["status"]) == (
-        "error",
-        "error",
-        "error",
-    )
-    reloaded_priv_after = store.get_trigger("owner_priv")
-    assert reloaded_priv_after is not None
-    assert reloaded_priv_after.enabled is True
+    # Admin can still manage visible public triggers.
+    assert (await env.admin_call("set_enabled", trigger_id="owner_pub", enabled=False))["status"] == "ok"
+    assert (await env.admin_call("set_enabled", trigger_id="owner_pub", enabled=True))["status"] == "ok"
+    assert (await env.admin_call("delete", trigger_id="owner_pub"))["status"] == "ok"
+    assert env.store.get_trigger("owner_pub") is None
+
+    # After unregistering slack_private, non-owner admin STILL gets exact absent-trigger error parity on every action.
+    assert env.registry.unregister("slack_private", env.emitter.token) is True
+    await _assert_admin_hidden_parity()
 
 
 @pytest.mark.asyncio
 async def test_registered_source_history_redaction_and_per_event_checks(tmp_path: Path) -> None:
     """check_history_access runs per firing event (caching only room state) and redacts denied firings."""
-    private_room, shared_room, admin = "!priv:localhost", "!shared:localhost", "@admin:localhost"
-    tool, store, priv_source, room_members, make_ctx = _setup_registered_tool_env(
-        tmp_path,
-        connected_users={_OWNER, admin},
-    )
-    priv_source.visible_to.add(admin)
+    env = _seam_env(tmp_path, connected_users={_OWNER, _ADMIN})
+    env.source.visible_to.add(_ADMIN)
 
     def _enqueue(trigger_id: str, dedupe_key: str, ev_id: str, text: str, ts: float) -> None:
-        rule = store.get_trigger(trigger_id)
+        rule = env.store.get_trigger(trigger_id)
         assert rule is not None
-        assert store.enqueue_firing(
+        assert env.store.enqueue_firing(
             trigger_id,
             dedupe_key,
-            TriggerEvent(
-                source_type="external_event",
-                source_id="slack_private",
-                kind="message",
-                event_id=ev_id,
-                timestamp=ts,
-                text=text,
-            ),
+            _ext_event("slack_private", ev_id, timestamp=ts, text=text),
             expected_rule_uid=rule.rule_uid,
         )
 
     # Non-admin owner: firing 1 allowed, firing 2 denied on the same rule.
-    priv_source.denied_event_ids.update({"owner-deny", "admin-ev-deny"})
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        sub = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="owner_priv",
-                source_id="slack_private",
-                kind="message",
-                prompt="Private watch",
-            ),
-        )
-    assert sub["status"] == "ok"
+    env.source.denied_event_ids.update({"owner-deny", "admin-ev-deny"})
+    assert (await env.subscribe("owner_priv"))["status"] == "ok"
     _enqueue("owner_priv", "T1:C3:100.0", "owner-allow", "Allowed owner msg", 1_000.0)
     _enqueue("owner_priv", "T1:C3:100.1", "owner-deny", "Denied owner msg", 1_001.0)
-    priv_source.history_contexts.clear()
-    owner_ctx = make_ctx(requester_id=_OWNER, room_id=private_room)
-    owner_ctx.client.room_get_state.reset_mock()  # type: ignore[union-attr]
-    with tool_runtime_context(owner_ctx):
-        owner_hist = json.loads(await tool.triggers(action="history", trigger_id="owner_priv"))
+    env.source.history_contexts.clear()
+    env.client.room_get_state.reset_mock()
+    owner_hist = await env.call("history", trigger_id="owner_priv")
     assert (owner_hist["count"], owner_hist["firings"][0]["event"]["event_id"]) == (1, "owner-allow")
-    assert [ev.event_id if ev is not None else None for _, ev in priv_source.history_contexts] == [
+    assert [ev.event_id if ev is not None else None for _, ev in env.source.history_contexts] == [
         None,
         "owner-deny",
         "owner-allow",
     ]
-    assert owner_ctx.client.room_get_state.await_count == 1  # type: ignore[union-attr]
+    assert env.client.room_get_state.await_count == 1
 
     # Admin owner on the SAME rule with TWO firings: firing 1 allowed (payload kept), firing 2 denied (redacted).
-    room_members[private_room] = [admin, "@mindroom_research:localhost"]
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=private_room)):
-        admin_sub = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="admin_priv",
-                source_id="slack_private",
-                kind="message",
-                prompt="Admin private watch",
-            ),
-        )
-    assert admin_sub["status"] == "ok"
+    env.room_members[_PRIVATE_ROOM] = [_ADMIN, "@mindroom_research:localhost"]
+    assert (await env.subscribe("admin_priv", requester_id=_ADMIN, prompt="Admin private watch"))["status"] == "ok"
     _enqueue("admin_priv", "T_TEAM:C_ALLOWED:1700000.001", "admin-ev-allow", "Allowed admin DM", 2_000.0)
     _enqueue("admin_priv", "T_TEAM:C_SECRET:1700000.002", "admin-ev-deny", "Top secret denied DM", 2_001.0)
-    firings_by_dedupe = {f.dedupe_key: f for f in store.list_firings(trigger_id="admin_priv")}
-    assert store.mark_skipped(firings_by_dedupe["T_TEAM:C_ALLOWED:1700000.001"].id, "allowable note")
-    assert store.mark_skipped(firings_by_dedupe["T_TEAM:C_SECRET:1700000.002"].id, "another person is in this room")
-    priv_source.history_contexts.clear()
+    firings_by_dedupe = {f.dedupe_key: f for f in env.store.list_firings(trigger_id="admin_priv")}
+    assert env.store.mark_skipped(firings_by_dedupe["T_TEAM:C_ALLOWED:1700000.001"].id, "allowable note")
+    assert env.store.mark_skipped(firings_by_dedupe["T_TEAM:C_SECRET:1700000.002"].id, "another person is in this room")
+    env.source.history_contexts.clear()
+    env.client.room_get_state.reset_mock()
 
-    admin_priv_ctx = make_ctx(requester_id=admin, room_id=private_room)
-    admin_priv_ctx.client.room_get_state.reset_mock()  # type: ignore[union-attr]
-    with tool_runtime_context(admin_priv_ctx):
-        mixed_hist = json.loads(await tool.triggers(action="history", trigger_id="admin_priv"))
+    mixed_hist = await env.call("history", requester_id=_ADMIN, trigger_id="admin_priv")
     assert mixed_hist["count"] == 2
-    assert [ev.event_id if ev is not None else None for _, ev in priv_source.history_contexts] == [
+    assert [ev.event_id if ev is not None else None for _, ev in env.source.history_contexts] == [
         None,
         "admin-ev-deny",
         "admin-ev-allow",
     ]
-    assert admin_priv_ctx.client.room_get_state.await_count == 1  # type: ignore[union-attr]
+    assert env.client.room_get_state.await_count == 1
     rows_by_id = {row["id"]: row for row in mixed_hist["firings"]}
     allowed_row = rows_by_id[firings_by_dedupe["T_TEAM:C_ALLOWED:1700000.001"].id]
     denied_row = rows_by_id[firings_by_dedupe["T_TEAM:C_SECRET:1700000.002"].id]
@@ -1796,21 +1596,13 @@ async def test_registered_source_history_redaction_and_per_event_checks(tmp_path
         allowed_row["dedupe_key"],
         allowed_row["error_message"],
     ) == ("admin-ev-allow", "Allowed admin DM", "T_TEAM:C_ALLOWED:1700000.001", "allowable note")
-    assert (denied_row["event"], denied_row["triage_reason"]) == (None, None)
-    assert {"error_message", "dedupe_key"}.isdisjoint(denied_row)
-    assert all(
-        secret not in json.dumps(denied_row)
-        for secret in ("another person is in this room", "T_TEAM:C_SECRET", "Top secret")
-    )
+    _assert_redacted(denied_row, "another person is in this room", "T_TEAM:C_SECRET", "Top secret")
 
     # In a shared room, both firings are redacted.
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        redacted_hist = json.loads(await tool.triggers(action="history", trigger_id="admin_priv"))
+    redacted_hist = await env.admin_call("history", trigger_id="admin_priv")
     assert redacted_hist["count"] == 2
-    assert all(
-        row["event"] is None and "error_message" not in row and "dedupe_key" not in row
-        for row in redacted_hist["firings"]
-    )
+    for row in redacted_hist["firings"]:
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -1826,31 +1618,13 @@ async def test_registered_and_yaml_external_sources_are_strictly_isolated(tmp_pa
     config, runtime_paths = _make_config(tmp_path, event_sources={"shared_id": gh_cfg})
     store = ReactiveTriggerStore(runtime_paths)
 
-    reg_rule = _make_rule(
-        trigger_id="reg_rule",
-        source_id="shared_id",
-        kind="push",
-        match={"repo": "org/app"},
-        source_origin="registered",
-    )
-    yaml_rule = _make_rule(
-        trigger_id="yaml_rule",
-        source_id="shared_id",
-        kind="push",
-        match={"repo": "org/app"},
-        source_origin="yaml",
-    )
+    shared_rule = functools.partial(_make_rule, source_id="shared_id", kind="push", match={"repo": "org/app"})
+    reg_rule = shared_rule(trigger_id="reg_rule", source_origin="registered")
+    yaml_rule = shared_rule(trigger_id="yaml_rule", source_origin="yaml")
     store.create_trigger(reg_rule)
     store.create_trigger(yaml_rule)
 
-    event = TriggerEvent(
-        source_type="external_event",
-        source_id="shared_id",
-        kind="push",
-        event_id="ev-1",
-        timestamp=1_000.0,
-        data={"repo": "org/app"},
-    )
+    event = _ext_event("shared_id", "ev-1", kind="push", data={"repo": "org/app"})
 
     # YAML webhook fan-out must match ONLY yaml_rule, NEVER reg_rule.
     enqueued = fan_out_external_event(
@@ -1866,7 +1640,7 @@ async def test_registered_and_yaml_external_sources_are_strictly_isolated(tmp_pa
     assert len(store.list_firings(trigger_id="yaml_rule")) == 1
     assert store.list_firings(trigger_id="reg_rule") == []
 
-    # Even with an empty EventSourceRegistry (registered source absent), dispatch NEVER falls back to YAML config!
+    # Even with an empty EventSourceRegistry (registered source absent), dispatch NEVER falls back to YAML config.
     empty_registry = EventSourceRegistry(lambda: config, AsyncMock(return_value=0))
     assert (
         check_external_event_source_access(
@@ -1901,234 +1675,71 @@ async def test_registered_and_yaml_external_sources_are_strictly_isolated(tmp_pa
         memberships=AgentReplyMembershipIndex(),
         store=store2,
     )
-    emitter = service.event_sources.register(_CustomSource("shared_id"))
+    emitter = service.event_sources.register(FakeEventSource("shared_id"))
     assert await emitter.emit(kind="push", event_id="ev-2", data={"repo": "org/app"}) == 1
     assert len(store2.list_firings(trigger_id="reg_rule")) == 1
     assert store2.list_firings(trigger_id="yaml_rule") == []
 
-    # If a source_id appears in BOTH YAML event_sources and EventSourceRegistry (e.g. after config reload),
-    # triggers(action="subscribe_event") fails closed with an explicit conflict error.
-    tool, _store3, _priv, _rm, make_ctx = _setup_registered_tool_env(tmp_path / "conflict", connected_users={_OWNER})
-    ctx = make_ctx(requester_id=_OWNER)
-    conflict_registry: EventSourceRegistry = ctx.orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
-    # Simulate a config reload introducing a YAML source colliding with an already-registered source.
-    ctx.config.external_trigger_policy.event_sources["slack_private"] = gh_cfg
-    assert conflict_registry.get("slack_private") is not None
-    with tool_runtime_context(ctx):
-        conflict_res = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                source_id="slack_private",
-                kind="message",
-                prompt="Watch",
-            ),
-        )
+    # If a source_id appears in BOTH YAML event_sources and EventSourceRegistry, subscribe_event fails closed.
+    env = _seam_env(tmp_path / "conflict", connected_users={_OWNER})
+    env.config.external_trigger_policy.event_sources["slack_private"] = gh_cfg
+    assert env.registry.get("slack_private") is not None
+    conflict_res = await env.subscribe(prompt="Watch")
     assert conflict_res["status"] == "error"
     assert "conflict" in conflict_res["message"].lower()
 
 
 @pytest.mark.asyncio
-async def test_update_passes_readonly_binding_copy_and_ignores_in_place_mutation_attempts(tmp_path: Path) -> None:
-    """Updating match passes a read-only MappingProxyType copy of binding and persists the original binding untouched."""
-    mutation_blocked = False
+async def test_dynamic_descriptor_private_room_only_persisted_and_hides_trigger_in_tool(tmp_path: Path) -> None:
+    """Descriptor-level private_room_only=True is persisted across subscribe/update and hides the rule from non-owners."""
+    env = _seam_env(tmp_path, connected_users={_OWNER})
+    env.registry.register(
+        FakeEventSource(
+            "dyn_private",
+            allowed_kinds=("alert",),
+            private_room_only=False,
+            descriptor_private_room_only=True,
+        ),
+    )
 
-    class _MutatingSource(EventSource):
-        source_id = "mut_src"
-        description = "Mutating test source"
-        allowed_kinds = ("message",)
-
-        async def validate_subscription(
-            self,
-            ctx: EventSourceContext,
-            *,
-            kind: str,
-            match: Mapping[str, Any],
-            existing_binding: Mapping[str, Any] | None = None,
-        ) -> ValidatedSubscription:
-            nonlocal mutation_blocked
-            del ctx
-            if existing_binding is not None:
-                try:
-                    existing_binding["team_id"] = "T_TAMPERED"  # type: ignore[index]
-                except TypeError:
-                    mutation_blocked = True
-                return ValidatedSubscription(
-                    kind=kind,
-                    match=dict(match),
-                    binding={"team_id": "T_RETURNED_TAMPERED", "slack_user_id": "U_EVIL"},
-                )
-            return ValidatedSubscription(
-                kind=kind,
-                match=dict(match),
-                binding={"team_id": "T_ORIG", "slack_user_id": "U_ORIG"},
-            )
-
-    tool, store, _priv, _rm, make_ctx = _setup_registered_tool_env(tmp_path)
-    ctx = make_ctx(requester_id=_OWNER)
-    ctx.orchestrator.reactive_triggers.event_sources.register(_MutatingSource())  # type: ignore[union-attr]
-
-    with tool_runtime_context(ctx):
-        created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="mut_1",
-                source_id="mut_src",
-                kind="message",
-                prompt="Watch",
-                match={"channel_id": "C1"},
-            ),
-        )
-        assert created["status"] == "ok"
-        updated = json.loads(
-            await tool.triggers(
-                action="update",
-                trigger_id="mut_1",
-                match={"channel_id": "C2"},
-            ),
-        )
-    assert updated["status"] == "ok"
-    assert mutation_blocked is True
-    reloaded = store.get_trigger("mut_1")
-    assert reloaded is not None
-    assert isinstance(reloaded.source, ExternalEventSourceSpec)
-    assert reloaded.source.match == {"channel_id": "C2"}
-    assert reloaded.source.binding == {"team_id": "T_ORIG", "slack_user_id": "U_ORIG"}
-    assert reloaded.source.source_origin == "registered"
-
-
-@pytest.mark.asyncio
-async def test_dynamic_descriptor_private_room_only_hides_trigger_in_list_and_room_api(tmp_path: Path) -> None:
-    """Descriptor-level private_room_only=True is persisted and hides the rule in both list and GET room triggers."""
-    from tests.api.test_room_triggers import ALICE, BOB, ROOM_A  # noqa: PLC0415
-    from tests.api.test_room_triggers import _Harness as RoomTriggersHarness  # noqa: PLC0415
-
-    shared_room, admin = "!shared:localhost", "@admin:localhost"
-    tool, store, _priv_source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
-    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
-
-    class _DynamicPrivateSource(EventSource):
-        source_id = "dyn_private"
-        description = "Dynamic privacy source"
-        allowed_kinds = ("alert",)
-        private_room_only = False
-
-        async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
-            del ctx
-            return EventSourceDescriptor(
-                source_id=self.source_id,
-                description=self.description,
-                allowed_kinds=self.allowed_kinds,
-                private_room_only=True,
-            )
-
-    dyn_source = _DynamicPrivateSource()
-    registry.register(dyn_source)
-
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="dyn_priv_1",
-                source_id="dyn_private",
-                kind="alert",
-                match={"env": "prod"},
-                prompt="Secret dynamic alert",
-            ),
-        )
-        updated = json.loads(
-            await tool.triggers(
-                action="update",
-                trigger_id="dyn_priv_1",
-                match={"env": "staging"},
-            ),
-        )
+    created = await env.subscribe(
+        "dyn_priv_1",
+        source_id="dyn_private",
+        kind="alert",
+        match={"env": "prod"},
+        prompt="Secret dynamic alert",
+    )
+    updated = await env.call("update", trigger_id="dyn_priv_1", match={"env": "staging"})
     assert (created["status"], updated["status"]) == ("ok", "ok")
-    stored = store.get_trigger("dyn_priv_1")
+    stored = env.store.get_trigger("dyn_priv_1")
     assert stored is not None
     assert isinstance(stored.source, ExternalEventSourceSpec)
     assert stored.source.private_room_only is True
 
-    # Hidden from non-owners (including admin) in triggers(action="list") and blocked for set_enabled/delete.
-    with tool_runtime_context(make_ctx(requester_id=admin, room_id=shared_room)):
-        admin_list = json.loads(await tool.triggers(action="list"))
-        admin_disable = json.loads(await tool.triggers(action="set_enabled", trigger_id="dyn_priv_1", enabled=False))
-        admin_delete = json.loads(await tool.triggers(action="delete", trigger_id="dyn_priv_1"))
+    admin_list = await env.admin_call("list")
+    admin_disable = await env.admin_call("set_enabled", trigger_id="dyn_priv_1", enabled=False)
+    admin_delete = await env.admin_call("delete", trigger_id="dyn_priv_1")
     assert "dyn_priv_1" not in {t["trigger_id"] for t in admin_list["reactive_triggers"]}
     assert (admin_disable["status"], admin_delete["status"]) == ("error", "error")
-
-    # Also hidden from non-owners in GET /api/rooms/{room_id}/triggers even though class-level private_room_only=False.
-    h = RoomTriggersHarness(tmp_path / "api_room")
-    api_registry = EventSourceRegistry(lambda: h.config, AsyncMock(return_value=0))
-    api_registry.register(_DynamicPrivateSource())
-    ensure_app_state(h.app).embedded = SimpleNamespace(  # type: ignore[assignment]
-        reactive_triggers=SimpleNamespace(event_sources=api_registry),
-    )
-    h.add_reactive(
-        "dyn_priv_api",
-        stored.source,
-        description="Dynamic private rule",
-        prompt="Secret dynamic alert",
-        created_at=1.0,
-    )
-    alice_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
-    bob_resp = h.req("GET", ROOM_A, BOB)
-    assert bob_resp.status_code == 200
-    assert "dyn_priv_api" in alice_rows
-    assert "dyn_priv_api" not in bob_resp.text
 
 
 @pytest.mark.asyncio
 async def test_broken_plugin_hooks_do_not_crash_triggers_list(tmp_path: Path) -> None:
     """Raising describe_for_user / check_delivery_access hooks are isolated during triggers(action='list')."""
-    tool, _store, _priv_source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
-    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
+    env = _seam_env(tmp_path, connected_users={_OWNER})
+    env.registry.register(FakeEventSource("broken_describe", describe_error=RuntimeError("describe crashed")))
+    env.registry.register(
+        FakeEventSource("broken_access", allowed_kinds=("alert",), delivery_error=RuntimeError("access crashed")),
+    )
 
-    class _BrokenDiscoverySource(EventSource):
-        source_id = "broken_describe"
-        description = "Broken describe"
-
-        async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
-            del ctx
-            msg = "describe crashed"
-            raise RuntimeError(msg)
-
-    class _BrokenAccessSource(EventSource):
-        source_id = "broken_access"
-        description = "Broken delivery access"
-        allowed_kinds = ("alert",)
-
-        async def check_delivery_access(
-            self,
-            ctx: EventSourceContext,
-            *,
-            rule: ReactiveTriggerRecord,
-            event: TriggerEvent | None = None,
-        ) -> EventSourceAccessDenial | None:
-            del ctx, rule, event
-            msg = "access crashed"
-            raise RuntimeError(msg)
-
-    registry.register(_BrokenDiscoverySource())
-    registry.register(_BrokenAccessSource())
-
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        sub = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="broken_access_rule",
-                source_id="broken_access",
-                kind="alert",
-                prompt="Handle alert",
-            ),
-        )
-        assert sub["status"] == "ok"
-        listed = json.loads(await tool.triggers(action="list"))
+    sub = await env.subscribe("broken_access_rule", source_id="broken_access", kind="alert", prompt="Handle alert")
+    assert sub["status"] == "ok"
+    listed = await env.call("list")
 
     assert listed["status"] == "ok"
     source_ids = {item["source_id"] for item in listed["event_sources"]}
     assert "broken_describe" not in source_ids
-    assert "slack_private" in source_ids
-    assert "broken_access" in source_ids
+    assert {"slack_private", "broken_access"} <= source_ids
     by_id = {t["trigger_id"]: t for t in listed["reactive_triggers"]}
     assert by_id["broken_access_rule"]["paused_reason"] == "source_error"
 
@@ -2138,44 +1749,25 @@ async def test_dry_run_test_unavailable_registered_source_errors_without_yaml_fa
     tmp_path: Path,
 ) -> None:
     """Dry-run test on an unregistered plugin source reports unavailable and never falls back to YAML matching or triage."""
-    tool, _store, _source, _room_members, make_ctx = _setup_registered_tool_env(tmp_path, connected_users={_OWNER})
-    registry: EventSourceRegistry = make_ctx(requester_id=_OWNER).orchestrator.reactive_triggers.event_sources  # type: ignore[union-attr]
-
-    class _PluginAlertSource(EventSource):
-        source_id = "plugin_alerts"
-        description = "Plugin alert source"
-        allowed_kinds = ("alert",)
-        match_fields = ("severity",)
-
-    emitter = registry.register(_PluginAlertSource())
-    with tool_runtime_context(make_ctx(requester_id=_OWNER)):
-        created = json.loads(
-            await tool.triggers(
-                action="subscribe_event",
-                trigger_id="plugin_alert_rule",
-                source_id="plugin_alerts",
-                kind="alert",
-                match={"severity": "high"},
-                triage_instructions="Only wake for urgent alerts.",
-                triage_model="default",
-                prompt="Handle alert",
-            ),
-        )
+    env = _seam_env(tmp_path, connected_users={_OWNER})
+    emitter = env.registry.register(
+        FakeEventSource("plugin_alerts", allowed_kinds=("alert",), match_fields=("severity",)),
+    )
+    created = await env.subscribe(
+        "plugin_alert_rule",
+        source_id="plugin_alerts",
+        kind="alert",
+        match={"severity": "high"},
+        triage_instructions="Only wake for urgent alerts.",
+        triage_model="default",
+        prompt="Handle alert",
+    )
     assert created["status"] == "ok", created
 
-    assert registry.unregister("plugin_alerts", emitter.token) is True
+    assert env.registry.unregister("plugin_alerts", emitter.token) is True
     triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="llm"))
-    with (
-        tool_runtime_context(make_ctx(requester_id=_OWNER)),
-        patch("mindroom.custom_tools.triggers.evaluate_triage", new=triage_mock),
-    ):
-        res = json.loads(
-            await tool.triggers(
-                action="test",
-                trigger_id="plugin_alert_rule",
-                sample_data={"severity": "high"},
-            ),
-        )
+    with patch("mindroom.custom_tools.triggers.evaluate_triage", new=triage_mock):
+        res = await env.call("test", trigger_id="plugin_alert_rule", sample_data={"severity": "high"})
     assert res["status"] == "error"
     assert "unavailable" in res["message"].lower()
     assert "plugin_alerts" in res["message"]

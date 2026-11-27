@@ -1637,7 +1637,6 @@ visibility = [
     "mindroom.api.github_requests",
     "mindroom.api.oauth",
     "mindroom.api.tools",
-    "mindroom.custom_tools.slack",
     "mindroom.egress_broker",
     "mindroom.github_client",
     "mindroom.mcp.manager",

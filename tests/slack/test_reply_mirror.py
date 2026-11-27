@@ -29,8 +29,6 @@ from mindroom.hooks import MessageEnvelope
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.slack import app as slack_app
-from mindroom.slack import identity as slack_identity
 from mindroom.slack import reply_mirror, turns
 from mindroom.slack.app import load_slack_app
 from mindroom.slack.delivery import deliver_slack_event
@@ -64,7 +62,7 @@ from tests.slack.delivery_fakes import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -193,17 +191,6 @@ class World:
 
     def posts(self) -> list[dict[str, str]]:
         return self.slack.calls("chat.postMessage")
-
-
-@pytest.fixture(autouse=True)
-def _empty_slack_caches() -> Iterator[None]:
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
-    yield
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
 
 
 async def _start_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, channel: str) -> World:

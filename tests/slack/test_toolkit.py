@@ -25,7 +25,6 @@ from mindroom.custom_tools import slack as slack_toolkit
 from mindroom.custom_tools.slack import SlackTools
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
-from mindroom.slack import app as slack_app
 from mindroom.slack import files as slack_files
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
@@ -36,7 +35,7 @@ from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -109,13 +108,6 @@ def _form(request: httpx.Request) -> dict[str, str]:
 
 def _bearer(request: httpx.Request) -> str:
     return request.headers["authorization"].removeprefix("Bearer ")
-
-
-@pytest.fixture(autouse=True)
-def _empty_identity_cache() -> Iterator[None]:
-    slack_app._IDENTITIES.clear()
-    yield
-    slack_app._IDENTITIES.clear()
 
 
 @pytest.fixture
@@ -1842,22 +1834,20 @@ def test_every_write_function_has_a_watch_guard_case() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hook_source", ["event_source:slack", "slack-watch/w-1", "slack-watch/"])
 async def test_writes_refused_during_watch_turn(
     paths: RuntimePaths,
     monkeypatch: pytest.MonkeyPatch,
     notes_workspace: Path,
-    hook_source: str,
 ) -> None:
     _connect_alice(paths)
     fake = FakeSlack(dict(_WRITE_ANSWERS)).install(monkeypatch)
     tools = _tools(paths, tool_output_workspace_root=notes_workspace)
     writes = [_WRITE_CALLS[name] for name in sorted(slack_toolkit._WRITE_FUNCTIONS)]
 
-    with tool_runtime_context(_turn_context(paths, hook_source)):
-        refusals = [json.loads(await write(tools))["message"] for write, _ in writes]
-
-    assert refusals == ["Ask me in a new message to post to Slack"] * len(writes)
+    for hook_source in ("event_source:slack", "slack-watch/w-1", "slack-watch/"):
+        with tool_runtime_context(_turn_context(paths, hook_source)):
+            refusals = [json.loads(await write(tools))["message"] for write, _ in writes]
+        assert refusals == ["Ask me in a new message to post to Slack"] * len(writes)
     assert fake.requests == []
 
     for context in (None, _turn_context(paths, None), _turn_context(paths, "plugin:message_received")):

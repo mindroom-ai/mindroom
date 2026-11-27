@@ -219,6 +219,16 @@ def _payload(raw: str) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(raw))
 
 
+def _assert_redacted(row: dict[str, Any], *forbidden: str) -> None:
+    assert row["event"] is None
+    assert row["triage_reason"] is None
+    assert {"dedupe_key", "error_message"}.isdisjoint(row)
+    if forbidden:
+        serialized = json.dumps(row)
+        for secret in forbidden:
+            assert secret not in serialized
+
+
 @pytest.mark.asyncio
 async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp_path: Path) -> None:
     """watch_room defaults to target_thread_id='origin' in same room, stores journal cursor, and notifies runtime."""
@@ -1482,8 +1492,8 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
         admin_hist = _payload(await tool.triggers(action="history", limit=500))
     assert admin_hist["status"] == "ok"
     assert [row["trigger_id"] for row in admin_hist["firings"]] == ["owner-r", "other-r", "owner-r"]
-    assert all("dedupe_key" not in row and "error_message" not in row for row in admin_hist["firings"])
-    assert all(row["event"] is None for row in admin_hist["firings"])
+    for row in admin_hist["firings"]:
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -1956,7 +1966,8 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
         "watch-priv-tag",
         "watch-lobby",
     ]
-    assert all("dedupe_key" not in row and "error_message" not in row for row in admin_hist["firings"])
+    for row in admin_hist["firings"]:
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -2398,14 +2409,8 @@ async def test_history_rechecks_per_event_external_source_grants_for_non_admins(
         admin_unscoped = _payload(await tool.triggers(action="history"))
     assert len(admin_scoped["firings"]) == 2
     assert len(admin_unscoped["firings"]) == 2
-    assert all(
-        row["event"] is None and "dedupe_key" not in row and "error_message" not in row
-        for row in admin_scoped["firings"]
-    )
-    assert all(
-        row["event"] is None and "dedupe_key" not in row and "error_message" not in row
-        for row in admin_unscoped["firings"]
-    )
+    for row in (*admin_scoped["firings"], *admin_unscoped["firings"]):
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -2476,28 +2481,25 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     assert scoped_other["status"] == "ok"
     assert scoped_other["count"] == 1
     redacted_row = scoped_other["firings"][0]
-    assert redacted_row["id"] == owner_firing.id
-    assert redacted_row["trigger_id"] == "owner-private"
-    assert "dedupe_key" not in redacted_row
-    assert redacted_row["status"] == "skipped"
-    assert "error_message" not in redacted_row
-    assert redacted_row["triage_reason"] is None
-    assert redacted_row["event"] is None
-    serialized_other = json.dumps(redacted_row)
-    assert "classified private room body" not in serialized_other
-    assert "@secret-sender:example.org" not in serialized_other
-    assert "Confidential Title" not in serialized_other
-    assert "delivery rate limited" not in serialized_other
-    assert "$ev_secret" not in serialized_other
+    assert (redacted_row["id"], redacted_row["trigger_id"], redacted_row["status"]) == (
+        owner_firing.id,
+        "owner-private",
+        "skipped",
+    )
+    _assert_redacted(
+        redacted_row,
+        "classified private room body",
+        "@secret-sender:example.org",
+        "Confidential Title",
+        "delivery rate limited",
+        "$ev_secret",
+    )
 
     assert scoped_own["status"] == "ok"
     assert scoped_own["firings"][0]["event"]["text"] == "admin visible body"
 
     by_trigger = {row["trigger_id"]: row for row in unscoped["firings"]}
-    assert by_trigger["owner-private"]["event"] is None
-    assert by_trigger["owner-private"]["triage_reason"] is None
-    assert "dedupe_key" not in by_trigger["owner-private"]
-    assert "error_message" not in by_trigger["owner-private"]
+    _assert_redacted(by_trigger["owner-private"])
     assert by_trigger["admin-own"]["event"]["text"] == "admin visible body"
 
     # Once admin leaves the watched room, even their own trigger's event content is redacted.
@@ -2505,8 +2507,8 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config, client=client)):
         scoped_own_after_leave = _payload(await tool.triggers(action="history", trigger_id="admin-own"))
         unscoped_after_leave = _payload(await tool.triggers(action="history"))
-    assert scoped_own_after_leave["firings"][0]["event"] is None
-    assert all(row["event"] is None for row in unscoped_after_leave["firings"])
+    for row in (*scoped_own_after_leave["firings"], *unscoped_after_leave["firings"]):
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio

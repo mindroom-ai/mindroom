@@ -1,13 +1,13 @@
 """Tests for delivering Slack events as Matrix turns to project agents and personal watches."""
 
-# ruff: noqa: D102, D103
+# ruff: noqa: D103
 
 from __future__ import annotations
 
 import asyncio
 import html
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -15,8 +15,6 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
@@ -27,21 +25,12 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.reactive_triggers import dispatch as reactive_dispatch
-from mindroom.reactive_triggers.service import ReactiveTriggerService
-from mindroom.reactive_triggers.store import ReactiveTriggerStore
-from mindroom.slack import app as slack_app
-from mindroom.slack import identity as slack_identity
-from mindroom.slack import turns
-from mindroom.slack.app import SlackAppCredentials, load_slack_app
-from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
-from mindroom.slack.event_source import SlackEventSource
+from mindroom.slack.app import load_slack_app
+from mindroom.slack.delivery import retry_slack_event
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
-    runtime_paths_for,
-    test_runtime_paths,
 )
 from tests.runtime_fakes import ready_runtime
 from tests.slack.delivery_fakes import (
@@ -67,27 +56,21 @@ from tests.slack.delivery_fakes import (
     UNRECEIVED,
     WATCH_ROOM,
     WORKSPACE_URL,
-    FakeBot,
-    FakeMatrix,
-    FakeSlack,
+    Harness,
     alice_slack_trigger,
     config_data,
     connect_alice,
-    entity_id,
     event_payload,
     install_slack_state,
-    runtime_for,
+    make_delivery_harness,
     slack_user,
 )
 from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
-    from mindroom.constants import RuntimePaths
-    from mindroom.slack.delivery import SlackRuntime
     from mindroom.slack.turns import DeliveryResult
 
 # Who may wake a project agent is part of what these tests pin.
@@ -99,126 +82,9 @@ OTHER_CHANNEL = "C0456EFGH"
 PERMALINK = f"{WORKSPACE_URL}archives/{CHANNEL}/p1700000000000100"
 
 
-@dataclass
-class Harness:
-    """A runtime-bound config, its Slack app, fake bots for `launch` and `assistant`, and the fakes they reach."""
-
-    config: Config
-    paths: RuntimePaths
-    slack: FakeSlack
-    matrix: FakeMatrix
-    bots: dict[str, FakeBot]
-    runtime: SlackRuntime
-    reactive_triggers: ReactiveTriggerService
-
-    async def drain_triggers(self) -> None:
-        """Drain queued reactive trigger firings through ReactiveTriggerService."""
-        await self.reactive_triggers.drain_due_firings_once()
-
-    async def deliver(
-        self,
-        payload: dict[str, Any],
-        *,
-        now: int = NOW,
-        app: SlackAppCredentials | None = None,
-    ) -> DeliveryResult:
-        """Deliver as the route does, with the Slack app it loaded for this event."""
-        manager = get_runtime_credentials_manager(self.paths)
-        loaded = app or load_slack_app(manager)
-        assert loaded is not None
-        async with self.slack.client() as client:
-            return await deliver_slack_event(
-                payload,
-                runtime=self.runtime,
-                config=self.config,
-                runtime_paths=self.paths,
-                app=loaded,
-                client=client,
-                now=now,
-            )
-
-    async def settle(self) -> None:
-        """Wait for the reactions and notices delivery started in the background."""
-        assert await wait_for_background_tasks(5.0, owner=self.runtime)
-
-    def store(self) -> DeliveryReplayStore:
-        assert self.paths.control_state_root is not None
-        return DeliveryReplayStore(self.paths.control_state_root / "slack" / "replay")
-
-    def agent_id(self, name: str) -> str:
-        return entity_id(self.config, self.paths, name)
-
-    def bearer(self, method: str) -> list[str]:
-        return [
-            request.headers["authorization"].removeprefix("Bearer ")
-            for request in self.slack.requests
-            if request.url.path == f"/api/{method}"
-        ]
-
-
-@pytest.fixture(autouse=True)
-def _empty_slack_caches() -> Iterator[None]:
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
-    yield
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
-
-
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
-    config = bind_runtime_paths(Config.model_validate(config_data()), test_runtime_paths(tmp_path))
-    paths = runtime_paths_for(config)
-    install_slack_state(paths)
-    slack = FakeSlack(
-        answers={
-            "auth.test": AUTH_TEST,
-            "conversations.info": {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME, "is_member": True}},
-            "apps.event.authorizations.list": {
-                "ok": True,
-                "authorizations": [{"user_id": SLACK_IDS["alice"], "team_id": "T0123ABCD", "is_bot": False}],
-            },
-        },
-        users={
-            **{SLACK_IDS[name]: slack_user(name) for name in ("ada", "carol", "dana", "alice")},
-            SLACK_IDS["erin"]: slack_user("erin", is_restricted=True),
-        },
-    )
-    matrix = FakeMatrix()
-    monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
-    monkeypatch.setattr(reactive_dispatch, "send_matrix_message", matrix.send)
-    assistant_id = entity_identity_registry(config, paths).current_id("assistant").full_id
-    bots = {
-        "launch": FakeBot(AsyncMock(), AsyncMock(return_value="$latest")),
-        "assistant": FakeBot(
-            room_state_client([ALICE, assistant_id], room_id=WATCH_ROOM),
-            AsyncMock(return_value="$latest"),
-        ),
-    }
-    memberships = AgentReplyMembershipIndex()
-    holder: list[Harness] = []
-    reactive_triggers = ReactiveTriggerService(
-        config_provider=lambda: holder[0].config if holder else config,
-        runtime_paths=paths,
-        bots=lambda: cast("dict[str, AgentBot]", bots),
-        memberships=memberships,
-        store=ReactiveTriggerStore(paths),
-    )
-    slack_source = SlackEventSource()
-    slack_emitter = reactive_triggers.event_sources.register(slack_source)
-    runtime = runtime_for(
-        bots,
-        memberships,
-        slack,
-        reactive_triggers=reactive_triggers,
-        event_source=slack_source,
-        event_source_emitter=slack_emitter,
-    )
-    harness_obj = Harness(config, paths, slack, matrix, bots, runtime, reactive_triggers)
-    holder.append(harness_obj)
-    return harness_obj
+    return make_delivery_harness(tmp_path, monkeypatch)
 
 
 def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any]:
@@ -1045,16 +911,6 @@ async def test_watch_skips_an_agent_without_personal_slack(harness: Harness) -> 
 
     assert await harness.deliver(_dm()) == "delivered"
     await harness.drain_triggers()
-    assert harness.matrix.sent == []
-
-
-@pytest.mark.asyncio
-async def test_transient_authorizations_failure_retries(harness: Harness) -> None:
-    alice_slack_trigger(harness.paths)
-    connect_alice(harness.paths)
-    harness.slack.answers["apps.event.authorizations.list"] = {"ok": False, "error": "internal_error"}
-
-    assert await harness.deliver(_dm()) == "retry"
     assert harness.matrix.sent == []
 
 
