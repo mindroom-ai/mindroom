@@ -51,7 +51,6 @@ _PROSE_FUNCTIONS = (
     "run_workflow",
     "get_workflow_run",
     "claude_send",
-    "claude_agent_write",
     "job",
 )
 _MAX_LISTED_CALLS = 20
@@ -70,6 +69,8 @@ class RenderedEpisode:
 def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
+        return False
+    if execution.tool_name == "claude_agent_write" and (execution.tool_args or {}).get("action") == "send":
         return False
     if execution.tool_name == KNOWLEDGE_SEARCH_TOOL_NAME:
         return bool(_observed(execution))

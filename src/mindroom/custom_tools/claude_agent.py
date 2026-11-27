@@ -6,9 +6,9 @@ import asyncio
 import collections
 import typing
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from time import monotonic
-from typing import ClassVar, Literal, get_args
+from typing import TYPE_CHECKING, ClassVar, Literal, get_args
 from uuid import uuid4
 
 from claude_agent_sdk import (
@@ -33,6 +33,9 @@ from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
 from mindroom.tools.native_helpers import validate_action_params
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
 _WriteAction = Literal["start", "send", "interrupt", "end"]
@@ -409,6 +412,12 @@ class ClaudeAgentTools(Toolkit):
             ],
         )
 
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit unused meta-schema fields on the instant in-memory session status lookup."""
+        if function.name == "claude_agent_status":
+            return replace(function, offer_background_after=False, offer_output_path=False)
+        return function
+
     def _build_options(
         self,
         stderr_callback: typing.Callable[[str], None] | None = None,
@@ -574,17 +583,17 @@ class ClaudeAgentTools(Toolkit):
     ) -> str:
         """Start, message, interrupt, or close a persistent Claude coding session.
 
-        - `start`: Start or reuse a persistent Claude coding session for this conversation.
-        - `send`: Send a prompt to a persistent Claude session and return Claude's response.
-        - `interrupt`: Send an interrupt signal to an active Claude session.
-        - `end`: Close and remove an active Claude session.
+        - `start`: start or reuse session (`resume`/`fork_session` apply on creation only).
+        - `send`: send `prompt` and return response (creates session if needed).
+        - `interrupt`: interrupt active session.
+        - `end`: close active session.
 
         Args:
-            action: Session operation to perform (`start`, `send`, `interrupt`, or `end`).
-            prompt: Prompt text to send to Claude (required for `send`).
-            session_label: Optional label separating multiple sessions in the same conversation.
-            resume: Optional Claude session ID to resume when creating a new session (`start` or `send`).
-            fork_session: Fork the resumed session instead of continuing it in place (`start` or `send`, defaults to false).
+            action: Action.
+            prompt: Prompt text (send).
+            session_label: Optional label.
+            resume: Claude session ID to resume (start, send).
+            fork_session: Fork resumed session (start, send).
 
         """
         params: dict[str, object] = {
@@ -735,12 +744,7 @@ class ClaudeAgentTools(Toolkit):
         self,
         session_label: str | None = None,
     ) -> str:
-        """Show status information for the current persistent Claude session.
-
-        Args:
-            session_label: Optional label separating multiple sessions in the same conversation.
-
-        """
+        """Show age, idle time, and Claude session ID for the current persistent Claude session."""
         session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:

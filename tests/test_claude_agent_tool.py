@@ -2178,3 +2178,18 @@ async def test_claude_agent_write_validates_action_and_params_before_side_effect
     await _in_call(run_context, tools.claude_agent_write(action="start"))
     conflict = await _in_call(run_context, tools.claude_agent_write(action="start", resume="r1"))
     assert 'claude_agent_write(action="end")' in conflict
+
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    offered = {fn.name: fn for fn in adapt_toolkit(tools).functions}
+    assert (
+        offered["claude_agent_status"].offer_background_after,
+        offered["claude_agent_status"].offer_output_path,
+    ) == (
+        False,
+        False,
+    )
+    assert (offered["claude_agent_write"].offer_background_after, offered["claude_agent_write"].offer_output_path) == (
+        True,
+        True,
+    )

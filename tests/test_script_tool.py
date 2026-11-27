@@ -144,6 +144,11 @@ def test_script_tool_interface_exists() -> None:
     toolkit = ScriptTools()
 
     assert set(toolkit.functions) == {"script_read", "script_write"}
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    offered = {fn.name: fn for fn in adapt_toolkit(toolkit).functions}
+    assert (offered["script_read"].offer_background_after, offered["script_read"].offer_output_path) == (False, True)
+    assert (offered["script_write"].offer_background_after, offered["script_write"].offer_output_path) == (True, False)
 
 
 def test_script_tool_discards_blank_allowed_tool_names() -> None:

@@ -5866,7 +5866,7 @@
     "functions": [
       {
         "name": "usage_stats",
-        "description": "Return retained token usage summaries.\n- `self`: retained usage for the current agent and canonical requester.\n- `private`: usage for all of the current requester's private agents.\n- `all`: retained usage across all sources (requires admin scope and platform administrator).",
+        "description": "Return retained token usage summaries (set `include_daily=True` for UTC-day breakdowns).\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.\n- `all`: all sources (requires admin scope and platform administrator).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -5876,12 +5876,10 @@
                 "self",
                 "private",
                 "all"
-              ],
-              "description": "Usage scope to inspect."
+              ]
             },
             "include_daily": {
-              "type": "boolean",
-              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [

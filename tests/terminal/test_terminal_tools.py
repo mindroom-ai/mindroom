@@ -458,3 +458,15 @@ async def test_terminal_validation_and_space_key_preservation(tmp_path: Path, ru
     assert sent_space.startswith("Sent.")
     sent_rest = await toolkit.terminal_write(action="send", session_id=session_id, keys="there<enter>")
     assert "hi there" in sent_rest
+
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    offered = {fn.name: fn for fn in adapt_toolkit(toolkit).functions}
+    assert (offered["terminal_read"].offer_background_after, offered["terminal_read"].offer_output_path) == (
+        False,
+        True,
+    )
+    assert (offered["terminal_write"].offer_background_after, offered["terminal_write"].offer_output_path) == (
+        True,
+        True,
+    )

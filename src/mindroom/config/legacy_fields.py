@@ -380,6 +380,8 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_tool_approval_grants.py::test_runtime_crud_action_scoped_grants_and_fail_closed_migration,
+#   tests/api/test_plugin_room_agents.py::test_retired_stored_claude_agent_filters_fail_closed_and_block_workspace_write_grant,
+#   tests/api/test_plugin_room_agents.py::test_retired_stored_tool_filters_fail_closed_across_consolidated_toolkits,
 #   tests/test_wave6_data_tools.py::test_wave6_batch1_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_db_tools.py::test_wave6_batch2_action_scoped_grants_and_fail_closed_migration,
 #   tests/test_wave6_finance_weather_tools.py::test_wave6_batch3_action_scoped_grants_and_fail_closed_migration,
@@ -1096,7 +1098,7 @@ def _retired_function_filter(
     return None
 
 
-def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+def _retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
     if (
         retired := _retired_function_filter(
@@ -1166,7 +1168,7 @@ def _retired_consolidated_filter_checker(
 
 
 _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
-    "filesystem": retired_file_setting,
+    "filesystem": _retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
     "slack": _retired_slack_setting,
@@ -1177,11 +1179,19 @@ _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple
 }
 
 
+def retired_stored_tool_setting(
+    tool_name: str,
+    settings: Mapping[str, object],
+) -> tuple[str, str] | None:
+    """Return the first retired stored setting or function filter for ``tool_name``, and its replacement guidance."""
+    if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None:
+        return checker(settings)
+    return None
+
+
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
-    if (checker := _RETIRED_TOOL_SETTING_CHECKERS.get(tool_name)) is not None and (
-        retired := checker(overrides)
-    ) is not None:
+    if (retired := retired_stored_tool_setting(tool_name, overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

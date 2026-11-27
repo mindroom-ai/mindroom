@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
@@ -33,6 +34,7 @@ from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from mindroom.terminal.client import TerminalStream, WorkerTerminals
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _COLS, _ROWS = 120, 32
 _DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -45,10 +47,7 @@ _EXIT_SECONDS = 0.1
 # The most output one call keeps, its newest part, as much as the runner's scrollback; and the most text it answers.
 _MAX_OUTPUT_BYTES = 256 * 1024
 _MAX_TEXT_CHARS = 16_000
-_ABOUT = (
-    "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can "
-    "watch, and type in, where your config allows it, from a chat client that shows terminals."
-)
+_ABOUT = "Persistent shells in your workspace that people in the room can watch (and type in where config allows)."
 _ReadAction = Literal["list", "read"]
 _WriteAction = Literal["open", "run", "send"]
 _READ_ALLOWED: dict[str, frozenset[str]] = {
@@ -61,9 +60,8 @@ _WRITE_ALLOWED: dict[str, frozenset[str]] = {
     "send": frozenset({"session_id", "keys"}),
 }
 _READ_ONLY = (
-    f"{_ABOUT} You can't type in them, because your run_shell_command calls may ask for approval: run commands with "
-    'run_shell_command. terminal_read(action="read") shows a terminal\'s recent output; '
-    'terminal_read(action="list") shows them all.'
+    f"{_ABOUT} You can't type because run_shell_command may ask for approval: run commands with "
+    "run_shell_command. Use terminal_read (`list`, `read`) to inspect terminals."
 )
 _NOT_AT_PROMPT = (
     "Error: the terminal's shell is not waiting at an empty prompt (a command is still running, its line holds typing, "
@@ -191,11 +189,9 @@ class TerminalTools(Toolkit):
 
     name = "terminal"
     instructions = (
-        f"{_ABOUT} Use them for work that keeps state between commands or that people should see: a dev server, a "
-        'REPL, an interactive program, a long build. terminal_write(action="open") starts one; '
-        'terminal_write(action="run") types one command line and waits for its prompt; '
-        'terminal_write(action="send") types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends '
-        'a terminal; terminal_read(action="read") shows recent output; terminal_read(action="list") shows them all.'
+        f"{_ABOUT} Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). "
+        "terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). "
+        "terminal_read: `read` shows recent output, `list` lists all."
     )
 
     def __init__(
@@ -218,6 +214,12 @@ class TerminalTools(Toolkit):
             instructions=_READ_ONLY if self._restricted else None,
         )
 
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit `background_after` on fast terminal reads while keeping output-file redirection."""
+        if function.name == "terminal_read":
+            return replace(function, offer_background_after=False)
+        return function
+
     @property
     def _workspace_terminals(self) -> WorkerTerminals:
         assert self._terminals is not None
@@ -232,22 +234,19 @@ class TerminalTools(Toolkit):
         cwd: str | None = None,
         timeout_s: float | None = None,
     ) -> str:
-        """Open a persistent terminal, run one command line in it, or type raw keys into it.
+        """Open a terminal, run one command line, or type keys.
 
-        - `open`: Open a new terminal in your workspace, which people in the room can watch where your config allows it.
-        - `run`: Type one command line into a terminal at an empty prompt, wait for its prompt, and return its output and exit status. A command still running at the timeout keeps running: read on with `terminal_read(action="read")`, or stop it with `terminal_write(action="send", keys="<ctrl-c>")`. Start servers and watchers here and leave them running; an idle terminal ends 30 minutes after its last input.
-        - `send`: Type keys into a terminal without waiting for a command (such as an answer to a prompt or `<ctrl-c>`). Text is typed verbatim; `<enter>`, `<tab>`, `<esc>`, `<backspace>`, `<space>`, `<up>`, `<down>`, `<left>`, `<right>`, `<home>`, `<end>`, `<delete>`, and `<ctrl-letter>` are keys (for example `"y<enter>"`). Send `<ctrl-c>` on its own.
+        - `open`: start a workspace terminal.
+        - `run`: run one command line at an empty prompt; running commands stay alive, idle terminals end after 30m.
+        - `send`: type verbatim text/keys (`<enter|tab|esc|backspace|space|up|down|left|right|home|end|delete|ctrl-letter>`) without waiting; send `<ctrl-c>` alone.
 
         Args:
-            action: Write operation to perform (`open`, `run`, or `send`).
-            session_id: The terminal, from `terminal_write(action="open")` or `terminal_read(action="list")` (required for `run` and `send`).
-            command: One command line; join several with && or ; (required for `run`).
-            keys: Exact text and keys to type verbatim (required for `send`).
-            cwd: Folder to start in, relative to your workspace; the workspace by default (`open` only).
-            timeout_s: Seconds to wait for the prompt, 30 by default (`run` only).
-
-        Returns:
-            The new session ID, the command output and exit status, or what the terminal printed right after typing.
+            action: Action.
+            session_id: Terminal ID (run, send).
+            command: One command line; join with && or ; (run).
+            keys: Verbatim text/keys (send).
+            cwd: Workspace-relative dir (open).
+            timeout_s: Wait seconds (run, default 30, max 600).
 
         """
         params: dict[str, object] = {
@@ -277,17 +276,14 @@ class TerminalTools(Toolkit):
         action: _ReadAction,
         session_id: str | None = None,
     ) -> str:
-        """List workspace terminals or read one terminal's recent output as text.
+        """Inspect workspace terminals.
 
-        - `list`: List the terminals of your workspace, including ones people opened.
-        - `read`: Read a terminal's recent output as text and whether its shell has exited.
+        - `list`: list terminals, including ones people opened.
+        - `read`: recent output and exit state.
 
         Args:
-            action: Read operation to perform (`list` or `read`).
-            session_id: The terminal, from `terminal_write(action="open")` or `terminal_read(action="list")` (required for `read`).
-
-        Returns:
-            Each terminal's session ID and status, or one terminal's recent output.
+            action: Action.
+            session_id: Terminal ID (read).
 
         """
         if (

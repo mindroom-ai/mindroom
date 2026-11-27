@@ -16,6 +16,7 @@ from mindroom.thread_models import (
 )
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tools.native_helpers import validate_action_params
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -25,6 +26,10 @@ if TYPE_CHECKING:
 _ReadAction = Literal["list", "get"]
 _WriteAction = Literal["switch", "reset"]
 _SwitchWhen = Literal["after-toolcall", "next-turn"]
+_WRITE_ALLOWED: dict[str, frozenset[str]] = {
+    "switch": frozenset({"model_name", "when"}),
+    "reset": frozenset(),
+}
 
 
 class ThreadModelTools(Toolkit):
@@ -70,13 +75,10 @@ class ThreadModelTools(Toolkit):
         )
 
     async def thread_model_read(self, action: _ReadAction) -> str:
-        """List configured models or inspect the current thread's model override.
+        """Inspect models or this thread's override.
 
-        - `list`: List the configured model aliases available for selection.
-        - `get`: Return the current thread's model override for each entity it applies to and the available model names.
-
-        Args:
-            action: Read operation to perform (`list` or `get`).
+        - `list`: configured model aliases (works outside a thread).
+        - `get`: active thread overrides and available models.
 
         """
         if action == "list":
@@ -94,42 +96,38 @@ class ThreadModelTools(Toolkit):
         model_name: str | None = None,
         when: _SwitchWhen | None = None,
     ) -> str | ToolOutcome:
-        """Switch or clear the model override for the current Matrix thread.
+        """Switch or reset this thread's model override.
 
-        - `switch`: Switch the model that the requester's addressable agents and teams use in the current thread until reset, taking effect after this tool call or from the next turn.
-        - `reset`: Remove the thread override of the requester's agents and teams, restoring room-level model selection.
+        - `switch`: set thread model to `model_name` until reset.
+        - `reset`: clear override, restoring room selection.
 
         Args:
-            action: Write operation to perform (`switch` or `reset`).
-            model_name: Configured model name from `models:` in config.yaml (for example "default" or "opus"), or `name@level` for one of the reasoning levels `thread_model_read(action="list")` shows (required for `switch`).
-            when: Whether the current response continues with the new model (`after-toolcall`) or the change starts on the next turn (`next-turn`, default) (`switch` only).
+            action: Action.
+            model_name: Model name or `name@level` (switch).
+            when: `next-turn` (default) or `after-toolcall` to continue now (switch).
 
         """
-        if action == "switch":
-            if not isinstance(model_name, str) or not model_name.strip():
-                return self._payload("error", action="switch", message="model_name is required for action='switch'.")
-            resolved_when: _SwitchWhen = "next-turn" if when is None else when
-            if resolved_when not in ("after-toolcall", "next-turn"):
-                return self._payload(
-                    "error",
-                    action="switch",
-                    message=f"Unsupported when value {resolved_when!r}. Expected 'after-toolcall' or 'next-turn'.",
-                )
-            return await self._switch_thread_model(model_name.strip(), when=resolved_when)
+        if (
+            error := validate_action_params(
+                "thread_model_write",
+                action,
+                _WRITE_ALLOWED,
+                {"model_name": model_name, "when": when},
+            )
+        ) is not None:
+            return self._payload("error", **({"action": action} if action in _WRITE_ALLOWED else {}), message=error)
         if action == "reset":
-            unexpected = [name for name, value in (("model_name", model_name), ("when", when)) if value is not None]
-            if unexpected:
-                names = ", ".join(f"'{name}'" for name in unexpected)
-                return self._payload(
-                    "error",
-                    action="reset",
-                    message=f"Parameter(s) {names} cannot be used with action='reset'.",
-                )
             return await self._reset_thread_model()
-        return self._payload(
-            "error",
-            message=f"Unsupported thread_model_write action {action!r}. Expected one of: switch, reset.",
-        )
+        if not isinstance(model_name, str) or not model_name.strip():
+            return self._payload("error", action="switch", message="model_name is required for action='switch'.")
+        resolved_when: _SwitchWhen = "next-turn" if when is None else when
+        if resolved_when not in ("after-toolcall", "next-turn"):
+            return self._payload(
+                "error",
+                action="switch",
+                message=f"Unsupported when value {resolved_when!r}. Expected 'after-toolcall' or 'next-turn'.",
+            )
+        return await self._switch_thread_model(model_name.strip(), when=resolved_when)
 
     async def _list_models(self) -> str:
         if isinstance(context := tool_context_or_error(self._payload, "Thread model"), str):

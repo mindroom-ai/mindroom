@@ -78,15 +78,11 @@ class UsageStatsTools(Toolkit):
         return resolved, config
 
     async def usage_stats(self, action: _UsageAction, include_daily: bool = False) -> str:
-        """Return retained token usage summaries.
+        """Return retained token usage summaries (set `include_daily=True` for UTC-day breakdowns).
 
-        - `self`: retained usage for the current agent and canonical requester.
-        - `private`: usage for all of the current requester's private agents.
-        - `all`: retained usage across all sources (requires admin scope and platform administrator).
-
-        Args:
-            action: Usage scope to inspect.
-            include_daily: Include token totals, per-model breakdowns, and run counts by UTC date.
+        - `self`: current agent and canonical requester usage.
+        - `private`: requester's private agents usage.
+        - `all`: all sources (requires admin scope and platform administrator).
 
         """
         if action == "self":

@@ -3720,22 +3720,11 @@
     "functions": [
       {
         "name": "claude_agent_status",
-        "description": "Show status information for the current persistent Claude session.",
+        "description": "Show age, idle time, and Claude session ID for the current persistent Claude session.",
         "parameters": {
           "type": "object",
           "properties": {
             "session_label": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional label separating multiple sessions in the same conversation."
-            },
-            "mindroom_output_path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -3754,7 +3743,7 @@
       },
       {
         "name": "claude_agent_write",
-        "description": "Start, message, interrupt, or close a persistent Claude coding session.\n- `start`: Start or reuse a persistent Claude coding session for this conversation.\n- `send`: Send a prompt to a persistent Claude session and return Claude's response.\n- `interrupt`: Send an interrupt signal to an active Claude session.\n- `end`: Close and remove an active Claude session.",
+        "description": "Start, message, interrupt, or close a persistent Claude coding session.\n- `start`: start or reuse session (`resume`/`fork_session` apply on creation only).\n- `send`: send `prompt` and return response (creates session if needed).\n- `interrupt`: interrupt active session.\n- `end`: close active session.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -3766,7 +3755,7 @@
                 "interrupt",
                 "end"
               ],
-              "description": "Session operation to perform (`start`, `send`, `interrupt`, or `end`)."
+              "description": "Action."
             },
             "prompt": {
               "anyOf": [
@@ -3777,7 +3766,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Prompt text to send to Claude (required for `send`)."
+              "description": "Prompt text (send)."
             },
             "session_label": {
               "anyOf": [
@@ -3788,7 +3777,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional label separating multiple sessions in the same conversation."
+              "description": "Optional label."
             },
             "resume": {
               "anyOf": [
@@ -3799,7 +3788,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional Claude session ID to resume when creating a new session (`start` or `send`)."
+              "description": "Claude session ID to resume (start, send)."
             },
             "fork_session": {
               "anyOf": [
@@ -3810,7 +3799,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Fork the resumed session instead of continuing it in place (`start` or `send`, defaults to false)."
+              "description": "Fork resumed session (start, send)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17161,7 +17150,7 @@
     "functions": [
       {
         "name": "script_read",
-        "description": "Inspect owned background Python scripts and available resource profiles.\n- `list`: List background scripts owned by this requester and agent.\n- `get`: Return durable state and recent process output for one owned script.\n- `resource_profiles`: Return the exact CPU and memory reservations available to background scripts.",
+        "description": "Inspect background Python scripts.\n- `list`: list owned runs.\n- `get`: state and recent output for one run.\n- `resource_profiles`: Kubernetes CPU/memory profiles.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17172,7 +17161,7 @@
                 "get",
                 "resource_profiles"
               ],
-              "description": "Read operation to perform (`list`, `get`, or `resource_profiles`)."
+              "description": "Action."
             },
             "run_id": {
               "anyOf": [
@@ -17183,7 +17172,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Identifier returned by `script_write(action=\"start\")` (required for `get`)."
+              "description": "Run ID (get)."
             },
             "include_finished": {
               "anyOf": [
@@ -17194,7 +17183,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Include terminal runs in addition to active runs (`list` only, defaults to true)."
+              "description": "Include finished runs (list, default true)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -17217,7 +17206,7 @@
       },
       {
         "name": "script_write",
-        "description": "Start or cancel a background Python script.\n- `start`: Run a Python script in the background. Provide exactly one of `source` or `path`; a path is relative to this agent's workspace and is snapshotted before execution. The script gets no command-line arguments and calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{\"argument\": \"value\"}'` (waiting for the result) or `from mindroom.script_sdk import MindRoomTools` and `MindRoomTools().call(\"toolkit\", \"function\", argument=\"value\")`.\n- `cancel`: Cancel one owned background script after revoking its tool capability.",
+        "description": "Start or cancel a background Python script.\n- `start`: run `source` or workspace-relative `path` (not both; snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call(\"toolkit\", \"function\", ...)`.\n- `cancel`: revoke tool access and stop one owned run.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -17227,7 +17216,7 @@
                 "start",
                 "cancel"
               ],
-              "description": "Write operation to perform (`start` or `cancel`)."
+              "description": "Action."
             },
             "source": {
               "anyOf": [
@@ -17238,7 +17227,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Inline Python source code (`start` only)."
+              "description": "Inline Python code (start)."
             },
             "path": {
               "anyOf": [
@@ -17249,7 +17238,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Workspace-relative path to a Python source file (`start` only)."
+              "description": "Workspace-relative .py file (start)."
             },
             "name": {
               "anyOf": [
@@ -17260,7 +17249,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Optional short label shown by status and list operations (`start` only)."
+              "description": "Short label (start)."
             },
             "resource_profile": {
               "type": "string",
@@ -17269,7 +17258,7 @@
                 "standard",
                 "large"
               ],
-              "description": "Optional bounded Kubernetes profile (`start` only). Call `script_read(action=\"resource_profiles\")` to inspect the exact resources, or omit it to use the configured default."
+              "description": "Profile from `script_read(action=\"resource_profiles\")` (start)."
             },
             "run_id": {
               "anyOf": [
@@ -17280,7 +17269,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Identifier returned by `script_write(action=\"start\")` (required for `cancel`)."
+              "description": "Run ID (cancel)."
             },
             "force": {
               "anyOf": [
@@ -17291,17 +17280,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Force-kill the supervised process instead of requesting graceful termination (`cancel` only, defaults to false)."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "description": "Force-kill (cancel, default false)."
             }
           },
           "required": [
@@ -19417,8 +19396,8 @@
     ]
   },
   "terminal": {
-    "instructions": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_write(action=\"open\") starts one; terminal_write(action=\"run\") types one command line and waits for its prompt; terminal_write(action=\"send\") types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read(action=\"read\") shows recent output; terminal_read(action=\"list\") shows them all.",
-    "guidance": "Your terminals are persistent shells in your workspace, beside your shell commands, that people in the room can watch, and type in, where your config allows it, from a chat client that shows terminals. Use them for work that keeps state between commands or that people should see: a dev server, a REPL, an interactive program, a long build. terminal_write(action=\"open\") starts one; terminal_write(action=\"run\") types one command line and waits for its prompt; terminal_write(action=\"send\") types keys such as <ctrl-c> or an answer to a prompt, and exit<enter> ends a terminal; terminal_read(action=\"read\") shows recent output; terminal_read(action=\"list\") shows them all.",
+    "instructions": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
+    "guidance": "Persistent shells in your workspace that people in the room can watch (and type in where config allows). Use for stateful or visible work (dev servers, REPLs, interactive tools, long builds). terminal_write: `open` starts one, `run` runs one command line, `send` types keys (e.g. <ctrl-c>, exit<enter>). terminal_read: `read` shows recent output, `list` lists all.",
     "functions": []
   },
   "thread_model": {
@@ -19427,7 +19406,7 @@
     "functions": [
       {
         "name": "thread_model_read",
-        "description": "List configured models or inspect the current thread's model override.\n- `list`: List the configured model aliases available for selection.\n- `get`: Return the current thread's model override for each entity it applies to and the available model names.",
+        "description": "Inspect models or this thread's override.\n- `list`: configured model aliases (works outside a thread).\n- `get`: active thread overrides and available models.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19436,8 +19415,7 @@
               "enum": [
                 "list",
                 "get"
-              ],
-              "description": "Read operation to perform (`list` or `get`)."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -19460,7 +19438,7 @@
       },
       {
         "name": "thread_model_write",
-        "description": "Switch or clear the model override for the current Matrix thread.\n- `switch`: Switch the model that the requester's addressable agents and teams use in the current thread until reset, taking effect after this tool call or from the next turn.\n- `reset`: Remove the thread override of the requester's agents and teams, restoring room-level model selection.",
+        "description": "Switch or reset this thread's model override.\n- `switch`: set thread model to `model_name` until reset.\n- `reset`: clear override, restoring room selection.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -19470,7 +19448,7 @@
                 "switch",
                 "reset"
               ],
-              "description": "Write operation to perform (`switch` or `reset`)."
+              "description": "Action."
             },
             "model_name": {
               "anyOf": [
@@ -19481,7 +19459,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Configured model name from `models:` in config.yaml (for example \"default\" or \"opus\"), or `name@level` for one of the reasoning levels `thread_model_read(action=\"list\")` shows (required for `switch`)."
+              "description": "Model name or `name@level` (switch)."
             },
             "when": {
               "type": "string",
@@ -19489,7 +19467,7 @@
                 "after-toolcall",
                 "next-turn"
               ],
-              "description": "Whether the current response continues with the new model (`after-toolcall`) or the change starts on the next turn (`next-turn`, default) (`switch` only)."
+              "description": "`next-turn` (default) or `after-toolcall` to continue now (switch)."
             }
           },
           "required": [
@@ -21365,7 +21343,7 @@
     "functions": [
       {
         "name": "usage_stats",
-        "description": "Return retained token usage summaries.\n- `self`: retained usage for the current agent and canonical requester.\n- `private`: usage for all of the current requester's private agents.",
+        "description": "Return retained token usage summaries (set `include_daily=True` for UTC-day breakdowns).\n- `self`: current agent and canonical requester usage.\n- `private`: requester's private agents usage.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -21374,12 +21352,10 @@
               "enum": [
                 "self",
                 "private"
-              ],
-              "description": "Usage scope to inspect."
+              ]
             },
             "include_daily": {
-              "type": "boolean",
-              "description": "Include token totals, per-model breakdowns, and run counts by UTC date."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [

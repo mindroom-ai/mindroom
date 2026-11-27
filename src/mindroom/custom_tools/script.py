@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = ["ScriptTools"]
 
@@ -52,22 +54,30 @@ class ScriptTools(Toolkit):
             tools=[self.script_read, self.script_write],
         )
 
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Omit unused meta-schema fields on fast script status queries and small control responses."""
+        if function.name == "script_read":
+            return replace(function, offer_background_after=False)
+        if function.name == "script_write":
+            return replace(function, offer_output_path=False)
+        return function
+
     async def script_read(
         self,
         action: _ReadAction,
         run_id: str | None = None,
         include_finished: bool | None = None,
     ) -> str:
-        """Inspect owned background Python scripts and available resource profiles.
+        """Inspect background Python scripts.
 
-        - `list`: List background scripts owned by this requester and agent.
-        - `get`: Return durable state and recent process output for one owned script.
-        - `resource_profiles`: Return the exact CPU and memory reservations available to background scripts.
+        - `list`: list owned runs.
+        - `get`: state and recent output for one run.
+        - `resource_profiles`: Kubernetes CPU/memory profiles.
 
         Args:
-            action: Read operation to perform (`list`, `get`, or `resource_profiles`).
-            run_id: Identifier returned by `script_write(action="start")` (required for `get`).
-            include_finished: Include terminal runs in addition to active runs (`list` only, defaults to true).
+            action: Action.
+            run_id: Run ID (get).
+            include_finished: Include finished runs (list, default true).
 
         """
         if (
@@ -110,17 +120,17 @@ class ScriptTools(Toolkit):
     ) -> str:
         """Start or cancel a background Python script.
 
-        - `start`: Run a Python script in the background. Provide exactly one of `source` or `path`; a path is relative to this agent's workspace and is snapshotted before execution. The script gets no command-line arguments and calls this agent's tools with `mindroom-agent tools call TOOLKIT FUNCTION '{"argument": "value"}'` (waiting for the result) or `from mindroom.script_sdk import MindRoomTools` and `MindRoomTools().call("toolkit", "function", argument="value")`.
-        - `cancel`: Cancel one owned background script after revoking its tool capability.
+        - `start`: run `source` or workspace-relative `path` (not both; snapshotted, no CLI args); call tools via `mindroom-agent tools call TOOLKIT FUNCTION '{...}'` or `mindroom.script_sdk.MindRoomTools().call("toolkit", "function", ...)`.
+        - `cancel`: revoke tool access and stop one owned run.
 
         Args:
-            action: Write operation to perform (`start` or `cancel`).
-            source: Inline Python source code (`start` only).
-            path: Workspace-relative path to a Python source file (`start` only).
-            name: Optional short label shown by status and list operations (`start` only).
-            resource_profile: Optional bounded Kubernetes profile (`start` only). Call `script_read(action="resource_profiles")` to inspect the exact resources, or omit it to use the configured default.
-            run_id: Identifier returned by `script_write(action="start")` (required for `cancel`).
-            force: Force-kill the supervised process instead of requesting graceful termination (`cancel` only, defaults to false).
+            action: Action.
+            source: Inline Python code (start).
+            path: Workspace-relative .py file (start).
+            name: Short label (start).
+            resource_profile: Profile from `script_read(action="resource_profiles")` (start).
+            run_id: Run ID (cancel).
+            force: Force-kill (cancel, default false).
 
         """
         params: dict[str, object] = {
