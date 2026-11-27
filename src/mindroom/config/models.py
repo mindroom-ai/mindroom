@@ -69,7 +69,6 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "self_config",
-        "skill_manage",
     },
 )
 

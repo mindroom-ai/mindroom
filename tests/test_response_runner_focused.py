@@ -9206,7 +9206,7 @@ async def test_approval_resume_restores_vetted_cross_room_fork_parent_scopes_for
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
-                tool_name="get_attachment",
+                tool_name="attachment",
                 invoking_agent="general",
                 expires_at_ns=1,
                 decision=ApprovalDecision.APPROVED,
@@ -9226,9 +9226,9 @@ async def test_approval_resume_restores_vetted_cross_room_fork_parent_scopes_for
         **_kwargs: object,
     ) -> CompletedApprovalRun:
         with tool_runtime_context(tool_context):
-            get_attachment = toolkit_offers(AttachmentTools(), "get_attachment").entrypoint
-            results["parent"] = await get_attachment(attachment_id="att_parent", view=True)
-            results["other"] = await get_attachment(attachment_id="att_other", view=True)
+            attachment_fn = toolkit_offers(AttachmentTools(), "attachment").entrypoint
+            results["parent"] = await attachment_fn(action="get", attachment_id="att_parent", view=True)
+            results["other"] = await attachment_fn(action="get", attachment_id="att_other", view=True)
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run):
@@ -9338,7 +9338,7 @@ async def test_approval_resume_filters_foreign_parent_pdf_attachment_when_reauth
         calls=(
             ApprovalCall(
                 tool_call_id="call-1",
-                tool_name="get_attachment",
+                tool_name="attachment",
                 invoking_agent="general",
                 expires_at_ns=1,
                 decision=ApprovalDecision.APPROVED,
@@ -9359,15 +9359,19 @@ async def test_approval_resume_filters_foreign_parent_pdf_attachment_when_reauth
         results["attachment_ids"] = tool_context.attachment_ids
         tools = AttachmentTools(tool_output_workspace_root=workspace_dir, runtime_paths=bot.runtime_paths)
         with tool_runtime_context(tool_context):
-            get_attachment = toolkit_offers(tools, "get_attachment").entrypoint
+            attachment_fn = toolkit_offers(tools, "attachment").entrypoint
             for prefix, att_id, out_name in (
                 ("parent", "att_parent_pdf", "parent.pdf"),
                 ("local", "att_local_pdf", "local.pdf"),
             ):
-                results[f"{prefix}_view"] = await get_attachment(attachment_id=att_id, view=True)
-                results[f"{prefix}_inspect"] = await get_attachment(attachment_id=att_id)
-                results[f"{prefix}_save"] = await get_attachment(attachment_id=att_id, mindroom_output_path=out_name)
-            results["other_view"] = await get_attachment(attachment_id="att_other_pdf", view=True)
+                results[f"{prefix}_view"] = await attachment_fn(action="get", attachment_id=att_id, view=True)
+                results[f"{prefix}_inspect"] = await attachment_fn(action="get", attachment_id=att_id)
+                results[f"{prefix}_save"] = await attachment_fn(
+                    action="get",
+                    attachment_id=att_id,
+                    mindroom_output_path=out_name,
+                )
+            results["other_view"] = await attachment_fn(action="get", attachment_id="att_other_pdf", view=True)
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     refresh_patch = (

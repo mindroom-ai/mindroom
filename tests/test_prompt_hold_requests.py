@@ -704,7 +704,11 @@ async def test_a_missing_local_image_on_a_held_route_is_sized_and_sent_with_the_
     held, plain = results
     assert held == plain
     assert held[1] == "ok"
-    assert INLINE_MEDIA_FALLBACK_PROMPT in json.dumps(held[2]["messages"][-1])
+    assert any(
+        INLINE_MEDIA_FALLBACK_PROMPT in part["text"]
+        for part in held[2]["messages"][-1]["content"]
+        if part.get("type") == "text"
+    )
     assert hold.exists()
 
 

@@ -35,9 +35,9 @@ from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
+    _with_optional_output_path,
     saved_tool_output_receipt,
     validate_output_path_syntax,
-    with_optional_output_path,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome, ToolValue
@@ -141,7 +141,7 @@ def _receipt(result: object) -> dict[str, object]:
 
 
 def test_an_optional_output_path_preserves_a_custom_schema_shape() -> None:
-    parameters = with_optional_output_path(
+    parameters = _with_optional_output_path(
         {
             "type": "object",
             "properties": {"attachment_id": {"type": "string", "description": "Context attachment."}},
@@ -1135,7 +1135,7 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
 
 
 def test_workdir_output_path_schema_keeps_description_without_default() -> None:
-    parameters = with_optional_output_path(
+    parameters = _with_optional_output_path(
         {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
         tools_use_workdir=True,
     )

@@ -117,7 +117,7 @@
           "content": [
             {
               "type": "text",
-              "text": "Use the attached media to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
+              "text": "Use the attached media to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat attachment(action=\"get\", ..., view=True) for it on this model. Use attachment(action=\"get\", ...) without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
             },
             {
               "type": "image",
@@ -137,7 +137,7 @@
             },
             {
               "type": "text",
-              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not application/vnd.openxmlformats-officedocument.wordprocessingml.document. Its content was not inspected. Use get_attachment without view to inspect or save it, then use other available tools.]"
+              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not application/vnd.openxmlformats-officedocument.wordprocessingml.document. Its content was not inspected. Use attachment(action=\"get\", ...) without view to inspect or save it, then use other available tools.]"
             },
             {
               "type": "document",
@@ -149,7 +149,7 @@
             },
             {
               "type": "text",
-              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not image/svg+xml. Its content was not inspected. Use get_attachment without view to inspect or save it, then use other available tools.]",
+              "text": "[Attached document not sent inline: Claude reads only PDF and plain-text documents inline, not image/svg+xml. Its content was not inspected. Use attachment(action=\"get\", ...) without view to inspect or save it, then use other available tools.]",
               "cache_control": {
                 "type": "ephemeral",
                 "ttl": "1h"

@@ -504,4 +504,4 @@ async def test_team_turn_sends_filtered_inline_file_media_and_omission_note(
     content = str(sent.content)
     assert "[Inline file attachment omitted]" in content
     assert "export.json (att_team1, 2.0 MiB)" in content
-    assert "get_attachment" in content
+    assert 'attachment(action="get"' in content
