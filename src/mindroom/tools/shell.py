@@ -30,7 +30,11 @@ from mindroom.shell.execution import (
     shell_call_timeout,
 )
 from mindroom.shell.output_capture import ShellOutputDestination
-from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.shell.supervisor import (
+    SHELL_SUPERVISOR_SOCKET_ENV,
+    current_shell_dispatch_context,
+    run_command_via_supervisor,
+)
 from mindroom.terminal.lines import PROMPT_COMMAND
 from mindroom.terminal.session import TerminalError, TerminalLaunch
 from mindroom.tool_system.authoring import Toolkit
@@ -415,7 +419,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             self._shell_path_prepend = shell_path_prepend
             # Sandbox tool subprocesses delegate execution to the runner's long-lived shell supervisor,
             # which stops the command when the per-request process dies.
-            self._supervisor_socket = os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV) or None
+            dispatch = current_shell_dispatch_context()
+            self._supervisor_socket = (
+                dispatch.socket_path if dispatch is not None else os.environ.get(SHELL_SUPERVISOR_SOCKET_ENV)
+            ) or None
+            self._process_environ = dispatch.process_environ if dispatch is not None else None
 
         def offered_function(self, function: ToolFunction) -> ToolFunction:
             """Describe ``run_shell_command`` with where and how it runs, offering named workers only where it may."""
@@ -503,8 +511,11 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
         def _background_log_policy(self) -> BackgroundLogPolicy:
             log_root = self._workspace_dir or self.base_dir
             if log_root is None:
+                temp_root = (
+                    self._process_environ.get("TMPDIR") if self._process_environ else None
+                ) or tempfile.gettempdir()
                 return BackgroundLogPolicy(
-                    log_dir=str(Path(tempfile.gettempdir()) / f"mindroom-shell-logs-{os.getuid()}"),
+                    log_dir=str(Path(temp_root) / f"mindroom-shell-logs-{os.getuid()}"),
                 )
             display_root = (
                 str(self.base_dir.resolve())
@@ -576,7 +587,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 if worker is not None:
                     raise ValueError(msg)
                 return f"Error: {msg}"
-            subprocess_env = self._command_env()
+            subprocess_env = self._command_env(self._process_environ)
             argv = _shell_subprocess_args(command_args, subprocess_env)
             cwd = str(self.base_dir) if self.base_dir else None
             output_request = current_tool_output_file_request()

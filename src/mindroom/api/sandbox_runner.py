@@ -1414,6 +1414,44 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
     return response
 
 
+async def _execute_request_shell_supervised(call: _ExecuteCall) -> ExecuteResponse:
+    """Run ``shell.run_shell_command`` via the runner's shell supervisor without a per-request child."""
+
+    def prepare() -> tuple[_PreparedSandboxRequestContext, _PreparedSandboxSubprocessContext, str]:
+        prepared_request = _prepare_execute_request(call)
+        subprocess_context = _prepare_subprocess_context(prepared_request)
+        socket_path = shell_supervisor.ensure_shell_supervisor()
+        return prepared_request, subprocess_context, socket_path
+
+    try:
+        prepared_request, subprocess_context, socket_path = await asyncio.to_thread(prepare)
+    except shell_supervisor.ShellSupervisorStartupError as exc:
+        return _subprocess_failure_response(call.route.worker_key, str(exc), call.route.runtime_paths)
+
+    if sandbox_request_cancellation.request_cancelled():
+        return _cancelled_response()
+
+    scope_id = prepared_request.request.shell_scope_id
+    scope = ShellBackgroundScope(scope_id=scope_id) if scope_id is not None else None
+    with (
+        bind_shell_background_scope(scope) if scope is not None else nullcontext(),
+        shell_supervisor.bind_shell_dispatch_context(
+            socket_path=socket_path,
+            process_environ=subprocess_context.subprocess_env,
+        ),
+    ):
+        response = await _execute_prepared_request_inprocess(
+            prepared_request.request,
+            prepared_request.runtime_paths,
+            call.route.config,
+            call.tools,
+            credentials_manager=None,
+        )
+    if scope is not None and scope.had_backgrounded:
+        return response.model_copy(update={"shell_backgrounded": True})
+    return response
+
+
 def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | None) -> TerminalLaunch:
     """Return the interactive shell of a terminal opened with ``payload``, a shell call's request, in ``cwd``.
 
@@ -1686,8 +1724,7 @@ def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     include: dict[str, IncEx] | None = None
     if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
         default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
-        # Plugin paths let the child register plugin tools; their settings stay out of the process running tool code.
-        include = {"plugins": {"__all__": {"path", "enabled"}}, "defaults": default_fields}
+        include = {"defaults": default_fields}
         if ToolManagedInitArg.FILE_ACCESS in builtin_metadata.managed_init_args:
             # The injected file_access resolves the routing agent through config.resolution.file_access().
             default_fields.add("file_access")
@@ -2409,6 +2446,18 @@ def _persistent_browser_runtime(
     return browser if isinstance(browser, WorkerBrowserRuntime) else None
 
 
+async def _dispatch_tool_call(call: _ExecuteCall, frames: asyncio.Queue[bytes] | None) -> ExecuteResponse:
+    if frames is not None:
+        return await _run_cancellable(_execute_streamed(call, frames))
+    # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
+    # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
+    if sandbox_exec.runner_uses_subprocess(call.route.runtime_paths) or call.route.worker_key is not None:
+        if (call.request.tool_name, call.request.function_name) == ("shell", "run_shell_command"):
+            return await _run_cancellable(_execute_request_shell_supervised(call))
+        return await _execute_request_subprocess(call)
+    return await _run_cancellable(_execute_request_inprocess(call))
+
+
 def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRoute) -> _PreparedToolCall:
     """Validate one call and return its dispatch; a job's request runs as part of its job."""
     # Plugin tools come from the request's config, not from a startup config runners never receive.
@@ -2432,20 +2481,11 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
             raise HTTPException(status_code=400, detail="Only a shell command's output streams.")
         frames = asyncio.Queue(maxsize=_STREAM_QUEUED_FRAMES)
 
-    async def dispatch() -> ExecuteResponse:
-        if frames is not None:
-            return await _run_cancellable(_execute_streamed(call, frames))
-        # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
-        # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
-        if sandbox_exec.runner_uses_subprocess(route.runtime_paths) or route.worker_key is not None:
-            return await _execute_request_subprocess(call)
-        return await _run_cancellable(_execute_request_inprocess(call))
-
     async def execute() -> ExecuteResponse:
         if sandbox_request_cancellation.request_cancelled():
             return _cancelled_response()
         with job_control_context(JobControl()) if request.run_as_job else nullcontext():
-            return await dispatch()
+            return await _dispatch_tool_call(call, frames)
 
     return _PreparedToolCall(execute, frames=frames)
 
