@@ -37,7 +37,12 @@ from mindroom.room_settings import (
     resolve_room_setting,
 )
 from mindroom.runtime_shutdown import ShutdownBudget
-from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
+from mindroom.steward_duties import (
+    _ROOM_STATE_CONCURRENCY,
+    StewardDuties,
+    StewardDutiesDeps,
+    reconcile_held_room_states,
+)
 from tests.access_schema_support import member_event
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -2926,3 +2931,54 @@ async def test_router_stop_cancels_its_room_state_tasks_without_waiting(room_sta
     await bot.prepare_for_sync_shutdown()
     assert budget.remaining_seconds() > 4
     assert publish.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["publish_rooms", "reconcile_held"])
+async def test_room_state_reconciliation_caps_concurrency(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Bulk room-state fan-outs cap in-flight reconciliations at _ROOM_STATE_CONCURRENCY."""
+    _, _, _, _, client = room_state
+    duties = _owner_bot(room_state).steward_duties
+    room_ids = {f"!room-{index}:localhost" for index in range(_ROOM_STATE_CONCURRENCY * 3)}
+    base_room = client.rooms[ROOM_ID]
+    for room_id in room_ids:
+        client.rooms[room_id] = base_room
+
+    in_flight = 0
+    peak = 0
+    seen: set[str] = set()
+    saturated = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_reconcile(
+        room_id: str,
+        _needed: set[str] | None = None,
+        _delay: int = 0,
+    ) -> set[str]:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        seen.add(room_id)
+        if in_flight == _ROOM_STATE_CONCURRENCY:
+            saturated.set()
+        await release.wait()
+        in_flight -= 1
+        return set()
+
+    monkeypatch.setattr(duties, "_reconcile_room_state", slow_reconcile)
+    work = asyncio.create_task(
+        duties._publish_rooms(room_ids)
+        if mode == "publish_rooms"
+        else reconcile_held_room_states(duties.deps.runtime.orchestrator),
+    )
+    await asyncio.wait_for(saturated.wait(), timeout=1.0)
+    await asyncio.sleep(0)
+    assert peak == _ROOM_STATE_CONCURRENCY
+    release.set()
+    await work
+    assert peak == _ROOM_STATE_CONCURRENCY
+    assert room_ids <= seen

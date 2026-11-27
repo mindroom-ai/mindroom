@@ -13,7 +13,7 @@ import ssl
 import sys
 import threading
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, contextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -6134,6 +6134,53 @@ async def test_a_bot_that_never_syncs_holds_startup_only_until_the_first_sync_de
     rebuilt.assert_not_called()
     assert not stuck.first_sync_complete
     assert not orchestrator.agent_reply_membership_sync.observer_is_open(stuck.matrix_id.full_id)
+
+
+@pytest.mark.asyncio
+async def test_startup_maintenance_starts_after_first_syncs_and_before_runtime_ready(tmp_path: Path) -> None:
+    """Startup maintenance begins only after initial syncs finish, right before marking the runtime ready."""
+    orchestrator, _config, slow = _startup_waiting_for_first_sync(tmp_path)
+    events: list[str] = []
+    real_wait = orchestrator._wait_for_first_syncs
+    real_start = orchestrator._startup_maintenance.start
+
+    async def tracked_wait(shutdown: asyncio.Event, bots: list[Any]) -> bool:
+        slow.first_sync_complete = True
+        result = await real_wait(shutdown, bots)
+        events.append("wait_for_first_syncs")
+        return result
+
+    def tracked_start(bots: list[Any], cfg: Config) -> None:
+        events.append("startup_maintenance_start")
+        real_start(bots, cfg)
+
+    ready = asyncio.Event()
+
+    def mark_ready() -> None:
+        events.append("set_runtime_ready")
+        ready.set()
+
+    with (
+        _matrix_free_startup(orchestrator),
+        patch.object(orchestrator, "_wait_for_first_syncs", side_effect=tracked_wait),
+        patch.object(orchestrator._startup_maintenance, "start", side_effect=tracked_start),
+        patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
+    ):
+        runtime_task = asyncio.create_task(orchestrator.start())
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            maintenance_task = orchestrator._startup_maintenance.task
+            assert maintenance_task is not None
+            await maintenance_task
+            await orchestrator.stop()
+            await asyncio.wait_for(runtime_task, timeout=SETTLE_TIMEOUT_SECONDS)
+        finally:
+            if not runtime_task.done():
+                runtime_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await runtime_task
+
+    assert events == ["wait_for_first_syncs", "startup_maintenance_start", "set_runtime_ready"]
 
 
 def _startup_waiting_for_first_sync(tmp_path: Path) -> tuple[_MultiAgentOrchestrator, Config, MagicMock]:

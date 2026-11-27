@@ -1181,7 +1181,6 @@ class _MultiAgentOrchestrator:
             self.fleet.start_sync(started_bots)
             log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
-            self._startup_maintenance.start(started_bots, config)
             if runtime_shutdown_event.is_set():
                 return
 
@@ -1209,6 +1208,8 @@ class _MultiAgentOrchestrator:
                 if runtime_shutdown_event.is_set():
                     return
                 self.config_reload.startup_published(config)
+                maintenance_bots = self._running_bots_for_entities(self.agent_bots) if self.agent_bots else started_bots
+                self._startup_maintenance.start(maintenance_bots, self.config)
                 set_runtime_ready()
                 self._runtime_ready_event.set()
                 self.turn_recovery.schedule()

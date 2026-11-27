@@ -160,6 +160,9 @@ class StewardDutiesDeps:
     personal_rooms: PersonalRoomLifecycle
 
 
+_ROOM_STATE_CONCURRENCY = 4
+
+
 @dataclass
 class StewardDuties:
     """Publish the room state of the rooms this bot stewards and emit their room-membership hooks.
@@ -184,6 +187,12 @@ class StewardDuties:
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
     # Each room's running republish of its thread mode after a change to the setting.
     _thread_mode_republishes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
+    # Caps concurrent per-room Matrix state reconciliations so startup and retry fan-outs do not flood the homeserver.
+    _room_state_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(_ROOM_STATE_CONCURRENCY),
+        init=False,
+        repr=False,
+    )
 
     @property
     def _is_owner(self) -> bool:
@@ -266,8 +275,9 @@ class StewardDuties:
 
     async def _publish_room_state(self, room_id: str, only: set[str] | None = None) -> None:
         """Reconcile one held room, or ``only`` some of its state, and let transient failures retry without another trigger."""
-        queued = self._room_state_reruns.get(room_id)
-        failed = await self._reconcile_room_state(room_id, only)
+        async with self._room_state_semaphore:
+            queued = self._room_state_reruns.get(room_id)
+            failed = await self._reconcile_room_state(room_id, only)
         # Supersede only the older work, which a publish of the whole state redid; concurrent failures replace the set.
         if only is None and queued is not None and self._room_state_reruns.get(room_id) is queued:
             del self._room_state_reruns[room_id]
@@ -301,15 +311,16 @@ class StewardDuties:
         delay = 1
         while runtime.phase is RunPhase.ACCEPTING and room_id in self._room_state_reruns:
             await asyncio.sleep(uniform(delay * 0.5, min(delay * 1.5, 60)))  # noqa: S311 - retry timing, not security
-            if runtime.phase is not RunPhase.ACCEPTING:
-                return
-            if not (needed := self._room_state_reruns.pop(room_id, None)):
-                break
-            self._room_state_retrying.add(room_id)
-            try:
-                failed = await self._reconcile_room_state(room_id, needed, delay)
-            finally:
-                self._room_state_retrying.discard(room_id)
+            async with self._room_state_semaphore:
+                if runtime.phase is not RunPhase.ACCEPTING:
+                    return
+                if not (needed := self._room_state_reruns.pop(room_id, None)):
+                    break
+                self._room_state_retrying.add(room_id)
+                try:
+                    failed = await self._reconcile_room_state(room_id, needed, delay)
+                finally:
+                    self._room_state_retrying.discard(room_id)
             if failed:
                 self._room_state_reruns[room_id] = self._room_state_reruns.get(room_id, set()) | failed
             delay = min(delay * 2, 60)
