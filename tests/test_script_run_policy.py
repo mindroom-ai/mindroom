@@ -422,9 +422,15 @@ def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: py
     adapted: list[str] = []
     adapt = toolkits._adapt_function
 
-    def counting_adapt(toolkit: Toolkit, name: str) -> object:
+    def counting_adapt(
+        toolkit: Toolkit,
+        name: str,
+        *,
+        key: str | None = None,
+        registered: str | None = None,
+    ) -> object:
         adapted.append(name)
-        return adapt(toolkit, name)
+        return adapt(toolkit, name, key=key, registered=registered)
 
     monkeypatch.setattr(toolkit_builder, "build_agent_toolkit", build_toolkit)
     monkeypatch.setattr(toolkits, "_adapt_function", counting_adapt)

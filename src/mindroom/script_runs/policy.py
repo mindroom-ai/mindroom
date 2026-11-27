@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
@@ -117,14 +117,13 @@ def resolve_current_script_tool(
     toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
-    function = toolkit_function(toolkit, grant.function_name)
-    if function is not None:
-        # The function as the agent's build offers it, so the grant rule judges what the agent sees.
-        function = replace(
-            function,
-            toolkit=tool_entry.authored_name or tool_entry.name,
-            registered_toolkit=tool_entry.name,
-        )
+    # The function as the agent's build offers it, so the grant rule judges what the agent sees.
+    function = toolkit_function(
+        toolkit,
+        grant.function_name,
+        key=tool_entry.authored_name or tool_entry.name,
+        registered=tool_entry.name,
+    )
     if function is None or not _grantable(context, function):
         if rejected_toolkit_cleanup is not None:
             rejected_toolkit_cleanup(toolkit)

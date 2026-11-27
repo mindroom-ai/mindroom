@@ -1084,19 +1084,64 @@ def _deserialize_tool_validation_fields(raw_fields: object, *, field_name: str) 
     return tuple(fields)
 
 
-def _deserialize_tool_validation_bool(
-    raw_info: Mapping[str, object],
-    *,
-    tool_name: str,
-    field_name: str,
-    default: bool,
-) -> bool:
-    """Read one strictly typed boolean from serialized tool validation metadata."""
-    value = raw_info.get(field_name, default)
-    if not isinstance(value, bool):
-        msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
+def _deserialize_tool_validation_info(tool_name: str, raw_info: object) -> ToolValidationInfo:
+    if not isinstance(raw_info, dict):
+        msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
         raise TypeError(msg)
-    return value
+    raw_info_mapping = cast("dict[str, object]", raw_info)
+    raw_validator = raw_info_mapping.get(
+        "authored_override_validator",
+        ToolAuthoredOverrideValidator.DEFAULT.value,
+    )
+    try:
+        authored_override_validator = ToolAuthoredOverrideValidator(raw_validator)
+    except ValueError as exc:
+        msg = (
+            f"Tool validation snapshot entry for '{tool_name}' has unsupported "
+            f"authored_override_validator '{raw_validator}'."
+        )
+        raise TypeError(msg) from exc
+    raw_file_access = raw_info_mapping.get("file_access", ToolFileAccess.NONE.value)
+    try:
+        file_access = ToolFileAccess(raw_file_access)
+    except ValueError as exc:
+        msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
+        raise TypeError(msg) from exc
+    flags: dict[str, bool] = {}
+    for field_name in (
+        "runtime_loadable",
+        "unavailable_due_to_plugin_load_error",
+        "requires_room_context",
+        "requires_primary_runtime",
+        "supports_toolkit_filters",
+    ):
+        if field_name in raw_info_mapping:
+            value = raw_info_mapping[field_name]
+            if not isinstance(value, bool):
+                msg = f"Tool validation snapshot entry for '{tool_name}' must set {field_name} to a boolean."
+                raise TypeError(msg)
+            flags[field_name] = value
+    raw_retired = raw_info_mapping.get("retired_functions", {})
+    if not isinstance(raw_retired, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in raw_retired.items()
+    ):
+        msg = f"Tool validation snapshot entry for '{tool_name}' must set retired_functions to a string mapping."
+        raise TypeError(msg)
+    return ToolValidationInfo(
+        name=tool_name,
+        config_fields=_deserialize_tool_validation_fields(
+            raw_info_mapping.get("config_fields", []),
+            field_name=f"{tool_name}.config_fields",
+        ),
+        agent_override_fields=_deserialize_tool_validation_fields(
+            raw_info_mapping.get("agent_override_fields", []),
+            field_name=f"{tool_name}.agent_override_fields",
+        ),
+        authored_override_validator=authored_override_validator,
+        file_access=file_access,
+        retired_functions=dict(raw_retired),
+        **flags,
+    )
 
 
 def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValidationInfo]:
@@ -1110,64 +1155,7 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         if not isinstance(tool_name, str):
             msg = "Tool validation snapshot must be a JSON object keyed by tool name."
             raise TypeError(msg)
-        if not isinstance(raw_info, dict):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
-            raise TypeError(msg)
-        raw_info_mapping = cast("dict[str, object]", raw_info)
-        raw_validator = raw_info_mapping.get(
-            "authored_override_validator",
-            ToolAuthoredOverrideValidator.DEFAULT.value,
-        )
-        try:
-            authored_override_validator = ToolAuthoredOverrideValidator(raw_validator)
-        except ValueError as exc:
-            msg = (
-                f"Tool validation snapshot entry for '{tool_name}' has unsupported "
-                f"authored_override_validator '{raw_validator}'."
-            )
-            raise TypeError(msg) from exc
-        raw_file_access = raw_info_mapping.get("file_access", ToolFileAccess.NONE.value)
-        try:
-            file_access = ToolFileAccess(raw_file_access)
-        except ValueError as exc:
-            msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
-            raise TypeError(msg) from exc
-        flags = {
-            field_name: _deserialize_tool_validation_bool(
-                raw_info_mapping,
-                tool_name=tool_name,
-                field_name=field_name,
-                default=default,
-            )
-            for field_name, default in (
-                ("runtime_loadable", True),
-                ("unavailable_due_to_plugin_load_error", False),
-                ("requires_room_context", False),
-                ("requires_primary_runtime", False),
-                ("supports_toolkit_filters", False),
-            )
-        }
-        raw_retired = raw_info_mapping.get("retired_functions", {})
-        if not isinstance(raw_retired, dict) or not all(
-            isinstance(key, str) and isinstance(value, str) for key, value in raw_retired.items()
-        ):
-            msg = f"Tool validation snapshot entry for '{tool_name}' must set retired_functions to a string mapping."
-            raise TypeError(msg)
-        snapshot[tool_name] = ToolValidationInfo(
-            name=tool_name,
-            config_fields=_deserialize_tool_validation_fields(
-                raw_info_mapping.get("config_fields", []),
-                field_name=f"{tool_name}.config_fields",
-            ),
-            agent_override_fields=_deserialize_tool_validation_fields(
-                raw_info_mapping.get("agent_override_fields", []),
-                field_name=f"{tool_name}.agent_override_fields",
-            ),
-            authored_override_validator=authored_override_validator,
-            file_access=file_access,
-            retired_functions=dict(raw_retired),
-            **flags,
-        )
+        snapshot[tool_name] = _deserialize_tool_validation_info(tool_name, raw_info)
     return snapshot
 
 
