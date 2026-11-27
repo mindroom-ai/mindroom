@@ -3208,6 +3208,12 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
         ("microsoft_files", "microsoft_files_write", ("replace_file", "upload_file", "excel_update_range")),
         ("microsoft_sharepoint", "microsoft_sharepoint_read", ("search_sites", "list_items", "get_page")),
         ("microsoft_sharepoint", "microsoft_sharepoint_write", ("create_item", "update_item")),
+        ("microsoft_onenote", "microsoft_onenote_read", ("list_notebooks", "list_pages", "get_page")),
+        ("microsoft_onenote", "microsoft_onenote_write", ("create_page", "append_to_page")),
+        ("microsoft_todo", "microsoft_todo_read", ("list_lists", "list_tasks")),
+        ("microsoft_todo", "microsoft_todo_write", ("create_task", "update_task", "delete_task")),
+        ("microsoft_meetings", "microsoft_meetings_read", ("find", "list_transcripts", "get_transcript")),
+        ("microsoft_people", "microsoft_people_read", ("search", "get_profile", "list_direct_reports")),
     ],
 )
 def test_microsoft_365_registry_action_scoped_grants_bind_per_action(
@@ -3252,6 +3258,10 @@ def test_outlook_mail_create_draft_keeps_tool_wide_grants() -> None:
         ("microsoft_teams", "microsoft_teams_send_channel_message", "microsoft_teams_send"),
         ("microsoft_files", "microsoft_files_replace_file", "microsoft_files_write"),
         ("microsoft_sharepoint", "microsoft_sharepoint_create_item", "microsoft_sharepoint_write"),
+        ("microsoft_onenote", "microsoft_onenote_create_page", "microsoft_onenote_write"),
+        ("microsoft_todo", "microsoft_todo_delete_task", "microsoft_todo_write"),
+        ("microsoft_meetings", "microsoft_meetings_get_transcript", "microsoft_meetings_read"),
+        ("microsoft_people", "microsoft_people_get_profile", "microsoft_people_read"),
     ],
 )
 def test_microsoft_365_retired_approval_rules_fail_closed(

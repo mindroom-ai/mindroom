@@ -539,7 +539,7 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
 
 
 @contextmanager
-def graph_session(
+def _graph_session(
     provider: OAuthProvider,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager,
@@ -657,7 +657,7 @@ class MicrosoftGraphToolkit(Toolkit):
             msg = f"{type(self).__name__} requires an explicit credentials_manager"
             raise RuntimeError(msg)
         self._session = partial(
-            graph_session,
+            _graph_session,
             microsoft_oauth_provider(tool_name),
             runtime_paths,
             credentials_manager,

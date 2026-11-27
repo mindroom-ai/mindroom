@@ -897,6 +897,31 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "microsoft_sharepoint_create_item": "microsoft_sharepoint_write",
         "microsoft_sharepoint_update_item": "microsoft_sharepoint_write",
     },
+    "microsoft_onenote": {
+        "microsoft_onenote_list_notebooks": "microsoft_onenote_read",
+        "microsoft_onenote_list_sections": "microsoft_onenote_read",
+        "microsoft_onenote_list_pages": "microsoft_onenote_read",
+        "microsoft_onenote_get_page": "microsoft_onenote_read",
+        "microsoft_onenote_create_page": "microsoft_onenote_write",
+        "microsoft_onenote_append_to_page": "microsoft_onenote_write",
+    },
+    "microsoft_todo": {
+        "microsoft_todo_list_lists": "microsoft_todo_read",
+        "microsoft_todo_list_tasks": "microsoft_todo_read",
+        "microsoft_todo_create_task": "microsoft_todo_write",
+        "microsoft_todo_update_task": "microsoft_todo_write",
+        "microsoft_todo_delete_task": "microsoft_todo_write",
+    },
+    "microsoft_meetings": {
+        "microsoft_meetings_find": "microsoft_meetings_read",
+        "microsoft_meetings_list_transcripts": "microsoft_meetings_read",
+        "microsoft_meetings_get_transcript": "microsoft_meetings_read",
+    },
+    "microsoft_people": {
+        "microsoft_people_search": "microsoft_people_read",
+        "microsoft_people_get_profile": "microsoft_people_read",
+        "microsoft_people_list_direct_reports": "microsoft_people_read",
+    },
     "outlook_mail": {
         "outlook_mail_search": "outlook_mail_read",
         "outlook_mail_get_message": "outlook_mail_read",

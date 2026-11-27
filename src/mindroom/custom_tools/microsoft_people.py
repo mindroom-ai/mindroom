@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
+    MicrosoftGraphToolkit,
     graph_call,
+    graph_error_payload,
     graph_int,
     graph_records,
-    graph_session,
+    invalid_action,
     next_page_token,
     page_path,
     path_segment,
 )
-from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -26,6 +25,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.custom_tools.microsoft_graph import GraphSession
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+_ReadAction = Literal["search", "get_profile", "list_direct_reports"]
 
 _TOOL_NAME = "microsoft_people"
 _MAX_LIMIT = 50
@@ -39,9 +40,9 @@ _SEARCH_HEADERS = {"ConsistencyLevel": "eventual", "Prefer": "legacySearch=false
 _USER_TYPE = "#microsoft.graph.user"
 
 
-def _search(query: str) -> str:
+def _search(query: str | None) -> str:
     """Return the `$search` that matches display name words in any order, or an email address by its beginning."""
-    text = query.strip()
+    text = query.strip() if isinstance(query, str) else ""
     if not text or len(text) > _MAX_QUERY_CHARACTERS:
         msg = f"query must be a name or email address of 1 to {_MAX_QUERY_CHARACTERS} characters."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
@@ -78,7 +79,7 @@ def _user_id_by_mail(session: GraphSession, address: str) -> str | None:
     return ids[0] if len(ids) == 1 and isinstance(ids[0], str) else None
 
 
-def _read_user(session: GraphSession, person: str, suffix: str = "") -> dict[str, Any]:
+def _read_user(session: GraphSession, person: str | None, suffix: str = "") -> dict[str, Any]:
     """Read a user, or one of its relationships, by id, sign-in name, or email address.
 
     A user's path takes only an id or a sign-in name, so an email address Graph does not find there is looked up
@@ -88,7 +89,11 @@ def _read_user(session: GraphSession, person: str, suffix: str = "") -> dict[str
     try:
         return session.json("GET", f"{_user_path(person)}{suffix}", params=params)
     except MicrosoftGraphError as exc:
-        user_id = _user_id_by_mail(session, person) if exc.code == "not_found" and "@" in person else None
+        user_id = (
+            _user_id_by_mail(session, person)
+            if exc.code == "not_found" and isinstance(person, str) and "@" in person
+            else None
+        )
         if user_id is None:
             raise
         return session.json("GET", f"{_user_path(user_id)}{suffix}", params=params)
@@ -120,7 +125,7 @@ def _people(payload: Mapping[str, Any]) -> list[dict[str, object]]:
     return [_person(entry) for entry in graph_records(payload) if _is_user(entry)]
 
 
-class MicrosoftPeopleTools(Toolkit):
+class MicrosoftPeopleTools(MicrosoftGraphToolkit):
     """Look up people, their managers, and their direct reports in the requester's organization directory."""
 
     def __init__(
@@ -131,63 +136,16 @@ class MicrosoftPeopleTools(Toolkit):
         worker_target: ResolvedWorkerTarget | None = None,
         runtime_config: Config | None = None,
     ) -> None:
-        if credentials_manager is None:
-            msg = "MicrosoftPeopleTools requires an explicit credentials_manager"
-            raise RuntimeError(msg)
-        self._session = partial(
-            graph_session,
-            microsoft_oauth_provider(_TOOL_NAME),
-            runtime_paths,
-            credentials_manager,
-            worker_target,
-            runtime_config,
-        )
         super().__init__(
-            name=_TOOL_NAME,
-            tools=[
-                self.microsoft_people_search,
-                self.microsoft_people_get_profile,
-                self.microsoft_people_list_direct_reports,
-            ],
+            tool_name=_TOOL_NAME,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=worker_target,
+            runtime_config=runtime_config,
+            tools=[self.microsoft_people_read],
         )
 
-    def microsoft_people_search(self, query: str, limit: int = 10) -> str:
-        """Search the requester's organization directory for people by name or email address.
-
-        Use it to find the person the requester means, and their email address for mail, calendar, and Teams.
-        Names match by whole words or their beginnings, in any order, so "dan exam" finds Dana Example; email
-        addresses match from their beginning. When several people match, ask the requester which one they mean
-        instead of guessing. Someone added to the directory in the last few minutes may not show up yet.
-
-        Args:
-            query: A name, part of a name, or the beginning of an email address, up to 100 characters.
-            limit: Maximum number of people to return, from 1 to 50.
-
-        """
-        return graph_call(
-            _TOOL_NAME,
-            self._session,
-            lambda: {
-                "$search": _search(query),
-                "$select": _SELECT,
-                "$top": str(graph_int(limit, "limit", maximum=_MAX_LIMIT)),
-            },
-            lambda session, params: {
-                "people": _people(session.json("GET", "/users", params=params, headers=_SEARCH_HEADERS)),
-            },
-        )
-
-    def microsoft_people_get_profile(self, person: str) -> str:
-        """Read one person's directory profile and their manager.
-
-        manager is null when the directory names no manager for them, or names a contact instead of a user.
-
-        Args:
-            person: The person's id from microsoft_people_search, their email address, their sign-in name
-                (userPrincipalName), or "me" for the requester.
-
-        """
-
+    def _get_profile(self, person: str | None) -> str:
         def run(session: GraphSession, _path: str) -> Mapping[str, object]:
             profile = _read_user(session, person)
             manager_path = f"{_user_path(person if _is_me(person) else profile.get('id'))}/manager"
@@ -202,19 +160,7 @@ class MicrosoftPeopleTools(Toolkit):
 
         return graph_call(_TOOL_NAME, self._session, lambda: _user_path(person), run)
 
-    def microsoft_people_list_direct_reports(self, person: str, page_token: str | None = None) -> str:
-        """List the people who report directly to one person.
-
-        Contacts and other directory entries that are not user accounts are left out, so a page may hold fewer
-        people, or none, while next_page_token still continues the listing.
-
-        Args:
-            person: The manager's id from microsoft_people_search, their email address, their sign-in name
-                (userPrincipalName), or "me" for the requester.
-            page_token: The next_page_token of the previous call, to continue the same listing.
-
-        """
-
+    def _list_direct_reports(self, person: str | None, page_token: str | None) -> str:
         def build() -> str | None:
             if page_token is not None:
                 return page_path(page_token, "/me/directReports")
@@ -226,3 +172,40 @@ class MicrosoftPeopleTools(Toolkit):
             return {"direct_reports": _people(payload), "next_page_token": next_page_token(payload)}
 
         return graph_call(_TOOL_NAME, self._session, build, run)
+
+    def microsoft_people_read(
+        self,
+        action: _ReadAction,
+        query: str | None = None,
+        person: str | None = None,
+        limit: int = 10,
+        page_token: str | None = None,
+    ) -> str:
+        """Look up people, profiles, managers, and direct reports in the requester's organization directory.
+
+        `person` takes a user id, email address, sign-in name (userPrincipalName), or "me" for the requester.
+
+        - `search`: search by name words (any order) or email prefix (`query` 1-100 chars; `limit` 1-50 default 10).
+          When several people match, ask the requester which one they mean instead of guessing.
+        - `get_profile`: read `person`'s directory profile and `manager` (null when unset or not a user)
+        - `list_direct_reports`: list user accounts reporting directly to `person` (optional `page_token`; non-user
+          contacts are omitted)
+        """
+        if action == "search":
+            return graph_call(
+                _TOOL_NAME,
+                self._session,
+                lambda: {
+                    "$search": _search(query),
+                    "$select": _SELECT,
+                    "$top": str(graph_int(limit, "limit", maximum=_MAX_LIMIT)),
+                },
+                lambda session, params: {
+                    "people": _people(session.json("GET", "/users", params=params, headers=_SEARCH_HEADERS)),
+                },
+            )
+        if action == "get_profile":
+            return self._get_profile(person)
+        if action == "list_direct_reports":
+            return self._list_direct_reports(person, page_token)
+        return graph_error_payload(_TOOL_NAME, invalid_action(action))
