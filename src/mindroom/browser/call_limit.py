@@ -13,6 +13,6 @@ class HostCallTimeLimitError(TimeoutError):
 
 def browser_request_budget_seconds(tool_name: str, function_name: str) -> float:
     """Return how long a process relaying this call waits for its answer, or 0 for a call without a limit of its own."""
-    if (tool_name, function_name) != ("browser", "browser_control"):
+    if tool_name != "browser" or function_name not in {"browser_read", "browser_control"}:
         return 0.0
     return HOST_CALL_TIMEOUT_SECONDS + _RELAY_GRACE_SECONDS

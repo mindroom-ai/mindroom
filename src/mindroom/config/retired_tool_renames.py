@@ -124,13 +124,24 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "apply_template": "todo",
         "list_templates": "todo",
     },
+    "triggers": {
+        "watch_room": "triggers_write",
+        "watch_thread": "triggers_write",
+        "watch_pr": "triggers_write",
+        "subscribe_event": "triggers_write",
+        "create_trigger": "triggers_write",
+        "list_triggers": "triggers_read",
+        "disable_trigger": "triggers_write",
+        "delete_trigger": "triggers_write",
+        "rotate_trigger_key": "triggers_write",
+    },
     "workflow": {
-        "start_workflow": "workflow",
-        "get_workflow": "workflow",
-        "cancel_workflow": "workflow",
-        "resume_workflow": "workflow",
-        "list_workflow_runs": "workflow",
-        "save_workflow": "workflow",
+        "start_workflow": "workflow_write",
+        "get_workflow": "workflow_read",
+        "cancel_workflow": "workflow_write",
+        "resume_workflow": "workflow_write",
+        "list_workflow_runs": "workflow_read",
+        "save_workflow": "workflow_write",
     },
     "thread_tags": {
         "tag_thread": "thread_tags",
@@ -861,6 +872,25 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
 }
 
+# LEGACY_COMPAT: Mega-tools split 1-to-N into separate read and write/control functions.
+# Legacy format: `triggers`, `desktop`, `workflow`, and `matrix_api` were previously single multi-action functions,
+#   and `browser_control` previously served both read and control actions (read actions moved to `browser_read` while
+#   `browser_control` remains active for control actions).
+# Last legacy release: v2026.11.664; replacement: unreleased; split into read vs. write/control functions.
+# Handling: Reject `triggers`, `desktop`, `workflow`, and `matrix_api` in `include_tools`/`exclude_tools` (both authored
+#   overrides and stored dashboard settings) and fail closed in `tool_approval.rules` unless rules explicitly cover every
+#   replacement function; for `browser`, validate `browser_control` -> `browser_read` in `tool_approval.rules` only while
+#   keeping `browser_control` valid in `include_tools`/`exclude_tools`.
+# Coverage:
+#   tests/test_triggers_tool.py, tests/test_desktop_tool.py, tests/test_browser_tool.py,
+#   tests/test_workflow_tool.py, tests/test_matrix_api_tool.py, tests/test_tool_approval_grants.py.
+RETIRED_SPLIT_FUNCTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    "triggers": {"triggers": ("triggers_read", "triggers_write")},
+    "desktop": {"desktop": ("desktop_read", "desktop_control")},
+    "workflow": {"workflow": ("workflow_read", "workflow_write")},
+    "matrix_api": {"matrix_api": ("matrix_api_read", "matrix_api_write")},
+}
+
 STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
     {
         "skills",
@@ -885,7 +915,11 @@ STRICT_WILDCARD_SCRIPT_TOOLKITS: frozenset[str] = frozenset(
         "oxylabs",
         "browserbase",
         "spider",
+        "triggers",
+        "desktop",
+        "browser",
         "workflow",
+        "matrix_api",
         "thread_tags",
         "outlook_mail",
         "outlook_calendar",

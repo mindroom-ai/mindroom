@@ -57,6 +57,7 @@ from mindroom.config.legacy_access import (
 from mindroom.config.legacy_fields import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_PROMPT_NAMES,
+    RETIRED_SPLIT_FUNCTIONS,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
@@ -64,6 +65,7 @@ from mindroom.config.legacy_fields import (
     retired_action_argument_approval_error,
     retired_builtin_approval_error,
     retired_consolidated_approval_error,
+    retired_split_approval_only_error,
     retired_tool_message,
 )
 from mindroom.config.matrix import (
@@ -1678,20 +1680,6 @@ class Config(BaseModel):
                 msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
                 raise ToolConfigOverrideError(msg)
         if (
-            any(entry.name == "triggers" for _, entry in entries)
-            and (
-                trigger_error := retired_builtin_approval_error(
-                    "triggers",
-                    self.tool_approval.rules,
-                    self.tool_approval.default,
-                    self.tool_approval.timeout_days,
-                    agent_names=self.agents.keys(),
-                )
-            )
-            is not None
-        ):
-            raise ToolConfigOverrideError(trigger_error)
-        if (
             any(entry.aliased_from_dynamic_workflow for _, entry in entries)
             and (
                 workflow_error := retired_builtin_approval_error(
@@ -1721,42 +1709,44 @@ class Config(BaseModel):
         if self.personal_agents:
             enabled_toolkits.add("agent_manager")
         for template in self.personal_agents.values():
-            enabled_toolkits.update(self.expand_tool_names([entry.name for entry in template.agent.tools]))
-            overrides = tuple(template.users.values())
-            if template.agent.contacts is not None or any(
-                override.get("contacts") is not None for override in overrides
-            ):
-                enabled_toolkits.update(("contacts", "matrix_message"))
-            template_graph = (
-                template.agent.knowledge_graph
-                if template.agent.knowledge_graph is not None
-                else self.defaults.knowledge_graph
-            )
-            if template_graph or any(
-                (
-                    override["knowledge_graph"]
-                    if override["knowledge_graph"] is not None
-                    else self.defaults.knowledge_graph
-                )
-                is True
-                for override in overrides
-                if "knowledge_graph" in override
-            ):
-                enabled_toolkits.add("knowledge_graph")
-            for override in overrides:
-                raw_tools = override.get("tools")
-                if isinstance(raw_tools, list):
-                    override_tool_names: list[str] = []
-                    for item in raw_tools:
-                        try:
-                            override_tool_names.append(canonical_tool_name(ToolConfigEntry.model_validate(item).name))
-                        except ValueError:
-                            # Let the generated-agent template validator report malformed entries with their exact path.
-                            continue
-                    enabled_toolkits.update(self.expand_tool_names(override_tool_names))
+            enabled_toolkits.update(self._template_approval_toolkits(template))
         for agent_name in self.agents:
             enabled_toolkits.update(entry.name for entry in resolve_agent_tools(self, agent_name, tools).candidates())
+        if self.defaults.desktop_pairing == "self_service" and tools.available("desktop"):
+            enabled_toolkits.add("desktop")
         return enabled_toolkits
+
+    def _template_approval_toolkits(self, template: PersonalAgentTemplateConfig) -> set[str]:
+        """Return toolkits enabled by one personal-agent template and its per-user overrides."""
+        toolkits = set(self.expand_tool_names([entry.name for entry in template.agent.tools]))
+        overrides = tuple(template.users.values())
+        if template.agent.contacts is not None or any(override.get("contacts") is not None for override in overrides):
+            toolkits.update(("contacts", "matrix_message"))
+        template_graph = (
+            template.agent.knowledge_graph
+            if template.agent.knowledge_graph is not None
+            else self.defaults.knowledge_graph
+        )
+        if template_graph or any(
+            (override["knowledge_graph"] if override["knowledge_graph"] is not None else self.defaults.knowledge_graph)
+            is True
+            for override in overrides
+            if "knowledge_graph" in override
+        ):
+            toolkits.add("knowledge_graph")
+        for override in overrides:
+            raw_tools = override.get("tools")
+            if not isinstance(raw_tools, list):
+                continue
+            override_tool_names: list[str] = []
+            for item in raw_tools:
+                try:
+                    override_tool_names.append(canonical_tool_name(ToolConfigEntry.model_validate(item).name))
+                except ValueError:
+                    # Let the generated-agent template validator report malformed entries with their exact path.
+                    continue
+            toolkits.update(self.expand_tool_names(override_tool_names))
+        return toolkits
 
     def _validate_retired_consolidated_approval_rules(
         self,
@@ -1793,6 +1783,16 @@ class Config(BaseModel):
 
         # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
         for toolkit_name in sorted(enabled_toolkits | {"skills"}):
+            if (
+                split_only_error := retired_split_approval_only_error(
+                    toolkit_name,
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                    agent_names=self.agents.keys(),
+                )
+            ) is not None:
+                raise ToolConfigOverrideError(split_only_error)
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             strict_toolkit = toolkit_name
             metadata = tools.entries.get(toolkit_name)
@@ -1811,7 +1811,8 @@ class Config(BaseModel):
                 if all(f"{prefix}_{new}" in metadata.function_names for new in set(base_renames.values())):
                     builtin_renames = {f"{prefix}_{old}": f"{prefix}_{new}" for old, new in base_renames.items()}
             declared_renames = metadata.retired_functions if metadata is not None else None
-            if not builtin_renames and not declared_renames:
+            has_split = toolkit_name in RETIRED_SPLIT_FUNCTIONS
+            if not builtin_renames and not declared_renames and not has_split:
                 continue
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
             if (

@@ -38,6 +38,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.tools.native_helpers import validate_action_params
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.answers import handle_workflow_answer
 from mindroom.workflow_runs.limits import WorkflowLimits, ceiling, limit_reached, run_usage
@@ -66,18 +67,17 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import WorkflowNode
 
-_WORKFLOW = "workflow"
+_WORKFLOW_READ = "workflow_read"
+_WORKFLOW_WRITE = "workflow_write"
 # The spec's teaching text, cut to what this release runs: each later release adds the lines for what it adds. The
 # list of models follows it.
-_WORKFLOW_DESCRIPTION = """\
-Run and manage durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs).
+_WORKFLOW_WRITE_DESCRIPTION = """\
+Start, cancel, resume, or save durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs). Use `workflow_read(action="list"|"get")` to list runs/saved workflows or inspect run status.
 
 Actions (only pass parameters for the chosen action):
 - `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.
-- `get`: run status, cost, open questions, failed calls, and nodes (`run_id`; optional `nodes`: `"active"` default, `"failed"`, or `"all"`; `messages=True` adds peer messages & shared state).
 - `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).
 - `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=["n4"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).
-- `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`)—no other parameters.
 - `save`: save a run's script as `workflows/<name>.py` for `action="start", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {"arg": "meaning"}`.
 
 Script authoring (`action="start"`):
@@ -114,7 +114,7 @@ SDK:
 Durability & execution:
 - Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
 - `action="resume"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.
-- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `action="get"` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
+- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `workflow_read(action="get")` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
@@ -122,18 +122,23 @@ _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.ena
 
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
 _NODE_FILTERS = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}
-_ALLOWED_WORKFLOW_PARAMS: dict[str, frozenset[str]] = {
+_READ_ALLOWED: dict[str, frozenset[str]] = {
+    "list": frozenset(),
+    "get": frozenset({"run_id", "nodes", "messages"}),
+}
+_WRITE_ALLOWED: dict[str, frozenset[str]] = {
     "start": frozenset(
         {"source", "path", "name", "args", "title", "max_concurrent", "resource_profile", "max_cost_usd"},
     ),
-    "get": frozenset({"run_id", "nodes", "messages"}),
     "cancel": frozenset({"run_id"}),
     "resume": frozenset({"run_id", "source", "path", "rerun", "max_cost_usd"}),
-    "list": frozenset(),
     "save": frozenset({"run_id", "name", "description"}),
 }
-_WORKFLOW_PARAMS = tuple(dict.fromkeys(k for keys in _ALLOWED_WORKFLOW_PARAMS.values() for k in sorted(keys)))
-_REQUIRED_WORKFLOW_PARAMS: dict[str, tuple[str, ...]] = {
+_ALLOWED_BY_FUNCTION: dict[str, dict[str, frozenset[str]]] = {
+    _WORKFLOW_READ: _READ_ALLOWED,
+    _WORKFLOW_WRITE: _WRITE_ALLOWED,
+}
+_REQUIRED_PARAMS: dict[str, tuple[str, ...]] = {
     "get": ("run_id",),
     "cancel": ("run_id",),
     "resume": ("run_id",),
@@ -141,22 +146,23 @@ _REQUIRED_WORKFLOW_PARAMS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _validate_workflow_params(action: object, arguments: Mapping[str, Any]) -> str:
+def _validate_workflow_params(
+    function_name: str,
+    action: object,
+    arguments: Mapping[str, Any],
+) -> str:
     """Validate workflow action and action-specific parameters, or raise WorkflowRunStoreError."""
-    if not isinstance(action, str) or action not in _ALLOWED_WORKFLOW_PARAMS:
-        msg = f"Unsupported workflow action {action!r}. Expected one of: start, get, cancel, resume, list, save."
-        raise WorkflowRunStoreError(msg)
-    allowed = _ALLOWED_WORKFLOW_PARAMS[action]
-    unexpected = [
-        key
-        for key in _WORKFLOW_PARAMS
-        if (bool(arguments.get(key)) if key == "messages" else arguments.get(key) is not None) and key not in allowed
-    ]
-    if unexpected:
-        names = ", ".join(f"`{name}`" for name in unexpected)
-        msg = f"Parameter(s) {names} cannot be used with action={action!r}."
-        raise WorkflowRunStoreError(msg)
-    for key in _REQUIRED_WORKFLOW_PARAMS.get(action, ()):
+    allowed_by_action = _ALLOWED_BY_FUNCTION[function_name]
+    action_str = action if isinstance(action, str) else repr(action)
+    if (
+        not isinstance(action, str)
+        or (error := validate_action_params(function_name, action_str, allowed_by_action, arguments)) is not None
+    ):
+        if not isinstance(action, str):
+            expected = ", ".join(allowed_by_action)
+            error = f"Unsupported {function_name} action {action!r}. Expected one of: {expected}."
+        raise WorkflowRunStoreError(error)
+    for key in _REQUIRED_PARAMS.get(action, ()):
         value = arguments.get(key)
         if not isinstance(value, str) or not value.strip():
             msg = f"`{key}` is required for action={action!r}."
@@ -186,11 +192,13 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             max_concurrent_agents=max_concurrent_agents,
             large_run_notice_usd=large_run_notice_usd,
         )
-        # The models of this deployment, named as `run_subagent` names them, end the description.
+        # The models of this deployment, named as `run_subagent` names them, end the write description.
         models = sorted((runtime_config.models if runtime_config is not None else {}).items())
         levels = [f"{name}@{model.reasoning.levels[-1]}" for name, model in models if model.reasoning]
         effort = f" (add an effort as in {levels[0]})" if levels else ""
-        self._description = f"{_WORKFLOW_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
+        self._write_description = (
+            f"{_WORKFLOW_WRITE_DESCRIPTION}\nModels: {', '.join(name for name, _ in models)}{effort}."
+        )
         # And the agents a run may name: those this agent may delegate to, and those configured for this room.
         agents = runtime_config.agents if runtime_config is not None else {}
         others = list(agents[agent_name].delegate_to) if agent_name in agents else []
@@ -198,16 +206,55 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             rooms = {name: resolve_room_aliases(other.rooms, runtime_paths) for name, other in agents.items()}
             others += [name for name in rooms if name not in (agent_name, *others) and current_room_id in rooms[name]]
         if others:
-            self._description += f"\nAgents you can run with agent=: {', '.join(others)}."
-        super().__init__(name="workflow", tools=[self.workflow])
+            self._write_description += f"\nAgents you can run with agent=: {', '.join(others)}."
+        super().__init__(name="workflow", tools=[self.workflow_read, self.workflow_write])
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Describe `workflow` with the action guide, SDK teaching text, and this deployment's models."""
-        return replace(function, description=self._description) if function.name == _WORKFLOW else function
+        """Keep `workflow_read` lean and attach the full SDK guide and model list to `workflow_write`."""
+        if function.name == _WORKFLOW_READ:
+            return replace(function, offer_background_after=False, offer_output_path=True)
+        if function.name == _WORKFLOW_WRITE:
+            return replace(
+                function,
+                description=self._write_description,
+                offer_background_after=True,
+                offer_output_path=False,
+            )
+        return function
 
-    async def workflow(
+    async def workflow_read(
         self,
-        action: Literal["start", "get", "cancel", "resume", "list", "save"],
+        action: Literal["list", "get"],
+        run_id: str | None = None,
+        nodes: Literal["active", "failed", "all"] | None = None,
+        messages: bool | None = None,
+    ) -> str:
+        """Inspect workflow runs and saved workflows.
+
+        - `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`).
+        - `get`: run status, cost, open questions, failed calls, and nodes (`run_id`).
+
+        Args:
+            action: Read action (`list` or `get`).
+            run_id: Run ID (get).
+            nodes: Node filter: `"active"` (default), `"failed"`, or `"all"` (get).
+            messages: Include peer messages and shared state (get, default false).
+
+        """
+        params: dict[str, Any] = {"run_id": run_id, "nodes": nodes, "messages": messages}
+        validated = _validate_workflow_params(_WORKFLOW_READ, action, params)
+        if validated == "list":
+            return await self._list()
+        assert run_id is not None
+        return await self._get(
+            run_id,
+            nodes="active" if nodes is None else nodes,
+            messages=False if messages is None else messages,
+        )
+
+    async def workflow_write(
+        self,
+        action: Literal["start", "cancel", "resume", "save"],
         run_id: str | None = None,
         source: str | None = None,
         path: str | None = None,
@@ -217,26 +264,19 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         max_concurrent: int | None = None,
         resource_profile: ScriptResourceProfileName | None = None,
         max_cost_usd: float | None = None,
-        nodes: Literal["active", "failed", "all"] | None = None,
-        messages: bool = False,
         rerun: list[str] | None = None,
         description: str | None = None,
     ) -> str:
-        """Run and manage durable background Python workflows."""
+        """Start, cancel, resume, or save durable background Python workflows."""
         arguments: dict[str, Any] = {k: v for k, v in locals().items() if k not in {"self", "action"}}
-        validated = _validate_workflow_params(action, arguments)
+        validated = _validate_workflow_params(_WORKFLOW_WRITE, action, arguments)
         if validated == "start":
             return await self._start(arguments)
-        if validated == "get":
-            assert run_id is not None
-            return await self._get(run_id, nodes="active" if nodes is None else nodes, messages=messages)
         if validated == "cancel":
             assert run_id is not None
             return await self._cancel(run_id)
         if validated == "resume":
             return await self._resume(arguments)
-        if validated == "list":
-            return await self._list()
         assert run_id is not None
         assert name is not None
         return await self._save(run_id, name, description)
@@ -372,19 +412,23 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         job_id: str,
         runtime: ToolJobRuntime,
     ) -> JobSpec | str | None:
-        """Return the job of the run a managed `workflow(action="start"|"resume")` call starts, or why not.
+        """Return the job of the run a managed `workflow_write(action="start"|"resume")` call starts, or why not.
 
         Nothing runs here: a start writes its intent, a resume is only checked, and the job's operation, which runs
         only once the runtime admitted the job, takes a resumed run and launches every attempt. Other actions run
         as any tool's call does (None).
         """
-        if function_name != _WORKFLOW:
+        if function_name != _WORKFLOW_WRITE:
             return None
         action = arguments.get("action")
         if action not in ("start", "resume"):
             return None
         try:
-            _validate_workflow_params(action, arguments)
+            _validate_workflow_params(
+                _WORKFLOW_WRITE,
+                action,
+                {k: v for k, v in arguments.items() if k != "action"},
+            )
             engine, context = _runtime()
             # The plugins' hooks of a call, which the job's own task does not run for it: a decline reserves nothing.
             hooks = partial(

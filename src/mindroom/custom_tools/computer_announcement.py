@@ -53,12 +53,12 @@ def computer_announcement_middleware(
 
 
 def _uses_computer(name: str, args: dict[str, Any], placement: SupportsPrimaryCallPlacement | None) -> bool:
-    if name == "browser_control":
+    if name in {"browser_read", "browser_control"}:
         # Imported here, not at module level, so that loading agents does not load Playwright.
         from mindroom.custom_tools.browser import is_reference_action  # noqa: PLC0415
 
-        # help and actions only return reference data, so they must not use up the announcement.
-        if is_reference_action(args.get("action")):
+        # help and actions on browser_read only return reference data, so they must not use up the announcement.
+        if name == "browser_read" and is_reference_action(args.get("action")):
             return False
     # Desktop browser calls stay on the primary and drive the user's own browser, not the computer.
     return placement is None or not placement.runs_on_primary(name, args)

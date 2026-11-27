@@ -1,6 +1,6 @@
 """Browser tool for MindRoom.
 
-This exposes a single ``browser_control`` function with an ``action`` parameter.
+Exposes read-only ``browser_read`` and mutating ``browser_control`` functions with ``action`` routing.
 """
 # ruff: noqa: N803, A002
 
@@ -101,33 +101,38 @@ _UNIX_SOCKET_PATH_MAX_BYTES = 107
 
 logger = get_logger(__name__)
 
-_BrowserAction = Literal[
-    "act",
-    "actions",
-    "close",
-    "console",
-    "dialog",
-    "focus",
-    "help",
-    "navigate",
-    "open",
-    "pdf",
-    "profiles",
-    "screenshot",
-    "snapshot",
-    "start",
+_BrowserReadAction = Literal[
     "status",
-    "stop",
+    "profiles",
     "tabs",
-    "upload",
+    "snapshot",
+    "screenshot",
+    "console",
+    "help",
+    "actions",
 ]
+_BrowserControlAction = Literal[
+    "start",
+    "stop",
+    "open",
+    "focus",
+    "close",
+    "navigate",
+    "pdf",
+    "upload",
+    "dialog",
+    "act",
+]
+_READ_ACTIONS = frozenset(get_args(_BrowserReadAction))
+_CONTROL_ACTIONS = frozenset(get_args(_BrowserControlAction))
+_ALL_ACTIONS = tuple(sorted(_READ_ACTIONS | _CONTROL_ACTIONS))
 
 # Actions that only return reference data and never use a browser.
 _REFERENCE_ACTIONS = frozenset({"actions", "help"})
 
 
 def is_reference_action(action: object) -> bool:
-    """Return whether a browser_control action only returns reference data and never uses a browser."""
+    """Return whether a browser_read action only returns reference data and never uses a browser."""
     return str(action).strip().lower() in _REFERENCE_ACTIONS
 
 
@@ -146,42 +151,71 @@ _ACT_REQUEST_KINDS = (
 )
 
 _BROWSER_ACTION_TABLE = (
-    {"action": "status", "description": "Report whether the selected browser profile is running."},
-    {"action": "start", "description": "Start the selected browser profile."},
-    {"action": "stop", "description": "Stop the selected browser profile."},
-    {"action": "profiles", "description": "List known browser profiles."},
-    {"action": "tabs", "description": "List tabs for the selected browser profile."},
-    {"action": "open", "description": "Open targetUrl, or one HTML file from paths, in a new tab."},
-    {"action": "focus", "description": "Host target only: focus targetId; desktop does not support focus."},
+    {
+        "action": "status",
+        "tool": "browser_read",
+        "description": "Report whether the selected browser profile is running.",
+    },
+    {"action": "start", "tool": "browser_control", "description": "Start the selected browser profile."},
+    {"action": "stop", "tool": "browser_control", "description": "Stop the selected browser profile."},
+    {"action": "profiles", "tool": "browser_read", "description": "List known browser profiles."},
+    {
+        "action": "tabs",
+        "tool": "browser_read",
+        "description": "List tabs for the selected browser profile without launching it.",
+    },
+    {
+        "action": "open",
+        "tool": "browser_control",
+        "description": "Open targetUrl, or one HTML file from paths, in a new tab.",
+    },
+    {
+        "action": "focus",
+        "tool": "browser_control",
+        "description": "Host target only: focus targetId; desktop does not support focus.",
+    },
     {
         "action": "close",
+        "tool": "browser_control",
         "description": "Host target only: close targetId or the active host tab.",
     },
-    {"action": "snapshot", "description": "Capture a model-friendly page snapshot and element refs."},
+    {
+        "action": "snapshot",
+        "tool": "browser_read",
+        "description": "Capture a model-friendly page snapshot and element refs.",
+    },
     {
         "action": "screenshot",
+        "tool": "browser_read",
         "description": "Capture a screenshot; host retains it while desktop removes its transient scratch file.",
     },
     {
         "action": "navigate",
+        "tool": "browser_control",
         "description": "Host target only: navigate targetId or the active tab to targetUrl.",
     },
-    {"action": "console", "description": "Read collected console entries."},
-    {"action": "pdf", "description": "Host target only: save the selected page as a PDF."},
+    {"action": "console", "tool": "browser_read", "description": "Read collected console entries."},
+    {"action": "pdf", "tool": "browser_control", "description": "Host target only: save the selected page as a PDF."},
     {
         "action": "upload",
+        "tool": "browser_control",
         "description": (
             "Host target only: upload browser artifacts, agent workspace files, or att_* context attachments "
             "through a selector or ref."
         ),
     },
-    {"action": "dialog", "description": "Host target only: arm how the next browser dialog should be handled."},
+    {
+        "action": "dialog",
+        "tool": "browser_control",
+        "description": "Host target only: arm how the next browser dialog should be handled.",
+    },
     {
         "action": "act",
+        "tool": "browser_control",
         "description": "Host target only: run request.kind; desktop control requires upstream stable targeting.",
     },
-    {"action": "help", "description": "Return this browser action and request-kind table."},
-    {"action": "actions", "description": "Alias for help."},
+    {"action": "help", "tool": "browser_read", "description": "Return this browser action and request-kind table."},
+    {"action": "actions", "tool": "browser_read", "description": "Alias for help."},
 )
 
 _SNAPSHOT_JS = """
@@ -419,9 +453,11 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
     """Return a compact browser action discovery payload."""
     return {
         "action": action,
-        "actions": list(get_args(_BrowserAction)),
+        "actions": list(_ALL_ACTIONS),
+        "readActions": list(get_args(_BrowserReadAction)),
+        "controlActions": list(get_args(_BrowserControlAction)),
         "actKinds": list(_ACT_REQUEST_KINDS),
-        "actRequestDescription": tool_parameters(BrowserTools.browser)["properties"]["request"]["description"],
+        "actRequestDescription": tool_parameters(BrowserTools.browser_control)["properties"]["request"]["description"],
         "actionTable": list(_BROWSER_ACTION_TABLE),
         "status": "ok",
     }
@@ -692,9 +728,9 @@ class BrowserTools(Toolkit):
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
-        if function_name != "browser_control":
+        if function_name not in {"browser_read", "browser_control"}:
             return False
-        if is_reference_action(arguments["action"]):
+        if function_name == "browser_read" and is_reference_action(arguments.get("action")):
             return False
         return (
             self._resolve_target(
@@ -800,10 +836,163 @@ class BrowserTools(Toolkit):
             msg = "Failed to close browser profiles"
             raise ExceptionGroup(msg, errors)
 
-    @tool(name="browser_control")
-    async def browser(  # noqa: C901, PLR0915
+    @tool(name="browser_read", offer_background_after=False, offer_output_path=True)
+    async def browser_read(
         self,
-        action: _BrowserAction,
+        action: _BrowserReadAction,
+        target: Literal["host", "desktop"] | None = None,
+        node: str | None = None,
+        profile: str | None = None,
+        targetId: str | None = None,
+        limit: int | None = None,
+        maxChars: int | None = None,
+        mode: str | None = None,
+        snapshotFormat: str | None = None,
+        refs: str | None = None,
+        interactive: bool | None = None,
+        compact: bool | None = None,
+        depth: int | None = None,
+        selector: str | None = None,
+        frame: str | None = None,
+        labels: bool | None = None,
+        fullPage: bool | None = None,
+        ref: str | None = None,
+        element: str | None = None,
+        type: str | None = None,
+        saveOnly: bool = False,
+        returnAttachment: bool = False,
+        level: str | None = None,
+    ) -> str | ToolValue:
+        """Inspect a Chromium browser without mutating pages: check status/profiles/tabs, capture element snapshots (returns refs for `browser_control`), take screenshots, read console logs, or fetch action `help`/`actions`.
+
+        `target='host'` uses MindRoom's worker browser (`tabs` returns empty when stopped without launching Chromium). `target='desktop'` (when configured) observes the user's local browser.
+
+        Args:
+            action: Read action (`status`, `profiles`, `tabs`, `snapshot`, `screenshot`, `console`, `help`, `actions`).
+            target: `host` (worker browser) or `desktop` (user's local browser).
+            node: Unsupported compatibility field.
+            profile: Host-target profile name (default `mindroom`).
+            targetId: Opaque host tab ID (rejected by desktop; desktop observes its active tab).
+            limit: Host-target snapshot item limit.
+            maxChars: Snapshot text limit.
+            mode: Host-target snapshot mode (`efficient`).
+            snapshotFormat: Host-target snapshot format (`ai`/`aria`).
+            refs: Host-target snapshot refs mode (compat).
+            interactive: Host-target interactive-only snapshot filter.
+            compact: Host-target compact snapshot hint.
+            depth: Snapshot traversal depth.
+            selector: Snapshot root CSS selector.
+            frame: Host-target frame selector (compat; ignored).
+            labels: Host-target snapshot label hint (compat; ignored).
+            fullPage: Capture full page screenshot.
+            ref: Snapshot ref or CSS selector.
+            element: CSS selector for element screenshot.
+            type: Screenshot format (`png`/`jpeg`).
+            saveOnly: Host screenshot: return artifact metadata only (omit image bytes).
+            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving plaintext to disk.
+            level: Console log level filter.
+
+        Returns:
+            JSON-encoded result payload or screenshot image.
+
+        """
+        if action not in _READ_ACTIONS:
+            hint = " Use browser_control instead." if action in _CONTROL_ACTIONS else ""
+            msg = f"Unsupported browser_read action: {action}.{hint}"
+            raise ValueError(msg)
+        return await self._dispatch(
+            action=action,
+            target=target,
+            node=node,
+            profile=profile,
+            targetId=targetId,
+            limit=limit,
+            maxChars=maxChars,
+            mode=mode,
+            snapshotFormat=snapshotFormat,
+            refs=refs,
+            interactive=interactive,
+            compact=compact,
+            depth=depth,
+            selector=selector,
+            frame=frame,
+            labels=labels,
+            fullPage=fullPage,
+            ref=ref,
+            element=element,
+            type=type,
+            saveOnly=saveOnly,
+            returnAttachment=returnAttachment,
+            level=level,
+        )
+
+    @tool(name="browser_control", offer_background_after=True, offer_output_path=True)
+    async def browser_control(
+        self,
+        action: _BrowserControlAction,
+        target: Literal["host", "desktop"] | None = None,
+        node: str | None = None,
+        profile: str | None = None,
+        targetUrl: str | None = None,
+        targetId: str | None = None,
+        paths: list[str] | None = None,
+        ref: str | None = None,
+        inputRef: str | None = None,
+        element: str | None = None,
+        timeoutMs: int | None = None,
+        accept: bool | None = None,
+        promptText: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> str | ToolValue:
+        """Drive a live Chromium browser: start/stop profiles, open URLs (or local HTML via `paths`), focus/close tabs, navigate, interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), save PDFs, upload files, and arm dialogs. Use `browser_read` for `status`, `tabs`, `snapshot`, `screenshot`, `console`, and `help`.
+
+        `target='host'` uses MindRoom's worker browser (first call auto-shows the Computer panel if `chat_ui` is present; call `chat_ui.open_panel(panel='computer')` only to reopen it—never navigates or takes control). `target='desktop'` (when configured) supports `start`, `stop`, and `open` only.
+
+        Args:
+            action: Control action (`start`, `stop`, `open`, `focus`, `close`, `navigate`, `pdf`, `upload`, `dialog`, `act`).
+            target: `host` (worker browser) or `desktop` (user's local browser: start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it).
+            node: Unsupported compatibility field.
+            profile: Host-target profile name (default `mindroom`).
+            targetUrl: URL for `open`/`navigate`.
+            targetId: Opaque host tab ID (rejected by desktop).
+            paths: Upload files (artifact/workspace paths or att_* IDs; use `./att_*` for workspace files named att_*). For `open`, one local HTML file instead of targetUrl (cannot load other local files; relative links don't resolve).
+            ref: Snapshot ref or CSS selector (for `upload`).
+            inputRef: Host-target upload input selector/ref.
+            element: CSS selector for element upload.
+            timeoutMs: Host-target upload/dialog timeout (ms).
+            accept: Accept browser dialog.
+            promptText: Dialog prompt text.
+            request: For action='act'; set request.kind to: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from browser_read(action='snapshot').
+
+        Returns:
+            JSON-encoded result payload.
+
+        """
+        if action not in _CONTROL_ACTIONS:
+            hint = " Use browser_read instead." if action in _READ_ACTIONS else ""
+            msg = f"Unsupported browser_control action: {action}.{hint}"
+            raise ValueError(msg)
+        return await self._dispatch(
+            action=action,
+            target=target,
+            node=node,
+            profile=profile,
+            targetUrl=targetUrl,
+            targetId=targetId,
+            paths=paths,
+            ref=ref,
+            inputRef=inputRef,
+            element=element,
+            timeoutMs=timeoutMs,
+            accept=accept,
+            promptText=promptText,
+            request=request,
+        )
+
+    async def _dispatch(  # noqa: C901, PLR0915
+        self,
+        *,
+        action: str,
         target: Literal["host", "desktop"] | None = None,
         node: str | None = None,
         profile: str | None = None,
@@ -834,46 +1023,6 @@ class BrowserTools(Toolkit):
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> str | ToolValue:
-        """Drive a live Chromium browser: open URLs (or local HTML via `paths`), navigate URLs, inspect pages via `action='snapshot'` (returns element refs), interact via `action='act'` (`click`, `type`, `fill`, `press`, `select`, `drag`, `wait`, `evaluate`), capture screenshots/PDFs, upload files, and read console logs.
-
-        `target='host'` uses MindRoom's worker browser (first call auto-shows the Computer panel if `chat_ui` is present; call `chat_ui.open_panel(panel='computer')` only to reopen it—never navigates or takes control). `target='desktop'` (when configured) observes/opens tabs in the user's local browser.
-
-        Args:
-            action: Browser action; page interactions use action='act' with request.kind. Use action='help' for full table.
-            target: `host` (worker browser) or `desktop` (user's local browser: observation + start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it).
-            node: Unsupported compatibility field.
-            profile: Host-target profile name (default `mindroom`).
-            targetUrl: URL for `open`/`navigate`.
-            targetId: Opaque host tab ID (rejected by desktop; desktop observes its active tab).
-            limit: Host-target snapshot item limit.
-            maxChars: Snapshot text limit.
-            mode: Host-target snapshot mode (`efficient`).
-            snapshotFormat: Host-target snapshot format (`ai`/`aria`).
-            refs: Host-target snapshot refs mode (compat).
-            interactive: Host-target interactive-only snapshot filter.
-            compact: Host-target compact snapshot hint.
-            depth: Snapshot traversal depth.
-            selector: Snapshot root CSS selector.
-            frame: Host-target frame selector (compat; ignored).
-            labels: Host-target snapshot label hint (compat; ignored).
-            fullPage: Capture full page screenshot.
-            ref: Snapshot ref or CSS selector.
-            element: CSS selector for element actions.
-            type: Screenshot format (`png`/`jpeg`).
-            saveOnly: Host screenshot: return artifact metadata only (omit image bytes).
-            returnAttachment: Desktop screenshot: return turn-scoped att_* handle for matrix_message without saving plaintext to disk.
-            level: Console log level filter.
-            paths: Upload files (artifact/workspace paths or att_* IDs; use `./att_*` for workspace files named att_*). For `open`, one local HTML file instead of targetUrl (cannot load other local files; relative links don't resolve).
-            inputRef: Host-target upload input selector/ref.
-            timeoutMs: Host-target upload/dialog timeout (ms).
-            accept: Accept browser dialog.
-            promptText: Dialog prompt text.
-            request: For action='act'; set request.kind to: click {kind, ref, doubleClick?, button?, modifiers?}; type {kind, ref, text, submit?, slowly?}; press {kind, key}; hover {kind, ref}; drag {kind, startRef, endRef}; select {kind, ref, values}; fill {kind, fields:[{ref|selector,value}]}; resize {kind, width, height}; wait {kind, timeMs?|text?|textGone?}; evaluate {kind, fn, ref?}; close {kind}. Refs come from action='snapshot'.
-
-        Returns:
-            JSON-encoded result payload.
-
-        """
         if action in _REFERENCE_ACTIONS:
             return json.dumps(_browser_help_payload(action), sort_keys=True)
         if returnAttachment and action != "screenshot":
@@ -949,8 +1098,7 @@ class BrowserTools(Toolkit):
             if action == "profiles":
                 return json.dumps(await self._profiles_payload(profile_name), sort_keys=True)
             if action == "tabs":
-                state = await self._ensure_profile(profile_name)
-                return json.dumps(await self._tabs_payload(profile_name, state), sort_keys=True)
+                return json.dumps(await self._host_tabs_payload(profile_name), sort_keys=True)
             if action == "open":
                 target_url = _clean_str(targetUrl)
                 if paths:
@@ -1274,6 +1422,28 @@ class BrowserTools(Toolkit):
         for target_id in stale:
             self._remove_tab(state, target_id)
         return payload_tabs
+
+    async def _host_tabs_payload(self, profile_name: str) -> dict[str, Any]:
+        session = self._session
+        async with session.lock:
+            state = session.profiles.get(profile_name)
+        if state is None or state.cleanup_required:
+            return {
+                "action": "tabs",
+                "activeTargetId": None,
+                "profile": profile_name,
+                "running": False,
+                "status": "ok",
+                "tabs": [],
+            }
+        launch_settings = self._launch_settings(profile_name)
+        if state.launch_settings != launch_settings:
+            msg = (
+                f"Browser profile {profile_name!r} is running with different launch or egress settings. "
+                'Restart it with browser_control(action="start") before listing tabs.'
+            )
+            raise RuntimeError(msg)
+        return await self._tabs_payload(profile_name, state)
 
     async def _tabs_payload(self, profile_name: str, state: _BrowserProfileState) -> dict[str, Any]:
         tabs = await self._tab_list(state)

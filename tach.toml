@@ -8949,6 +8949,7 @@ depends_on = []
 from = ["mindroom.config.retired_tool_renames"]
 expose = [
     "RETIRED_CONSOLIDATED_FUNCTIONS",
+    "RETIRED_SPLIT_FUNCTIONS",
     "STRICT_WILDCARD_SCRIPT_TOOLKITS",
 ]
 

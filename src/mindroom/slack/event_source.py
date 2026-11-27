@@ -205,7 +205,7 @@ class SlackEventSource(EventSource):
     allowed_kinds: tuple[str, ...] = _ALLOWED_KINDS
     match_fields: tuple[str, ...] = ("channel_id",)
     example: str | None = (
-        'triggers(action="subscribe_event", source_id="slack", kind="message", '
+        'triggers_write(action="subscribe_event", source_id="slack", kind="message", '
         'prompt="Summarize this Slack message and ask if I want to reply.")'
     )
     default_once: bool = False
@@ -314,7 +314,7 @@ class SlackEventSource(EventSource):
         )
 
     def dry_run_audience(self, rule: ReactiveTriggerRecord) -> object:
-        """Synthesize a single-owner audience for dry-run ``triggers(action="test")``."""
+        """Synthesize a single-owner audience for dry-run ``triggers_read(action="test")``."""
         bound = _bound_slack_account(rule)
         return frozenset({bound[1]}) if bound is not None else frozenset()
 

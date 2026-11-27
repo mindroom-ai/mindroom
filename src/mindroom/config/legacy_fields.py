@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.retired_tool_renames import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
+    RETIRED_SPLIT_FUNCTIONS,
     STRICT_WILDCARD_SCRIPT_TOOLKITS,
 )
 
@@ -386,46 +387,38 @@ def approval_rule_a_file_rename_escapes(
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_changing_timeout_days_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
-_RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = dict.fromkeys(
-    (
-        "watch_room",
-        "watch_thread",
-        "watch_pr",
-        "subscribe_event",
-        "create_trigger",
-        "list_triggers",
-        "disable_trigger",
-        "delete_trigger",
-        "rotate_trigger_key",
-    ),
-    "triggers",
-)
+_SPLIT_APPROVAL_ONLY_FUNCTIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    "browser": {"browser_control": ("browser_read",)},
+}
 
 # LEGACY_COMPAT: Retired `slack_watch` function of the `slack` toolkit.
 # Legacy format: `slack: {include_tools: [slack_watch]}` / `exclude_tools` and `tool_approval.rules` matching `slack_watch`.
-# Last legacy release: v2026.11.651; replacement: `triggers(action="subscribe_event", source_id="slack", ...)`.
+# Last legacy release: v2026.11.651; replacement: `triggers_write(action="subscribe_event", source_id="slack", ...)`.
 # Handling: Reject `slack_watch` in `include_tools`/`exclude_tools` on `slack` and fail closed in `tool_approval.rules`
-#   whenever both `slack` and `triggers` toolkits are enabled and `slack_watch` conflicts with `triggers` (allowing broad
-#   `slack_*` globs paired with an explicit exact `triggers` rule).
+#   whenever both `slack` and `triggers` toolkits are enabled and `slack_watch` conflicts with `triggers_write` (allowing
+#   broad `slack_*` globs paired with an explicit exact `triggers_write` rule).
 # Coverage: tests/slack/test_event_source.py::test_retired_slack_watch_config_validation_fails_closed.
-_RETIRED_SLACK_FUNCTIONS: dict[str, str] = {"slack_watch": "triggers"}
+_RETIRED_SLACK_FUNCTIONS: dict[str, str] = {"slack_watch": "triggers_write"}
 
 # LEGACY_COMPAT: Retired function names of the deleted `dynamic_workflow` toolkit in `tool_approval.rules`.
 # Legacy format: `tool_approval.rules[].match` could gate or allow the old Dynamic Workflows functions
 #   (`run_workflow`, `create_workflow`, `update_workflow`, `get_workflow_run`, `list_workflows`).
 # Last legacy release: v2026.11.590; replacement: unreleased; `dynamic_workflow` now aliases `workflow`, whose
-#   unified function is `workflow`.
-# Handling: When the config authors `dynamic_workflow`, allow `workflow` when already decided by an exact
+#   functions are `workflow_read` (`list`, `get`) and `workflow_write` (`start`, `cancel`, `resume`, `save`).
+# Handling: When the config authors `dynamic_workflow`, allow replacement functions when already decided by an exact
 #   `match` rule, and otherwise reject `tool_approval.rules` when a retired function is decided by an approval script or
-#   its effective approval decision differs from `workflow`'s effective decision.
+#   its effective approval decision differs from its replacement function's effective decision.
 # Coverage: tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_fail,
 #   tests/test_dynamic_workflow_alias.py::test_retired_dynamic_workflow_approval_rules_allowed,
 #   tests/test_dynamic_workflow_alias.py::test_wildcard_approval_script_rule_fails_closed_for_retired_dynamic_workflow_names,
 #   tests/test_dynamic_workflow_alias.py::test_canonical_workflow_wildcard_approval_rules_load_cleanly.
-_RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, str] = dict.fromkeys(
-    ("run_workflow", "create_workflow", "update_workflow", "get_workflow_run", "list_workflows"),
-    "workflow",
-)
+_RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS: dict[str, str] = {
+    "run_workflow": "workflow_write",
+    "create_workflow": "workflow_write",
+    "update_workflow": "workflow_write",
+    "get_workflow_run": "workflow_read",
+    "list_workflows": "workflow_read",
+}
 
 
 def _effective_approval_decision(
@@ -486,6 +479,7 @@ def _retired_approval_pair_error_for_agent(
     default_timeout_days: float,
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
+    split_from_active: bool = False,
 ) -> str | None:
     old_indices = _agent_rule_indices(rules, old, agent)
     new_indices = _agent_rule_indices(rules, new, agent)
@@ -517,9 +511,14 @@ def _retired_approval_pair_error_for_agent(
         )
         is not None
     ):
+        subject = (
+            f"{old}; read actions from {old} moved to {new}"
+            if split_from_active
+            else f"retired tool {old}; {old} is now {new}"
+        )
         return (
             f"tool_approval.rules[{script_index}].match {rules[script_index].match!r} runs approval script "
-            f"{rules[script_index].script!r} for retired tool {old}; {old} is now {new}; "
+            f"{rules[script_index].script!r} for {subject}; "
             f"update the script for {new} and add an explicit match: {new} rule."
         )
     old_chain = _effective_approval_chain(
@@ -561,22 +560,44 @@ def _retired_approval_pair_error_for_agent(
             if conflict_index is not None
             else None
         )
+    return _retired_approval_mismatch_error(
+        rules,
+        rem_old=rem_old,
+        rem_new=rem_new,
+        old=old,
+        new=new,
+        default=default,
+        split_from_active=split_from_active,
+    )
+
+
+def _retired_approval_mismatch_error(
+    rules: Sequence[_ApprovalRule],
+    *,
+    rem_old: Sequence[int],
+    rem_new: Sequence[int],
+    old: str,
+    new: str,
+    default: str,
+    split_from_active: bool,
+) -> str | None:
+    fix = f"add explicit approval rules for {new}." if split_from_active else f"rewrite the rules for {new}."
     if rem_old:
         report_index = next((index for index in rem_old if index not in rem_new), rem_old[0])
+        reason = f"read actions from {old} moved to {new}" if split_from_active else f"{old} is now {new}"
         return (
             f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} decided {old}; "
-            f"{old} is now {new}, which now gets a different approval decision; "
-            f"rewrite the rules for {new}."
+            f"{reason}, which now gets a different approval decision; {fix}"
         )
     if rem_new:
         report_index = next(
             (index for index in rem_new if new not in rules[index].match_patterns()),
             rem_new[0],
         )
+        previous = f"read actions from {old}" if split_from_active else old
         return (
             f"tool_approval.rules[{report_index}].match {rules[report_index].match!r} now decides {new}, "
-            f"changing tool_approval.default {default!r} that previously decided {old}; "
-            f"rewrite the rules for {new}."
+            f"changing tool_approval.default {default!r} that previously decided {previous}; {fix}"
         )
     return None
 
@@ -590,6 +611,7 @@ def _first_retired_approval_error(
     reject_wildcard_scripts: bool = False,
     broad_probe: str | None = None,
     agent_names: Collection[str] = (),
+    split_from_active: bool = False,
 ) -> str | None:
     probes = _probe_agents(rules, agent_names)
     for old, new in pairs:
@@ -604,6 +626,7 @@ def _first_retired_approval_error(
                     default_timeout_days=default_timeout_days,
                     reject_wildcard_scripts=reject_wildcard_scripts,
                     broad_probe=broad_probe,
+                    split_from_active=split_from_active,
                 )
             ) is not None:
                 return error
@@ -618,7 +641,6 @@ class _RetiredApprovalSpec:
 
 
 _BUILTIN_RETIRED_APPROVALS: dict[str, _RetiredApprovalSpec] = {
-    "triggers": _RetiredApprovalSpec(_RETIRED_TRIGGER_FUNCTIONS),
     # Probe historical broad globs like `slack_*` without matching `slack_w*`.
     "slack_watch": _RetiredApprovalSpec(_RETIRED_SLACK_FUNCTIONS, broad_probe="slack_post"),
     "dynamic_workflow": _RetiredApprovalSpec(_RETIRED_DYNAMIC_WORKFLOW_FUNCTIONS, reject_wildcard_scripts=True),
@@ -626,13 +648,13 @@ _BUILTIN_RETIRED_APPROVALS: dict[str, _RetiredApprovalSpec] = {
 
 
 def retired_builtin_approval_error(
-    target: Literal["triggers", "slack_watch", "dynamic_workflow"],
+    target: Literal["slack_watch", "dynamic_workflow"],
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
     agent_names: Collection[str] = (),
 ) -> str | None:
-    """Return a migration error for a built-in retired approval target (`triggers`, `slack_watch`, `dynamic_workflow`)."""
+    """Return a migration error for a built-in retired approval target (`slack_watch`, `dynamic_workflow`)."""
     spec = _BUILTIN_RETIRED_APPROVALS[target]
     return _first_retired_approval_error(
         spec.renames.items(),
@@ -693,12 +715,17 @@ def retired_consolidated_approval_error(
     *,
     reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
-    """Return a migration error when approval rules decide a consolidated function differently from a retired name."""
+    """Return a migration error when approval rules decide a consolidated/split function differently from a retired name."""
     effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name) if renames is None else renames
-    if not effective_renames:
+    split_renames = RETIRED_SPLIT_FUNCTIONS.get(toolkit_name)
+    pairs = [
+        *(effective_renames.items() if effective_renames else ()),
+        *((old, new) for old, replacements in (split_renames or {}).items() for new in replacements),
+    ]
+    if not pairs:
         return None
     return _first_retired_approval_error(
-        effective_renames.items(),
+        pairs,
         rules=rules,
         default=default,
         default_timeout_days=default_timeout_days,
@@ -708,6 +735,28 @@ def retired_consolidated_approval_error(
             else reject_wildcard_scripts
         ),
         agent_names=agent_names,
+    )
+
+
+def retired_split_approval_only_error(
+    toolkit_name: str,
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+    agent_names: Collection[str] = (),
+) -> str | None:
+    """Return a migration error when read actions moved out of an active function lack explicit approval rules."""
+    split_renames = _SPLIT_APPROVAL_ONLY_FUNCTIONS.get(toolkit_name)
+    if not split_renames:
+        return None
+    return _first_retired_approval_error(
+        ((old, new) for old, replacements in split_renames.items() for new in replacements),
+        rules=rules,
+        default=default,
+        default_timeout_days=default_timeout_days,
+        reject_wildcard_scripts=toolkit_name in STRICT_WILDCARD_SCRIPT_TOOLKITS,
+        agent_names=agent_names,
+        split_from_active=True,
     )
 
 
@@ -809,15 +858,36 @@ def _retired_fallback_filter_guidance(
     )
 
 
+def _retired_split_function_filter(
+    settings: Mapping[str, object],
+    split_renames: Mapping[str, tuple[str, ...]],
+    *,
+    guidance_for: Callable[[str, str, tuple[str, ...]], str],
+) -> tuple[str, str] | None:
+    for key in ("include_tools", "exclude_tools"):
+        value = settings.get(key)
+        names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+        for name in names if isinstance(names, list) else ():
+            if isinstance(name, str) and (replacements := split_renames.get(old := name.strip())):
+                return f"{key}: {old}", guidance_for(key, old, replacements)
+    return None
+
+
+def _retired_split_filter_guidance(tool_name: str, key: str, old: str, replacements: tuple[str, ...]) -> str:
+    joined = ", ".join(f"`{name}`" for name in replacements)
+    extra = " (alongside `run_desktop_shell` for shell commands)" if tool_name == "desktop" else ""
+    return (
+        f"`{old}` was split into {joined}{extra}; replace `{old}` in `{tool_name}.{key}` with the desired "
+        f"function(s) or remove the filter and use `tool_approval.rules` for per-action gating"
+    )
+
+
 _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str, str, str], str]], ...]] = {
     "filesystem": ((_RETIRED_FILE_FUNCTIONS, lambda key, _old, new: f"use `filesystem: {{{key}: [{new}]}}`"),),
     "triggers": (
         (
-            _RETIRED_TRIGGER_FUNCTIONS,
-            lambda _key, _old, new: (
-                f"`{new}` is now a single unified function with an `action` parameter; "
-                "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
-            ),
+            RETIRED_CONSOLIDATED_FUNCTIONS["triggers"],
+            partial(_retired_consolidated_filter_guidance, "triggers"),
         ),
     ),
     "attachments": (
@@ -840,7 +910,7 @@ _RETIRED_STORED_FILTERS: dict[str, tuple[tuple[Mapping[str, str], Callable[[str,
         (
             _RETIRED_SLACK_FUNCTIONS,
             lambda _key, _old, _new: (
-                '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
+                '`slack_watch` has been retired in favor of `triggers_write(action="subscribe_event", source_id="slack", ...)`; '
                 "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
             ),
         ),
@@ -908,6 +978,14 @@ def retired_stored_tool_setting(
                 tool_name,
                 has_enable_toggles=has_enable_toggles,
             ),
+        )
+    ) is not None:
+        return retired
+    if (split_renames := RETIRED_SPLIT_FUNCTIONS.get(tool_name)) is not None and (
+        retired := _retired_split_function_filter(
+            settings,
+            split_renames,
+            guidance_for=partial(_retired_split_filter_guidance, tool_name),
         )
     ) is not None:
         return retired

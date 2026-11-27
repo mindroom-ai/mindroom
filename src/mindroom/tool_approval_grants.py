@@ -74,7 +74,7 @@ class ApprovalGrantScope:
     invoking_agent: str
 
 
-_ACTION_SCOPED_TOOLS = frozenset({"triggers", "memory", "todo", "scheduler", "attachment"})
+_ACTION_SCOPED_TOOLS = frozenset({"memory", "todo", "scheduler", "attachment"})
 _TOOLKIT_DISPATCH_SCOPED_ARGS: dict[tuple[str, str], str] = {
     ("file_generation", "generate_file"): "format",
     ("visualization", "create_chart"): "chart_type",
@@ -145,7 +145,7 @@ def grant_operation(
         if not isinstance(dispatch_value, str) or not dispatch_value.strip():
             return None
         normalized_dispatch = dispatch_value.strip()
-        if tool_name == "triggers" and normalized_dispatch == "watch_script":
+        if tool_name == "triggers_write" and normalized_dispatch == "watch_script":
             return None
         return ApprovalOperation(approval_binding(config), tool_name, scope_owner, normalized_dispatch)
     return ApprovalOperation(approval_binding(config), tool_name)

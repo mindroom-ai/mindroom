@@ -758,7 +758,7 @@ def _is_nested_workflow_start(request: dict[str, object]) -> bool:
     if request.get("toolkit") != "workflow":
         return False
     function = request.get("function")
-    if function == "workflow":
+    if function in {"workflow_write", "workflow"}:
         arguments = request.get("arguments")
         return isinstance(arguments, dict) and arguments.get("action") == "start"
     return function == "start_workflow"
