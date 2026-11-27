@@ -73,6 +73,8 @@ _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 #: deleted rows leave pages SQLite reuses but never returns.
 _MAX_REUSED_FREE_FRACTION = 0.25
 
+type _SourceScan = dict[str, tuple[FileSignature, Path]]
+
 
 @dataclass
 class _CandidateRun:
@@ -176,8 +178,6 @@ class KnowledgeManager:
     _base_storage_path: Path = field(init=False)
     _collections: CollectionSpace = field(init=False, repr=False)
     _max_concurrent_file_indexes: int = field(init=False, repr=False)
-    #: The files a local base's last corpus hash listed and signed, which the next reconciliation adopts once.
-    _source_scan: dict[str, tuple[FileSignature, Path]] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize filesystem paths and the Git checkout this base indexes; a bad indexing limit raises here."""
@@ -238,18 +238,7 @@ class KnowledgeManager:
             )
         return list_knowledge_files(self.config, self.base_id, knowledge_root)
 
-    async def source_signature(self, known: Mapping[str, FileSignature] | None = None) -> str:
-        """Return the signature of the corpus this base currently manages.
-
-        A file whose ctime and size still match its ``known`` signature is not read again.
-
-        Git-backed bases hand over the tracked paths this process already
-        listed, so an unchanged checkout is not re-listed just to hash it.
-        A local base keeps the scan for its next reconciliation instead of
-        listing and hashing the corpus again: a file that changes after the
-        scan still fails the hash that ends the pass. A Git base's pass ends
-        on its revision instead, which a stale scan could slip past.
-        """
+    async def _scan_source(self, known: Mapping[str, FileSignature] | None = None) -> tuple[str, _SourceScan | None]:
         scanned = await asyncio.to_thread(
             scan_corpus,
             self.config,
@@ -259,14 +248,60 @@ class KnowledgeManager:
             tracked_relative_paths=self.git_source.cached_tracked_relative_paths(),
             known=known,
         )
-        self._source_scan = None if self.git_source.is_configured() else scanned
-        return corpus_signature({relative_path: signature for relative_path, (signature, _path) in scanned.items()})
+        signature = corpus_signature({relative_path: sig for relative_path, (sig, _path) in scanned.items()})
+        return signature, None if self.git_source.is_configured() else scanned
 
-    async def published_file_signatures(self, collection: str) -> Mapping[str, FileSignature] | None:
-        """Return the signatures the published ``collection`` claims, for a stat-first scan to reuse.
+    async def source_signature(self, known: Mapping[str, FileSignature] | None = None) -> str:
+        """Return the signature of the corpus this base currently manages, skipping reads on stat-matched files."""
+        signature, _scanned = await self._scan_source(known)
+        return signature
 
-        None when the collection is not one this release can read, which a refresh must rebuild rather than republish.
-        """
+    async def _save_publication(self, publication: Publication, *, run: _CandidateRun | None = None) -> None:
+        def _write() -> None:
+            save_publication(self._base_storage_path, publication)
+            if run is not None:
+                run.published = True
+
+        await run_blocking_until_complete(_write)
+
+    async def publish_files_mode(self, *, published_revision: str | None = None) -> None:
+        """Publish current source metadata for a file-only base."""
+        await self._save_publication(
+            new_publication(
+                settings=self._indexing_settings,
+                collection=None,
+                indexed_count=0,
+                source_signature=await self.source_signature(),
+                published_revision=published_revision,
+            ),
+        )
+
+    async def _sync_git_source(self) -> tuple[str | None, str | None]:
+        if not self.git_source.is_configured():
+            return None, None
+        result = await self.git_source.sync()
+        return result.head, ("git_source_updated" if result.updated else None)
+
+    async def _should_defer_cold_empty_publication(self, publication: Publication | None) -> bool:
+        return (
+            self.config.get_knowledge_base_config(self.base_id).require_content_before_publish
+            and (publication is None or not publication.indexed_count)
+            and not await asyncio.to_thread(self.list_files)
+        )
+
+    def _published_collection_exists(self, collection_name: str) -> bool:
+        try:
+            return open_collection(self._collections, collection_name).exists()
+        except Exception:
+            logger.warning(
+                "Published knowledge collection existence check failed",
+                base_id=self.base_id,
+                collection=collection_name,
+                exc_info=True,
+            )
+            return False
+
+    async def _published_file_signatures(self, collection: str) -> Mapping[str, FileSignature] | None:
         try:
             return await asyncio.to_thread(open_collection(self._collections, collection).files)
         except Exception as error:
@@ -274,26 +309,72 @@ class KnowledgeManager:
                 raise
             return None
 
-    async def has_unfinished_rebuild(self, publication: Publication | None) -> bool:
-        """Return whether a forced rebuild of the current settings was interrupted before it published."""
-        return any(
-            self._unpublished_rebuild(meta, publication)
-            for _collection, meta in await asyncio.to_thread(self._working_collections, publication)
-        )
-
-    async def discard_superseded_builds(self, publication: Publication) -> None:
-        """Delete the builds an unchanged republish made obsolete, keeping a retired collection nobody took over.
-
-        A build exists only for a source that differed from the publication; once the source matches it again, the
-        build is obsolete, and left in place it would keep a copy of the index on disk and its progress in the status.
-        """
+    async def _publish_unchanged(
+        self,
+        publication: Publication,
+        *,
+        git_head: str | None,
+    ) -> tuple[bool, _SourceScan | None]:
+        """Republish an unchanged index without opening a candidate; return ``(republished, local_scan)``."""
+        if (
+            publication.collection is None
+            or publication.settings != self._indexing_settings
+            or not await asyncio.to_thread(self._published_collection_exists, publication.collection)
+        ):
+            return False, None
         working = await asyncio.to_thread(self._working_collections, publication)
-        if not any(meta.stage == "building" for _collection, meta in working):
-            return
-        retired_untouched = any(
-            collection.name == publication.retired and meta.stage == "complete" for collection, meta in working
-        )
-        await self._delete_working(publication, keep=publication.retired if retired_untouched else None)
+        if any(self._unpublished_rebuild(meta, publication) for _collection, meta in working):
+            return False, None
+        known = await self._published_file_signatures(publication.collection)
+        if known is None:
+            return False, None
+        if git_head is None or publication.published_revision != git_head:
+            signature, scanned = await self._scan_source(known)
+            if signature != publication.source_signature:
+                return False, scanned
+        if git_head is not None:
+            # The dashboard reports this as the last successful sync.
+            await self._save_publication(
+                replace(publication, published_revision=git_head, last_published_at=utc_now()),
+            )
+        if any(meta.stage == "building" for _collection, meta in working):
+            retired_untouched = any(
+                collection.name == publication.retired and meta.stage == "complete" for collection, meta in working
+            )
+            await self._delete_working(publication, keep=publication.retired if retired_untouched else None)
+        return True, None
+
+    async def refresh(self, *, force_reindex: bool = False) -> RefreshOutcome:
+        """Refresh this knowledge base under its source-root lock, publishing or deferring as policy dictates."""
+        if self.config.get_knowledge_base_config(self.base_id).mode == "files":
+            published_revision, source_changed = await self._sync_git_source()
+            await self.publish_files_mode(published_revision=published_revision)
+            return RefreshOutcome(published=True, source_changed=source_changed)
+        # Read once: only this refresh, under the source-root lock, publishes the base until it returns.
+        publication = await asyncio.to_thread(load_publication, self._base_storage_path)
+        if await self._should_defer_cold_empty_publication(publication):
+            return RefreshOutcome(deferred=True)
+        git_head, source_changed = await self._sync_git_source()
+        initial_scan: _SourceScan | None = None
+        if not force_reindex and source_changed is None and publication is not None:
+            republished, initial_scan = await self._publish_unchanged(publication, git_head=git_head)
+            if republished:
+                return RefreshOutcome(indexed_count=publication.indexed_count, published=True)
+            if initial_scan is not None:
+                source_changed = "source_changed"
+        elif force_reindex and publication is not None and not self.git_source.is_configured():
+            # The rebuild trusts no claim, but the aliases over this folder still need to hear of an edit it finds;
+            # the stat-first scan is the one the rebuild then reuses.
+            known = (
+                None
+                if publication.collection is None
+                else await self._published_file_signatures(publication.collection)
+            )
+            signature, initial_scan = await self._scan_source(known)
+            if signature != publication.source_signature:
+                source_changed = "source_changed"
+        outcome = await self.reindex_all(force_reindex=force_reindex, initial_scan=initial_scan)
+        return replace(outcome, source_changed=source_changed)
 
     @staticmethod
     def _unpublished_rebuild(meta: CollectionMeta, publication: Publication | None) -> bool:
@@ -319,7 +400,12 @@ class KnowledgeManager:
             updated_at=now,
         )
 
-    async def reindex_all(self, *, force_reindex: bool = False) -> RefreshOutcome:
+    async def reindex_all(  # privata: ignore
+        self,
+        *,
+        force_reindex: bool = False,
+        initial_scan: _SourceScan | None = None,
+    ) -> RefreshOutcome:
         """Advance a candidate collection and publish it when it matches the source.
 
         ``force_reindex`` is the operator asking for vectors to be rebuilt
@@ -348,7 +434,7 @@ class KnowledgeManager:
             completed=len(run.completed),
         )
         try:
-            await self._advance_candidate(run, indexer, progress)
+            await self._advance_candidate(run, indexer, progress, initial_scan=initial_scan)
         except Exception as exc:
             run.record_error(str(exc))
             raise
@@ -532,12 +618,12 @@ class KnowledgeManager:
         *,
         round_revision: str | None,
         changed_files: frozenset[str] | None,
+        scanned: _SourceScan | None = None,
     ) -> tuple[frozenset[str], tuple[Path, ...]]:
         """Align the candidate with the current source listing; return the expected paths and the files still owed."""
         # ``vanished`` describes files lost during one indexing pass, so it must
         # not outlive the pass and permanently exclude a path that came back.
         run.vanished.clear()
-        scanned, self._source_scan = self._source_scan, None
         if changed_files is None and scanned is not None:
             signatures = scanned
         else:
@@ -607,8 +693,8 @@ class KnowledgeManager:
         round_revision: str | None,
         candidate_signatures: Mapping[str, FileSignature],
         candidate_source_signature: str,
-    ) -> bool:
-        """Return whether the candidate still matches the source after one pass.
+    ) -> tuple[bool, _SourceScan | None]:
+        """Return whether the candidate still matches the source after one pass, plus any local scan to reuse.
 
         Two independent things must hold. The source must not have moved while the
         pass ran, and the candidate must cover every managed file: a file whose
@@ -626,14 +712,24 @@ class KnowledgeManager:
         reset, and re-listing proves coverage. Neither reads unchanged contents.
         """
         if round_revision is None:
-            return await self.source_signature(candidate_signatures) == candidate_source_signature
+            signature, scanned = await self._scan_source(candidate_signatures)
+            if signature == candidate_source_signature:
+                return True, None
+            return False, scanned
 
         if await self.git_source.head() != round_revision:
-            return False
+            return False, None
         current_files = await asyncio.to_thread(self.list_files)
-        return {self._relative_path(path) for path in current_files} == set(candidate_signatures)
+        return {self._relative_path(path) for path in current_files} == set(candidate_signatures), None
 
-    async def _advance_candidate(self, run: _CandidateRun, indexer: FileIndexer, progress: _CandidateProgress) -> None:
+    async def _advance_candidate(
+        self,
+        run: _CandidateRun,
+        indexer: FileIndexer,
+        progress: _CandidateProgress,
+        *,
+        initial_scan: _SourceScan | None = None,
+    ) -> None:
         """Reconcile, index and publish until the candidate matches the live source."""
 
         def record_file() -> None:
@@ -642,6 +738,7 @@ class KnowledgeManager:
             progress.retrying = indexer.retry_count
             progress.maybe_log()
 
+        pending_scan = initial_scan
         for round_index in range(_MAX_CANDIDATE_RECONCILE_ROUNDS):
             round_revision = await self.git_source.head() if self.git_source.is_configured() else None
             changed_files = (
@@ -653,7 +750,9 @@ class KnowledgeManager:
                 run,
                 round_revision=round_revision,
                 changed_files=changed_files,
+                scanned=pending_scan,
             )
+            pending_scan = None
             run.baseline_revision = round_revision
             progress.total = len(expected)
             progress.completed = len(run.completed)
@@ -681,11 +780,13 @@ class KnowledgeManager:
                 path: signature for path, signature in run.completed.items() if path in expected_paths
             }
             candidate_source_signature = corpus_signature(candidate_signatures)
-            if not await self._candidate_matches_source(
+            matched, next_scan = await self._candidate_matches_source(
                 round_revision,
                 candidate_signatures,
                 candidate_source_signature,
-            ):
+            )
+            if not matched:
+                pending_scan = next_scan
                 # The source moved while this pass ran. Keep every unchanged
                 # vector and reconcile the delta instead of discarding the
                 # candidate; only the changed files are re-embedded.
@@ -716,7 +817,6 @@ class KnowledgeManager:
         unless this is a forced rebuild, which keeps none; the publication names the kept one, so a leftover that an
         interrupted cleanup spared is never mistaken for it.
         """
-        storage = self._base_storage_path
         started_from = run.started_from
         kept = (
             started_from.collection
@@ -732,12 +832,7 @@ class KnowledgeManager:
             published_revision=run.baseline_revision,
             retired=kept,
         )
-
-        def publish() -> None:
-            save_publication(storage, publication)
-            run.published = True
-
-        await run_blocking_until_complete(publish)
+        await self._save_publication(publication, run=run)
         await run_blocking_until_complete(
             partial(
                 cleanup_superseded_collections,
