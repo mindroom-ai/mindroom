@@ -11344,7 +11344,6 @@ path = "mindroom.slack.event_source"
 depends_on = [
     "mindroom.event_sources",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.reactive_triggers.dispatch",
     "mindroom.reactive_triggers.models",
     "mindroom.slack.api",
     "mindroom.slack.app",

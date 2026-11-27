@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-    from mindroom.reactive_triggers.dispatch import DispatchResult
     from mindroom.reactive_triggers.models import ReactiveTriggerRecord, TriggerEvent
 
 _EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
@@ -80,6 +79,14 @@ class ValidatedSubscription:
     kind: str
     match: dict[str, ExternalMatchValue] = field(default_factory=dict)
     binding: dict[str, ExternalBindingValue] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class EventSourceAccessDenial:
+    """Access-check denial returned by ``EventSource.check_delivery_access``."""
+
+    reason: str
+    retry: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +189,7 @@ class EventSource:
         *,
         rule: ReactiveTriggerRecord,
         event: TriggerEvent | None = None,
-    ) -> DispatchResult | None:
+    ) -> EventSourceAccessDenial | None:
         """Recheck live delivery access before triage/dispatch and for paused_reason reporting."""
         del ctx, rule, event
         return None

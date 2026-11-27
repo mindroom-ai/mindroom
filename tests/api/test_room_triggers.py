@@ -18,10 +18,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
-from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
+from mindroom.event_sources import EventSource, EventSourceAccessDenial, EventSourceContext, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
-from mindroom.reactive_triggers.dispatch import DispatchResult
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     GitHubPRCheckpoint,
@@ -533,19 +532,19 @@ class _RoomTestEventSource(EventSource):
         *,
         rule: ReactiveTriggerRecord,
         event: object = None,
-    ) -> DispatchResult | None:
+    ) -> EventSourceAccessDenial | None:
         del event
         if not self.private_room_only:
             return None
         if ctx.target_room_state is None:
-            return DispatchResult(status="skipped", reason="Cannot verify private room state")
+            return EventSourceAccessDenial(reason="Cannot verify private room state")
         members = {
             state_key
             for (etype, state_key), content in ctx.target_room_state.events.items()
             if etype == "m.room.member" and content.get("membership") in {"join", "invite"}
         }
         if members - {rule.owner_user_id}:
-            return DispatchResult(status="skipped", reason="Room has another member")
+            return EventSourceAccessDenial(reason="Room has another member")
         return None
 
 
@@ -698,3 +697,45 @@ def test_unregistered_private_event_source_stays_hidden_from_non_owners(tmp_path
     alice_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE).json()["triggers"]}
     assert "tr_slack" in alice_rows
     assert alice_rows["tr_slack"]["paused_reason"] is None
+
+
+def test_broken_plugin_check_delivery_access_returns_source_error_without_500(tmp_path: Path) -> None:
+    """A raising check_delivery_access hook degrades to paused_reason='source_error' instead of 500."""
+
+    class _ExplodingSource(EventSource):
+        source_id = "exploding_src"
+        description = "Exploding source"
+
+        async def check_delivery_access(
+            self,
+            ctx: EventSourceContext,
+            *,
+            rule: ReactiveTriggerRecord,
+            event: object = None,
+        ) -> EventSourceAccessDenial | None:
+            del ctx, rule, event
+            msg = "plugin crashed"
+            raise RuntimeError(msg)
+
+    h = _Harness(tmp_path)
+    registry = EventSourceRegistry(lambda: h.config, AsyncMock(return_value=0))
+    registry.register(_ExplodingSource())
+    ensure_app_state(h.app).embedded = SimpleNamespace(  # type: ignore[assignment]
+        reactive_triggers=SimpleNamespace(event_sources=registry),
+    )
+    h.add_reactive(
+        "tr_broken",
+        ExternalEventSourceSpec(
+            source_id="exploding_src",
+            kind="alert",
+            source_origin="registered",
+        ),
+        description="Broken source trigger",
+        prompt="Handle alert",
+        created_at=1.0,
+    )
+
+    resp = h.req("GET", ROOM_A, ALICE)
+    assert resp.status_code == 200
+    rows = {row["trigger_id"]: row for row in resp.json()["triggers"]}
+    assert rows["tr_broken"]["paused_reason"] == "source_error"

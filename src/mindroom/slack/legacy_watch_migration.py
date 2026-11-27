@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mindroom.file_locks import advisory_file_lock
+from mindroom.logging_config import get_logger
 from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
     ExternalEventSourceSpec,
@@ -19,12 +20,15 @@ from mindroom.slack.turns import slack_replay_store
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_replay import DeliveryReplayStore
     from mindroom.event_sources import ExternalMatchValue
     from mindroom.reactive_triggers.store import ReactiveTriggerStore
+
+logger = get_logger(__name__)
 
 _LEGACY_MIGRATION_NAME = "slack_watches_v1"
 _LEGACY_THREAD_TTL_SECONDS = 7 * 86_400
@@ -76,6 +80,7 @@ def _convert_legacy_watch(
             match=match,
             binding={"team_id": str(fields["team_id"]), "slack_user_id": str(fields["slack_user_id"])},
             source_origin="registered",
+            private_room_only=True,
         ),
         target=TriggerTargetSpec(
             agent=str(fields["agent_name"]),
@@ -105,6 +110,18 @@ def _convert_legacy_watch(
     return record, thread_keys
 
 
+def _archive_legacy_watches_file(watches_path: Path) -> None:
+    try:
+        watches_path.replace(watches_path.with_name("watches.json.migrated"))
+    except OSError:
+        logger.warning(
+            "Migrated legacy Slack watches.json into SQLite, but archiving to watches.json.migrated failed; "
+            "will retry archival on next startup",
+            watches_path=str(watches_path),
+            exc_info=True,
+        )
+
+
 # LEGACY_COMPAT: One-time migration of `<control_state>/slack/watches.json` and live replay watch thread roots.
 # Legacy format: `watches.json` with `{"watches": {<id>: {owner_id, agent_name, room_id, team_id, slack_user_id,
 #   mentions, direct_messages, channels, created_at}}}` plus `slack/replay` entries under scope `slack:watch:<id>`.
@@ -115,14 +132,17 @@ def _convert_legacy_watch(
 def migrate_legacy_slack_watches(runtime_paths: RuntimePaths, store: ReactiveTriggerStore, config: Config) -> int:
     """Import legacy ``watches.json`` rules and unexpired replay watch thread roots once, then archive the file."""
     control_state_root = runtime_paths.control_state_root
-    if control_state_root is None or store.has_migration(_LEGACY_MIGRATION_NAME):
+    if control_state_root is None:
         return 0
     watches_path = control_state_root / "slack" / "watches.json"
     if not watches_path.exists():
         return 0
 
     with advisory_file_lock(watches_path.with_name("watches.json.lock")):
-        if not watches_path.exists() or store.has_migration(_LEGACY_MIGRATION_NAME):
+        if not watches_path.exists():
+            return 0
+        if store.has_migration(_LEGACY_MIGRATION_NAME):
+            _archive_legacy_watches_file(watches_path)
             return 0
         stored = json.loads(watches_path.read_text(encoding="utf-8"))
         raw_watches = stored.get("watches") if isinstance(stored, dict) else None
@@ -144,5 +164,5 @@ def migrate_legacy_slack_watches(runtime_paths: RuntimePaths, store: ReactiveTri
                 thread_keys.extend(converted[1])
 
         imported = store.import_triggers_once(_LEGACY_MIGRATION_NAME, records, thread_keys, now=now)
-        watches_path.replace(watches_path.with_name("watches.json.migrated"))
+        _archive_legacy_watches_file(watches_path)
         return imported

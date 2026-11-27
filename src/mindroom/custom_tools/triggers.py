@@ -32,7 +32,7 @@ from mindroom.custom_tools.external_trigger_context import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
+from mindroom.event_sources import EventSource, EventSourceContext, EventSourceDescriptor, EventSourceRegistry
 from mindroom.external_triggers.policy import is_external_trigger_administrator, is_source_subscriber_allowed
 from mindroom.external_triggers.store import (
     ExternalTriggerRecord,
@@ -53,7 +53,6 @@ from mindroom.reactive_triggers.management import (
     can_view_reactive_trigger,
     delete_trigger_sync,
     get_trigger_record,
-    is_trigger_owner,
     read_thread_tag_present,
     refresh_reactive_state_on_reenable,
     set_trigger_enabled_sync,
@@ -522,7 +521,6 @@ class TriggersTools(Toolkit):
         *,
         room_access_cache: dict[str, bool],
         room_state_cache: dict[str, RoomStateSnapshot | None] | None = None,
-        history_access_cache: dict[str, bool] | None = None,
     ) -> bool:
         if isinstance(rule.source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
             resolved_room_id = resolve_room_id(rule.source.room_id, context.runtime_paths)
@@ -545,13 +543,12 @@ class TriggersTools(Toolkit):
 
         if isinstance(rule.source, GitHubPRSourceSpec):
             return _gh_pr_allowed(context, context.requester_id, rule.source)
-        if _is_registered_external_source_rule(rule.source):
+        if rule.source.is_registered:
             return await _check_registered_history_access(
                 context,
                 rule,
                 event=None,
                 room_state_cache=room_state_cache,
-                history_access_cache=history_access_cache,
             )
         cfg = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
         allowed = cfg is not None and is_source_subscriber_allowed(
@@ -574,7 +571,6 @@ class TriggersTools(Toolkit):
         firing: FiringRecord,
         *,
         room_state_cache: dict[str, RoomStateSnapshot | None] | None = None,
-        history_access_cache: dict[str, bool] | None = None,
     ) -> bool:
         if firing.rule_uid != rule.rule_uid:
             return False
@@ -582,13 +578,12 @@ class TriggersTools(Toolkit):
             return _gh_pr_allowed(context, rule.owner_user_id, rule.source)
         if not isinstance(rule.source, ExternalEventSourceSpec):
             return True
-        if _is_registered_external_source_rule(rule.source):
+        if rule.source.is_registered:
             return await _check_registered_history_access(
                 context,
                 rule,
                 event=firing.event,
                 room_state_cache=room_state_cache,
-                history_access_cache=history_access_cache,
             )
         return (
             check_external_event_source_access(
@@ -631,6 +626,7 @@ class TriggersTools(Toolkit):
         if isinstance(source_payload, dict):
             source_payload.pop("binding", None)
             source_payload.pop("source_origin", None)
+            source_payload.pop("private_room_only", None)
         return {"trigger_kind": "reactive", **payload}
 
     @staticmethod
@@ -646,10 +642,16 @@ class TriggersTools(Toolkit):
         *,
         verb: str = "changed",
     ) -> None:
-        if not (
-            is_trigger_owner(context.requester_id, record.owner_user_id, context.config, context.runtime_paths)
-            or cls._is_admin(context)
+        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
+        if not can_view_reactive_trigger(
+            record,
+            context.requester_id,
+            event_sources=_event_sources_registry(context),
+            viewer_user_ids=owner_ids,
         ):
+            msg = f"external trigger not found: {record.trigger_id}"
+            raise ReactiveTriggerStoreError(msg)
+        if not (record.owner_user_id in owner_ids or cls._is_admin(context)):
             msg = f"trigger can only be {verb} by its owner or an external trigger admin"
             raise ReactiveTriggerStoreError(msg)
 
@@ -1061,7 +1063,7 @@ class TriggersTools(Toolkit):
             if registered is None:
                 raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
             discovery_ctx = await _build_event_source_context(context, owner_user_id=context.requester_id)
-            descriptor = await registered.describe_for_user(discovery_ctx)
+            descriptor = await _safe_describe_for_user(registered, discovery_ctx)
             if descriptor is None:
                 raise ValueError(await _unavailable_event_source_message(context, resolved_source_id))
             default_max_fires = (
@@ -1106,6 +1108,7 @@ class TriggersTools(Toolkit):
                 match=validated.match,
                 binding=validated.binding,
                 source_origin="registered",
+                private_room_only=descriptor.private_room_only,
             )
             default_once = descriptor.default_once
 
@@ -1200,7 +1203,7 @@ class TriggersTools(Toolkit):
             if (
                 record.owner_user_id in owner_ids
                 and isinstance(record.source, ExternalEventSourceSpec)
-                and _is_registered_external_source_rule(record.source)
+                and record.source.is_registered
                 and (registered := _registered_event_source(context, record.source.source_id)) is not None
             ):
                 ctx = await _build_event_source_context(
@@ -1211,8 +1214,18 @@ class TriggersTools(Toolkit):
                     read_target_state=True,
                     room_state_cache=room_state_cache,
                 )
-                access_result = await registered.check_delivery_access(ctx, rule=record, event=None)
-                payload["paused_reason"] = access_result.reason if access_result is not None else None
+                try:
+                    access_result = await registered.check_delivery_access(ctx, rule=record, event=None)
+                except Exception:
+                    logger.warning(
+                        "Event source check_delivery_access failed during trigger listing",
+                        source_id=record.source.source_id,
+                        trigger_id=record.trigger_id,
+                        exc_info=True,
+                    )
+                    payload["paused_reason"] = "source_error"
+                else:
+                    payload["paused_reason"] = access_result.reason if access_result is not None else None
             reactive_payloads.append(payload)
 
         return self._payload(
@@ -1237,7 +1250,16 @@ class TriggersTools(Toolkit):
                 direct_error="In-place update is only supported for reactive triggers.",
             ),
         )
-        if not is_trigger_owner(context.requester_id, existing.owner_user_id, context.config, context.runtime_paths):
+        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
+        if not can_view_reactive_trigger(
+            existing,
+            context.requester_id,
+            event_sources=_event_sources_registry(context),
+            viewer_user_ids=owner_ids,
+        ):
+            msg = f"external trigger not found: {resolved_trigger_id}"
+            raise ReactiveTriggerStoreError(msg)
+        if existing.owner_user_id not in owner_ids:
             msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
             raise ReactiveTriggerStoreError(msg)
 
@@ -1356,7 +1378,6 @@ class TriggersTools(Toolkit):
         is_admin = self._is_admin(context)
         room_access_cache: dict[str, bool] = {}
         room_state_cache: dict[str, RoomStateSnapshot | None] = {}
-        history_access_cache: dict[str, bool] = {}
 
         if args["trigger_id"] is not None:
             stripped_id = args["trigger_id"].strip()
@@ -1373,21 +1394,12 @@ class TriggersTools(Toolkit):
                 ),
             )
             self._require_reactive_owner_or_admin(context, record, verb="viewed")
-            if not can_view_reactive_trigger(
-                record,
-                context.requester_id,
-                event_sources=event_sources,
-                viewer_user_ids=owner_ids,
-            ):
-                msg = f"external trigger not found: {stripped_id}"
-                raise ReactiveTriggerStoreError(msg)
             if not is_admin:
                 if not await self._has_source_access_for_history(
                     context,
                     record,
                     room_access_cache=room_access_cache,
                     room_state_cache=room_state_cache,
-                    history_access_cache=history_access_cache,
                 ):
                     msg = f"You no longer have access to the source for trigger {record.trigger_id}."
                     raise ReactiveTriggerStoreError(msg)
@@ -1397,7 +1409,6 @@ class TriggersTools(Toolkit):
                     limit=clamped_limit,
                     room_access_cache=room_access_cache,
                     room_state_cache=room_state_cache,
-                    history_access_cache=history_access_cache,
                     trigger_record=record,
                 )
                 serialized = [_firing_summary_payload(firing) for firing in firings]
@@ -1411,7 +1422,6 @@ class TriggersTools(Toolkit):
                     record,
                     room_access_cache=room_access_cache,
                     room_state_cache=room_state_cache,
-                    history_access_cache=history_access_cache,
                 )
                 serialized = [
                     _firing_summary_payload(
@@ -1423,7 +1433,6 @@ class TriggersTools(Toolkit):
                                 record,
                                 firing,
                                 room_state_cache=room_state_cache,
-                                history_access_cache=history_access_cache,
                             )
                         ),
                     )
@@ -1438,7 +1447,6 @@ class TriggersTools(Toolkit):
                 limit=clamped_limit,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
-                history_access_cache=history_access_cache,
             )
         else:
             firings = await self._list_owner_history(
@@ -1447,7 +1455,6 @@ class TriggersTools(Toolkit):
                 limit=clamped_limit,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
-                history_access_cache=history_access_cache,
             )
             serialized = [_firing_summary_payload(firing) for firing in firings]
 
@@ -1463,7 +1470,6 @@ class TriggersTools(Toolkit):
         limit: int,
         room_access_cache: dict[str, bool],
         room_state_cache: dict[str, RoomStateSnapshot | None],
-        history_access_cache: dict[str, bool],
     ) -> list[dict[str, object]]:
         all_rules = await run_blocking_until_complete(
             partial(reactive_store.list_triggers, include_disabled=True),
@@ -1492,7 +1498,6 @@ class TriggersTools(Toolkit):
                 rule,
                 room_access_cache=room_access_cache,
                 room_state_cache=room_state_cache,
-                history_access_cache=history_access_cache,
             ):
                 allowed_owned_rules[rule.trigger_id] = rule
         return [
@@ -1505,7 +1510,6 @@ class TriggersTools(Toolkit):
                         owned_rule,
                         firing,
                         room_state_cache=room_state_cache,
-                        history_access_cache=history_access_cache,
                     )
                 ),
             )
@@ -1520,7 +1524,6 @@ class TriggersTools(Toolkit):
         limit: int,
         room_access_cache: dict[str, bool],
         room_state_cache: dict[str, RoomStateSnapshot | None],
-        history_access_cache: dict[str, bool],
         trigger_record: ReactiveTriggerRecord | None = None,
     ) -> list[FiringRecord]:
         owner_ids: set[str] | None = None
@@ -1539,7 +1542,6 @@ class TriggersTools(Toolkit):
                     candidate,
                     room_access_cache=room_access_cache,
                     room_state_cache=room_state_cache,
-                    history_access_cache=history_access_cache,
                 ):
                     allowed_rules[candidate.trigger_id] = candidate
             if not allowed_rules:
@@ -1566,7 +1568,6 @@ class TriggersTools(Toolkit):
                     rule,
                     firing,
                     room_state_cache=room_state_cache,
-                    history_access_cache=history_access_cache,
                 ):
                     visible.append(firing)
                     if len(visible) >= limit:
@@ -1592,15 +1593,6 @@ class TriggersTools(Toolkit):
             ),
         )
         self._require_reactive_owner_or_admin(context, rule, verb="tested")
-        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
-        if not can_view_reactive_trigger(
-            rule,
-            context.requester_id,
-            event_sources=_event_sources_registry(context),
-            viewer_user_ids=owner_ids,
-        ):
-            msg = f"external trigger not found: {resolved_trigger_id}"
-            raise ReactiveTriggerStoreError(msg)
 
         now = time.time()
         event, matched, skip_note = _build_dry_run_event_and_match(context, rule=rule, args=args, now=now)
@@ -1773,8 +1765,19 @@ def _resolve_target_options(
     return new_thread, thread_key, thread_key_from_event, reopen_on_fire
 
 
-def _is_registered_external_source_rule(source: ExternalEventSourceSpec) -> bool:
-    return source.source_origin == "registered" or bool(source.binding)
+async def _safe_describe_for_user(
+    registered: EventSource,
+    ctx: EventSourceContext,
+) -> EventSourceDescriptor | None:
+    try:
+        return await registered.describe_for_user(ctx)
+    except Exception:
+        logger.warning(
+            "Event source describe_for_user failed",
+            source_id=registered.source_id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _check_registered_history_access(
@@ -1783,28 +1786,21 @@ async def _check_registered_history_access(
     *,
     event: TriggerEvent | None,
     room_state_cache: dict[str, RoomStateSnapshot | None] | None = None,
-    history_access_cache: dict[str, bool] | None = None,
 ) -> bool:
-    if history_access_cache is not None and rule.rule_uid in history_access_cache:
-        return history_access_cache[rule.rule_uid]
     assert isinstance(rule.source, ExternalEventSourceSpec)
     registered = _registered_event_source(context, rule.source.source_id)
     if registered is None:
-        allowed = False
-    else:
-        ctx = await _build_event_source_context(
-            context,
-            owner_user_id=context.requester_id,
-            target_room_id=rule.target.room_id,
-            target_agent=rule.target.agent,
-            read_target_state=True,
-            read_calling_state=True,
-            room_state_cache=room_state_cache,
-        )
-        allowed = await registered.check_history_access(ctx, rule=rule, event=event)
-    if history_access_cache is not None:
-        history_access_cache[rule.rule_uid] = allowed
-    return allowed
+        return False
+    ctx = await _build_event_source_context(
+        context,
+        owner_user_id=context.requester_id,
+        target_room_id=rule.target.room_id,
+        target_agent=rule.target.agent,
+        read_target_state=True,
+        read_calling_state=True,
+        room_state_cache=room_state_cache,
+    )
+    return await registered.check_history_access(ctx, rule=rule, event=event)
 
 
 def _event_sources_registry(context: ToolRuntimeContext) -> EventSourceRegistry | None:
@@ -1934,7 +1930,7 @@ async def _visible_event_sources_payload(context: ToolRuntimeContext) -> list[di
     if registry is not None:
         discovery_ctx = await _build_event_source_context(context, owner_user_id=context.requester_id)
         for registered in registry.all():
-            descriptor = await registered.describe_for_user(discovery_ctx)
+            descriptor = await _safe_describe_for_user(registered, discovery_ctx)
             if descriptor is None:
                 continue
             sources.append(
@@ -2080,7 +2076,7 @@ async def _resolve_updated_source(
 
     if isinstance(existing.source, ExternalEventSourceSpec) and args["match"] is not None:
         preserved_binding = copy.deepcopy(existing.source.binding)
-        if _is_registered_external_source_rule(existing.source):
+        if existing.source.is_registered:
             if existing.source.source_id in context.config.external_trigger_policy.event_sources:
                 msg = (
                     f"Event source {existing.source.source_id!r} conflicts between YAML "
@@ -2098,7 +2094,8 @@ async def _resolve_updated_source(
                 target_agent=existing.target.agent,
                 read_target_state=True,
             )
-            if await registered.describe_for_user(ctx) is None:
+            descriptor = await _safe_describe_for_user(registered, ctx)
+            if descriptor is None:
                 msg = f"Event source {existing.source.source_id!r} is unavailable."
                 raise ValueError(msg)
             validated = await registered.validate_subscription(
@@ -2113,6 +2110,7 @@ async def _resolve_updated_source(
                 match=validated.match,
                 binding=copy.deepcopy(preserved_binding),
                 source_origin="registered",
+                private_room_only=existing.source.private_room_only or descriptor.private_room_only,
             )
 
         source_config = context.config.external_trigger_policy.event_sources.get(existing.source.source_id)
@@ -2132,6 +2130,7 @@ async def _resolve_updated_source(
             match=new_match,
             binding=preserved_binding,
             source_origin="yaml",
+            private_room_only=existing.source.private_room_only,
         )
 
     return existing.source
@@ -2260,11 +2259,7 @@ def _build_dry_run_event_and_match(
             text=args["text"],
             data=extra_data,
         )
-        registered = (
-            _registered_event_source(context, rule.source.source_id)
-            if _is_registered_external_source_rule(rule.source)
-            else None
-        )
+        registered = _registered_event_source(context, rule.source.source_id) if rule.source.is_registered else None
         matched = (
             registered.matches_rule(
                 rule,

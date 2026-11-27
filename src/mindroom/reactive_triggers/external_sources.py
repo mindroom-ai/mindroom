@@ -121,8 +121,7 @@ def check_external_event_source_access(
 ) -> str | None:
     """Recheck shared external event source existence, subscriber allowlist, and event/repo grants."""
     if (
-        source_spec.source_origin != "yaml"
-        or bool(source_spec.binding)
+        source_spec.is_registered
         or (source := config.external_trigger_policy.event_sources.get(source_spec.source_id)) is None
     ):
         return "source_removed"
@@ -371,11 +370,7 @@ def fan_out_external_event(
     for rule in rules:
         if rule.expires_at is not None and rule.expires_at <= current_time:
             continue
-        if (
-            not isinstance(rule.source, ExternalEventSourceSpec)
-            or rule.source.source_origin != "yaml"
-            or bool(rule.source.binding)
-        ):
+        if not isinstance(rule.source, ExternalEventSourceSpec) or rule.source.is_registered:
             continue
         if not is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths):
             continue

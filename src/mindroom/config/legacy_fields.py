@@ -978,6 +978,7 @@ def retired_slack_watch_approval_error(
     if old_decision == new_decision:
         return None
     if first_new is not None and rules[first_new].match == new:
+        # Distinguish broad Slack globs like `slack_*` (which also match `slack_post`) from `slack_watch`-specific rules.
         if first_old is not None and not fnmatchcase("slack_post", rules[first_old].match):
             return (
                 f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} targets retired {old}, "

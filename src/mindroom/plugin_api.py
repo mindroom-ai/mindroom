@@ -17,6 +17,7 @@ from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, re
 from mindroom.entity_directory import ManagedEntity, entity_directory
 from mindroom.event_sources import (
     EventSource,
+    EventSourceAccessDenial,
     EventSourceContext,
     EventSourceDescriptor,
     EventSourceEmitter,
@@ -209,6 +210,7 @@ __all__ = [
     "Done",
     "EnrichmentItem",
     "EventSource",
+    "EventSourceAccessDenial",
     "EventSourceContext",
     "EventSourceDescriptor",
     "EventSourceEmitter",

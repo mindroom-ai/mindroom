@@ -1725,7 +1725,8 @@ class Config(BaseModel):
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
         if (
-            "triggers" in enabled_toolkits
+            "slack" in enabled_toolkits
+            and "triggers" in enabled_toolkits
             and (
                 slack_watch_error := retired_slack_watch_approval_error(
                     self.tool_approval.rules,

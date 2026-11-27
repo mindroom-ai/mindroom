@@ -12,6 +12,7 @@ from mindroom.config.slack import has_personal_slack
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.event_sources import (
     EventSource,
+    EventSourceAccessDenial,
     EventSourceContext,
     EventSourceDescriptor,
     ExternalBindingValue,
@@ -28,7 +29,6 @@ from mindroom.oauth.credential_lifecycle import (
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.service import OAUTH_ACCESS_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
-from mindroom.reactive_triggers.dispatch import DispatchResult
 from mindroom.reactive_triggers.models import ExternalEventSourceSpec, ReactiveTriggerRecord, TriggerEvent
 from mindroom.requester_identity import (
     equivalent_requester_ids,
@@ -206,6 +206,9 @@ class SlackEventSource(EventSource):
     private_room_only: bool = True
     default_max_fires_per_hour: int | None = 60
 
+    def __init__(self) -> None:
+        self.migration_failed: bool = False
+
     async def describe_for_user(self, ctx: EventSourceContext) -> EventSourceDescriptor | None:
         """Advertise Slack watches when the Slack app has an app token and personal Slack is configured."""
         _, app = await _slack_app_for_ctx(ctx)
@@ -290,11 +293,11 @@ class SlackEventSource(EventSource):
         *,
         rule: ReactiveTriggerRecord,
         event: TriggerEvent | None = None,
-    ) -> DispatchResult | None:
+    ) -> EventSourceAccessDenial | None:
         """Re-verify app token, personal Slack config, verified OAuth identity, and private target room."""
         del event
         reason = await self._delivery_pause_reason(ctx, rule)
-        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
+        return EventSourceAccessDenial(reason=reason) if reason is not None else None
 
     async def _delivery_pause_reason(self, ctx: EventSourceContext, rule: ReactiveTriggerRecord) -> str | None:
         if (bound := _bound_slack_account(rule)) is None:
@@ -458,9 +461,16 @@ async def emit_slack_watch_event(
         or reactive_triggers is None
         or reactive_triggers.store is None
         or not (policy.enabled and policy.reactive_enabled)
-        or reactive_triggers.event_sources.get(SLACK_EVENT_SOURCE_ID) is None
+        or (registered := reactive_triggers.event_sources.get(SLACK_EVENT_SOURCE_ID)) is None
     ):
         return "ignored"
+    if isinstance(registered, SlackEventSource) and registered.migration_failed:
+        logger.warning(
+            "Retrying Slack watch event because legacy Slack watch migration has not completed",
+            event_id=attempt.event.event_id,
+            channel_id=attempt.event.channel_id,
+        )
+        return "retry"
 
     event = attempt.event
     is_dm, mentioned = is_direct_message(event), mentioned_user_ids(event.text)

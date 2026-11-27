@@ -51,10 +51,12 @@ def can_view_reactive_trigger(
     elif record.owner_user_id == viewer_user_id:
         return True
     if isinstance(record.source, ExternalEventSourceSpec):
+        if record.source.private_room_only:
+            return False
         registered = event_sources.get(record.source.source_id) if event_sources is not None else None
         if registered is not None and registered.private_room_only:
             return False
-        if registered is None and (record.source.source_origin == "registered" or bool(record.source.binding)):
+        if registered is None and record.source.is_registered:
             return False
     return True
 

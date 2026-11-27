@@ -23,7 +23,7 @@ from mindroom.custom_tools.triggers import TriggersTools
 from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND, hook_source_from_content
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_sources import EventSourceContext
+from mindroom.event_sources import EventSource, EventSourceContext
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -986,12 +986,20 @@ def test_migrate_legacy_slack_watches_and_replay_roots_once(
     both_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_both"].source)
     mention_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_mention"].source)
     dm_src = cast("ExternalEventSourceSpec", migrated["slack_watch_w_dm"].source)
-    assert (both_src.kind, both_src.match, both_src.binding, both_src.source_origin) == (
+    assert (
+        both_src.kind,
+        both_src.match,
+        both_src.binding,
+        both_src.source_origin,
+        both_src.private_room_only,
+    ) == (
         "message",
         {"channel_id": [CHANNEL, OTHER_CHANNEL]},
         {"team_id": TEAM, "slack_user_id": SLACK_IDS["alice"]},
         "registered",
+        True,
     )
+    assert (mention_src.private_room_only, dm_src.private_room_only) == (True, True)
     assert (mention_src.kind, mention_src.match, dm_src.kind, dm_src.match) == (
         "mention",
         {"channel_id": CHANNEL},
@@ -1069,11 +1077,15 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
 
 
 def test_retired_slack_watch_config_validation_fails_closed(tmp_path: Path) -> None:
-    """Legacy slack_watch approval rules only gate when triggers is enabled and handle broad vs exact rules cleanly."""
+    """Legacy slack_watch approval rules only gate when both slack and triggers are enabled."""
     slack_only = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
         "agents": {"assistant": {"display_name": "Assistant", "tools": ["slack"]}},
+    }
+    triggers_only = {
+        **slack_only,
+        "agents": {"assistant": {"display_name": "Assistant", "tools": ["triggers"]}},
     }
     slack_and_triggers = {
         **slack_only,
@@ -1090,6 +1102,18 @@ def test_retired_slack_watch_config_validation_fails_closed(tmp_path: Path) -> N
             },
         },
         test_runtime_paths(tmp_path / "s1"),
+    )
+
+    # 1b. tools: [triggers] (no slack) + leftover slack_* require_approval + default: auto_approve -> loads!
+    Config.validate_with_runtime(
+        {
+            **triggers_only,
+            "tool_approval": {
+                "default": "auto_approve",
+                "rules": [{"match": "slack_*", "action": "require_approval"}],
+            },
+        },
+        test_runtime_paths(tmp_path / "s1b"),
     )
 
     # 2. tools: [slack, triggers] + slack_* require_approval + default: auto_approve -> rejected!
@@ -1436,4 +1460,266 @@ def test_migrate_legacy_slack_watches_aborts_on_replay_store_error(
     assert watches_path.exists()
     assert not watches_path.with_name("watches.json.migrated").exists()
     assert store.has_migration("slack_watches_v1") is False
+    assert store.get_trigger("slack_watch_w1") is None
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_toggle_or_delete_private_slack_trigger_but_can_manage_visible_trigger(
+    tmp_path: Path,
+) -> None:
+    """Non-owner trigger admins cannot read/toggle/delete private Slack triggers (registered or unregistered), while managing visible triggers."""
+
+    class _VisibleSource(EventSource):
+        source_id = "public_ops"
+        description = "Public ops events"
+        allowed_kinds = ("alert",)
+        private_room_only = False
+
+    config, paths = _make_config(tmp_path)
+    install_slack_state(paths, app_token=APP_TOKEN)
+    connect_alice(paths)
+    agent_id = entity_identity_registry(config, paths).current_id("assistant").full_id
+    client = _multi_room_client(
+        {
+            WATCH_ROOM: room_state_client((ALICE, agent_id), room_id=WATCH_ROOM),
+            ADMIN_ROOM: room_state_client((ADMIN, agent_id), room_id=ADMIN_ROOM),
+        },
+    )
+    store = ReactiveTriggerStore(paths)
+    service = ReactiveTriggerService(
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        bots=dict,
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    slack_emitter = service.event_sources.register(SlackEventSource())
+    service.event_sources.register(_VisibleSource())
+    tool = TriggersTools()
+
+    with tool_runtime_context(_tool_context(config=config, paths=paths, client=client, service=service)):
+        sub_slack = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="alice_slack",
+                source_id="slack",
+                kind="message",
+                prompt="Watch my Slack",
+            ),
+        )
+        sub_public = json.loads(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="alice_public",
+                source_id="public_ops",
+                kind="alert",
+                prompt="Watch ops alerts",
+            ),
+        )
+    assert (sub_slack["status"], sub_public["status"]) == ("ok", "ok")
+
+    admin_ctx = _tool_context(
+        config=config,
+        paths=paths,
+        client=client,
+        service=service,
+        room_id=ADMIN_ROOM,
+        requester_id=ADMIN,
+    )
+    with tool_runtime_context(admin_ctx):
+        listed = json.loads(await tool.triggers(action="list"))
+        hist = json.loads(await tool.triggers(action="history", trigger_id="alice_slack"))
+        tested = json.loads(await tool.triggers(action="test", trigger_id="alice_slack"))
+        disabled = json.loads(await tool.triggers(action="set_enabled", trigger_id="alice_slack", enabled=False))
+        deleted = json.loads(await tool.triggers(action="delete", trigger_id="alice_slack"))
+        pub_disabled = json.loads(await tool.triggers(action="set_enabled", trigger_id="alice_public", enabled=False))
+        pub_enabled = json.loads(await tool.triggers(action="set_enabled", trigger_id="alice_public", enabled=True))
+        pub_deleted = json.loads(await tool.triggers(action="delete", trigger_id="alice_public"))
+
+    assert "alice_slack" not in {t["trigger_id"] for t in listed["reactive_triggers"]}
+    assert "alice_public" in {t["trigger_id"] for t in listed["reactive_triggers"]}
+    assert (hist["status"], tested["status"], disabled["status"], deleted["status"]) == (
+        "error",
+        "error",
+        "error",
+        "error",
+    )
+    assert "Watch my Slack" not in json.dumps(disabled)
+    reloaded = store.get_trigger("alice_slack")
+    assert reloaded is not None
+    assert reloaded.enabled is True
+    assert (pub_disabled["status"], pub_enabled["status"], pub_deleted["status"]) == ("ok", "ok", "ok")
+    assert store.get_trigger("alice_public") is None
+
+    # After unregistering SlackEventSource, admin is STILL blocked from reading/toggling/deleting alice_slack.
+    assert service.event_sources.unregister(SLACK_EVENT_SOURCE_ID, slack_emitter.token) is True
+    with tool_runtime_context(admin_ctx):
+        listed_after = json.loads(await tool.triggers(action="list"))
+        hist_after = json.loads(await tool.triggers(action="history", trigger_id="alice_slack"))
+        disabled_after = json.loads(await tool.triggers(action="set_enabled", trigger_id="alice_slack", enabled=False))
+        deleted_after = json.loads(await tool.triggers(action="delete", trigger_id="alice_slack"))
+    assert "alice_slack" not in {t["trigger_id"] for t in listed_after["reactive_triggers"]}
+    assert (hist_after["status"], disabled_after["status"], deleted_after["status"]) == ("error", "error", "error")
+    reloaded_after = store.get_trigger("alice_slack")
+    assert reloaded_after is not None
+    assert reloaded_after.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_pre_commit_migration_failure_retries_slack_watch_events(tmp_path: Path) -> None:
+    """Pre-commit legacy watch migration failure marks SlackEventSource unready so Slack events return 'retry'."""
+    config, paths = _make_config(tmp_path)
+    install_slack_state(paths, app_token=APP_TOKEN)
+    connect_alice(paths)
+    assert paths.control_state_root is not None
+    watches_path = paths.control_state_root / "slack" / "watches.json"
+    watches_path.parent.mkdir(parents=True, exist_ok=True)
+    watches_path.write_text("{not valid json", encoding="utf-8")
+
+    store = ReactiveTriggerStore(paths)
+    memberships = AgentReplyMembershipIndex()
+    bots: dict[str, AgentBot] = {}
+    service = ReactiveTriggerService(
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        bots=lambda: bots,
+        memberships=memberships,
+        store=store,
+    )
+    app_api = FastAPI()
+    ensure_app_state(app_api)
+    SLACK_INTEGRATION.bind(app_api, bots, memberships, service)
+
+    registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
+    assert isinstance(registered, SlackEventSource)
+    assert registered.migration_failed is True
+    assert watches_path.exists()
+    assert not store.has_migration("slack_watches_v1")
+
+    slack = FakeSlack(answers={"auth.test": AUTH_TEST})
+    runtime = runtime_for({}, memberships, slack, reactive_triggers=service)
+    manager = get_runtime_credentials_manager(paths)
+    slack_creds = load_slack_app(manager)
+    assert slack_creds is not None
+    dm = event_payload("message", author="dana", text="urgent dm", channel=DM, channel_type="im")
+    async with slack.client() as http_client:
+        result = await deliver_slack_event(
+            dm,
+            runtime=runtime,
+            config=config,
+            runtime_paths=paths,
+            credentials_manager=manager,
+            app=slack_creds,
+            client=http_client,
+            now=NOW,
+        )
+    assert result == "retry"
+    assert slack.calls("apps.event.authorizations.list") == []
+
+
+@pytest.mark.asyncio
+async def test_post_commit_archive_rename_failure_delivers_and_self_heals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-commit watches.json rename OSError still delivers migrated watches and self-heals on next migration call."""
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    config, paths = _make_config(tmp_path)
+    install_slack_state(paths, app_token=APP_TOKEN)
+    connect_alice(paths)
+    agent_id = entity_identity_registry(config, paths).current_id("assistant").full_id
+    assert paths.control_state_root is not None
+    watches_path = paths.control_state_root / "slack" / "watches.json"
+    watches_path.parent.mkdir(parents=True, exist_ok=True)
+    watches_path.write_text(
+        json.dumps(
+            {
+                "watches": {
+                    "w1": {
+                        "watch_id": "w1",
+                        "owner_id": ALICE,
+                        "agent_name": "assistant",
+                        "room_id": WATCH_ROOM,
+                        "team_id": TEAM,
+                        "slack_user_id": SLACK_IDS["alice"],
+                        "mentions": True,
+                        "direct_messages": True,
+                        "channels": [],
+                        "created_at": NOW,
+                    },
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    real_replace = _Path.replace
+
+    def _failing_replace(self: _Path, target: _Path) -> _Path:
+        if self == watches_path:
+            msg = "archive rename failed"
+            raise OSError(msg)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(_Path, "replace", _failing_replace)
+
+    store = ReactiveTriggerStore(paths)
+    memberships = AgentReplyMembershipIndex()
+    bots = {"assistant": FakeBot(room_state_client((ALICE, agent_id), room_id=WATCH_ROOM))}
+    service = ReactiveTriggerService(
+        config_provider=lambda: config,
+        runtime_paths=paths,
+        bots=lambda: cast("dict[str, AgentBot]", bots),
+        memberships=memberships,
+        store=store,
+    )
+    app_api = FastAPI()
+    ensure_app_state(app_api)
+    SLACK_INTEGRATION.bind(app_api, cast("dict[str, AgentBot]", bots), memberships, service)
+
+    registered = service.event_sources.get(SLACK_EVENT_SOURCE_ID)
+    assert isinstance(registered, SlackEventSource)
+    assert registered.migration_failed is False
+    assert store.has_migration("slack_watches_v1") is True
+    assert store.get_trigger("slack_watch_w1") is not None
+    assert watches_path.exists()
+    assert not watches_path.with_name("watches.json.migrated").exists()
+
+    # Migrated watch delivers normally despite the post-commit rename error.
+    slack = FakeSlack(
+        answers={
+            "auth.test": AUTH_TEST,
+            "apps.event.authorizations.list": {
+                "ok": True,
+                "authorizations": [{"user_id": SLACK_IDS["alice"], "is_bot": False}],
+            },
+            "users.info": {"ok": False, "error": "user_not_found"},
+        },
+    )
+    runtime = runtime_for(bots, memberships, slack, reactive_triggers=service)
+    manager = get_runtime_credentials_manager(paths)
+    slack_creds = load_slack_app(manager)
+    assert slack_creds is not None
+    dm = event_payload("message", author="dana", text="hello after commit", channel=DM, channel_type="im")
+    async with slack.client() as http_client:
+        result = await deliver_slack_event(
+            dm,
+            runtime=runtime,
+            config=config,
+            runtime_paths=paths,
+            credentials_manager=manager,
+            app=slack_creds,
+            client=http_client,
+            now=NOW,
+        )
+    assert result == "delivered"
+    assert len(store.list_firings(trigger_id="slack_watch_w1")) == 1
+
+    # Deleting the trigger and running migrate_legacy_slack_watches again self-heals archival WITHOUT re-importing.
+    assert store.delete_trigger("slack_watch_w1") is True
+    monkeypatch.setattr(_Path, "replace", real_replace)
+    assert migrate_legacy_slack_watches(paths, store, config) == 0
+    assert not watches_path.exists()
+    assert watches_path.with_name("watches.json.migrated").exists()
     assert store.get_trigger("slack_watch_w1") is None

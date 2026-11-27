@@ -69,8 +69,9 @@ def _bind(
 
     token: str | None = None
     if reactive_triggers is not None:
+        slack_source = SlackEventSource()
         try:
-            token = reactive_triggers.event_sources.register(SlackEventSource()).token
+            token = reactive_triggers.event_sources.register(slack_source).token
         except ValueError as exc:
             logger.warning("Could not register built-in Slack EventSource", reason=str(exc))
         else:
@@ -82,6 +83,7 @@ def _bind(
                         reactive_triggers.config_provider(),
                     )
                 except Exception:
+                    slack_source.migration_failed = True
                     logger.exception("Failed to migrate legacy Slack watches.json")
 
     _runtimes(api_app)[_NAME] = SlackRuntime(

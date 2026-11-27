@@ -17,6 +17,7 @@ from mindroom.api.room_reads import read_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.event_sources import EventSource, EventSourceContext, EventSourceRegistry
 from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerStoreError
+from mindroom.logging_config import get_logger
 from mindroom.matrix.state import resolve_room_id
 from mindroom.plugin_http import ClientUser, client_rooms, require_room_member
 from mindroom.reactive_triggers.management import (
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.reactive_triggers.models import TriggerTargetSpec
 
+logger = get_logger(__name__)
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["room-triggers"])
 
 _Member = Annotated[ClientUser, Depends(require_room_member)]
@@ -323,7 +325,7 @@ def _registered_source_for_record(
         event_sources is not None
         and isinstance(record, ReactiveTriggerRecord)
         and isinstance(record.source, ExternalEventSourceSpec)
-        and (record.source.source_origin == "registered" or bool(record.source.binding))
+        and record.source.is_registered
     ):
         return event_sources.get(record.source.source_id)
     return None
@@ -367,7 +369,16 @@ async def _paused_reason_for_owner_trigger(
         target_room_state=target_room_state,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
     )
-    result = await registered.check_delivery_access(ctx, rule=record, event=None)
+    try:
+        result = await registered.check_delivery_access(ctx, rule=record, event=None)
+    except Exception:
+        logger.warning(
+            "Event source check_delivery_access failed during room trigger listing",
+            source_id=registered.source_id,
+            trigger_id=record.trigger_id,
+            exc_info=True,
+        )
+        return "source_error"
     return result.reason if result is not None else None
 
 

@@ -182,7 +182,7 @@ async def _check_external_source_access(
     known_room_states: Mapping[str, RoomStateSnapshot] | None,
     event_sources: EventSourceRegistry | None,
 ) -> DispatchResult | None:
-    if source.source_origin == "registered" or bool(source.binding):
+    if source.is_registered:
         registered = event_sources.get(source.source_id) if event_sources is not None else None
         if registered is None:
             return DispatchResult(status="skipped", reason="source_removed")
@@ -195,7 +195,10 @@ async def _check_external_source_access(
             target_room_state=(known_room_states.get(rule.target.room_id) if known_room_states is not None else None),
             client=source_bot.client if source_bot is not None else None,
         )
-        return await registered.check_delivery_access(ctx, rule=rule, event=event)
+        denial = await registered.check_delivery_access(ctx, rule=rule, event=event)
+        if denial is None:
+            return None
+        return DispatchResult(status="retry" if denial.retry else "skipped", reason=denial.reason)
     reason = check_external_event_source_access(
         owner_user_id=rule.owner_user_id,
         source_spec=source,

@@ -114,6 +114,12 @@ class ExternalEventSourceSpec(BaseModel):
     match: dict[str, str | bool | int | list[str]] = Field(default_factory=dict)
     binding: dict[str, str | bool | int] = Field(default_factory=dict)
     source_origin: Literal["yaml", "registered"] = "yaml"
+    private_room_only: bool = False
+
+    @property
+    def is_registered(self) -> bool:
+        """Return whether this spec targets a registered EventSource rather than a YAML webhook source."""
+        return self.source_origin == "registered" or bool(self.binding)
 
     @field_validator("source_id", "kind")
     @classmethod

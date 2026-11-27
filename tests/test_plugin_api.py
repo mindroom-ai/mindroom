@@ -85,6 +85,7 @@ _EXPORTS = [
     "Done",
     "EnrichmentItem",
     "EventSource",
+    "EventSourceAccessDenial",
     "EventSourceContext",
     "EventSourceDescriptor",
     "EventSourceEmitter",
@@ -239,6 +240,7 @@ _SIGNATURES = {
     "Done": "(notice, resolve, on_loop)",
     "EnrichmentItem": "(key, text, cache_policy, persist, minimal_required)",
     "EventSource": "()",
+    "EventSourceAccessDenial": "(reason, retry)",
     "EventSourceContext": (
         "(owner_user_id, config, runtime_paths, target_room_id, target_agent, target_room_state, "
         "calling_room_id, calling_room_state, client, credentials_manager)"
@@ -719,7 +721,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 36), "ad3111669f511d0196924a64f2a6d4fc016363997a2253f897136778cdf735ce")
+_PINNED_VERSION = ((1, 36), "3f8d6dc5c33cda8c0761db1f7da2911b6a84cad82baad44286f18bc999e91bf5")
 
 
 def _is_enum(obj: object) -> bool:
