@@ -22,7 +22,12 @@ from mindroom.desktop.accessibility import (
 from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
 from mindroom.desktop.media import upload_encrypted_media
-from mindroom.desktop.protocol import DESKTOP_APP_ACTIONS, DesktopCommand, EncryptedDesktopMedia
+from mindroom.desktop.protocol import (
+    DESKTOP_APP_ACTIONS,
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    DesktopCommand,
+    EncryptedDesktopMedia,
+)
 from mindroom.desktop.provider import DesktopProviderError, ScreenCapture
 from mindroom.desktop.session import DesktopMatrixSession
 from mindroom.desktop.shell import DesktopShell, DesktopShellOutput
@@ -409,15 +414,24 @@ def _run_shell(
     sequence: int = 1,
     requester_id: str = ALICE,
     timeout_seconds: int = 1,
-    expires_at_ms: int = 11_000,
+    expires_at_ms: int = 120_000,
+    max_runtime_seconds: object | None = None,
 ) -> DesktopCommand:
+    params: dict[str, object] = {
+        "command": command,
+        "cwd": str(cwd),
+        "timeout_seconds": timeout_seconds,
+        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+    }
+    if max_runtime_seconds is not None:
+        params["max_runtime_seconds"] = max_runtime_seconds
     return replace(
         _command(
             "run_shell",
             request_id=request_id,
             sequence=sequence,
             requester_id=requester_id,
-            parameters={"command": command, "cwd": str(cwd), "timeout_seconds": timeout_seconds},
+            parameters=params,
         ),
         expires_at_ms=expires_at_ms,
     )

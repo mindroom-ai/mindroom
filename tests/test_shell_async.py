@@ -28,10 +28,10 @@ from mindroom.shell.execution import (
     _CAPPED_STREAM_BURST_READS,
     _MAX_OUTPUT_BYTES,
     ProcessRecord,
+    ShellOutputBuffer,
+    ShellOutputProgress,
     _background_rejection,
     _format_auto_background_message,
-    _OutputBuffer,
-    _OutputProgress,
     _pace_capped_stream,
     _progress_lines,
     _read_stream,
@@ -485,7 +485,7 @@ async def test_run_shell_command_keeps_stderr_on_success(tmp_path: Path) -> None
 
 def test_a_tail_cut_of_byte_capped_output_gives_one_notice() -> None:
     """Output cut by both the byte cap and ``tail`` says so in one notice, counting every line printed."""
-    buffer = _OutputBuffer(max_bytes=12)
+    buffer = ShellOutputBuffer(max_bytes=12)
     buffer.append("1\n2\n3\n4\n5\n6\n7\n8\n")
 
     assert buffer.render(tail=2) == (
@@ -497,9 +497,9 @@ def test_a_tail_cut_of_byte_capped_output_gives_one_notice() -> None:
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 def test_a_notice_counts_blank_lines_and_a_missing_final_newline_alike(newline: str) -> None:
     """A blank last line counts as a line with LF as with CRLF; uncut output keeps its old form."""
-    buffer = _OutputBuffer()
+    buffer = ShellOutputBuffer()
     buffer.append(f"a{newline}b{newline}{newline}")
-    unterminated = _OutputBuffer()
+    unterminated = ShellOutputBuffer()
     unterminated.append(f"a{newline}b")
 
     # The one line shown is the blank one, which holds a carriage return when the command ended lines with CRLF.
@@ -531,7 +531,7 @@ async def test_run_shell_command_keeps_blank_stderr_and_trims_only_whole_stdout(
 
 def test_the_line_cap_keeps_line_boundaries_across_appends() -> None:
     """Trimming to the line cap keeps the newline before the next append, and the notice names the cap."""
-    buffer = _OutputBuffer(max_lines=2)
+    buffer = ShellOutputBuffer(max_lines=2)
     buffer.append("1\n2\n3\n")
     buffer.append("4\n")
 
@@ -993,10 +993,10 @@ async def test_a_running_commands_output_is_reported_whole(tmp_path: Path) -> No
 def test_the_stream_that_printed_last_ends_the_report() -> None:
     """Warnings on stderr do not hide a build's newer progress on stdout, which the live view shows as the tail."""
     reports: list[str] = []
-    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+    stdout, stderr = ShellOutputBuffer(), ShellOutputBuffer()
 
     with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0):
-        progress = _OutputProgress(reports.append, stdout, stderr)
+        progress = ShellOutputProgress(reports.append, stdout, stderr)
         stderr.append("".join(f"warning: unused variable {index}\n" for index in range(80)))
         stdout.append("step 1/2\n")
         progress.poll()
@@ -1011,14 +1011,14 @@ def test_the_stream_that_printed_last_ends_the_report() -> None:
 def test_a_quiet_commands_unchanged_output_is_not_read_again() -> None:
     """A command that prints nothing new, such as a dev server waiting for requests, costs its progress checks nothing."""
     reports: list[str] = []
-    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+    stdout, stderr = ShellOutputBuffer(), ShellOutputBuffer()
     stdout.append("listening on :8000\n")
 
     with (
         patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0),
         patch("mindroom.shell.execution._progress_lines", wraps=_progress_lines) as read,
     ):
-        progress = _OutputProgress(reports.append, stdout, stderr)
+        progress = ShellOutputProgress(reports.append, stdout, stderr)
         for _ in range(5):
             progress.poll()
 
@@ -1118,9 +1118,9 @@ async def test_scoped_auto_background_untimed_streams_log_and_exits_cleanly(tmp_
             assert "[MindRoom: exited with code 0]" in log_text
 
     # Verify receipt preview formatting deterministically without relying on subprocess startup timing.
-    stdout_buf = _OutputBuffer()
+    stdout_buf = ShellOutputBuffer()
     stdout_buf.append("before-out\n")
-    stderr_buf = _OutputBuffer()
+    stderr_buf = ShellOutputBuffer()
     stderr_buf.append("before-err\n")
     preview = _format_auto_background_message(
         pid=4242,
@@ -1510,7 +1510,7 @@ def test_output_buffer_matches_naive_reference_trimming(
     expected_lines: list[str],
 ) -> None:
     """Incremental line/byte trimming matches naive whole-buffer trimming across chunk boundaries."""
-    buf = _OutputBuffer(max_lines=max_lines, max_bytes=max_bytes)
+    buf = ShellOutputBuffer(max_lines=max_lines, max_bytes=max_bytes)
     ref_text, ref_bytes_capped, ref_lines_capped = "", False, False
     for raw in chunks:
         buf.append(raw)
@@ -1534,7 +1534,7 @@ def test_output_buffer_matches_naive_reference_trimming(
 
 def test_progress_lines_handles_plain_and_carriage_return_output() -> None:
     """Plain output skips carriage-return splitting while redrawn lines still collapse to their last state."""
-    plain, redrawn = _OutputBuffer(), _OutputBuffer()
+    plain, redrawn = ShellOutputBuffer(), ShellOutputBuffer()
     assert _progress_lines(plain) == ""
     plain.append("line 1\nline 2\n\n")
     redrawn.append("step 1\rstep 2\n10%\r50%\r100%\r\ndone\r\r\n")
@@ -1547,7 +1547,7 @@ async def test_output_buffer_and_run_command_preserve_tail_after_64kib_chunk_and
     """A tiny write after a full 50 KiB retained chunk slices the head bytes instead of evicting the whole chunk."""
     block = "".join(f"{i:04d}:" + "x" * 58 + "\n" for i in range(1024))
     expected_tail = [*(f"{i:04d}:" + "x" * 58 for i in range(925, 1024)), "done"]
-    buf = _OutputBuffer()
+    buf = ShellOutputBuffer()
     buf.append(block)
     buf.append("done\n")
     buf_lines = buf.render(tail=100).splitlines()
@@ -1597,18 +1597,18 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
         patch("mindroom.shell.execution._STREAM_READ_CHUNK_BYTES", 8),
         patch("mindroom.shell.execution._pace_capped_stream", side_effect=fake_pace),
     ):
-        await _read_stream(make_stream(b"12345678"), _OutputBuffer(max_bytes=16))
-        await _read_stream(make_stream(sub_burst), _OutputBuffer(max_bytes=8))
+        await _read_stream(make_stream(b"12345678"), ShellOutputBuffer(max_bytes=16))
+        await _read_stream(make_stream(sub_burst), ShellOutputBuffer(max_bytes=8))
         active = CapturedShellStream(ShellOutputDestination(str(tmp_path), "out.txt", max_bytes=1024))
-        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8), active)
+        await _read_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8), active)
         active.file.close()
         assert pace_calls == 0
 
-        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8))
+        await _read_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8))
         assert pace_calls == 1
 
         overflow = CapturedShellStream(ShellOutputDestination(str(tmp_path), "err.txt", max_bytes=10))
-        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8), overflow)
+        await _read_stream(make_stream(one_burst), ShellOutputBuffer(max_bytes=8), overflow)
         overflow.file.close()
         assert overflow.error is not None
         assert pace_calls == 2
@@ -1617,10 +1617,10 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
     bulk_under_free = b"x" * (65536 * (_CAPPED_STREAM_BURST_READS + 2))
     bulk_two_bursts_past_free = b"x" * (65536 * (3 + 2 * _CAPPED_STREAM_BURST_READS + 1))
     with patch("mindroom.shell.execution._pace_capped_stream", side_effect=fake_pace):
-        await _read_stream(make_stream(bulk_under_free), _OutputBuffer())
+        await _read_stream(make_stream(bulk_under_free), ShellOutputBuffer())
         assert pace_calls == 0
         with patch("mindroom.shell.execution._CAPPED_STREAM_BULK_FREE_BYTES", 256 * 1024):
-            await _read_stream(make_stream(bulk_two_bursts_past_free), _OutputBuffer())
+            await _read_stream(make_stream(bulk_two_bursts_past_free), ShellOutputBuffer())
         assert pace_calls == 2
 
     events: list[str] = []

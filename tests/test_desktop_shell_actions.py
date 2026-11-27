@@ -16,7 +16,12 @@ import nio
 import pytest
 
 from mindroom.desktop.media import DesktopMediaError, download_encrypted_media, upload_encrypted_media
-from mindroom.desktop.protocol import DesktopCommand, DesktopProtocolError, EncryptedDesktopMedia
+from mindroom.desktop.protocol import (
+    DESKTOP_SHELL_PROTOCOL_VERSION,
+    DesktopCommand,
+    DesktopProtocolError,
+    EncryptedDesktopMedia,
+)
 from mindroom.desktop.reply_fitting import fits_inline
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellOutput
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
@@ -97,7 +102,14 @@ async def _wait_for_finished_handle(shell: DesktopShell, handle: str) -> None:
 async def test_shell_actions_require_a_shell() -> None:
     """Without local shell access there is nothing to run, check, or kill."""
     with pytest.raises(DesktopProtocolError, match=r"^Local shell access is disabled\.$"):
-        await execute_shell(_CLIENT, None, _command("run_shell", parameters={"command": PRIVATE_COMMAND}))
+        await execute_shell(
+            _CLIENT,
+            None,
+            _command(
+                "run_shell",
+                parameters={"command": PRIVATE_COMMAND, "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+            ),
+        )
 
 
 def test_disabled_shell_reports_empty_status_to_everyone() -> None:
@@ -118,7 +130,15 @@ def test_disabled_shell_reports_empty_status_to_everyone() -> None:
 async def test_run_shell_defaults_to_local_home_and_requires_local_approval() -> None:
     """Omitted cwd resolves locally, and a local rejection starts no process."""
     shell = _local_shell()
-    execution = asyncio.create_task(_execute(shell, _command("run_shell", parameters={"command": PRIVATE_COMMAND})))
+    execution = asyncio.create_task(
+        _execute(
+            shell,
+            _command(
+                "run_shell",
+                parameters={"command": PRIVATE_COMMAND, "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+            ),
+        ),
+    )
     pending = await _wait_for_pending(shell)
     assert pending == {
         "request_id": "request-1",
@@ -140,7 +160,7 @@ async def test_long_working_directory_reaches_the_shell(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     shell = _local_shell()
     shell.grant(60)
-    run = _command("run_shell", parameters={"command": "pwd", "cwd": str(nested)})
+    run = _run_shell("pwd", nested)
     assert (await _execute(shell, run))["output"] == f"{nested}\n"
     await shell.close()
 
@@ -171,7 +191,7 @@ async def test_shell_actions_reject_unrelated_or_malformed_parameters(
     """Strict parameters are checked before any approval request exists."""
     shell = _local_shell()
     if action == "run_shell":
-        parameters = {**parameters, "cwd": str(tmp_path)}
+        parameters = {**parameters, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION}
     with pytest.raises(DesktopProtocolError, match=f"^{re.escape(error)}$"):
         await _execute(shell, _command(action, parameters=parameters))
     assert shell.status()["pending"] is None
@@ -182,7 +202,10 @@ async def test_shell_actions_reject_unrelated_or_malformed_parameters(
 async def test_caller_shell_status_hides_another_callers_pending_command(tmp_path: Path) -> None:
     """Another allowed caller learns only that approval is pending; the local view shows the command."""
     shell = _local_shell()
-    command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
+    command = _command(
+        "run_shell",
+        parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path), "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION},
+    )
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_pending(shell)
     status = caller_shell_status(shell, _command("status", requester_id=BOB))
@@ -207,7 +230,7 @@ async def test_other_callers_see_active_shell_without_its_request_id(tmp_path: P
     """A different allowed caller sees that a command is active, but never learns its request ID."""
     shell = _local_shell()
     shell.grant(60)
-    command = _command("run_shell", parameters={"command": "sleep 30", "cwd": str(tmp_path)})
+    command = _run_shell("sleep 30", tmp_path, request_id="request-1", timeout_seconds=30)
     execution = asyncio.create_task(_execute(shell, command))
     await _wait_for_active(shell)
     bob = _command("status", requester_id=BOB)
@@ -238,6 +261,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 0,
         "next_offset": 6,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     assert (await _execute(shell, _handle_command("check_shell", handle, sequence=2)))["state"] == "running"
 
@@ -253,6 +282,12 @@ async def test_shell_handle_lifecycle_returns_full_output(tmp_path: Path) -> Non
         "output_attachment": None,
         "output_start": 6,
         "next_offset": 10,
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
         await _execute(shell, _handle_command("check_shell", handle, sequence=sequence + 1))
@@ -502,6 +537,12 @@ async def test_output_over_the_inline_limit_round_trips_as_an_encrypted_attachme
         "output_truncated": False,
         "output_start": 0,
         "next_offset": len(expected),
+        "stderr": "",
+        "stderr_bytes": 0,
+        "stderr_truncated": False,
+        "stderr_attachment": None,
+        "stderr_start": 0,
+        "stderr_next_offset": 0,
     }
     media = EncryptedDesktopMedia.from_content(completed["output_attachment"], kind="output_attachment")
     assert (media.mime_type, media.size) == ("text/plain", len(expected))
@@ -673,4 +714,265 @@ async def test_stalled_output_upload_falls_back_to_a_first_page_within_the_bound
     _assert_upload_fallback(result)
     # The handle keeps its output for the next page.
     assert released == []
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_split_stderr_streams_inline_and_pages_independently(tmp_path: Path) -> None:
+    """Running and finished shell replies carry separate stdout/stderr fields and support stderr_offset."""
+    shell = _local_shell()
+    shell.grant(60)
+    command = (
+        "printf 'out1'; printf 'err1' >&2; "
+        "while [ ! -f release ]; do sleep 0.05; done; "
+        "printf 'out2'; printf 'err2' >&2"
+    )
+    running = await _execute(shell, _run_shell(command, tmp_path))
+    handle = running["handle"]
+    assert isinstance(handle, str)
+    assert (running["output"], running["next_offset"]) == ("out1", 4)
+    assert (running["stderr"], running["stderr_next_offset"]) == ("err1", 4)
+
+    (tmp_path / "release").touch()
+    finished = None
+    for seq in range(2, 200):
+        reply = await _execute(
+            shell,
+            _handle_command("check_shell", handle, sequence=seq, offset=4, stderr_offset=4),
+        )
+        if reply["state"] != "running":
+            finished = reply
+            break
+        await asyncio.sleep(0.02)
+    assert finished is not None
+    assert (finished["output"], finished["output_start"], finished["next_offset"]) == ("out2", 4, 8)
+    assert (finished["stderr"], finished["stderr_start"], finished["stderr_next_offset"]) == ("err2", 4, 8)
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_large_split_stdout_and_stderr_attach_separately_and_fallback_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large stdout and stderr upload separately; if stderr upload fails, handle stays open with fitted pages."""
+    uploaded: list[tuple[str, bytes]] = []
+
+    async def fake_upload(
+        _client: object,
+        content: bytes,
+        *,
+        mime_type: str,
+        filename: str,
+        timeout_seconds: float,
+    ) -> EncryptedDesktopMedia:
+        del mime_type, timeout_seconds
+        uploaded.append((filename, content))
+        if filename.endswith("-stderr.txt") and len(uploaded) == 2:
+            msg = "stderr upload failed"
+            raise DesktopMediaError(msg)
+        return replace(MEDIA, url=f"mxc://example.org/{filename}", mime_type="text/plain", size=len(content))
+
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", fake_upload)
+    shell = _local_shell()
+    shell.grant(60)
+    script = "import sys; sys.stdout.write('O' * 60_000); sys.stderr.write('E' * 60_000)"
+    first = await _execute(
+        shell,
+        _run_shell(
+            f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
+            tmp_path,
+            timeout_seconds=5,
+        ),
+    )
+    # First attempt failed on stderr upload -> handle kept open and both streams make inline progress.
+    handle = first["handle"]
+    assert isinstance(handle, str)
+    assert first["output_attachment"] is None
+    assert first["stderr_attachment"] is None
+    assert "stderr upload failed" in str(first["warning"])
+    assert 0 < first["next_offset"] < 60_000
+    assert 0 < first["stderr_next_offset"] < 60_000
+    assert fits_inline(_run_shell("true", tmp_path), first)
+
+    # Next check uploads both remaining slices and hands over the handle.
+    second = await _execute(
+        shell,
+        _handle_command(
+            "check_shell",
+            handle,
+            sequence=2,
+            offset=first["next_offset"],
+            stderr_offset=first["stderr_next_offset"],
+        ),
+    )
+    assert second["output_attachment"] is not None
+    assert second["stderr_attachment"] is not None
+    assert (second["next_offset"], second["stderr_next_offset"]) == (60_000, 60_000)
+    with pytest.raises(DesktopShellError, match=_UNKNOWN_HANDLE):
+        await _execute(shell, _handle_command("check_shell", handle, sequence=3))
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_dual_stream_attachments_upload_concurrently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large split stdout and stderr attachments upload concurrently via asyncio.gather."""
+    stdout_started = asyncio.Event()
+    stderr_started = asyncio.Event()
+
+    async def barrier_upload(
+        _client: object,
+        content: bytes,
+        *,
+        mime_type: str,
+        filename: str,
+        timeout_seconds: float,
+    ) -> EncryptedDesktopMedia:
+        del mime_type, timeout_seconds
+        if filename.endswith("-stderr.txt"):
+            stderr_started.set()
+            await asyncio.wait_for(stdout_started.wait(), timeout=2)
+        else:
+            stdout_started.set()
+            await asyncio.wait_for(stderr_started.wait(), timeout=2)
+        return replace(MEDIA, url=f"mxc://example.org/{filename}", mime_type="text/plain", size=len(content))
+
+    monkeypatch.setattr("mindroom.desktop.shell_actions.upload_encrypted_media", barrier_upload)
+    shell = _local_shell()
+    shell.grant(60)
+    script = "import sys; sys.stdout.write('O' * 60_000); sys.stderr.write('E' * 60_000)"
+    result = await _execute(
+        shell,
+        _run_shell(
+            f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
+            tmp_path,
+            timeout_seconds=5,
+        ),
+    )
+    assert result["output_attachment"] is not None
+    assert result["stderr_attachment"] is not None
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_kill_shell_accepts_handle_or_request_id_mutually_exclusively(tmp_path: Path) -> None:
+    """kill_shell requires exactly one of handle or request_id, and request_id cancels a pending approval."""
+    shell = _local_shell()
+    for bad_params in ({}, {"handle": "shell:1", "request_id": "req-1"}):
+        with pytest.raises(DesktopProtocolError, match="exactly one of handle or request_id"):
+            await _execute(shell, _command("kill_shell", parameters=bad_params))
+
+    marker = tmp_path / "never"
+    run_task = asyncio.create_task(
+        _execute(shell, _run_shell(f"touch {marker}", tmp_path, request_id="req-cancel")),
+    )
+    await _wait_for_pending(shell)
+    cancelled = await _execute(
+        shell,
+        _command("kill_shell", request_id="k1", sequence=2, parameters={"request_id": "req-cancel"}),
+    )
+    assert cancelled == {"state": "cancelled", "request_id": "req-cancel"}
+    assert shell.status()["pending"] is None
+    with pytest.raises(DesktopShellError, match="cancelled before approval"):
+        await asyncio.wait_for(run_task, timeout=2)
+    assert not marker.exists()
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_max_runtime_seconds_validation_and_timed_out_payload(tmp_path: Path) -> None:
+    """run_shell validates max_runtime_seconds and emits timed_out only on timeout."""
+    shell = _local_shell()
+    shell.grant(60)
+
+    for idx, bad_value in enumerate((0, -2.5, True, float("nan"), float("inf"), "5", None)):
+        with pytest.raises(DesktopProtocolError, match="max_runtime_seconds"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-max-{idx}",
+                    parameters={
+                        "command": "echo hi",
+                        "cwd": str(tmp_path),
+                        "max_runtime_seconds": bad_value,
+                        "shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION,
+                    },
+                ),
+            )
+
+    normal = await _execute(
+        shell,
+        _run_shell("printf 'ok'", tmp_path, request_id="normal-1", timeout_seconds=5, max_runtime_seconds=5.0),
+    )
+    assert normal["state"] == "completed"
+    assert normal["output"] == "ok"
+    assert "timed_out" not in normal
+
+    started = await _execute(
+        shell,
+        _run_shell(
+            "printf 'partial\n'; sleep 30",
+            tmp_path,
+            request_id="timeout-1",
+            timeout_seconds=10,
+            max_runtime_seconds=0.3,
+        ),
+    )
+    payload = started
+    if payload["state"] == "running":
+        assert "timed_out" not in payload
+        handle = payload["handle"]
+        assert isinstance(handle, str)
+        for seq in range(2, 60):
+            await asyncio.sleep(0.05)
+            payload = await _execute(
+                shell,
+                _handle_command("check_shell", handle, sequence=seq, offset=0, stderr_offset=0),
+            )
+            if payload["state"] != "running":
+                break
+    assert payload["state"] == "killed"
+    assert payload["timed_out"] is True
+    assert payload["output"] == "partial\n"
+    await shell.close()
+
+
+@pytest.mark.asyncio
+async def test_run_shell_rejects_missing_or_mismatched_shell_protocol_before_approval(tmp_path: Path) -> None:
+    """run_shell fails closed before approval when shell_protocol is missing, mismatched, or non-integer."""
+    shell = _local_shell()
+    marker = tmp_path / "should-not-run"
+
+    # Missing or mismatched protocol tells the caller to update the MindRoom server.
+    for idx, extra in enumerate(({}, {"shell_protocol": 1}, {"shell_protocol": DESKTOP_SHELL_PROTOCOL_VERSION + 1})):
+        with pytest.raises(DesktopProtocolError, match="Update the MindRoom server"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-proto-{idx}",
+                    parameters={"command": f"touch {marker}", "cwd": str(tmp_path), **extra},
+                ),
+            )
+        assert shell.status()["pending"] is None
+        assert not marker.exists()
+
+    # Non-integer protocol values are also rejected before approval.
+    for idx, bad_value in enumerate(("2", True, None)):
+        with pytest.raises(DesktopProtocolError, match="Desktop parameter shell_protocol must be an integer"):
+            await _execute(
+                shell,
+                _command(
+                    "run_shell",
+                    request_id=f"bad-proto-type-{idx}",
+                    parameters={"command": f"touch {marker}", "cwd": str(tmp_path), "shell_protocol": bad_value},
+                ),
+            )
+        assert shell.status()["pending"] is None
+        assert not marker.exists()
+
     await shell.close()
