@@ -64,16 +64,15 @@ def tool_parameters(entrypoint: Callable[..., Any], *, filled: Collection[str] =
     hints = _resolved_annotations(entrypoint, offered)
     descriptions = _parameter_descriptions(entrypoint)
     properties: dict[str, Any] = {}
+    required: list[str] = []
     for name in offered:
-        schema = _parameter_schema(hints.get(name))
+        is_required = signature.parameters[name].default is inspect.Parameter.empty
+        if is_required:
+            required.append(name)
+        schema = _parameter_schema(hints.get(name), required=is_required)
         if description := descriptions.get(name):
             schema["description"] = description
         properties[name] = schema
-    required = [
-        name
-        for name, parameter in signature.parameters.items()
-        if parameter.default is inspect.Parameter.empty and name in properties
-    ]
     return {"type": "object", "properties": properties, "required": required}
 
 
@@ -141,15 +140,18 @@ def _parameter_descriptions(entrypoint: Callable[..., Any]) -> dict[str, str]:
     return descriptions
 
 
-def _parameter_schema(hint: object) -> dict[str, Any]:
-    """Return one parameter's schema: an unannotated one takes anything, and ``Optional[X]`` is ``X``'s.
+def _parameter_schema(hint: object, *, required: bool) -> dict[str, Any]:
+    """Return one parameter's schema: an unannotated one takes anything, and an optional ``X | None`` is ``X``'s.
 
-    Only ``typing.Optional`` and ``Union[X, None]`` drop the null; ``X | None`` keeps it as an alternative.
+    When the parameter has a default (``required=False``), a two-member nullable union (``X | None``,
+    ``Optional[X]``, or ``Union[X, None]``) drops the null branch and renders as ``X`` because omitting the key
+    uses the default. A required nullable parameter (``required=True``) keeps ``anyOf: [X, {"type": "null"}]`` so
+    callers can pass ``null`` explicitly, and unions with three or more members always keep ``anyOf``.
     """
     if hint is None:
         return {}
     arguments = get_args(hint)
-    if get_origin(hint) is Union and len(arguments) == 2 and NoneType in arguments:
+    if not required and get_origin(hint) in (Union, UnionType) and len(arguments) == 2 and NoneType in arguments:
         hint = next(argument for argument in arguments if argument is not NoneType)
     return _schema(hint)
 

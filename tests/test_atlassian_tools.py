@@ -1085,8 +1085,10 @@ def test_extra_fields_accept_any_json_value(tmp_path: Path, function_name: str) 
     paths = runtime_paths(tmp_path)
     function = toolkit_offers(_tool(paths, save_client_config(paths)), function_name)
 
-    field_schema = function.parameters["properties"]["fields"]["anyOf"][0]
-    assert field_schema == {"type": "object", "additionalProperties": True}
+    field_schema = function.parameters["properties"]["fields"]
+    assert field_schema["type"] == "object"
+    assert field_schema["additionalProperties"] is True
+    assert "anyOf" not in field_schema
 
 
 @pytest.mark.asyncio

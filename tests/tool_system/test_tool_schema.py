@@ -18,7 +18,6 @@ from typing import (  # noqa: UP035 - The bare typing aliases are annotation-kin
     Literal,
     Optional,
     Union,
-    get_origin,
 )
 
 import pytest
@@ -26,10 +25,13 @@ from pydantic import BaseModel
 
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
+from mindroom.tool_jobs.background_after import BACKGROUND_AFTER, background_after_schema
+from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
-from mindroom.tool_system.toolkits import adapt_toolkit
+from mindroom.tool_system.toolkits import adapt_callable, adapt_toolkit
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.tools.pandas import pandas_tools
 from tests.agent_tool_helpers import toolkit_offers
@@ -38,6 +40,7 @@ from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
 ARGUMENTS = json.loads(support.ARGUMENTS_PATH.read_text(encoding="utf-8"))
 
@@ -45,21 +48,6 @@ ARGUMENTS = json.loads(support.ARGUMENTS_PATH.read_text(encoding="utf-8"))
 def owned_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[str, Any]]:
     """Return the description and parameters the owned generator derives for ``entrypoint``."""
     return tool_description(entrypoint), tool_parameters(entrypoint)
-
-
-_PIPED_UNION_IS_TYPING_UNION = get_origin(int | None) is Union
-
-
-def _piped_optional(schema: dict[str, Any], *, description: str | None = None) -> dict[str, Any]:
-    """Return the schema ``_parameter_schema`` emits for top-level ``X | None`` on this Python version.
-
-    Python 3.14 unified ``types.UnionType`` with ``typing.Union``, so top-level ``X | None`` drops ``null`` like
-    ``Optional[X]`` on 3.14 while keeping ``anyOf`` on 3.13.
-    """
-    result = dict(schema) if _PIPED_UNION_IS_TYPING_UNION else {"anyOf": [schema, {"type": "null"}]}
-    if description is not None:
-        result["description"] = description
-    return result
 
 
 def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -131,7 +119,7 @@ def scalars(count: int, ratio: float, enabled: bool, label: str) -> str:
 
 
 def optionals(
-    typed: Optional[str] = None,  # noqa: UP045 - typing.Optional renders differently from X | None.
+    typed: Optional[str] = None,  # noqa: UP045 - typing.Optional must match X | None.
     union: Union[int, None] = None,  # noqa: UP007
     piped: int | None = None,
     choice: Union[Literal["a", "b"], None] = None,  # noqa: UP007
@@ -219,7 +207,7 @@ def test_values_annotated_any_or_object_take_any_json_value() -> None:
         "anything": {},
         "thing": {},
         "mapping": mapping,
-        "objects": _piped_optional(mapping),
+        "objects": {"anyOf": [mapping, {"type": "null"}]},
         "rows": {"type": "array", "items": {"type": "array", "items": {}}},
     }
 
@@ -380,7 +368,7 @@ _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
             {
                 "typed": {"type": "string", "description": "Optional text."},
                 "union": {"type": "integer", "description": "Optional number."},
-                "piped": _piped_optional({"type": "integer"}, description="Optional number with a pipe."),
+                "piped": {"type": "integer", "description": "Optional number with a pipe."},
                 "choice": {"type": "string", "enum": ["a", "b"], "description": "An optional choice."},
                 "flag": {"type": "boolean", "description": "A defaulted flag."},
             },
@@ -446,7 +434,7 @@ _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
                 "unions": _string_mapping(
                     {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "boolean"}]},
                 ),
-                "nested": _piped_optional(_string_mapping({"type": "array", "items": {"type": "string"}})),
+                "nested": _string_mapping({"type": "array", "items": {"type": "string"}}),
             },
             required=["bare", "legacy", "typed", "anything", "objects", "unions"],
         ),
@@ -483,7 +471,7 @@ _EXPECTED_ANNOTATION_SCHEMAS: dict[str, tuple[str | None, dict[str, Any]]] = {
                     "title": "TreeNode",
                     "type": "object",
                 },
-                "many": _piped_optional({"type": "array", "items": _INNER_MODEL_SCHEMA}),
+                "many": {"type": "array", "items": _INNER_MODEL_SCHEMA},
             },
             required=["outer", "tree"],
         ),
@@ -639,6 +627,106 @@ def test_an_annotation_that_does_not_resolve_raises() -> None:
 
     with pytest.raises(NameError, match="Missing"):
         tool_parameters(broken)
+
+
+def test_optional_piped_union_renders_identically_to_typing_optional() -> None:
+    """Optional ``X | None`` and ``None | X`` drop ``null`` and match ``Optional[X]``."""
+
+    def with_piped(x: str | None = None) -> str:
+        return x or ""
+
+    def with_reversed_piped(x: None | str = None) -> str:
+        return x or ""
+
+    def with_typing_optional(x: Optional[str] = None) -> str:  # noqa: UP045
+        return x or ""
+
+    expected = {"type": "object", "properties": {"x": {"type": "string"}}, "required": []}
+    assert_same_bytes(tool_parameters(with_piped), expected)
+    assert_same_bytes(tool_parameters(with_reversed_piped), expected)
+    assert_same_bytes(tool_parameters(with_typing_optional), expected)
+
+
+def test_required_nullable_parameters_keep_null_alternative() -> None:
+    """Required nullable parameters without a default keep ``anyOf: [X, null]`` so callers can pass ``null``."""
+
+    def required_nullable(
+        piped: str | None,
+        typing_opt: Optional[str],  # noqa: UP045
+        typing_union: Union[int, None],  # noqa: UP007
+    ) -> str:
+        return ""
+
+    assert_same_bytes(
+        tool_parameters(required_nullable),
+        {
+            "type": "object",
+            "properties": {
+                "piped": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "typing_opt": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "typing_union": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+            },
+            "required": ["piped", "typing_opt", "typing_union"],
+        },
+    )
+
+
+def test_multi_type_nullable_union_keeps_any_of() -> None:
+    """Unions with three or more members keep ``anyOf`` even when the parameter is optional."""
+
+    def multi_union(x: str | int | None = None) -> str:
+        return ""
+
+    assert_same_bytes(
+        tool_parameters(multi_union),
+        {
+            "type": "object",
+            "properties": {
+                "x": {"anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "null"}]},
+            },
+            "required": [],
+        },
+    )
+
+
+def test_validated_entrypoint_still_accepts_explicit_none_for_plain_optional_schema() -> None:
+    """Runtime validation still accepts explicit ``None`` when the JSON schema omits ``null``."""
+
+    def lookup(x: str | None = None, limit: int | None = 10) -> tuple[str | None, int | None]:
+        return x, limit
+
+    assert tool_parameters(lookup) == {
+        "type": "object",
+        "properties": {"x": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": [],
+    }
+    validated = validated_entrypoint(lookup)
+    assert validated() == (None, 10)
+    assert validated(x=None, limit=None) == (None, None)
+    assert validated(x="ok", limit=5) == ("ok", 5)
+
+
+def test_injected_background_after_and_mindroom_output_path_keep_nullable_any_of(tmp_path: Path) -> None:
+    """ISSUE-211: injected ``background_after`` and ``mindroom_output_path`` keep ``anyOf: [..., null]``."""
+
+    def fetch(query: str, tag: str | None = None) -> str:
+        return query
+
+    wrapped = with_output_files(
+        adapt_callable(fetch),
+        ToolOutputFilePolicy(workspace_root=tmp_path),
+    )
+    projected = project_definitions([wrapped.definition()], {"fetch": 30.0})[0]
+
+    assert projected.parameters["properties"]["tag"] == {"type": "string"}
+    assert projected.parameters["properties"][OUTPUT_PATH_ARGUMENT] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+    }
+    assert projected.parameters["properties"][BACKGROUND_AFTER] == background_after_schema(30.0)
+    assert projected.parameters["properties"][BACKGROUND_AFTER]["anyOf"] == [
+        {"type": "number", "minimum": 0},
+        {"type": "null"},
+    ]
 
 
 def owned_probe_functions() -> dict[str, Any]:
