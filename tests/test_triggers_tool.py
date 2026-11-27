@@ -1710,6 +1710,13 @@ def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path
             "default": "require_approval",
             "rules": [{"match": "*triggers", "arguments": {"action": "list"}, "action": "auto_approve"}],
         },
+        {
+            "rules": [
+                {"match": "delete_trigger", "agents": "ops", "action": "require_approval"},
+                {"match": "*", "agents": "ops", "action": "auto_approve"},
+                {"match": "triggers", "action": "require_approval"},
+            ],
+        },
     ):
         with pytest.raises(ConfigRuntimeValidationError, match="triggers"):
             Config.validate_with_runtime({**base, "tool_approval": approval}, _runtime_paths(tmp_path))

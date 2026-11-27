@@ -18110,9 +18110,10 @@ tool_approval:
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](https://docs.mindroom.chat/scheduling/#pre-approved-tool-calls) |
 
-`rules[].arguments` checks only the raw top-level arguments supplied on the call (omitted arguments with defaults do not match).
+`rules[].arguments` checks the same supplied top-level arguments that `script` rules receive (after call decoding, before tool defaults are filled in, so omitted arguments with defaults do not match).
 String matchers use case-sensitive globs, booleans, numbers, and `null` use strict equality (`true` never matches `1`, and `false` never matches `0`), a list matches if any element matches, and multiple keys combine with AND.
-Prefer fail-closed allowlisting (`auto_approve` specific safe argument values, followed by a fallback `require_approval` rule) over denylisting dangerous values under `default: auto_approve`, because omitted defaults, coerced values (such as `"true"` or `1` for boolean parameters), and path variations (where `*` matches `/`) will not match a denylist rule; use a `script` rule when you need to denylist or normalize argument values.
+Prefer fail-closed allowlisting (`auto_approve` specific safe argument values, followed by a fallback `require_approval` rule) over denylisting dangerous values under `default: auto_approve`, because omitted defaults and path or formatting variations (where `*` matches `/`) can bypass a denylist rule.
+Avoid glob allowlists on shell commands or free-text arguments (for example, `command: "git status*"` also matches `git status; rm -rf ~`); use a `script` rule when you need to parse, normalize, or denylist argument values.
 
 [`config_manager`](https://docs.mindroom.chat/tools/agent-orchestration/#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 

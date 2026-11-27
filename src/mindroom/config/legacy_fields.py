@@ -1001,14 +1001,16 @@ def _retired_approval_pair_error(
 ) -> str | None:
     old_indices = _effective_rule_indices(rules, old)
     new_indices = _effective_rule_indices(rules, new)
-    fully_explicit_new = (
-        bool(new_indices)
-        and all(new in rules[index].match_patterns() for index in new_indices)
-        and _is_unconditional(rules[new_indices[-1]])
+    rem_old, rem_new = _strip_shared_prefix(old_indices, new_indices)
+    shared_prefix = old_indices[: len(old_indices) - len(rem_old)]
+    rem_new_fully_explicit = (
+        bool(rem_new)
+        and all(new in rules[index].match_patterns() for index in rem_new)
+        and _is_unconditional(rules[rem_new[-1]])
     )
     if (
-        not fully_explicit_new
-        and reject_wildcard_scripts
+        reject_wildcard_scripts
+        and not (rem_new_fully_explicit and all(rules[index].script is None for index in shared_prefix))
         and (script_index := next((index for index in old_indices if rules[index].script is not None), None))
         is not None
     ):
@@ -1031,15 +1033,11 @@ def _retired_approval_pair_error(
     )
     if old_chain == new_chain:
         return None
-    rem_old, rem_new = _strip_shared_prefix(old_indices, new_indices)
     extra_new = [index for index in rem_new if index not in rem_old]
-    explicit_new_override = (
+    explicit_new_override = rem_new_fully_explicit or (
         bool(extra_new)
         and all(new in rules[index].match_patterns() for index in extra_new)
-        and (
-            (bool(rem_new) and new in rules[rem_new[-1]].match_patterns() and _is_unconditional(rules[rem_new[-1]]))
-            or set(rem_old) <= set(rem_new)
-        )
+        and set(rem_old) <= set(rem_new)
     )
     if explicit_new_override:
         conflict_index = (
