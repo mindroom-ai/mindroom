@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import posixpath
 import shlex
 from typing import Any, Literal
@@ -21,7 +20,13 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import UNSET, prepare_python_code, require_non_empty, resolve_bool_toggle
+from mindroom.tools.native_helpers import (
+    UNSET,
+    prepare_python_code,
+    require_non_empty,
+    resolve_bool_toggle,
+    status_error_json,
+)
 from mindroom.tools.string_mapping import parse_string_mapping
 
 logger = get_logger(__name__)
@@ -47,10 +52,6 @@ def _normalize_language(value: str | None) -> str | None:
         msg = f"Unsupported Daytona sandbox_language {value!r}; expected one of: {', '.join(sorted(_VALID_LANGUAGES))}"
         raise ValueError(msg)
     return normalized
-
-
-def _error_json(message: str) -> str:
-    return json.dumps({"status": "error", "message": message})
 
 
 class _DaytonaTools(Toolkit):
@@ -256,8 +257,8 @@ class _DaytonaTools(Toolkit):
                     return self._change_dir(sandbox, cmd[3:].strip())
                 return str(sandbox.process.exec(cmd, cwd=self._working_directory).result)
         except Exception as exc:
-            return _error_json(f"Error in daytona_run ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in daytona_run ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
     def daytona_inspect(
         self,
@@ -276,17 +277,17 @@ class _DaytonaTools(Toolkit):
                 target = self._resolve_sandbox_path(require_non_empty(path, "path"))
                 result = sandbox.process.exec(f"cat {shlex.quote(target)}")
                 if result.exit_code != 0:
-                    return _error_json(f"Error reading file: {result.result}")
+                    return status_error_json(f"Error reading file: {result.result}")
                 return str(result.result)
             if action == "list_files":
                 target = self._resolve_sandbox_path(path) if path else self._working_directory
                 result = sandbox.process.exec(f"ls -la {shlex.quote(target)}")
                 if result.exit_code != 0:
-                    return _error_json(f"Error listing directory: {result.result}")
+                    return status_error_json(f"Error listing directory: {result.result}")
                 return f"Contents of {target}:\n{result.result}"
         except Exception as exc:
-            return _error_json(f"Error in daytona_inspect ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in daytona_inspect ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
     def daytona_files(  # noqa: PLR0911
         self,
@@ -309,18 +310,18 @@ class _DaytonaTools(Toolkit):
             target = self._resolve_sandbox_path(raw_path)
             if action == "create_file":
                 if content is None:
-                    return _error_json("Error creating file: content is required")
+                    return status_error_json("Error creating file: content is required")
                 parent = posixpath.dirname(target)
                 if parent and parent != "/":
                     mkdir_res = sandbox.process.exec(f"mkdir -p {shlex.quote(parent)}")
                     if mkdir_res.exit_code != 0:
-                        return _error_json(f"Failed to create directory: {mkdir_res.result}")
+                        return status_error_json(f"Failed to create directory: {mkdir_res.result}")
                 encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
                 write_res = sandbox.process.exec(
                     f"printf %s {shlex.quote(encoded)} | base64 -d > {shlex.quote(target)}",
                 )
                 if write_res.exit_code != 0:
-                    return _error_json(f"Failed to create file: {write_res.result}")
+                    return status_error_json(f"Failed to create file: {write_res.result}")
                 return f"File created/updated: {target}"
             if action == "delete_file":
                 check = sandbox.process.exec(
@@ -329,11 +330,11 @@ class _DaytonaTools(Toolkit):
                 flag = "-rf" if "directory" in str(check.result) else "-f"
                 rm_res = sandbox.process.exec(f"rm {flag} {shlex.quote(target)}")
                 if rm_res.exit_code != 0:
-                    return _error_json(f"Failed to delete: {rm_res.result}")
+                    return status_error_json(f"Failed to delete: {rm_res.result}")
                 return f"Deleted: {target}"
         except Exception as exc:
-            return _error_json(f"Error in daytona_files ({action}): {exc}")
-        return _error_json(f"Unsupported action: {action}")
+            return status_error_json(f"Error in daytona_files ({action}): {exc}")
+        return status_error_json(f"Unsupported action: {action}")
 
 
 @register_tool_with_metadata(

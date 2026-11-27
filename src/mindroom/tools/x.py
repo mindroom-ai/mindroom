@@ -33,11 +33,7 @@ class _XTools(Toolkit):
         include_post_metrics: bool = False,
         wait_on_rate_limit: bool = False,
     ) -> None:
-        try:
-            import tweepy
-        except ImportError as exc:
-            msg = "`tweepy` not installed. Install with `pip install tweepy`."
-            raise ImportError(msg) from exc
+        import tweepy
 
         self.bearer_token = bearer_token or None
         self.consumer_key = consumer_key or None

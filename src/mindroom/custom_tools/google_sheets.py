@@ -17,7 +17,7 @@ from mindroom.custom_tools.google_service import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.oauth.google import google_oauth_provider
-from mindroom.tools.native_helpers import restrict_actions
+from mindroom.tools.native_helpers import UNSET, restrict_actions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -33,7 +33,6 @@ logger = get_logger(__name__)
 _SERVICE_NAME = "Google Sheets"
 _SHEETS_READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 _SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-_UNSET = object()
 
 _WriteAction = Literal["create", "update", "batch_update", "duplicate"]
 _WRITE_ACTION_FIELDS: dict[str, str] = {
@@ -51,12 +50,12 @@ def _resolve_toggle(
     init_value: object,
 ) -> bool:
     """Resolve a dashboard toggle and its constructor alias, treating explicit None as falsy."""
-    if field_value is not _UNSET and init_value is not _UNSET:
+    if field_value is not UNSET and init_value is not UNSET:
         msg = f"Google Sheets received both {field_name!r} and {init_arg!r}"
         raise ValueError(msg)
-    if field_value is not _UNSET:
+    if field_value is not UNSET:
         return bool(field_value)
-    if init_value is not _UNSET:
+    if init_value is not UNSET:
         return bool(init_value)
     return True
 
@@ -104,13 +103,13 @@ class GoogleSheetsTools(GoogleApiToolkit):
         scopes: Sequence[str] | None = None,
         spreadsheet_id: str | None = None,
         spreadsheet_range: str | None = None,
-        read: object = _UNSET,
-        create: object = _UNSET,
-        update: object = _UNSET,
-        read_sheet: object = _UNSET,
-        create_sheet: object = _UNSET,
-        update_sheet: object = _UNSET,
-        create_duplicate_sheet: object = _UNSET,
+        read: object = UNSET,
+        create: object = UNSET,
+        update: object = UNSET,
+        read_sheet: object = UNSET,
+        create_sheet: object = UNSET,
+        update_sheet: object = UNSET,
+        create_duplicate_sheet: object = UNSET,
         all: bool | None = False,  # noqa: A002
         include_tools: Sequence[str] | None = None,
         exclude_tools: Sequence[str] | None = None,
@@ -123,7 +122,7 @@ class GoogleSheetsTools(GoogleApiToolkit):
         enable_read = _resolve_toggle("read", "read_sheet", read, read_sheet)
         enable_create = _resolve_toggle("create", "create_sheet", create, create_sheet)
         enable_update = _resolve_toggle("update", "update_sheet", update, update_sheet)
-        enable_duplicate = False if create_duplicate_sheet is _UNSET else bool(create_duplicate_sheet)
+        enable_duplicate = False if create_duplicate_sheet is UNSET else bool(create_duplicate_sheet)
 
         write_actions: list[str] = []
         if enable_all or enable_create:

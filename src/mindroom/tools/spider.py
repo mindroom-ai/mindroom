@@ -23,16 +23,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_spider() -> type[Any]:
-    """Import and return ``spider.Spider``, raising a helpful ImportError when absent."""
-    try:
-        from spider import Spider
-    except ImportError as exc:
-        msg = "`spider-client` not installed. Please install using `pip install spider-client`"
-        raise ImportError(msg) from exc
-    return Spider
-
-
 class _SpiderTools(Toolkit):
     """Search, scrape, and crawl websites using Spider."""
 
@@ -46,7 +36,6 @@ class _SpiderTools(Toolkit):
         enable_crawl: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_spider()
         self.max_results = max_results
         self.url = url
         self.optional_params = optional_params or {}
@@ -72,8 +61,9 @@ class _SpiderTools(Toolkit):
             The results of the search.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         try:
             num_results = self.max_results if self.max_results is not None else 5
             options = {"fetch_page_content": False, "num": num_results, **self.optional_params}
@@ -97,8 +87,9 @@ class _SpiderTools(Toolkit):
             Markdown of the webpage.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         logger.info("spider_scrape", url=url)
         try:
             options = {"return_format": "markdown", **self.optional_params}
@@ -119,8 +110,9 @@ class _SpiderTools(Toolkit):
             The results of the crawl.
 
         """
-        spider_cls = _require_spider()
-        app = spider_cls()
+        from spider import Spider
+
+        app = Spider()
         logger.info("spider_crawl", url=url)
         try:
             options = {"return_format": "markdown", "limit": 10, **self.optional_params}
@@ -171,5 +163,4 @@ class _SpiderTools(Toolkit):
 )
 def spider_tools() -> type[Toolkit]:
     """Return Spider tools for web scraping and crawling."""
-    _require_spider()
     return _SpiderTools

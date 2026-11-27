@@ -18,30 +18,13 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import restrict_actions
+from mindroom.tools.native_helpers import format_http_error, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
 
 _DISCORD_API_BASE = "https://discord.com/api/v10"
 _DiscordReadAction = Literal["list_channels", "get_channel_info", "get_channel_messages"]
-
-
-def _safe_http_error(exc: Exception, *, secret: str | None) -> str:
-    """Format an HTTP/JSON error without echoing raw bodies or credentials."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        detail = ""
-        try:
-            body = exc.response.json()
-        except ValueError:
-            body = None
-        if isinstance(body, dict) and isinstance(body.get("message"), str):
-            detail = body["message"].strip()
-        if detail and secret:
-            detail = detail.replace(secret, "[REDACTED]")
-        return f"Discord API error ({status}): {detail}" if detail else f"Discord API error ({status})"
-    return f"Discord request failed: {type(exc).__name__}"
 
 
 class _DiscordTools(Toolkit):
@@ -155,7 +138,7 @@ class _DiscordTools(Toolkit):
             data = self._request("GET", endpoint, params=params)
             return json.dumps(data, indent=2)
         except (httpx.HTTPError, ValueError) as exc:
-            return _safe_http_error(exc, secret=self.bot_token)
+            return format_http_error("Discord", exc, secrets=(self.bot_token,))
 
     @tool
     def discord_send(self, channel_id: str, message: str) -> str:
@@ -177,7 +160,7 @@ class _DiscordTools(Toolkit):
                 json_body={"content": message},
             )
         except (httpx.HTTPError, ValueError) as exc:
-            return _safe_http_error(exc, secret=self.bot_token)
+            return format_http_error("Discord", exc, secrets=(self.bot_token,))
         return f"Message sent successfully to channel {channel_id}"
 
     @tool
@@ -193,7 +176,7 @@ class _DiscordTools(Toolkit):
                 f"/channels/{quote(channel_id.strip(), safe='')}/messages/{quote(message_id.strip(), safe='')}",
             )
         except (httpx.HTTPError, ValueError) as exc:
-            return _safe_http_error(exc, secret=self.bot_token)
+            return format_http_error("Discord", exc, secrets=(self.bot_token,))
         return f"Message {message_id} deleted successfully from channel {channel_id}"
 
 

@@ -25,26 +25,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_browserbase() -> type[Any]:
-    """Import and return ``browserbase.Browserbase``, raising a helpful ImportError when absent."""
-    try:
-        from browserbase import Browserbase
-    except ImportError as exc:
-        msg = "`browserbase` not installed. Please install using `pip install browserbase`"
-        raise ImportError(msg) from exc
-    return Browserbase
-
-
-def _require_async_playwright() -> Any:  # noqa: ANN401
-    """Import and return ``playwright.async_api.async_playwright``, raising a helpful ImportError when absent."""
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        msg = "`playwright` not installed. Please install using `pip install playwright` and run `playwright install`"
-        raise ImportError(msg) from exc
-    return async_playwright
-
-
 class _BrowserbaseTools(Toolkit):
     """Navigate, screenshot, and extract content from remote Browserbase browser sessions."""
 
@@ -61,7 +41,8 @@ class _BrowserbaseTools(Toolkit):
         parse_html: bool = True,
         max_content_length: int | None = 100000,
     ) -> None:
-        browserbase_cls = _require_browserbase()
+        from browserbase import Browserbase
+
         self.parse_html = parse_html
         self.max_content_length = max_content_length
 
@@ -70,17 +51,17 @@ class _BrowserbaseTools(Toolkit):
             msg = "BROWSERBASE_API_KEY is required. Please set the BROWSERBASE_API_KEY environment variable."
             raise ValueError(msg)
 
-        self.project_id = project_id
-        if not self.project_id:
+        if not project_id:
             msg = "BROWSERBASE_PROJECT_ID is required. Please set the BROWSERBASE_PROJECT_ID environment variable."
             raise ValueError(msg)
+        self.project_id: str = project_id
 
         self.base_url = base_url
         if self.base_url:
-            self.app = browserbase_cls(api_key=self.api_key, base_url=self.base_url)
+            self.app = Browserbase(api_key=self.api_key, base_url=self.base_url)
             logger.debug("browserbase_custom_endpoint", base_url=self.base_url)
         else:
-            self.app = browserbase_cls(api_key=self.api_key)
+            self.app = Browserbase(api_key=self.api_key)
 
         self._async_playwright: Any = None
         self._async_browser: Any = None
@@ -112,7 +93,8 @@ class _BrowserbaseTools(Toolkit):
                 raise
 
     async def _initialize_browser(self, connect_url: str | None = None) -> None:
-        async_playwright = _require_async_playwright()
+        from playwright.async_api import async_playwright
+
         if connect_url:
             self._connect_url = connect_url
         elif not self._connect_url:
@@ -120,7 +102,7 @@ class _BrowserbaseTools(Toolkit):
 
         if not self._async_playwright:
             self._async_playwright = await async_playwright().start()
-            if self._async_playwright:
+            if self._async_playwright and self._connect_url:
                 self._async_browser = await self._async_playwright.chromium.connect_over_cdp(self._connect_url)
             context = self._async_browser.contexts[0] if self._async_browser else None
             if context:
@@ -299,5 +281,4 @@ class _BrowserbaseTools(Toolkit):
 )
 def browserbase_tools() -> type[Toolkit]:
     """Return Browserbase tools for browser automation and web scraping."""
-    _require_browserbase()
     return _BrowserbaseTools

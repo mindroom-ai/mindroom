@@ -23,16 +23,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_linkup() -> type[Any]:
-    """Import and return ``linkup.LinkupClient``, raising a helpful ImportError when absent."""
-    try:
-        from linkup import LinkupClient
-    except ImportError as exc:
-        msg = "`linkup-sdk` not installed. Please install using `pip install linkup-sdk`"
-        raise ImportError(msg) from exc
-    return LinkupClient
-
-
 class _LinkupTools(Toolkit):
     """Search the web using the Linkup API."""
 
@@ -44,12 +34,13 @@ class _LinkupTools(Toolkit):
         enable_web_search_with_linkup: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        linkup_client_cls = _require_linkup()
+        from linkup import LinkupClient
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("linkup_api_key_missing")
 
-        self.linkup = linkup_client_cls(api_key=self.api_key)
+        self.linkup: Any = LinkupClient(api_key=self.api_key)
         self.depth = depth
         self.output_type = output_type
 
@@ -135,5 +126,4 @@ class _LinkupTools(Toolkit):
 )
 def linkup_tools() -> type[Toolkit]:
     """Return Linkup tools for web search."""
-    _require_linkup()
     return _LinkupTools

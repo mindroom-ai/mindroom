@@ -24,22 +24,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_scrapegraph() -> tuple[type[Any], type[Any], type[Any], type[Any], type[Any]]:
-    """Import and return ScrapeGraphAI SDK classes, raising a helpful ImportError when absent."""
-    try:
-        from scrapegraph_py import (
-            FetchConfig,
-            HtmlFormatConfig,
-            JsonFormatConfig,
-            MarkdownFormatConfig,
-            ScrapeGraphAI,
-        )
-    except ImportError as exc:
-        msg = "`scrapegraph-py` not installed. Please install using `pip install scrapegraph-py`"
-        raise ImportError(msg) from exc
-    return FetchConfig, HtmlFormatConfig, JsonFormatConfig, MarkdownFormatConfig, ScrapeGraphAI
-
-
 class _ScrapeGraphTools(Toolkit):
     """Web scraping, structured extraction, search, and crawl via the ScrapeGraphAI API."""
 
@@ -57,12 +41,13 @@ class _ScrapeGraphTools(Toolkit):
         crawl_max_wait: int = 180,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _, _, _, _, scrapegraph_cls = _require_scrapegraph()
+        from scrapegraph_py import ScrapeGraphAI
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("scrapegraph_api_key_missing")
 
-        self.client = scrapegraph_cls(api_key=self.api_key)
+        self.client = ScrapeGraphAI(api_key=self.api_key)
         self.render_heavy_js = render_heavy_js
         self.headers = headers
         self.crawl_poll_interval = crawl_poll_interval
@@ -83,13 +68,14 @@ class _ScrapeGraphTools(Toolkit):
         super().__init__(name="scrapegraph_tools", tools=tools)
 
     def _fetch_config(self) -> Any:  # noqa: ANN401
-        fetch_config_cls, _, _, _, _ = _require_scrapegraph()
+        from scrapegraph_py import FetchConfig
+
         config_kwargs: dict[str, Any] = {}
         if self.render_heavy_js:
             config_kwargs["mode"] = "js"
         if self.headers:
             config_kwargs["headers"] = self.headers
-        return fetch_config_cls(**config_kwargs) if config_kwargs else None
+        return FetchConfig(**config_kwargs) if config_kwargs else None
 
     def smartscraper(self, url: str, prompt: str) -> str:
         """Extract structured data from a webpage using an AI prompt.
@@ -123,11 +109,12 @@ class _ScrapeGraphTools(Toolkit):
 
         """
         try:
-            _, _, _, markdown_format_cls, _ = _require_scrapegraph()
+            from scrapegraph_py import MarkdownFormatConfig
+
             logger.debug("scrapegraph_markdownify", url=url)
             response = self.client.scrape(
                 url,
-                formats=[markdown_format_cls()],
+                formats=[MarkdownFormatConfig()],
                 fetch_config=self._fetch_config(),
             )
             if response.status != "success" or response.data is None:
@@ -182,11 +169,12 @@ class _ScrapeGraphTools(Toolkit):
 
         """
         try:
-            _, _, json_format_cls, _, _ = _require_scrapegraph()
+            from scrapegraph_py import JsonFormatConfig
+
             logger.debug("scrapegraph_crawl_start", url=url)
             start_response = self.client.crawl.start(
                 url,
-                formats=[json_format_cls(prompt=prompt, schema=schema)],
+                formats=[JsonFormatConfig(prompt=prompt, schema=schema)],
                 max_depth=max_depth,
                 max_pages=max_pages,
                 fetch_config=self._fetch_config(),
@@ -221,11 +209,12 @@ class _ScrapeGraphTools(Toolkit):
 
         """
         try:
-            _, html_format_cls, _, _, _ = _require_scrapegraph()
+            from scrapegraph_py import HtmlFormatConfig
+
             logger.debug("scrapegraph_scrape", url=url)
             response = self.client.scrape(
                 url,
-                formats=[html_format_cls()],
+                formats=[HtmlFormatConfig()],
                 fetch_config=self._fetch_config(),
             )
             if response.status != "success" or response.data is None:
@@ -282,5 +271,4 @@ class _ScrapeGraphTools(Toolkit):
 )
 def scrapegraph_tools() -> type[Toolkit]:
     """Return ScrapeGraph tools for web data extraction."""
-    _require_scrapegraph()
     return _ScrapeGraphTools

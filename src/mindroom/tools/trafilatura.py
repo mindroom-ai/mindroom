@@ -55,14 +55,11 @@ class _TrafilaturaImports(NamedTuple):
 
 def _require_trafilatura() -> _TrafilaturaImports:
     """Import and return the Trafilatura functions and settings needed by the toolkit."""
-    try:
-        from trafilatura import extract, extract_metadata, html2txt
-        from trafilatura.downloads import USER_AGENT, Response
-        from trafilatura.meta import reset_caches
-        from trafilatura.settings import DEFAULT_CONFIG
-    except ImportError as exc:
-        msg = "`trafilatura` not installed. Please install using `pip install trafilatura`"
-        raise ImportError(msg) from exc
+    from trafilatura import extract, extract_metadata, html2txt
+    from trafilatura.downloads import USER_AGENT, Response
+    from trafilatura.meta import reset_caches
+    from trafilatura.settings import DEFAULT_CONFIG
+
     return _TrafilaturaImports(
         extract=extract,
         extract_metadata=extract_metadata,
@@ -245,7 +242,6 @@ class _TrafilaturaTools(Toolkit):
         enable_crawl_website: bool = True,
         all: bool = False,  # noqa: A002
     ) -> None:
-        _require_trafilatura()
         _install_server_fetch_guard()
 
         self.output_format = output_format
@@ -581,6 +577,5 @@ class _TrafilaturaTools(Toolkit):
 )
 def trafilatura_tools() -> type[Toolkit]:
     """Return Trafilatura tools whose downloads follow the server-fetch policy within one time limit per call."""
-    _require_trafilatura()
     _install_server_fetch_guard()
     return _TrafilaturaTools

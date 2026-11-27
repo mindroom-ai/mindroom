@@ -28,17 +28,6 @@ _ASIN_LEN = 10
 _MAX_PARSED_HTML_LEN = 1000
 
 
-def _require_oxylabs() -> tuple[type[Any], Any]:
-    """Import and return Oxylabs SDK client and render enum, raising a helpful ImportError when absent."""
-    try:
-        from oxylabs import RealtimeClient
-        from oxylabs.utils.types import render
-    except ImportError as exc:
-        msg = "Oxylabs SDK not found. Please install it with: pip install oxylabs"
-        raise ImportError(msg) from exc
-    return RealtimeClient, render
-
-
 def _extract_google_results(result: Any) -> list[dict[str, Any]]:  # noqa: ANN401
     organic_results: list[dict[str, Any]] = []
     if getattr(result, "content_parsed", None):
@@ -142,7 +131,8 @@ class _OxylabsTools(Toolkit):
         password: str | None = None,
         markdown: bool = False,
     ) -> None:
-        realtime_client_cls, _ = _require_oxylabs()
+        from oxylabs import RealtimeClient
+
         self.username = username
         self.password = password
         self.markdown = markdown
@@ -154,7 +144,7 @@ class _OxylabsTools(Toolkit):
             )
             raise ValueError(msg)
 
-        self.client = realtime_client_cls(self.username, self.password)
+        self.client = RealtimeClient(self.username, self.password)
         tools: list[Callable[..., Any]] = [
             self.search_google,
             self.get_amazon_product,
@@ -277,9 +267,10 @@ class _OxylabsTools(Toolkit):
                 f"Invalid URL format: {cleaned_url}. Must start with http:// or https://",
             )
         try:
-            _, render_enum = _require_oxylabs()
+            from oxylabs.utils.types import render
+
             use_markdown = markdown if markdown is not None else self.markdown
-            render_arg = render_enum.HTML if render_javascript else None
+            render_arg = render.HTML if render_javascript else None
             if use_markdown:
                 response = self.client.universal.scrape_url(url=cleaned_url, render=render_arg, markdown=True)
             else:
@@ -363,5 +354,4 @@ class _OxylabsTools(Toolkit):
 )
 def oxylabs_tools() -> type[Toolkit]:
     """Return Oxylabs tools for web scraping and data extraction."""
-    _require_oxylabs()
     return _OxylabsTools

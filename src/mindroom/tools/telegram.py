@@ -93,13 +93,9 @@ class _TelegramTools(Toolkit):
         enable_get_file: bool = False,
         all: bool = False,  # noqa: A002
     ) -> None:
-        try:
-            from telebot import TeleBot
-            from telebot.apihelper import ApiTelegramException
-            from telebot.types import ReactionTypeEmoji
-        except ImportError as exc:
-            msg = "`pyTelegramBotAPI` not installed. Install with `pip install pytelegrambotapi`."
-            raise ImportError(msg) from exc
+        from telebot import TeleBot
+        from telebot.apihelper import ApiTelegramException
+        from telebot.types import ReactionTypeEmoji
 
         if not token:
             msg = "TELEGRAM_TOKEN not set. Please set the TELEGRAM_TOKEN environment variable."

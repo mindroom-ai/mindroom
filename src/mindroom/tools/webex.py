@@ -26,12 +26,8 @@ class _WebexTools(Toolkit):
         all: bool = False,  # noqa: A002
         access_token: str | None = None,
     ) -> None:
-        try:
-            from webexpythonsdk import WebexAPI
-            from webexpythonsdk.exceptions import ApiError
-        except ImportError as exc:
-            msg = "Webex tools require `webexpythonsdk`. Install with `pip install webexpythonsdk`."
-            raise ImportError(msg) from exc
+        from webexpythonsdk import WebexAPI
+        from webexpythonsdk.exceptions import ApiError
 
         if not access_token:
             msg = "Webex access token is not set. Please set the WEBEX_ACCESS_TOKEN environment variable."

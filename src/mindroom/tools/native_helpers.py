@@ -9,6 +9,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import httpx
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
@@ -203,6 +205,40 @@ def json_dumps(payload: Any) -> str:  # noqa: ANN401
 def error_json(message: str, **extra: Any) -> str:  # noqa: ANN401
     """Return a JSON error payload."""
     return json_dumps({"error": message, **extra})
+
+
+def status_error_json(message: str) -> str:
+    """Return a JSON status/message error payload."""
+    return json.dumps({"status": "error", "message": message})
+
+
+def format_http_error(
+    service: str,
+    exc: Exception,
+    *,
+    secrets: Iterable[str | None] = (),
+    detail_path: tuple[str, ...] = ("message",),
+) -> str:
+    """Format an HTTP/JSON error with optional nested detail extraction and secret redaction."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        detail = ""
+        try:
+            body: Any = exc.response.json()
+        except ValueError:
+            body = None
+        for key in detail_path:
+            if not isinstance(body, dict):
+                body = None
+                break
+            body = body.get(key)
+        if isinstance(body, str):
+            detail = body.strip()
+            for secret in secrets:
+                if secret:
+                    detail = detail.replace(secret, "[REDACTED]")
+        return f"{service} API error ({status}): {detail}" if detail else f"{service} API error ({status})"
+    return f"{service} request failed: {type(exc).__name__}"
 
 
 def prepare_python_code(code: str) -> str:

@@ -23,16 +23,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_tavily() -> type[Any]:
-    """Import and return ``tavily.TavilyClient``, raising a helpful ImportError when absent."""
-    try:
-        from tavily import TavilyClient
-    except ImportError as exc:
-        msg = "`tavily-python` not installed. Please install using `pip install tavily-python`"
-        raise ImportError(msg) from exc
-    return TavilyClient
-
-
 class _TavilyTools(Toolkit):
     """Search the web and extract URL content using the Tavily API."""
 
@@ -65,13 +55,14 @@ class _TavilyTools(Toolkit):
         chunks_per_source: int | None = None,
         search_params: dict[str, Any] | None = None,
     ) -> None:
-        tavily_client_cls = _require_tavily()
+        from tavily import TavilyClient
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("tavily_api_key_missing")
         self.api_base_url = api_base_url
 
-        self.client = tavily_client_cls(api_key=self.api_key, api_base_url=self.api_base_url)
+        self.client = TavilyClient(api_key=self.api_key, api_base_url=self.api_base_url)
         self.search_depth = search_depth
         self.extract_depth = extract_depth
         self.max_tokens = max_tokens
@@ -419,5 +410,4 @@ class _TavilyTools(Toolkit):
 )
 def tavily_tools() -> type[Toolkit]:
     """Return Tavily tools for real-time web search."""
-    _require_tavily()
     return _TavilyTools

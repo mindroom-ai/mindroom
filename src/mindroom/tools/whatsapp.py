@@ -19,7 +19,7 @@ from mindroom.tool_system.declarations import (
     bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import restrict_actions
+from mindroom.tools.native_helpers import error_json, format_http_error, restrict_actions
 
 if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
@@ -303,21 +303,9 @@ class _WhatsAppTools(Toolkit):
         return function
 
     def _safe_error(self, exc: Exception) -> str:
-        if isinstance(exc, httpx.HTTPStatusError):
-            status = exc.response.status_code
-            detail = ""
-            try:
-                body = exc.response.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict) and isinstance(body.get("error"), dict):
-                raw_msg = body["error"].get("message")
-                if isinstance(raw_msg, str):
-                    detail = raw_msg.strip().replace(self.access_token, "[REDACTED]")
-            return json.dumps(
-                {"error": f"WhatsApp API error ({status}): {detail}" if detail else f"WhatsApp API error ({status})"},
-            )
-        return json.dumps({"error": f"WhatsApp request failed: {type(exc).__name__}"})
+        return error_json(
+            format_http_error("WhatsApp", exc, secrets=(self.access_token,), detail_path=("error", "message")),
+        )
 
     def _send_message(self, data: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}/{quote(self.version, safe='')}/{quote(self.phone_number_id, safe='')}/messages"

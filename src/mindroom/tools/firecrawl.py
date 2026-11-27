@@ -23,17 +23,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _require_firecrawl() -> tuple[type[Any], type[Any]]:
-    """Import and return Firecrawl SDK classes, raising a helpful ImportError when absent."""
-    try:
-        from firecrawl import FirecrawlApp
-        from firecrawl.types import ScrapeOptions
-    except ImportError as exc:
-        msg = "`firecrawl-py` not installed. Please install using `pip install firecrawl-py`"
-        raise ImportError(msg) from exc
-    return FirecrawlApp, ScrapeOptions
-
-
 def _serialize(value: Any) -> str:  # noqa: ANN401
     """Serialize a Firecrawl response or Pydantic model to JSON."""
     payload = value.model_dump() if hasattr(value, "model_dump") else value
@@ -57,7 +46,8 @@ class _FirecrawlTools(Toolkit):
         search_params: dict[str, Any] | None = None,
         api_url: str | None = "https://api.firecrawl.dev",
     ) -> None:
-        firecrawl_app_cls, _ = _require_firecrawl()
+        from firecrawl import FirecrawlApp
+
         self.api_key = api_key
         if not self.api_key:
             logger.error("firecrawl_api_key_missing")
@@ -65,7 +55,8 @@ class _FirecrawlTools(Toolkit):
         self.formats = formats
         self.limit = limit
         self.poll_interval = poll_interval
-        self.app = firecrawl_app_cls(api_key=self.api_key, api_url=api_url)
+        firecrawl_app: Any = FirecrawlApp
+        self.app: Any = firecrawl_app(api_key=self.api_key, api_url=api_url)
         self.search_params = search_params
 
         tools: list[Callable[..., Any]] = []
@@ -104,13 +95,15 @@ class _FirecrawlTools(Toolkit):
             The results of the crawling.
 
         """
-        _, scrape_options_cls = _require_firecrawl()
+        from firecrawl.types import ScrapeOptions
+
         params: dict[str, Any] = {}
         if limit is not None:
             params["limit"] = limit
         elif self.limit is not None:
             params["limit"] = self.limit
         if self.formats:
+            scrape_options_cls: Any = ScrapeOptions
             params["scrape_options"] = scrape_options_cls(formats=self.formats)
         params["poll_interval"] = self.poll_interval
 
@@ -135,11 +128,13 @@ class _FirecrawlTools(Toolkit):
             limit: The maximum number of results to return. Defaults to the limit set on the toolkit.
 
         """
-        _, scrape_options_cls = _require_firecrawl()
+        from firecrawl.types import ScrapeOptions
+
         params: dict[str, Any] = {}
         if self.limit is not None:
             params["limit"] = self.limit
         if self.formats:
+            scrape_options_cls: Any = ScrapeOptions
             params["scrape_options"] = scrape_options_cls(formats=self.formats)
         if self.search_params:
             params.update(self.search_params)
@@ -214,5 +209,4 @@ class _FirecrawlTools(Toolkit):
 )
 def firecrawl_tools() -> type[Toolkit]:
     """Return Firecrawl tools for web scraping and crawling."""
-    _require_firecrawl()
     return _FirecrawlTools

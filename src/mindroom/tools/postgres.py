@@ -2,29 +2,28 @@
 
 from __future__ import annotations
 
-import csv
-from contextlib import suppress
-from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, LiteralString
 
-from mindroom.logging_config import get_logger
-from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.libpq_env import reject_ambient_libpq_env
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tools.native_helpers import format_tabular_rows, require_non_empty
+from mindroom.tools._sql_cursor import SqlCursorToolkit, SqlInspectAction
+from mindroom.tools.native_helpers import require_non_empty
 
-logger = get_logger(__name__)
-
-_PostgresInspectAction = Literal["show_tables", "describe_table", "summarize_table", "inspect_query"]
-_NUMERIC_TYPES = ("integer", "numeric", "real", "double precision", "bigint", "smallint")
-_TEXT_TYPES = ("char", "text", "uuid")
+if TYPE_CHECKING:
+    from mindroom.tool_system.authoring import Toolkit
 
 
-class _PostgresTools(Toolkit):
+class _PostgresTools(SqlCursorToolkit):
     """Read-only PostgreSQL inspection, querying, and CSV table export."""
 
-    requires_connect = True
+    _db_label = "PostgreSQL"
+    _inspect_tool_name = "postgres_inspect"
+    _text_stats_sql: LiteralString = (
+        "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
+        "COUNT(DISTINCT {col}) AS unique_values, AVG(LENGTH({col}::text)) AS avg_length "
+        "FROM {tbl};"
+    )
 
     def __init__(
         self,
@@ -36,18 +35,16 @@ class _PostgresTools(Toolkit):
         port: int | None = 5432,
         table_schema: str = "public",
     ) -> None:
-        self._connection: Any | None = connection
-        self._owns_connection: bool = False
         self.db_name = db_name
         self.user = user
         self.password = password
         self.host = host
         self.port = port
-        self.table_schema = table_schema or "public"
-
         super().__init__(
             name="postgres_tools",
             tools=[self.postgres_inspect, self.run_query, self.export_table_to_path],
+            table_schema=table_schema,
+            connection=connection,
         )
 
     def _open_connection(self) -> Any:  # noqa: ANN401 - psycopg.Connection is an optional runtime import
@@ -91,110 +88,20 @@ class _PostgresTools(Toolkit):
         connection.commit()
         return connection
 
-    def _ensure_connection(self) -> Any:  # noqa: ANN401 - optional psycopg connection
-        if self._connection is None or getattr(self._connection, "closed", False):
-            self._connection = self._open_connection()
-            self._owns_connection = True
-        return self._connection
+    def _empty_result_message(self, cursor: Any, /) -> str:  # noqa: ANN401 - psycopg cursor
+        return cursor.statusmessage or "Query executed successfully with no output."
 
-    def connect(self) -> None:
-        """Open the PostgreSQL connection for the run."""
-        self._ensure_connection()
-
-    def close(self) -> None:
-        """Close and clear a toolkit-owned PostgreSQL connection."""
-        connection = self._connection
-        owns = self._owns_connection
-        self._connection = None
-        self._owns_connection = False
-        if owns and connection is not None and not getattr(connection, "closed", False):
-            with suppress(Exception):
-                connection.close()
-
-    def _run_db_query(self, query: str, params: tuple[object, ...] | None = None) -> str:
-        try:
-            connection = self._ensure_connection()
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, params)
-                    if cursor.description is None:
-                        return cursor.statusmessage or "Query executed successfully with no output."
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = cursor.fetchall()
-                    if not rows:
-                        return f"Query returned no results.\nColumns: {', '.join(columns)}"
-                    row_values = [tuple(row.values()) if isinstance(row, dict) else tuple(row) for row in rows]
-                    return format_tabular_rows(columns, row_values)
-            except Exception:
-                if not getattr(connection, "closed", False):
-                    with suppress(Exception):
-                        connection.rollback()
-                raise
-        except Exception as exc:
-            logger.exception("Error executing PostgreSQL query")
-            return f"Error executing query: {exc}"
-
-    def _summarize_table(self, table: str) -> str:
+    def _format_sql_query(self, template: LiteralString, *, table: str, col: str | None = None) -> Any:  # noqa: ANN401
         from psycopg import sql
 
-        connection: Any | None = None
-        try:
-            connection = self._ensure_connection()
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT column_name, data_type FROM information_schema.columns "
-                    "WHERE table_schema = %s AND table_name = %s;",
-                    (self.table_schema, table),
-                )
-                columns = cursor.fetchall()
-                if not columns:
-                    return f"Error: Table '{table}' not found in schema '{self.table_schema}'."
-
-                summary_parts = [f"Summary for table: {table}\n"]
-                table_ident = sql.Identifier(self.table_schema, table)
-                for col in columns:
-                    col_name = col["column_name"] if isinstance(col, dict) else col[0]
-                    data_type = col["data_type"] if isinstance(col, dict) else col[1]
-                    col_ident = sql.Identifier(col_name)
-                    if any(token in data_type for token in _NUMERIC_TYPES):
-                        stats_query = sql.SQL(
-                            "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
-                            "MIN({col}) AS min, MAX({col}) AS max, AVG({col}) AS average, "
-                            "STDDEV({col}) AS std_deviation FROM {tbl};",
-                        ).format(col=col_ident, tbl=table_ident)
-                    elif any(token in data_type for token in _TEXT_TYPES):
-                        stats_query = sql.SQL(
-                            "SELECT COUNT(*) AS total_rows, COUNT({col}) AS non_null_rows, "
-                            "COUNT(DISTINCT {col}) AS unique_values, AVG(LENGTH({col}::text)) AS avg_length "
-                            "FROM {tbl};",
-                        ).format(col=col_ident, tbl=table_ident)
-                    else:
-                        continue
-                    cursor.execute(stats_query)
-                    stats = cursor.fetchone()
-                    summary_parts.append(f"\n--- Column: {col_name} (Type: {data_type}) ---")
-                    if stats is None:
-                        summary_parts.append("  No statistics available")
-                        continue
-                    items = (
-                        stats.items()
-                        if isinstance(stats, dict)
-                        else zip([desc[0] for desc in cursor.description], stats, strict=True)
-                    )
-                    for key, value in items:
-                        rendered = f"{value:.2f}" if isinstance(value, float) else str(value)
-                        summary_parts.append(f"  {key}: {rendered}")
-                return "\n".join(summary_parts)
-        except Exception as exc:
-            if connection is not None and not getattr(connection, "closed", False):
-                with suppress(Exception):
-                    connection.rollback()
-            logger.exception("Error summarizing PostgreSQL table", table=table)
-            return f"Error summarizing table: {exc}"
+        parts: dict[str, Any] = {"tbl": sql.Identifier(self.table_schema, table)}
+        if col is not None:
+            parts["col"] = sql.Identifier(col)
+        return sql.SQL(template).format(**parts)
 
     def postgres_inspect(
         self,
-        action: _PostgresInspectAction,
+        action: SqlInspectAction,
         table: str | None = None,
         query: str | None = None,
     ) -> str:
@@ -206,27 +113,7 @@ class _PostgresTools(Toolkit):
         - `summarize_table`: compute per-column statistics for `table`.
         - `inspect_query`: return `EXPLAIN` execution plan for `query`.
         """
-        try:
-            if action == "show_tables":
-                return self._run_db_query(
-                    "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;",
-                    (self.table_schema,),
-                )
-            if action == "describe_table":
-                table_name = require_non_empty(table, "table")
-                return self._run_db_query(
-                    "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-                    "WHERE table_schema = %s AND table_name = %s;",
-                    (self.table_schema, table_name),
-                )
-            if action == "summarize_table":
-                return self._summarize_table(require_non_empty(table, "table"))
-            if action == "inspect_query":
-                stmt = require_non_empty(require_non_empty(query, "query").rstrip(";"), "query")
-                return self._run_db_query(f"EXPLAIN {stmt}")
-        except Exception as exc:
-            return f"Error in postgres_inspect ({action}): {exc}"
-        return f"Unsupported action: {action}"
+        return self._inspect_db(action, table=table, query=query)
 
     def run_query(self, query: str) -> str:
         """Run a read-only SQL query against PostgreSQL and return CSV-formatted rows."""
@@ -234,30 +121,7 @@ class _PostgresTools(Toolkit):
 
     def export_table_to_path(self, table: str, path: str) -> str:
         """Export a PostgreSQL table as a local CSV file at `path`."""
-        connection: Any | None = None
-        try:
-            from psycopg import sql
-
-            table_name = require_non_empty(table, "table")
-            target_path = Path(require_non_empty(path, "path"))
-            stmt = sql.SQL("SELECT * FROM {tbl};").format(tbl=sql.Identifier(self.table_schema, table_name))
-            connection = self._ensure_connection()
-            with connection.cursor() as cursor:
-                cursor.execute(stmt)
-                if cursor.description is None:
-                    return f"Error: Query returned no description for table '{table_name}'."
-                columns = [desc[0] for desc in cursor.description]
-                with target_path.open("w", newline="", encoding="utf-8") as handle:
-                    writer = csv.writer(handle)
-                    writer.writerow(columns)
-                    writer.writerows(row.values() if isinstance(row, dict) else row for row in cursor)
-        except Exception as exc:
-            if connection is not None and not getattr(connection, "closed", False):
-                with suppress(Exception):
-                    connection.rollback()
-            logger.exception("Error exporting PostgreSQL table", table=table, path=path)
-            return f"Error exporting table: {exc}"
-        return f"Successfully exported table '{table_name}' to '{target_path}'."
+        return self._export_table(table, path)
 
 
 @register_tool_with_metadata(
