@@ -371,7 +371,7 @@ async def execute_tool_call(
 def tool_outcome(
     value: ToolValue,
     *,
-    stop_after_call: bool,
+    stop_after_call: bool = False,
     is_error: bool,
     counts_as_tool_failure: bool = True,
     saved_output: dict[str, object] | None = None,

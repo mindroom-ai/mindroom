@@ -721,3 +721,41 @@ async def test_failed_managed_shell_job_wait_redirect(
         assert (auto.tools[0].is_error, not auto.failing_tools, auto_r["status"]) == (True, True, "error")
         assert "16 byte auto-save limit" in auto_r["error"]
         assert not (await lookup(case.runtime, large_id, owner=case.owner, depth=0)).consumed
+
+
+async def test_failed_auto_saved_shell_job_wait_redirect_writes_json_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiting with mindroom_output_path on a failed auto-saved shell job writes valid JSON preserving error flags."""
+    async with _output_agent(tmp_path, monkeypatch, tools=("shell",)) as case:
+
+        async def turn(cid: str, fn: str, **kw: object) -> RunRecord:
+            rec, _, _ = await case.owned_turn(calls(tool_call(fn, cid, **kw)), answer("ok"), run_id=cid)
+            return rec
+
+        cmd = ["sh", "-c", "head -c 60000 /dev/zero | tr '\\0' x >&2; printf '\\nbuild-fail\\n' >&2; exit 7"]
+        start = await turn("bg-auto-start", "run_shell_command", args=cmd, background_after=0)
+        assert start.tools
+        job_id = json.loads(str(start.tools[0].result))["job_id"]
+        ready = await case.runtime.wait(job_id, owner=case.owner, depth=0)
+        assert ready.job.status == "failed"
+        await case.runtime.release_wait(job_id, ready.claim)
+
+        wait_rec = await turn("bg-auto-wait", "job", action="wait", job_id=job_id, mindroom_output_path="receipt.json")
+        assert wait_rec.tools
+        assert (wait_rec.tools[0].is_error, not wait_rec.failing_tools) == (True, True)
+        wait_receipt = literal_eval(str(wait_rec.tools[0].result))["mindroom_tool_output"]
+        assert (wait_receipt["status"], wait_receipt["path"], wait_receipt["format"]) == (
+            "saved_to_file",
+            "receipt.json",
+            "json",
+        )
+        saved_receipt = json.loads((case.workspace / "receipt.json").read_text(encoding="utf-8"))[
+            "mindroom_tool_output"
+        ]
+        assert saved_receipt["status"] == "saved_to_file"
+        original_log = (case.workspace / saved_receipt["path"]).read_text(encoding="utf-8")
+        assert "Exit code 7" in original_log
+        assert "build-fail" in original_log
+        assert (await lookup(case.runtime, job_id, owner=case.owner, depth=0)).consumed

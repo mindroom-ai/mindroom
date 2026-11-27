@@ -10229,6 +10229,8 @@ depends_on = [
     "mindroom.tool_jobs.execution_authority",
     "mindroom.tool_jobs.results",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
     "mindroom.session_storage.lanes",
     "mindroom.delegation.cost",

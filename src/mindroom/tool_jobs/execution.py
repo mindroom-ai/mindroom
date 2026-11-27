@@ -605,6 +605,8 @@ def _saved_outcome(result: CallResult, baseline: dict[str, Any], state: dict[str
         if failure is None
         else replace(result.value, content=failure)
         if isinstance(result.value, ToolValue) and any(result.value.media())
+        else result.value.saved_output
+        if isinstance(result.value, ToolOutcome) and result.value.saved_output is not None
         else None
     )
     try:
