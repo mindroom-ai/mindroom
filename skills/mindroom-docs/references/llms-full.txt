@@ -11795,7 +11795,7 @@ A command with `timeout` <= 120 that is still running after `timeout` seconds is
 When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) (with `background_after` unset) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
 A managed top-level job still saves `mindroom_output_path` when it completes; a command stopped at its timeout or backgrounded in the current turn saves no file.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
-A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
+A command that exits non-zero or stops at its timeout returns an error result, so its job ends `failed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` or `Stopped after <timeout>s.` line (or, with `mindroom_output_path`, the output-file receipt), and `job(action="wait")` / `job(action="collect")` still deliver that full output.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
 For how stopping a response and worker restarts affect running commands, see [Stopping and background commands](https://docs.mindroom.chat/deployment/sandbox-proxy/#stopping-and-background-commands).
 
@@ -22305,8 +22305,8 @@ async def check_for_injection(ctx: ToolResultTransformContext) -> str | None:
 - `ctx.result` is the text the model would read for the result.
   A hook returns a `str` to replace it or `None` to keep it.
   Hooks run one after another in priority order, and each sees the text the hook before it returned.
-- The hooks run only for a call that returned a result, not for one that raised, answered with a failed `ToolOutcome`, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
-  Failure text, such as the text of an MCP server's `isError` result, is not checked.
+- The hooks run for every call that returned a result, including tool-returned failed `ToolOutcome`s (such as failed shell commands), not for one that raised, raised `OAuthConnectionRequired`, or was declined, denied, or stopped before it ran.
+  Raised failure text, such as an unhandled exception or an MCP server's `isError` exception, is not checked.
 - What the hooks leave is what the model, the reply's record of the call (which an interrupted reply replays to its next attempt), the tool-call log, and `tool:after_call` hooks read.
   The hooks run after the call's shell commands, outside the environment they had, on the result with given secrets masked.
   A Stop while a hook runs leaves no result recorded, even when the hook catches it.

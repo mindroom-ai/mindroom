@@ -25,6 +25,7 @@ from mindroom.shell.output_capture import format_shell_completion
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from tests.test_workers_run_control import (
@@ -117,7 +118,11 @@ async def test_item7_program_that_cannot_start_exits_as_a_shell_reports_it(
     (tmp_path / "not-executable.txt").write_text("hello\n")
     program = program.format(tmp_path=tmp_path)
     shell_result = await _shell_entrypoint(tmp_path, monkeypatch)([program], worker="w1")
-    assert shell_result == format_shell_completion("", f"{program}: {reason}", return_code=exit_code)
+    assert shell_result == ToolOutcome(
+        content=format_shell_completion("", f"{program}: {reason}", return_code=exit_code),
+        is_error=True,
+        counts_as_tool_failure=False,
+    )
 
     said = f"{program}: {reason}\n"
     _cli_with_stream(monkeypatch, command_frames(stderr=said.encode(), code=exit_code, header="[worker: w1]"))

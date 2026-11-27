@@ -250,6 +250,26 @@ def test_tool_failures_count_once_per_batch_until_the_tool_succeeds() -> None:
     assert failing == {}
 
 
+def test_non_counting_tool_error_clears_failure_streak_and_stays_transient() -> None:
+    failing = {"run_shell_command": FailingTool(failures=3, last_error="refused")}
+    shell_exit = ToolExecution(
+        tool_call_id="c1",
+        tool_name="run_shell_command",
+        is_error=True,
+        result="Exit code 1",
+        counts_as_tool_failure=False,
+    )
+
+    count_tool_failures(failing, [shell_exit])
+
+    assert failing == {}
+    stored = shell_exit.to_dict()
+    assert "counts_as_tool_failure" not in stored
+    reloaded = ToolExecution.from_dict(stored)
+    assert reloaded == shell_exit
+    assert reloaded.counts_as_tool_failure is True
+
+
 def test_a_failing_tool_keeps_its_last_error_redacted_and_cut_for_the_room_to_read() -> None:
     url = "https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret"
     failing: dict[str, FailingTool] = {}

@@ -55,7 +55,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
-from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
@@ -562,7 +562,7 @@ class ScriptToolBroker:
             if run.workflow_run_id is not None:
                 # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
                 await hold("before_receipt")
-            if not result.succeeded:
+            if not result.succeeded and not _shell_exit_completes(run, call, result, metadata):
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
                     "message": sanitize_failure_text(result.failure_text),
@@ -986,6 +986,23 @@ def _launch_function_owners(run: ScriptRunRecord) -> dict[str, frozenset[str]]:
     for grant in run.grants:
         owners.setdefault(grant.function_name, set()).add(grant.toolkit_name)
     return {function_name: frozenset(toolkit_owners) for function_name, toolkit_owners in owners.items()}
+
+
+_SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
+
+
+def _shell_exit_completes(
+    run: ScriptRunRecord,
+    call: ScriptCallRecord,
+    result: CallResult,
+    metadata: dict[str, object] | None,
+) -> bool:
+    """Return whether a failed shell outcome settles as COMPLETED under plain-script or workflow contracts."""
+    value = result.value
+    if call.grant != _SHELL_COMMAND or not isinstance(value, ToolOutcome) or value.counts_as_tool_failure:
+        return False
+    code = (metadata or {}).get("exit_code")
+    return run.workflow_run_id is None or (isinstance(code, int) and not isinstance(code, bool))
 
 
 def _strict_json_result(result: object) -> object:
