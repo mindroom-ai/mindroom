@@ -943,7 +943,7 @@ def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.Mon
         proxy_url="http://sandbox-runner:8765",
         proxy_token=_TEST_AUTH_TOKEN,
         execution_mode="selective",
-        proxy_tools={"calculator"},
+        proxy_tools={"filesystem"},
         credential_policy={},
     )
     monkeypatch.setattr(
@@ -952,26 +952,25 @@ def test_sandbox_proxy_schema_keeps_mindroom_output_path(monkeypatch: pytest.Mon
     )
 
     tool = get_tool_by_name(
-        "calculator",
+        "filesystem",
         runtime_paths,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    function = toolkit_function(tool, "add")
+    function = toolkit_function(tool, "grep")
     assert function is not None
 
     output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
-    assert output_schema["description"].startswith("Optional")
-    assert output_schema["default"] is None
+    assert output_schema == {"anyOf": [{"type": "string"}, {"type": "null"}]}
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
-    entrypoint = blocking_entrypoint(tool, "add")
+    entrypoint = blocking_entrypoint(tool, "grep")
 
-    result = entrypoint(1, 2, mindroom_output_path="tool-results/add.json")
+    result = entrypoint("needle", mindroom_output_path="tool-results/grep.txt")
 
     assert result == "sandbox-result"
-    assert captured["json"]["args"] == [1, 2]
-    assert captured["json"]["kwargs"] == {OUTPUT_PATH_ARGUMENT: "tool-results/add.json"}
+    assert captured["json"]["args"] == ["needle"]
+    assert captured["json"]["kwargs"] == {OUTPUT_PATH_ARGUMENT: "tool-results/grep.txt"}
 
 
 def test_static_proxy_payload_carries_agent_identity_for_output_redirect(

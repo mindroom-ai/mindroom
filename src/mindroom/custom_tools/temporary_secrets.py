@@ -55,6 +55,8 @@ _EXPIRED_NOTE = (
 class TemporarySecretsTools(Toolkit):
     """Tool that asks the user for a secret this agent's shell commands receive for a limited time."""
 
+    offer_output_path = False
+
     def __init__(self, *, runtime_paths: RuntimePaths) -> None:
         self._runtime_paths = runtime_paths
         super().__init__(name="temporary_secrets", tools=[self.request_temporary_secret])

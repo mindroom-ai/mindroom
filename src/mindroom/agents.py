@@ -121,7 +121,27 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     ".mindroom-worker-assets/",
 )
 _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
-_NO_OUTPUT_REDIRECT_TOOLKITS = frozenset({"dynamic_tools", "skill_manage"})
+_NO_OUTPUT_REDIRECT_TOOLKITS = frozenset(
+    {
+        "calculator",
+        "compact_context",
+        "dynamic_tools",
+        "egress_credentials",
+        "oauth_connections",
+        "react",
+        "report_publishing",
+        "shared_directories",
+        "skill_manage",
+        "sleep",
+        "stop_reply",
+        "temporary_secrets",
+        "thread_move",
+        "thread_resolution",
+        "thread_snooze",
+        "thread_summary",
+        "todo",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -1185,9 +1205,9 @@ def _prompt_tool_capabilities(
         )
         for entry in deferred_configs.values()
     )
-    supports_output_redirect = any(
-        _function_accepts_output_path(function) or function.registered_toolkit == "shell" for function in discoverable
-    ) or any(name not in _NO_OUTPUT_REDIRECT_TOOLKITS for name in deferred_configs)
+    supports_output_redirect = any(_function_accepts_output_path(function) for function in discoverable) or any(
+        name not in _NO_OUTPUT_REDIRECT_TOOLKITS for name in deferred_configs
+    )
     return supports_output_redirect, not has_skill_manage and has_workspace_skill_writer
 
 
@@ -1712,8 +1732,8 @@ def _build_agent_instructions(
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
-    ``output_redirect`` adds ``OUTPUT_REDIRECT_PROMPT`` when offered tools accept ``mindroom_output_path`` or include
-    ``shell`` and the prompt is non-empty (it defaults to empty and renders only when overridden in ``config.prompts``);
+    ``output_redirect`` adds ``OUTPUT_REDIRECT_PROMPT`` when offered or deferred tools accept ``mindroom_output_path``
+    and the prompt is non-empty;
     ``skill_authoring`` adds ``WORKSPACE_SKILL_AUTHORING_PROMPT`` when workspace writers are offered without
     ``skill_manage``.
     """

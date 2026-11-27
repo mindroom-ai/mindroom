@@ -345,7 +345,7 @@ An agent leaves out a toolkit with a refused parameter or an annotation that doe
 A `str` parameter receives the model's string unchanged, and a `Literal[...]` parameter each of its choices, so a choice may be named `none` or `true`.
 A parameter with a default, such as `title: str | None = None`, receives a model's `"none"` or `"null"`, in any case, as `None` unless that exact string is one of its choices.
 Other parameters receive a model's `"none"`, `"null"`, `"true"`, or `"false"` string, in any case, as `None` or a boolean.
-To return media alongside text, return a `ToolValue` carrying `Image`, `Audio`, `Video`, or `File` values imported from `mindroom.plugin_api` (a plugin that imports `Image`, `Audio`, `Video`, or `File` states `"mindroom_plugin_api": "1.36"`).
+To return media alongside text, return a `ToolValue` carrying `Image`, `Audio`, `Video`, or `File` values imported from `mindroom.plugin_api` (a plugin that imports `Image`, `Audio`, `Video`, or `File` states `"mindroom_plugin_api": "1.37"`).
 
 Assign the tool to agents like any built-in tool:
 

@@ -190,11 +190,17 @@ def _adapt_function(toolkit: Toolkit, name: str, finishing: _Finishing) -> ToolF
         raise ValueError(msg)
     authored = authoring.passthrough_parameters(function)
     derived = authored is None
+    offer_background_after = authoring.authored_offer_background_after(function)
+    offer_output_path = authoring.authored_offer_output_path(function)
     offered = toolkit.offered_function(
         ToolFunction(
             name=name,
             description=authoring.authored_description(function) or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
+            offer_background_after=toolkit.offer_background_after
+            if offer_background_after is None
+            else offer_background_after,
+            offer_output_path=toolkit.offer_output_path if offer_output_path is None else offer_output_path,
             entrypoint=validated_entrypoint(function) if derived else function,
         ),
     )

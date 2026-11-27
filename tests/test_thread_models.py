@@ -1529,11 +1529,13 @@ def _configured_thread_model_functions(context: ToolRuntimeContext, workspace: P
 
 
 def test_a_configured_switch_offers_no_output_path(tmp_path: Path) -> None:
-    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for the other calls."""
+    """A switch's result is for its run, so the model cannot ask to save it to a file, as it can for list_models."""
     functions = _configured_thread_model_functions(_make_tool_context(tmp_path), tmp_path / "workspace")
 
     assert OUTPUT_PATH_ARGUMENT not in functions["switch_thread_model"].parameters["properties"]
-    assert OUTPUT_PATH_ARGUMENT in functions["get_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT not in functions["get_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT not in functions["reset_thread_model"].parameters["properties"]
+    assert OUTPUT_PATH_ARGUMENT in functions["list_models"].parameters["properties"]
 
 
 @pytest.mark.asyncio

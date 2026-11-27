@@ -50,6 +50,9 @@ class ToolFunction:
     ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
     call stops it only when the call's outcome says so (``ToolOutcome.stop_after_call``), as a model switch for the
     current response does; either way the function controls the run (``controls_run``).
+    ``offer_background_after`` and ``offer_output_path`` control whether the model-facing schema projects the reserved
+    ``background_after`` and ``mindroom_output_path`` parameters; runtime job execution and large-result auto-save stay
+    active even when a function opts out of advertising them.
     ``middleware`` is the function's own policy, which every call of it runs innermost, inside whatever policy the
     caller runs, such as the computer announcement of the browser that gives an agent its worker computer.
     ``toolkit`` is the authored toolkit an agent is offered the function from, which approvals, scheduled calls, and
@@ -71,6 +74,8 @@ class ToolFunction:
     gate: ToolGate | None = None
     stop_after_call: bool = False
     may_stop_run: bool = False
+    offer_background_after: bool = True
+    offer_output_path: bool = True
     entrypoint: Callable[..., Any]
     middleware: tuple[ToolMiddleware, ...] = ()
 

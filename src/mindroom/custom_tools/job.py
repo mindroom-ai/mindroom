@@ -163,9 +163,9 @@ class JobTools(Toolkit):
             name="job",
             tools=[self.job],
             instructions=(
-                "Tools with `background_after` can continue as background jobs without cancelling: "
-                "omit/null waits until completion or a newer message you answer (or the tool's default cap), "
-                "0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
+                "Tools with `background_after` accept an optional wait time in seconds before continuing as background "
+                "jobs without cancelling: omit/null waits until completion or a newer message you answer (or the "
+                "tool's default cap), 0 backgrounds immediately and returns a job handle. Manage jobs with `job`."
             ),
         )
 
