@@ -38,16 +38,15 @@ When `check()` returns `None`, updated `state` persists and zero LLM calls happe
 ### 1. Security, Capability & Approval Model
 
 1. **`triggers` stays `executes_code=False`:** Flipping `executes_code=True` on `triggers` would escalate `triggers`-only monitoring agents and expose workspace write permissions in `room_agent_access.py`.
-2. **Creation & code-update authority (`watch_script`, `update` with `source`/`path`):**
+2. **Creation authority (`watch_script`; `update` is metadata-only):**
    - Require `external_trigger_policy.enabled`, `reactive_enabled`, and `script_check_enabled`.
    - Require calling `context.agent_name` in `config.agents` with `"triggers"` **and** at least one of `"script"` or `"workflow"` in its resolved tools (future-proof if standalone `script` is later retired).
-   - Reject narrowed/filtered turns (`context.tool_function_filter is not None`, persona tool restrictions excluding both `script` and `workflow`, or missing Matrix `execution_identity.session_id`), preventing scripts, scheduled calls, or restricted personas from authoring Python triggers.
+   - Require a direct-agent Matrix turn (`identity.recipient == context.agent_name`, refusing team-transport authoring while still permitting `target_agent` to target a team), and reject narrowed/filtered turns (`context.tool_function_filter is not None`, persona tool restrictions excluding both `script` and `workflow`, detached/background-script turns, event-source watch turns, or unattended automation turns including router-relayed scheduled turns tracked via `com.mindroom.automation_origin`).
    - Check placement via `workflow_placement(config, runtime_paths)` (`worker` when dedicated backend/proxy configured; `local` only when `defaults.allow_shell_without_worker: true` or explicit local execution mode — never silent fallback from a broken worker backend to the host) and verify `script_runtime.tool_manager is not None` **before** reading `path` or saving.
-   - Register `ApprovalAlias(judged_as="start_script", judge=_judge_triggers_script_check)` on `src/mindroom/tools/triggers.py` for function `"triggers"`:
+   - Register `ApprovalAlias(judged_as="start_script", judge=_judge_triggers_script_check, allow_non_resumable_passthrough=True)` on `src/mindroom/tools/triggers.py` for function `"triggers"`:
      - `action == "watch_script"` -> `[{"source": args.get("source"), "path": args.get("path"), "name": args.get("trigger_id") or args.get("description")}]`
-     - `action == "update"` with `source` or `path` supplied -> `[{"source": args.get("source"), "path": args.get("path"), "name": args.get("trigger_id")}]`
-     - Missing/non-string `action` -> `None` (fail closed)
-     - All other actions (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`, `create`, `list`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`, non-code `update`) -> `[]` (no `start_script` approval prompt).
+     - Missing/non-string/unknown `action` -> `None` (fail closed)
+     - All other known actions (`watch_room`, `watch_thread`, `watch_pr`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) -> `[]` (no `start_script` approval prompt, and allowed on non-resumable surfaces and voice calls via shared `non_resumable_alias_refusal_message`).
 3. **Live tick authorization & dispatch source access:**
    - Recheck on every tick and before triage/dispatch: policy toggles enabled, owner is human, `source.agent` in `config.agents` with `"triggers"` and (`"script"` or `"workflow"`), owner authorized for `source.agent` in `source.room_id` (`is_sender_allowed_for_agent_reply_in_room(..., require_resolved_membership=True)`), and `workflow_placement` still permits execution.
    - `source.agent` and `source.room_id` (and captured `execution_identity`) are immutable; `target.agent` only determines who wakes up, never whose credentials run `check()`.
@@ -86,7 +85,7 @@ Add to `ExternalTriggerPolicyConfig`:
      - `GET /api/script-gateway/runs/{run_id}/check-input` -> returns `{"source": ..., "source_digest": ..., "state": ...}`.
      - `POST /api/script-gateway/runs/{run_id}/check-result` -> stream-bounded at `128 KiB`, strict Pydantic `ScriptCheckResultRequest` (`extra="forbid"`, `has_only_finite_numbers`, fields: `result: JsonValue = None`, `state: dict[str, JsonValue] = {}`, `state_changed: bool = False`, `error: str | None = None` max 8192 chars). Identical duplicate POST returns 200; conflicting second POST returns 409.
    - Both routes authenticate with `broker.authenticate(run_id, authorization)`, require `run.is_script_check`, and require an active slot for `run_id` (else `404`). Ordinary script and workflow tokens are rejected.
-3. **Fixed stdlib bootstrap (`src/mindroom/orchestration/script_checks.py`):**
+3. **Fixed stdlib bootstrap (`SCRIPT_CHECK_BOOTSTRAP_SOURCE` in `src/mindroom/reactive_triggers/script_check.py`):**
    - Snapshotted as `source.py` on launch (small fixed stdlib module importing only `MindRoomTools` from `mindroom.script_sdk` and `ScriptGatewayTransport` from `mindroom.script_runs.transport` — no 4th SDK).
    - Fetches `GET runs/{run_id}/check-input`, verifies SHA-256 of `source` against `source_digest`.
    - Builds `_CheckState` (`get`, `set`, `delete`, `pop`, `clear`, `keys` with strict finite JSON validation and 32 KiB UTF-8 byte cap), `tool = MindRoomTools(http_timeout_seconds=10.0, poll_interval_seconds=0.1).call` (refusing calls during module load outside `check()`), and stub `agent(*a, **kw)` raising `RuntimeError`.
@@ -94,15 +93,15 @@ Add to `ExternalTriggerPolicyConfig`:
 4. **Headless context reconstruction & ephemeral cleanup:**
    - Capture `serialize_tool_execution_identity(context.execution_identity)` in `script_check_checkpoints.identity_json` at creation.
    - On each tick, rebuild `ToolRuntimeContext` via the executing agent's live bot (`MessageTarget` from stored `identity_json`, fresh `correlation_id=f"script-check:{trigger_id}:{run_id}"`), matching `_LiveScriptRuntimeResolver.resolve` byte-for-byte.
-   - Wait up to `script_check_timeout_seconds` (bounded launch + execution deadline). After `POST /check-result`, wait briefly (up to 2 s) for process exit via `reconcile_durable`; if still running or timed out, `revoke` + `reconcile_durable` (retiring dedicated worker / removing snapshot).
-   - Accept staged result **only** when the process exited cleanly with exit code `0`, `error is None`, and no approval denial occurred during the tick.
-   - Immediately call `store.prune_terminal_run(run_id, finished_before=final.finished_at)` once resources are cleaned. `ScriptRuntimeLifecycle._prune_pass` also prunes orphaned terminal `script_check` rows immediately without waiting 30 days, and `_apply_update` revokes active `script_check` runs if policy disables them or removes required tools from the agent.
+   - Separate launch timeout budget (`_LAUNCH_TIMEOUT_SECONDS = 60s` in a tracked `asyncio.Task`) from script execution timeout (`script_check_timeout_seconds` started after launch). On launch timeout, revoke + `broker.cancel_run` + cancel task, hand cleanup/retirement to a tracked background task set (drained on `stop()`), and return `launch_timeout` immediately so per-owner and global poller slots release on time.
+   - After `POST /check-result`, wait briefly (up to 2 s) for process exit via `ScriptRunManager.observe_process_exit(run_id)` (which records process exit durably without blocking on worker retirement), commit the result & state whenever `exit_code == 0`, `error is None`, and no approval denial occurred, and hand worker retirement (`reconcile_durable`) + `prune_terminal_run` to the tracked background cleanup set.
+   - `ScriptRuntimeLifecycle._prune_pass` also prunes orphaned terminal `script_check` rows immediately without waiting 30 days, and `_apply_update` revokes active `script_check` runs if policy disables them or removes required tools from the agent.
 
 ---
 
 ### 4. Authoring Contract & Event Normalization (`src/mindroom/reactive_triggers/script_check.py`)
 
-- **Source validation (synchronous on create & source-bearing update):**
+- **Source validation (synchronous on create):**
   - Exactly one of `source` or `path` (`path` resolved via `ScriptRunManager.resolve_source`, snapshotted once into `source_utf8`, never re-read on ticks).
   - UTF-8, non-empty, `<= 64 KiB`.
   - `ast.parse` checks valid syntax and a top-level synchronous `def check():` with 0 required/positional args (rejecting `async def check` and wrong arity with clear messages).
@@ -125,7 +124,7 @@ Add to `ExternalTriggerPolicyConfig`:
   - `ScriptCheckSourceSpec`: `source_type: Literal["script_check"] = "script_check"`, `agent: str`, `room_id: str`, `source_digest: str`, `poll_interval_seconds: StrictInt = Field(default=300, ge=30, le=86400)`. Keeps raw code, identity, and state out of `spec_json`, `list`, and Room Triggers API.
   - `ScriptCheckCheckpoint`: `revision: int = 1`, `source_utf8: str`, `identity_json: dict[str, Any]`, `state: dict[str, Any] = {}`, `next_poll_at: float`, `consecutive_errors: int = 0`, `last_error_code: str | None = None`, `last_run_at: float | None = None`, `updated_at: float`.
 - **SQLite (`src/mindroom/reactive_triggers/store.py`):**
-  - Schema version `3` with additive migration from both `v1` and `v2`.
+  - Schema version `4` with idempotent additive migration from `v1`, `v2`, and `v3` (preserving `applied_migrations` from #4423).
   - `script_check_checkpoints` table (`trigger_id PK FK ON DELETE CASCADE`, `revision`, `source_utf8`, `identity_json`, `state_json`, `next_poll_at`, `consecutive_errors`, `last_error_code`, `last_run_at`, `updated_at`) + `idx_script_check_checkpoints_due(next_poll_at)`.
   - `_source_index_fields` returns `(None, source.agent)` so `source_room_id` stays reserved for Matrix-room-watching rules.
   - Atomic `_check_script_check_quota` enforced on `create_trigger`, `update_trigger` (re-enable or expiry extension), and `set_enabled(..., enabled=True)`.
@@ -142,7 +141,7 @@ Add to `ExternalTriggerPolicyConfig`:
 
 - **2 new parameters on `TriggersTools.triggers(...)`:** `source: str | None = None`, `path: str | None = None`.
 - **`action="watch_script"`:** requires `prompt` and exactly one of `source` or `path`; accepts `_COMMON_REACTIVE_PARAMS | _TRIAGE_PARAMS | {"source", "path", "poll_interval_seconds"}`; defaults `poll_interval_seconds=300` (clamped to `[policy.min_script_check_poll_interval_seconds, 86400]`), `once=False`; creates rule + checkpoint with `next_poll_at=now` and wakes poller.
-- **`action="update"`:** adds `source`, `path`, `poll_interval_seconds` to `_UPDATABLE_FIELDS`. Replacing `source`/`path` validates capability + AST, updates `source_digest` & `source_utf8`, resets `state={}` and error counters, increments `revision`, and sets `next_poll_at=now`.
+- **`action="update"`:** metadata-only for `script_check` (`poll_interval_seconds`, `prompt`, `description`, `triage_*`, caps, `enabled`; rejects `source`/`path`). Updating `poll_interval_seconds` or re-enabling atomically bumps `checkpoint.revision` inside `store.update_trigger` so in-flight ticks cannot overwrite `next_poll_at`.
 - **`action="set_enabled"` & Room Triggers `PATCH`:** enabling preserves `state`, resets error counters, increments `revision`, sets `next_poll_at=now`, enforces quota, and verifies live capability before activating.
 - **`action="test"`:** fast synthetic dry-run using `sample_data`/`text`/`actor`/`kind` through optional triage (never executes Python or calls tools).
 - **`action="list"` & `/api/rooms/{room_id}/triggers`:** metadata only (`source_digest`, `agent`, `poll_interval_seconds`, plus owner-only `consecutive_errors`/`last_error_code`/`last_run_at`); never exposes `source_utf8`, `identity_json`, or `state`. `api/room_triggers.py` automatically includes `kind="script_check"` via `SourceType`.

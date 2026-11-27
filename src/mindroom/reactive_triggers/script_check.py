@@ -5,16 +5,15 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from mindroom.reactive_triggers.models import (
     ScriptCheckCheckpoint,
-    ScriptCheckSourceSpec,
     TriggerEvent,
 )
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 from mindroom.script_runs.manager import workflow_placement
-from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.room_reconciliation import RoomStateSnapshot
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _MAX_SCRIPT_CHECK_SOURCE_BYTES = 64 * 1024
 _MAX_SCRIPT_CHECK_STATE_BYTES = 32 * 1024
@@ -211,7 +209,7 @@ def build_script_check_dry_run_event(
     )
 
 
-def agent_supports_script_check(config: Config, agent_name: str) -> bool:
+def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
     """Return whether ``agent_name`` is configured with triggers plus script or workflow tools."""
     if agent_name not in config.agents:
         return False
@@ -219,28 +217,61 @@ def agent_supports_script_check(config: Config, agent_name: str) -> bool:
     return "triggers" in resolved and bool({"script", "workflow"} & resolved)
 
 
-def check_script_check_availability(
+@dataclass(frozen=True, slots=True)
+class _ScriptCheckAccessFailure:
+    """Shared failure details for script_check policy, capability, owner, and placement checks."""
+
+    code: str
+    category: Literal["policy", "agent", "placement"]
+    message: str
+
+
+def check_script_check_access(
     config: Config,
     runtime_paths: RuntimePaths,
     agent_name: str,
-) -> tuple[Literal["policy", "agent", "placement"], str] | None:
-    """Verify shared policy, executing-agent capability, and placement for script_check triggers."""
+    *,
+    owner_user_id: str | None = None,
+    require_placement: bool = True,
+) -> _ScriptCheckAccessFailure | None:
+    """Verify policy, optional human owner, executing-agent capability, and optional placement."""
     pol = config.external_trigger_policy
-    if not pol.enabled:
-        return ("policy", "External triggers are disabled by configuration.")
-    if not pol.reactive_enabled:
-        return ("policy", "Reactive triggers are disabled by configuration.")
-    if not pol.script_check_enabled:
-        return ("policy", "Scheduled script_check triggers are disabled by policy.")
-    if not agent_supports_script_check(config, agent_name):
-        return (
+    failure: _ScriptCheckAccessFailure | None = None
+    if not pol.is_reactive_active:
+        failure = (
+            _ScriptCheckAccessFailure(
+                "external_triggers_disabled",
+                "policy",
+                "External triggers are disabled by configuration.",
+            )
+            if not pol.enabled
+            else _ScriptCheckAccessFailure(
+                "reactive_triggers_disabled",
+                "policy",
+                "Reactive triggers are disabled by configuration.",
+            )
+        )
+    elif not pol.script_check_enabled:
+        failure = _ScriptCheckAccessFailure(
+            "script_check_disabled",
+            "policy",
+            "Scheduled script_check triggers are disabled by policy.",
+        )
+    elif owner_user_id is not None and not is_human_requester_id(owner_user_id, config, runtime_paths):
+        failure = _ScriptCheckAccessFailure(
+            "owner_not_human",
+            "policy",
+            "Only human users can own script_check triggers.",
+        )
+    elif not _agent_supports_script_check(config, agent_name):
+        failure = _ScriptCheckAccessFailure(
+            "agent_script_check_unavailable",
             "agent",
             f"Agent {agent_name!r} requires 'triggers' plus 'script' or 'workflow' tools for script_check triggers.",
         )
-    placement = workflow_placement(config, runtime_paths)
-    if placement not in {"worker", "local"}:
-        return ("placement", placement)
-    return None
+    elif require_placement and (placement := workflow_placement(config, runtime_paths)) not in {"worker", "local"}:
+        failure = _ScriptCheckAccessFailure("placement_unavailable", "placement", placement)
+    return failure
 
 
 def is_owner_joined_in_state(
@@ -257,66 +288,118 @@ def is_owner_joined_in_state(
     )
 
 
-def serving_entity_for_identity(identity: ToolExecutionIdentity, agent_name: str, config: Config) -> str:
-    """Return whose bot and access answer for a run or script_check with ``identity``.
+SCRIPT_CHECK_BOOTSTRAP_SOURCE = """\
+import hashlib, hmac, json, sys, traceback
+from mindroom.script_runs.transport import ScriptGatewayTransport
+from mindroom.script_sdk import MindRoomTools
 
-    A member of a configured team that authored or started it in that team is reached through the team, and an agent
-    served through another configured agent uses that agent; otherwise ``agent_name`` answers directly.
-    """
-    recipient = identity.recipient
-    team = config.teams.get(recipient)
-    through = recipient in config.agents if team is None else agent_name in team.agents
-    return recipient if through else agent_name
+_MAX_STATE_BYTES, _MAX_RESULT_BYTES, _MAX_ERROR_CHARS, _MISSING = 32 * 1024, 64 * 1024, 8000, object()
 
+def _check_str_keys(value, label):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str): raise ValueError(f"script_check {label} objects must use string keys")
+            _check_str_keys(v, label)
+    elif isinstance(value, list):
+        for item in value: _check_str_keys(item, label)
 
-def serving_entity_for_checkpoint(
-    checkpoint: ScriptCheckCheckpoint | None,
-    agent_name: str,
-    config: Config,
-) -> str:
-    """Resolve the saved serving entity from ``checkpoint.identity_json``, falling back to ``agent_name``."""
-    if checkpoint is None:
-        return agent_name
-    try:
-        identity = parse_tool_execution_identity_payload(
-            checkpoint.identity_json,
-            error_prefix="script_check execution_identity",
+def _encode_json(value, label, max_bytes):
+    _check_str_keys(value, label)
+    raw = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    if len(raw) > max_bytes: raise ValueError(f"script_check {label} exceeds maximum size of {max_bytes} bytes")
+    return raw
+
+class _CheckState:
+    def __init__(self, initial, is_active):
+        self._data = json.loads(_encode_json(dict(initial), "state", _MAX_STATE_BYTES))
+        self._is_active, self.changed = is_active, False
+
+    def _require_active(self):
+        if not self._is_active():
+            raise RuntimeError("state mutations are not allowed during module load; mutate state inside check().")
+
+    def _copy(self, value): return json.loads(json.dumps(value, allow_nan=False))
+    def __contains__(self, key): return key in self._data
+    def __getitem__(self, key): return self._copy(self._data[key])
+    def get(self, key, default=None): return default if key not in self._data else self._copy(self._data[key])
+    def keys(self): return list(self._data.keys())
+    def items(self): return [(k, self._copy(v)) for k, v in self._data.items()]
+    def snapshot(self): return self._copy(self._data)
+
+    def set(self, key, value):
+        self._require_active()
+        if not isinstance(key, str): raise ValueError("state keys must be strings")
+        self._data = json.loads(_encode_json({**self._data, key: value}, "state", _MAX_STATE_BYTES))
+        self.changed = True
+
+    def delete(self, key):
+        self._require_active()
+        if key in self._data:
+            del self._data[key]
+            self.changed = True
+
+    def pop(self, key, default=_MISSING):
+        self._require_active()
+        if key in self._data:
+            value = self.get(key)
+            del self._data[key]
+            self.changed = True
+            return value
+        if default is _MISSING: raise KeyError(key)
+        return default
+
+    def clear(self):
+        self._require_active()
+        if self._data:
+            self._data.clear()
+            self.changed = True
+
+def _main():
+    transport = ScriptGatewayTransport(timeout_seconds=10.0)
+    run_id = transport.run_id
+    payload = transport.request_json("GET", f"runs/{run_id}/check-input")
+    if not isinstance(payload, dict): raise RuntimeError("Invalid check-input response.")
+    source, digest, initial_state = payload.get("source"), payload.get("source_digest"), payload.get("state")
+    if not isinstance(source, str) or not isinstance(digest, str) or not isinstance(initial_state, dict):
+        raise RuntimeError("Malformed check-input payload.")
+    if not hmac.compare_digest(hashlib.sha256(source.encode("utf-8")).hexdigest(), digest):
+        raise RuntimeError("script_check source digest mismatch.")
+    in_check, tools = False, MindRoomTools(http_timeout_seconds=10.0, poll_interval_seconds=0.1)
+    state = _CheckState(initial_state, lambda: in_check)
+
+    def tool(toolkit_name, function_name, /, **arguments):
+        if not in_check: raise RuntimeError("tool() is not allowed during module load; call tool() inside check().")
+        return tools.call(toolkit_name, function_name, **arguments)
+
+    def agent(*_args, **_kwargs):
+        raise RuntimeError(
+            "agent() is not allowed inside script_check triggers; "
+            "return a dict payload from check() to wake the target agent."
         )
-    except (TypeError, ValueError):
-        return agent_name
-    return serving_entity_for_identity(identity, agent_name, config)
 
+    try:
+        ns = {"__name__": "__script_check__", "tool": tool, "state": state, "agent": agent}
+        exec(compile(source, "<script_check>", "exec"), ns)
+        check_fn = ns.get("check")
+        if not callable(check_fn): raise RuntimeError("script_check source must define a callable check() function.")
+        in_check = True
+        try:
+            result = check_fn()
+        finally:
+            in_check = False
+        if result is not None: _encode_json(result, "result", _MAX_RESULT_BYTES)
+        body = {"result": result, "state": state.snapshot(), "state_changed": state.changed, "error": None}
+        transport.request_json("POST", f"runs/{run_id}/check-result", body)
+    except Exception as exc:
+        err = ("".join(traceback.format_exception_only(type(exc), exc)).strip() or repr(exc))[:_MAX_ERROR_CHARS]
+        try:
+            body = {"result": None, "state": {}, "state_changed": False, "error": err}
+            transport.request_json("POST", f"runs/{run_id}/check-result", body)
+        except Exception:
+            pass
+        print(err, file=sys.stderr)
+        sys.exit(1)
 
-def script_check_accessed_entities(config: Config, serving_entity: str, agent_name: str) -> set[str]:
-    """Return the entities a requester must reach for a script_check served through ``serving_entity``."""
-    team = config.teams.get(serving_entity)
-    if team is not None and agent_name in team.agents:
-        return {serving_entity}
-    return {serving_entity, agent_name}
-
-
-def check_script_check_source_access(
-    *,
-    owner_user_id: str,
-    source_spec: ScriptCheckSourceSpec,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    require_placement: bool = False,
-) -> str | None:
-    """Verify current policy, human owner, executing-agent capability, and optional placement."""
-    pol = config.external_trigger_policy
-    if not pol.enabled:
-        return "external_triggers_disabled"
-    if not pol.reactive_enabled:
-        return "reactive_triggers_disabled"
-    if not pol.script_check_enabled:
-        return "script_check_disabled"
-    if not is_human_requester_id(owner_user_id, config, runtime_paths):
-        return "owner_not_human"
-    if not agent_supports_script_check(config, source_spec.agent):
-        return "agent_script_check_unavailable"
-    return (
-        "placement_unavailable"
-        if require_placement and workflow_placement(config, runtime_paths) not in {"worker", "local"}
-        else None
-    )
+if __name__ == "__main__":
+    _main()
+"""

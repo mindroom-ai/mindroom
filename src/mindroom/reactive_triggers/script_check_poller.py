@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from uuid import uuid4
 from mindroom.logging_config import get_logger
 from mindroom.reactive_triggers.models import ReactiveTriggerRecord, ScriptCheckCheckpoint, ScriptCheckSourceSpec
 from mindroom.reactive_triggers.script_check import (
-    check_script_check_source_access,
+    check_script_check_access,
     normalize_script_check_event,
     validate_script_check_state,
 )
@@ -84,6 +85,14 @@ class ScriptCheckPoller:
     def set_tick_runner(self, tick_runner: ScriptCheckTickRunner | None) -> None:
         """Bind or replace the tick runner callable."""
         self._tick_runner = tick_runner
+
+    async def stop(self) -> None:
+        """Drain any tracked background cleanup tasks on the bound tick runner."""
+        stop_fn = getattr(self._tick_runner, "stop", None)
+        if callable(stop_fn):
+            result = stop_fn()
+            if inspect.isawaitable(result):
+                await result
 
     @asynccontextmanager
     async def _owner_slot(self, owner_user_id: str) -> AsyncIterator[None]:
@@ -180,14 +189,15 @@ class ScriptCheckPoller:
         config = self._config_provider()
         min_poll = float(config.external_trigger_policy.min_script_check_poll_interval_seconds)
         effective_interval = max(min_poll, float(rule.source.poll_interval_seconds))
-        if unauth_code := check_script_check_source_access(
+        if failure := check_script_check_access(
+            config,
+            self._runtime_paths,
+            rule.source.agent,
             owner_user_id=rule.owner_user_id,
-            source_spec=rule.source,
-            config=config,
-            runtime_paths=self._runtime_paths,
+            require_placement=False,
         ):
             next_at = now + min(_UNAUTHORIZED_RECHECK_CAP_SECONDS, effective_interval)
-            await self._save_non_ok(rule, cp, last_error_code=unauth_code, next_poll_at=next_at, updated_at=now)
+            await self._save_non_ok(rule, cp, last_error_code=failure.code, next_poll_at=next_at, updated_at=now)
             return False
         if self._tick_runner is None:
             return False

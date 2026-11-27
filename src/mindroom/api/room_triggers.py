@@ -36,7 +36,7 @@ from mindroom.reactive_triggers.models import (
     SourceType,
     ThreadTagSourceSpec,
 )
-from mindroom.reactive_triggers.script_check import check_script_check_availability
+from mindroom.reactive_triggers.script_check import check_script_check_access
 from mindroom.reactive_triggers.store import (
     ReactiveTriggerLimitError,
     ReactiveTriggerStore,
@@ -220,10 +220,9 @@ async def update_room_trigger(
                 "Watched thread tags could not be read; try again.",
             )
         elif isinstance(source, ScriptCheckSourceSpec) and (
-            failure := check_script_check_availability(config, runtime_paths, source.agent)
+            failure := check_script_check_access(config, runtime_paths, source.agent)
         ):
-            kind, message = failure
-            raise HTTPException(409 if kind == "placement" else 403, message)
+            raise HTTPException(409 if failure.category == "placement" else 403, failure.message)
 
     def _update() -> tuple[TriggerRecord, ScriptCheckCheckpoint | None]:
         result = set_trigger_enabled_sync(

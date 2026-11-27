@@ -3914,7 +3914,6 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 [[modules]]
 path = "mindroom.orchestration.script_checks"
 depends_on = [
-    "mindroom.delegation.lifecycle",
     "mindroom.matrix.room_reconciliation",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.script_check",
@@ -3926,7 +3925,6 @@ visibility = ["mindroom.orchestrator"]
 [[modules]]
 path = "mindroom.orchestration.script_runtime"
 depends_on = [
-    "mindroom.reactive_triggers.script_check",
     "mindroom.approval.manager",
     "mindroom.delegation.lifecycle",
     "mindroom.orchestration.runtime",
@@ -7678,6 +7676,7 @@ expose = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
+    "non_resumable_alias_refusal_message",
     "team_background_jobs",
 ]
 from = ["mindroom.agents"]
@@ -11641,7 +11640,6 @@ depends_on = [
 path = "mindroom.reactive_triggers.script_check"
 depends_on = [
     "mindroom.reactive_triggers.models",
-    "mindroom.tool_system.worker_routing",
 ]
 
 [[modules]]
@@ -11671,7 +11669,6 @@ depends_on = [
     "mindroom.reactive_triggers.dispatch",
     "mindroom.event_sources",
     "mindroom.reactive_triggers.github_pr",
-    "mindroom.reactive_triggers.script_check",
     "mindroom.reactive_triggers.script_check_poller",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",

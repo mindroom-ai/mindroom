@@ -932,9 +932,9 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
     )
 
 
-async def _non_resumable_alias_refusal_message(
+async def non_resumable_alias_refusal_message(
     function_name: str,
-    call_args: dict[str, Any],
+    call_args: Mapping[str, Any],
     *,
     config: Config,
     alias: ApprovalAlias,
@@ -947,7 +947,7 @@ async def _non_resumable_alias_refusal_message(
                 context.current_config,
                 context.runtime_paths,
                 function_name,
-                call_args,
+                dict(call_args),
                 context.agent_name,
                 alias,
             )
@@ -1004,7 +1004,7 @@ def _wrap_non_resumable_alias_entrypoint(
             call_args = dict(kwargs)
 
         if (
-            refusal := await _non_resumable_alias_refusal_message(
+            refusal := await non_resumable_alias_refusal_message(
                 function.name,
                 call_args,
                 config=config,
@@ -2337,5 +2337,6 @@ __all__ = [
     "create_agent",
     "describe_agent",
     "ensure_default_agent_workspaces",
+    "non_resumable_alias_refusal_message",
     "team_background_jobs",
 ]

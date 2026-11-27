@@ -1099,6 +1099,8 @@ AGENT_AUTHORED_KEY = "io.mindroom.agent_authored"
 # The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
 ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
+# Preserves a trusted automation source kind across router relays whose SOURCE_KIND_KEY is "trusted_internal_relay".
+AUTOMATION_ORIGIN_KEY = "com.mindroom.automation_origin"
 PER_FIRE_THREAD_ROOT_KEY = "com.mindroom.per_fire_thread_root"
 PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"

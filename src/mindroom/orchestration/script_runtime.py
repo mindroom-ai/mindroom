@@ -25,7 +25,6 @@ from mindroom.delegation.lifecycle import accessed_entities, bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.origins import configured_public_url
-from mindroom.reactive_triggers.script_check import agent_supports_script_check, serving_entity_for_identity
 from mindroom.response_activity import ActiveScriptRunInfo
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
@@ -222,7 +221,7 @@ class _LiveScriptRuntimeResolver:
             return None
         current_config = bot.config if config is None else config
         entities = {run.agent_name}
-        if _uses_serving_transport(run):
+        if run.entry == "workflow":
             # A run acts through the bot that serves it, which must still be in the run's room, and its requester
             # must still reach the run's agent as well as that bot's: an agent's bot is no grant for another agent.
             joined = bot_in_room(bot, run.room_id)
@@ -245,7 +244,7 @@ class _LiveScriptRuntimeResolver:
     def serving_bot(self, run: _OwnedRun, config: Config | None = None) -> AgentBot | None:
         """Return the running bot that answers for *run*, None while it or the bot of the run's agent is not running."""
         bot = self.bot_provider(run.agent_name)
-        if bot is not None and bot.running and _uses_serving_transport(run):
+        if bot is not None and bot.running and run.entry == "workflow":
             bot = self.bot_provider(_serving_entity(run, config or bot.config))
         return bot if bot is not None and bot.running else None
 
@@ -646,11 +645,6 @@ class ScriptRuntimeLifecycle:
             for entry in ("script", "workflow")
             if None not in (old_new := [script_process_authority(c, agent_name, entry) for c in configs])
             and old_new[0] != old_new[1]
-        } | {
-            agent_name
-            for agent_name in continuing_agents
-            if None not in (old_new := [_script_check_process_authority(c, agent_name) for c in configs])
-            and old_new[0] != old_new[1]
         }
         script_check_policy_revoked = _script_check_policy_enabled(current_config) and not _script_check_policy_enabled(
             new_config,
@@ -658,8 +652,8 @@ class ScriptRuntimeLifecycle:
         script_check_agent_lost = {
             agent_name
             for agent_name in continuing_agents
-            if agent_supports_script_check(current_config, agent_name)
-            and not agent_supports_script_check(new_config, agent_name)
+            if _agent_supports_script_check(current_config, agent_name)
+            and not _agent_supports_script_check(new_config, agent_name)
         }
         if (
             not removed_agents
@@ -675,7 +669,7 @@ class ScriptRuntimeLifecycle:
 
         script_check_disabled = not _script_check_policy_enabled(new_config)
         script_check_agent_removals = {
-            agent_name for agent_name in continuing_agents if not agent_supports_script_check(new_config, agent_name)
+            agent_name for agent_name in continuing_agents if not _agent_supports_script_check(new_config, agent_name)
         }
         launch_fence_started = False
 
@@ -1281,18 +1275,17 @@ def build_script_runtime(
     )
 
 
-def _uses_serving_transport(run: _OwnedRun) -> bool:
-    return run.entry == "workflow" or (isinstance(run, ScriptRunRecord) and run.script_check_rule_uid is not None)
-
-
 def _serving_entity(run: _OwnedRun, config: Config) -> str:
-    """Return whose bot and whose access answer for a workflow or script_check *run* or attempt.
+    """Return whose bot and whose access answer for a workflow *run* or attempt.
 
     A member of a configured team that started it in that team is reached through the team, and an agent that another
     agent ran as its child through that agent: the run saved that bot as its transport, so the same bot rebuilds its
     context.
     """
-    return serving_entity_for_identity(_run_execution_identity(run), run.agent_name, config)
+    recipient = _run_execution_identity(run).recipient
+    team = config.teams.get(recipient)
+    through = recipient in config.agents if team is None else run.agent_name in team.agents
+    return recipient if through else run.agent_name
 
 
 def _run_execution_identity(run: _OwnedRun) -> ToolExecutionIdentity:
@@ -1310,16 +1303,15 @@ def _agent_has_tool(config: Config, agent_name: str, tool_name: str) -> bool:
 
 def _script_check_policy_enabled(config: Config) -> bool:
     pol = config.external_trigger_policy
-    return pol.enabled and pol.reactive_enabled and pol.script_check_enabled
+    return pol.is_reactive_active and pol.script_check_enabled
 
 
-def _script_check_process_authority(config: Config, agent_name: str) -> dict[str, object] | None:
-    if not agent_supports_script_check(config, agent_name):
-        return None
-    for entry in ("workflow", "script"):
-        if (authority := script_process_authority(config, agent_name, entry)) is not None:
-            return authority
-    return None
+def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
+    return (
+        agent_name in config.agents
+        and _agent_has_tool(config, agent_name, "triggers")
+        and (_agent_has_tool(config, agent_name, "script") or _agent_has_tool(config, agent_name, "workflow"))
+    )
 
 
 def _reload_reason_for(

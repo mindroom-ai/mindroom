@@ -716,6 +716,20 @@ class ScriptRunManager:
         except _REQUEST_FAILURES as exc:
             raise ScriptRunManagerError(str(exc)) from exc
 
+    async def observe_process_exit(self, run_id: str) -> ScriptRunRecord | None:
+        """Query process status and durably record exit without waiting for worker retirement."""
+        try:
+            async with self._run_lock(run_id):
+                run = await asyncio.to_thread(self.store.get_run, run_id)
+                if run.state in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is not None:
+                    return run
+                status = await self._process_status(run)
+                if status.state == "running":
+                    return None
+                return await self._record_observed_process_exit(run, status)
+        except _REQUEST_FAILURES as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
+
     async def reconcile_revoked_process(self, *, run_id: str) -> ScriptRunRecord:
         """Record process truth for one already-revoked run without broker or resource cleanup."""
         async with self._run_lock(run_id):
@@ -936,6 +950,14 @@ class ScriptRunManager:
             if run.state is ScriptRunState.STARTING:
                 return await asyncio.to_thread(self.store.transition_run, run.run_id, state=ScriptRunState.RUNNING)
             return run
+        observed = await self._record_observed_process_exit(run, status)
+        return await self._finalize_observed_exit(observed)
+
+    async def _record_observed_process_exit(
+        self,
+        run: ScriptRunRecord,
+        status: WorkerScriptStatus,
+    ) -> ScriptRunRecord:
         bounded_output = _bounded_output(status.output)
         if status.state == "unknown":
             reason = SUPERVISOR_UNAVAILABLE
@@ -947,7 +969,7 @@ class ScriptRunManager:
                 if status.exit_code == 0
                 else bounded_output or f"Background script exited with code {status.exit_code}."
             )
-        observed = await asyncio.to_thread(
+        return await asyncio.to_thread(
             self.store.record_process_exit,
             run.run_id,
             exit_code=status.exit_code,
@@ -955,7 +977,6 @@ class ScriptRunManager:
             output=bounded_output,
             cancellation_reason=reason,
         )
-        return await self._finalize_observed_exit(observed)
 
     async def _reconcile_revoked_process_run(
         self,

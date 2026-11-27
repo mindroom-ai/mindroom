@@ -321,8 +321,6 @@ class ReactiveTriggerStore:
         max_per_owner: int | None = None,
         max_github_pr_per_owner: int | None = None,
         max_script_check_per_owner: int | None = None,
-        updated_script_check_checkpoint: ScriptCheckCheckpoint | None = None,
-        expected_script_check_revision: int | None = None,
     ) -> ReactiveTriggerRecord | None:
         """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints.
 
@@ -332,8 +330,8 @@ class ReactiveTriggerStore:
         """
         with self._write_transaction() as conn:
             existing = conn.execute(
-                "SELECT rule_uid, owner_user_id, source_type, enabled, disabled_reason, expires_at, fire_count, last_fired_at "
-                "FROM reactive_triggers WHERE trigger_id = ?",
+                "SELECT rule_uid, owner_user_id, source_type, enabled, disabled_reason, expires_at, "
+                "fire_count, last_fired_at, spec_json FROM reactive_triggers WHERE trigger_id = ?",
                 (record.trigger_id,),
             ).fetchone()
             if existing is None:
@@ -367,13 +365,6 @@ class ReactiveTriggerStore:
                 _check_pr_quota(conn, owner, max_github_pr_per_owner, ts, persisted.trigger_id)
             if str(existing["source_type"]) == "script_check" and not was_on and now_on:
                 _check_script_check_quota(conn, owner, max_script_check_per_owner, ts, persisted.trigger_id)
-            if updated_script_check_checkpoint is not None or expected_script_check_revision is not None:
-                _validate_script_check_checkpoint_update(
-                    conn,
-                    trigger_id=persisted.trigger_id,
-                    source_type=str(existing["source_type"]),
-                    expected_revision=expected_script_check_revision,
-                )
             cursor = conn.execute(
                 """
                 UPDATE reactive_triggers
@@ -402,8 +393,15 @@ class ReactiveTriggerStore:
             )
             if cursor.rowcount == 0:
                 return None
-            if updated_script_check_checkpoint is not None:
-                _upsert_script_check_checkpoint(conn, persisted.trigger_id, updated_script_check_checkpoint)
+            if str(existing["source_type"]) == "script_check" and isinstance(persisted.source, ScriptCheckSourceSpec):
+                _sync_script_check_checkpoint_on_update(
+                    conn,
+                    trigger_id=persisted.trigger_id,
+                    existing_spec_json=str(existing["spec_json"]),
+                    new_poll_interval_seconds=persisted.source.poll_interval_seconds,
+                    reenabling=not bool(existing["enabled"]) and effective_enabled,
+                    now=ts,
+                )
             row = conn.execute(
                 "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
                 (persisted.trigger_id,),
@@ -1653,25 +1651,47 @@ def _check_script_check_quota(
         raise ReactiveTriggerLimitError(msg)
 
 
-def _validate_script_check_checkpoint_update(
+def _sync_script_check_checkpoint_on_update(
     conn: sqlite3.Connection,
     *,
     trigger_id: str,
-    source_type: str,
-    expected_revision: int | None,
+    existing_spec_json: str,
+    new_poll_interval_seconds: int,
+    reenabling: bool,
+    now: float,
 ) -> None:
-    if source_type != "script_check":
-        msg = f"Script check checkpoint update requires a script_check trigger: {trigger_id}"
-        raise ReactiveTriggerStoreError(msg)
-    if expected_revision is None:
+    old_poll = int(json.loads(existing_spec_json)["source"]["poll_interval_seconds"])
+    if not reenabling and new_poll_interval_seconds == old_poll:
         return
-    cp_row = conn.execute(
-        "SELECT revision FROM script_check_checkpoints WHERE trigger_id = ?",
-        (trigger_id,),
-    ).fetchone()
-    if cp_row is None or int(cp_row["revision"]) != expected_revision:
-        msg = f"Script check checkpoint revision conflict for trigger: {trigger_id}"
+    cp_row = conn.execute("SELECT * FROM script_check_checkpoints WHERE trigger_id = ?", (trigger_id,)).fetchone()
+    if cp_row is None:
+        msg = f"Script check checkpoint not found: {trigger_id}"
         raise ReactiveTriggerStoreError(msg)
+    live_cp = _script_check_checkpoint_from_row(cp_row)
+    if reenabling:
+        updated_cp = live_cp.model_copy(
+            update={
+                "revision": live_cp.revision + 1,
+                "consecutive_errors": 0,
+                "last_error_code": None,
+                "next_poll_at": now,
+                "updated_at": now,
+            },
+        )
+    else:
+        interval = float(new_poll_interval_seconds)
+        next_poll_at = max(
+            now,
+            (live_cp.last_run_at + interval) if live_cp.last_run_at is not None else (now + interval),
+        )
+        updated_cp = live_cp.model_copy(
+            update={
+                "revision": live_cp.revision + 1,
+                "next_poll_at": next_poll_at,
+                "updated_at": now,
+            },
+        )
+    _upsert_script_check_checkpoint(conn, trigger_id, updated_cp)
 
 
 def _upsert_script_check_checkpoint(conn: sqlite3.Connection, trigger_id: str, cp: ScriptCheckCheckpoint) -> None:

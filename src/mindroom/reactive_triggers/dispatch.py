@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import sqlite3
@@ -31,10 +30,8 @@ from mindroom.reactive_triggers.models import (
     ThreadTagSourceSpec,
 )
 from mindroom.reactive_triggers.script_check import (
-    check_script_check_source_access,
+    check_script_check_access,
     is_owner_joined_in_state,
-    script_check_accessed_entities,
-    serving_entity_for_checkpoint,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.requester_identity import (
@@ -132,7 +129,6 @@ async def check_reactive_source_access(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
     known_room_states: Mapping[str, RoomStateSnapshot] | None = None,
-    script_check_serving_entity: str | None = None,
     event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult | None:
     """Recheck source-side authorization and membership before triage and before every delivery."""
@@ -165,7 +161,6 @@ async def check_reactive_source_access(
             runtime_paths=runtime_paths,
             memberships=memberships,
             known_room_states=known_room_states,
-            serving_entity=script_check_serving_entity,
         )
 
     if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
@@ -191,17 +186,15 @@ async def _check_script_check_source_access(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
     known_room_states: Mapping[str, RoomStateSnapshot] | None,
-    serving_entity: str | None = None,
 ) -> DispatchResult | None:
-    reason = check_script_check_source_access(
+    if failure := check_script_check_access(
+        config,
+        runtime_paths,
+        source.agent,
         owner_user_id=rule.owner_user_id,
-        source_spec=source,
-        config=config,
-        runtime_paths=runtime_paths,
         require_placement=True,
-    )
-    if reason is not None:
-        return DispatchResult(status="skipped", reason=reason)
+    ):
+        return DispatchResult(status="skipped", reason=failure.code)
     room_state = await _resolve_source_room_state(
         source.room_id,
         source_bot=source_bot,
@@ -216,21 +209,17 @@ async def _check_script_check_source_access(
         runtime_paths=runtime_paths,
     ):
         return DispatchResult(status="skipped", reason="source_room_not_joined")
-    entities = sorted(script_check_accessed_entities(config, serving_entity or source.agent, source.agent))
     observed_room = _observed_room_for_bot(source_bot, source.room_id)
     try:
-        allowed = all(
-            is_sender_allowed_for_agent_reply_in_room(
-                rule.owner_user_id,
-                entity,
-                config,
-                source.room_id,
-                runtime_paths,
-                memberships,
-                require_resolved_membership=True,
-                observed_room=observed_room,
-            )
-            for entity in entities
+        allowed = is_sender_allowed_for_agent_reply_in_room(
+            rule.owner_user_id,
+            source.agent,
+            config,
+            source.room_id,
+            runtime_paths,
+            memberships,
+            require_resolved_membership=True,
+            observed_room=observed_room,
         )
     except ReplyMembershipPendingError:
         return DispatchResult(status="retry", reason="source_membership_pending")
@@ -445,10 +434,6 @@ async def dispatch_reactive_trigger(
     event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult:
     """Verify owner-scoped policy/auth/membership/source access and post one Matrix wake-agent message."""
-    script_check_serving_entity: str | None = None
-    if isinstance(rule.source, ScriptCheckSourceSpec):
-        checkpoint = await asyncio.to_thread(store.get_script_check_checkpoint, rule.trigger_id)
-        script_check_serving_entity = serving_entity_for_checkpoint(checkpoint, rule.source.agent, config)
     rejection = await _check_dispatch_preconditions(
         rule=rule,
         firing=firing,
@@ -457,7 +442,6 @@ async def dispatch_reactive_trigger(
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
-        script_check_serving_entity=script_check_serving_entity,
         event_sources=event_sources,
     )
     if rejection is not None:
@@ -586,7 +570,6 @@ async def _check_dispatch_preconditions(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
-    script_check_serving_entity: str | None = None,
     event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult | None:
     """Return a skip/retry DispatchResult when preconditions are not met, or None to proceed."""
@@ -612,7 +595,6 @@ async def _check_dispatch_preconditions(
         runtime_paths=runtime_paths,
         memberships=memberships,
         known_room_states=room_states,
-        script_check_serving_entity=script_check_serving_entity,
         event_sources=event_sources,
     )
 
