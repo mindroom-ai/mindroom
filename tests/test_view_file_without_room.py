@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ModelRequest
 
-_ROOM_FUNCTIONS = {"get_attachment", "list_attachments", "register_attachment", "inline_image"}
+_ROOM_FUNCTIONS = {"attachment"}
 
 
 def _headless_config(*tools: object) -> dict[str, Any]:
@@ -226,7 +226,7 @@ def test_file_reads_name_view_file_only_where_the_run_offers_it() -> None:
     """An `attachments` a persona narrowed to other functions leaves the reads without a view_file hint."""
     file = _toolkit("filesystem", "read_file", "write_file")
 
-    narrowed = with_view_file_hint([file, _toolkit("attachments", "list_attachments")], lambda _path: True)
+    narrowed = with_view_file_hint([file, _toolkit("attachments", "attachment")], lambda _path: True)
     offered = with_view_file_hint([file, _toolkit("attachments", "view_file")], lambda _path: True)
 
     assert [len(function.middleware) for function in narrowed[0].functions] == [0, 0]
@@ -237,10 +237,10 @@ def test_file_reads_name_view_file_only_where_the_run_offers_it() -> None:
 @pytest.mark.parametrize(
     ("entry", "saved", "offered"),
     [
-        ({"attachments": {"include_tools": ["list_attachments", "view_file"]}}, {}, {"view_file"}),
-        ({"attachments": {"include_tools": ["list_attachments"]}}, {}, set()),
+        ({"attachments": {"include_tools": ["attachment", "view_file"]}}, {}, {"view_file"}),
+        ({"attachments": {"include_tools": ["attachment"]}}, {}, set()),
         ({"attachments": {"exclude_tools": ["view_file"]}}, {}, set()),
-        ("attachments", {"include_tools": ["list_attachments"]}, set()),
+        ("attachments", {"include_tools": ["attachment"]}, set()),
         ("attachments", {"exclude_tools": ["view_file"]}, set()),
         ("matrix_message", {}, {"view_file"}),
     ],

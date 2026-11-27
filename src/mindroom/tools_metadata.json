@@ -638,10 +638,9 @@
         "slack_react",
         "slack_edit",
         "slack_delete",
-        "slack_upload",
-        "slack_watch"
+        "slack_upload"
       ],
-      "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for watches, app-level token in slack_app.",
+      "helper_text": "Each user connects their own Slack account through the MindRoom Slack app. Store the app's client ID and secret in the slack_oauth_client credential service, and its bot token, signing secret and, for Slack event triggers, app-level token in slack_app.",
       "icon": "FaSlack",
       "icon_color": "text-purple-600",
       "name": "slack",
@@ -7793,10 +7792,7 @@
       "executes_code": false,
       "file_access": "agent",
       "function_names": [
-        "get_attachment",
-        "inline_image",
-        "list_attachments",
-        "register_attachment",
+        "attachment",
         "view_file"
       ],
       "helper_text": null,

@@ -102,7 +102,7 @@ async def _register_attachment(
 ) -> bool:
     tool = AttachmentTools(tool_output_workspace_root=workspace, file_access=file_access)
     with tool_runtime_context(_tool_context(tmp_path)):
-        payload = json.loads(await tool.register_attachment(raw_path))
+        payload = json.loads(await tool.attachment("register", path=raw_path))
     if payload["status"] != "ok":
         return False
     attachment = load_attachment(tmp_path, payload["attachment_id"])
@@ -382,7 +382,7 @@ async def _upload_to_slack(
 
 
 _PROBES = (
-    _ToolProbe("attachments", "register_attachment", _register_attachment, attachments_module),
+    _ToolProbe("attachments", "attachment", _register_attachment, attachments_module),
     _ToolProbe("attachments", "view_file", _view_file, media_delivery_module),
     _ToolProbe("matrix_message", "send attachments", _send_attachment_path, attachments_module),
     _ToolProbe("gmail", "attachments", _stage_gmail_attachment, gmail_module),

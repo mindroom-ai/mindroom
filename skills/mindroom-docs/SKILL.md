@@ -15,7 +15,7 @@ Use this skill when the user asks how MindRoom works, how to configure it, or wh
 ## Workflow
 
 1. Load `reference-index.md` first to discover the best page files.
-2. Load the smallest number of page references needed with `get_skill_reference(...)`.
+2. Load the smallest number of page references needed with `skill(action="reference", name="mindroom-docs", path=...)`.
 3. Use `llms.txt` for high-level navigation only.
 4. Use `llms-full.txt` only when the answer spans many sections and page-level references are insufficient.
 5. For setup or administration requests, inspect the available capabilities before claiming the change cannot be performed. Discover and use `config_manager` for changes it supports, then use the documented config-file workflow for other requested changes.

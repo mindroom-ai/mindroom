@@ -999,6 +999,7 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
         ("zoom", "zoom_manage", ("schedule_meeting", "delete_meeting")),
         ("x", "x_read", ("search_posts", "get_home_timeline")),
         ("x", "x_write", ("create_post", "reply_to_post", "send_dm")),
+        (None, "attachment", ("list", "get", "register", "inline_image")),
     ],
 )
 def test_action_dispatched_grant_operation_binds_to_action(
@@ -1040,6 +1041,7 @@ def test_action_dispatched_grant_operation_binds_to_action(
         (None, "memory", "list"),
         (None, "todo", "list"),
         (None, "scheduler", "list"),
+        (None, "attachment", "list"),
         ("zoom", "zoom_manage", "schedule_meeting"),
     ],
 )
@@ -1197,11 +1199,18 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         ("zoom", "delete_meeting", "zoom_manage"),
         ("x", "search_posts", "x_read"),
         ("x", "send_dm", "x_write"),
+        ("attachments", "list_attachments", "attachment"),
+        ("attachments", "get_attachment", "attachment"),
+        ("attachments", "register_attachment", "attachment"),
+        ("attachments", "inline_image", "attachment"),
+        (None, "get_skill_instructions", "skill"),
+        (None, "get_skill_reference", "skill"),
+        (None, "get_skill_script", "skill"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
     tmp_path: Path,
-    toolkit: str,
+    toolkit: str | None,
     old_name: str,
     new_name: str,
 ) -> None:
@@ -1210,10 +1219,12 @@ def test_retired_consolidated_approval_rules_fail_closed(
 
     runtime_paths = test_runtime_paths(tmp_path)
     options = {"searxng": {"host": "https://search.example.test"}, "telegram": {"chat_id": "1234"}}
-    tool_entry: object = {toolkit: options[toolkit]} if toolkit in options else toolkit
+    tools_list: list[object] = (
+        [] if toolkit is None else [{toolkit: options[toolkit]} if toolkit in options else toolkit]
+    )
     stale_data = {
         "models": {"default": {"provider": "openai", "id": "x"}},
-        "agents": {"a": {"display_name": "A", "tools": [tool_entry], "include_default_tools": False}},
+        "agents": {"a": {"display_name": "A", "tools": tools_list, "include_default_tools": False}},
         "tool_approval": {"rules": [{"match": old_name, "action": "require_approval"}]},
     }
     with pytest.raises(ConfigRuntimeValidationError, match=new_name):
@@ -3194,6 +3205,149 @@ def test_secondary_google_workspace_retired_approval_rules_fail_closed(tmp_path:
     assert star_op != del_op
 
 
+def test_attachment_action_scoped_grants_when_implied_by_matrix_message_and_openclaw_compat() -> None:
+    """Action-scoped grants and scheduled_any_arguments stay per-action when attachments is implied or preset."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+
+    config = Config.model_validate({"tool_approval": {"scheduled_any_arguments": True}})
+    registry = builtin_tool_registry()
+
+    for toolkit_name, tools_arg in (
+        ("attachments", registry),
+        ("matrix_message", registry),
+        ("openclaw_compat", registry),
+        ("matrix_message", None),
+        (None, None),
+    ):
+        ops = {}
+        for action in ("list", "inline_image"):
+            op = grant_operation(
+                config,
+                "attachment",
+                {"action": action},
+                tools=tools_arg,
+                toolkit_name=toolkit_name,
+            )
+            assert op is not None
+            assert op.mcp_server_id == "attachment"
+            assert op.mcp_tool_name == action
+            assert (
+                scheduled_call_offers_any_arguments(
+                    config,
+                    "attachment",
+                    {"action": action},
+                    requester_id="@alice:example.org",
+                    approver_id="@alice:example.org",
+                    authored_confirmation=False,
+                    tools=tools_arg,
+                    toolkit_name=toolkit_name,
+                )
+                is False
+            )
+            ops[action] = op
+        assert ops["list"].key != ops["inline_image"].key
+        assert grant_operation(config, "attachment", {}, tools=tools_arg, toolkit_name=toolkit_name) is None
+
+    # Standalone view_file keeps normal tool-wide scheduled_any_arguments behavior.
+    assert (
+        scheduled_call_offers_any_arguments(
+            config,
+            "view_file",
+            {"path": "chart.png"},
+            requester_id="@alice:example.org",
+            approver_id="@alice:example.org",
+            authored_confirmation=False,
+            tools=registry,
+            toolkit_name="matrix_message",
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ("tools", "matches", "error_pattern"),
+    [
+        ([], ["*"], r"check\.py.*skill"),
+        ([], ["skill", "*"], None),
+        (["attachments"], ["*"], r"check\.py.*attachment"),
+        (["attachments"], ["*", "attachment", "skill"], r"check\.py.*attachment"),
+        (["attachments"], ["attachment", "skill", "*"], None),
+        (["memory"], ["*memor*"], None),
+    ],
+)
+def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names(
+    tmp_path: Path,
+    tools: list[str],
+    matches: list[str],
+    error_pattern: str | None,
+) -> None:
+    """Wildcard approval scripts fail closed for retired skills/attachments names until explicit rules precede them."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": tools, "include_default_tools": False}},
+        "tool_approval": {"rules": [{"match": match, "script": "check.py"} for match in matches]},
+    }
+    if error_pattern is not None:
+        with pytest.raises(ConfigRuntimeValidationError, match=error_pattern):
+            Config.validate_with_runtime(data, runtime_paths)
+        return
+    loaded = Config.validate_with_runtime(data, runtime_paths)
+    assert [rule.match for rule in loaded.tool_approval.rules] == matches
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"exclude_tools": ["register_attachment"]},
+        {"include_tools": ["get_attachment"]},
+        {"exclude_tools": ["list_attachments"]},
+        {"include_tools": ["inline_image"]},
+        {"exclude_tools": "register_attachment,inline_image"},
+    ],
+)
+def test_retired_attachments_include_exclude_overrides_fail_config_load(
+    tmp_path: Path,
+    overrides: dict[str, object],
+) -> None:
+    """include_tools/exclude_tools naming retired attachment functions fail fast at config load with guidance."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [{"attachments": overrides}], "include_default_tools": False}},
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"attachments\.(in|ex)clude_tools: .* was removed; .*attachment.*view_file.*tool_approval\.rules",
+    ):
+        Config.validate_with_runtime(data, runtime_paths)
+
+
+def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) -> None:
+    """Excluding standalone view_file remains a valid attachments override."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    valid = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {
+                    "display_name": "A",
+                    "tools": [{"attachments": {"exclude_tools": ["view_file"]}}],
+                    "include_default_tools": False,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    assert valid.agents["a"].tools[0].overrides == {"exclude_tools": ["view_file"]}
+
+
 @pytest.mark.parametrize(
     ("toolkit_name", "tool_name", "actions"),
     [
@@ -3308,13 +3462,6 @@ def test_microsoft_365_retired_approval_rules_fail_closed(
             "default": "require_approval",
             "rules": [
                 {"match": "outlook_mail_send", "action": "auto_approve"},
-                {"match": "outlook_mail_reply", "action": "require_approval"},
-            ],
-        },
-        {
-            "default": "require_approval",
-            "rules": [
-                {"match": "outlook_mail_send_message", "action": "auto_approve"},
                 {"match": "outlook_mail_reply", "action": "require_approval"},
             ],
         },

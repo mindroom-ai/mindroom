@@ -847,8 +847,8 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
             operation=ToolCallOperation(
                 operation="tools.call",
                 toolkit="attachments",
-                function="list_attachments",
-                arguments={},
+                function="attachment",
+                arguments={"action": "list"},
                 call_id=call_id,
             ),
         )

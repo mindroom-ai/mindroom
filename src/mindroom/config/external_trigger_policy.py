@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+EVENT_SOURCE_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 _HTTP_HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
@@ -474,10 +474,15 @@ class ExternalTriggerPolicyConfig(BaseModel):
     ) -> dict[str, ExternalEventSourceConfig]:
         """Require route-safe ASCII source_id keys matching ^[A-Za-z0-9_-]{1,64}$."""
         for key in values:
-            if _EVENT_SOURCE_KEY_PATTERN.fullmatch(key) is None:
+            if EVENT_SOURCE_ID_PATTERN.fullmatch(key) is None:
                 msg = f"Invalid event_sources key {key!r}: must match ^[A-Za-z0-9_-]{{1,64}}$"
                 raise ValueError(msg)
         return values
+
+    @property
+    def is_reactive_active(self) -> bool:
+        """Return whether external triggers and reactive triggers are both enabled."""
+        return self.enabled and self.reactive_enabled
 
     @model_validator(mode="after")
     def validate_defaults_fit_caps(self) -> ExternalTriggerPolicyConfig:
