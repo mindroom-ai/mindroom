@@ -1283,7 +1283,7 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
         tool_runtime_context(ctx),
     ):
         register_payload = json.loads(
-            await asyncio.create_task(attachment_tool.register_attachment(str(generated_file))),
+            await asyncio.create_task(attachment_tool.attachment("register", path=str(generated_file))),
         )
         attachment_id = register_payload["attachment_id"]
         payload = json.loads(

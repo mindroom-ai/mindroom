@@ -40,7 +40,8 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKSPACE_IN_WORKER,
         ToolManagedInitArg.FILE_ACCESS,
     ),
-    function_names=("get_attachment", "inline_image", "list_attachments", "register_attachment", "view_file"),
+    function_names=("attachment", "view_file"),
+    action_scoped_grants=("attachment",),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

@@ -1,12 +1,12 @@
 """Tests for delivering Slack events as Matrix turns to project agents and personal watches."""
 
-# ruff: noqa: D102, D103
+# ruff: noqa: D103
 
 from __future__ import annotations
 
 import asyncio
 import html
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,8 +15,6 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.main import Config
 from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
@@ -27,18 +25,12 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.slack import app as slack_app
-from mindroom.slack import identity as slack_identity
-from mindroom.slack import turns
-from mindroom.slack.app import SlackAppCredentials, load_slack_app
-from mindroom.slack.delivery import deliver_slack_event, retry_slack_event
-from mindroom.slack.watches import SlackWatchStore, _watch_id_for
+from mindroom.slack.app import load_slack_app
+from mindroom.slack.delivery import retry_slack_event
 from tests.conftest import (
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
-    runtime_paths_for,
-    test_runtime_paths,
 )
 from tests.runtime_fakes import ready_runtime
 from tests.slack.delivery_fakes import (
@@ -64,26 +56,21 @@ from tests.slack.delivery_fakes import (
     UNRECEIVED,
     WATCH_ROOM,
     WORKSPACE_URL,
-    FakeBot,
-    FakeMatrix,
-    FakeSlack,
-    alice_watch,
+    Harness,
+    alice_slack_trigger,
     config_data,
     connect_alice,
-    entity_id,
     event_payload,
     install_slack_state,
-    runtime_for,
+    make_delivery_harness,
     slack_user,
 )
 from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-    from mindroom.slack.delivery import SlackRuntime
     from mindroom.slack.turns import DeliveryResult
 
 # Who may wake a project agent is part of what these tests pin.
@@ -95,98 +82,9 @@ OTHER_CHANNEL = "C0456EFGH"
 PERMALINK = f"{WORKSPACE_URL}archives/{CHANNEL}/p1700000000000100"
 
 
-@dataclass
-class Harness:
-    """A runtime-bound config, its Slack app, fake bots for `launch` and `assistant`, and the fakes they reach."""
-
-    config: Config
-    paths: RuntimePaths
-    slack: FakeSlack
-    matrix: FakeMatrix
-    bots: dict[str, FakeBot]
-    runtime: SlackRuntime
-
-    async def deliver(
-        self,
-        payload: dict[str, Any],
-        *,
-        now: int = NOW,
-        app: SlackAppCredentials | None = None,
-    ) -> DeliveryResult:
-        """Deliver as the route does, with the Slack app it loaded for this event."""
-        manager = get_runtime_credentials_manager(self.paths)
-        loaded = app or load_slack_app(manager)
-        assert loaded is not None
-        async with self.slack.client() as client:
-            return await deliver_slack_event(
-                payload,
-                runtime=self.runtime,
-                config=self.config,
-                runtime_paths=self.paths,
-                credentials_manager=manager,
-                app=loaded,
-                client=client,
-                now=now,
-            )
-
-    async def settle(self) -> None:
-        """Wait for the reactions and notices delivery started in the background."""
-        assert await wait_for_background_tasks(5.0, owner=self.runtime)
-
-    def store(self) -> DeliveryReplayStore:
-        assert self.paths.control_state_root is not None
-        return DeliveryReplayStore(self.paths.control_state_root / "slack" / "replay")
-
-    def agent_id(self, name: str) -> str:
-        return entity_id(self.config, self.paths, name)
-
-    def bearer(self, method: str) -> list[str]:
-        return [
-            request.headers["authorization"].removeprefix("Bearer ")
-            for request in self.slack.requests
-            if request.url.path == f"/api/{method}"
-        ]
-
-
-@pytest.fixture(autouse=True)
-def _empty_slack_caches() -> Iterator[None]:
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
-    yield
-    slack_app._IDENTITIES.clear()
-    slack_identity._PROFILES.clear()
-    slack_identity._CHANNELS.clear()
-
-
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
-    config = bind_runtime_paths(Config.model_validate(config_data()), test_runtime_paths(tmp_path))
-    paths = runtime_paths_for(config)
-    install_slack_state(paths)
-    slack = FakeSlack(
-        answers={
-            "auth.test": AUTH_TEST,
-            "conversations.info": {"ok": True, "channel": {"id": CHANNEL, "name": CHANNEL_NAME, "is_member": True}},
-            "apps.event.authorizations.list": {
-                "ok": True,
-                "authorizations": [{"user_id": SLACK_IDS["alice"], "team_id": "T0123ABCD", "is_bot": False}],
-            },
-        },
-        users={
-            **{SLACK_IDS[name]: slack_user(name) for name in ("ada", "carol", "dana", "alice")},
-            SLACK_IDS["erin"]: slack_user("erin", is_restricted=True),
-        },
-    )
-    matrix = FakeMatrix()
-    monkeypatch.setattr(turns, "send_matrix_message", matrix.send)
-    assistant_id = entity_identity_registry(config, paths).current_id("assistant").full_id
-    bots = {
-        "launch": FakeBot(AsyncMock(), AsyncMock(return_value="$latest")),
-        "assistant": FakeBot(room_state_client([ALICE, assistant_id]), AsyncMock(return_value="$latest")),
-    }
-    runtime = runtime_for(bots, AgentReplyMembershipIndex(), slack)
-    return Harness(config, paths, slack, matrix, bots, runtime)
+    return make_delivery_harness(tmp_path, monkeypatch)
 
 
 def _dm(text: str = "are you free at 3?", *, ts: str = ROOT_TS) -> dict[str, Any]:
@@ -315,7 +213,7 @@ async def test_slack_names_and_text_cannot_add_markup(harness: Harness, name: st
 
 @pytest.mark.asyncio
 async def test_watch_names_cannot_add_markup(harness: Harness) -> None:
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     name = _CRAFTED_NAMES[3]
     harness.slack.users[SLACK_IDS["dana"]] = {
@@ -324,9 +222,13 @@ async def test_watch_names_cannot_add_markup(harness: Harness) -> None:
     }
 
     assert await harness.deliver(_dm("[call me](https://evil.example)")) == "delivered"
+    await harness.drain_triggers()
 
     ((_, content),) = harness.matrix.sent
-    _assert_only_the_target_is_markup(content, harness.agent_id("assistant"), name, "[call me](https://evil.example)")
+    assert "<untrusted_event_data>" in content["body"]
+    assert '<a href="https://evil.example"' not in content["formatted_body"]
+    assert "<img " not in content["formatted_body"]
+    assert content["m.mentions"] == {"user_ids": [harness.agent_id("assistant")]}
 
 
 @pytest.mark.asyncio
@@ -435,15 +337,16 @@ async def test_failed_channel_name_lookup_names_the_channel_by_id_and_still_deli
     answer: Any,  # noqa: ANN401
 ) -> None:
     """A watch's channel name is only for display: a failed lookup shows `#<ID>`, without Slack's angle brackets."""
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.slack.answers["conversations.info"] = answer
     mention = event_payload("message", author="dana", text=f"<@{SLACK_IDS['alice']}> look?", channel=OTHER_CHANNEL)
 
     assert await harness.deliver(mention) == "delivered"
+    await harness.drain_triggers()
 
     ((_, content),) = harness.matrix.sent
-    assert f" in #{OTHER_CHANNEL}: {WORKSPACE_URL}archives/{OTHER_CHANNEL}/" in content["body"].split("\n")[0]
+    assert f" in #{OTHER_CHANNEL}: {WORKSPACE_URL}archives/{OTHER_CHANNEL}/" in content["body"]
 
 
 @pytest.mark.asyncio
@@ -720,7 +623,7 @@ async def test_author_lookup_refused_for_good_skips_the_project_agent(harness: H
 @_PASSING_FAILURES
 @pytest.mark.asyncio
 async def test_watch_visibility_lookup_failure_retries(harness: Harness, answer: Any) -> None:  # noqa: ANN401
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.slack.answers["apps.event.authorizations.list"] = answer
 
@@ -732,7 +635,7 @@ async def test_watch_visibility_lookup_failure_retries(harness: Harness, answer:
 @pytest.mark.asyncio
 async def test_watch_visibility_lookup_refused_for_good_skips_the_watches(harness: Harness, error: str) -> None:
     """A watch Slack refuses to check for good is skipped, and the project agent still receives the event."""
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.slack.answers["apps.event.authorizations.list"] = {"ok": False, "error": error}
     payload = event_payload(text=f"<@{BOT_USER}> ask <@{SLACK_IDS['alice']}>")
@@ -805,8 +708,8 @@ async def test_failure_after_ack_exhausted_sends_ephemeral(harness: Harness) -> 
 
 @pytest.mark.asyncio
 async def test_failing_author_lookup_notifies_once_and_still_tries_watches(harness: Harness) -> None:
-    """A project wake that keeps failing tells its author once, and never keeps watches from their attempt."""
-    alice_watch(harness.paths)
+    """A project wake that keeps failing tells its author once, while watches fail soft on author lookup."""
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.slack.answers["users.info"] = {"ok": False, "error": "internal_error"}
     payload = event_payload(text=f"<@{BOT_USER}> ask <@{SLACK_IDS['alice']}>")
@@ -814,13 +717,16 @@ async def test_failing_author_lookup_notifies_once_and_still_tries_watches(harne
 
     assert await harness.deliver(payload) == "retry"
     await _retry(harness, "retry", delays, payload=payload)
+    await harness.drain_triggers()
 
     assert delays == [5, 30, 120]
-    assert harness.matrix.sent == []
+    # Watch enqueued once (deduped across retries) and failed soft to the raw Slack user ID.
+    assert len(harness.matrix.sent) == 1
+    assert harness.matrix.sent[0][0] == WATCH_ROOM
+    assert SLACK_IDS["ada"] in harness.matrix.sent[0][1]["body"]
     assert harness.slack.calls("chat.postEphemeral") == [
         {"channel": CHANNEL, "user": SLACK_IDS["ada"], "text": UNRECEIVED, "thread_ts": ROOT_TS},
     ]
-    # Every attempt reached the watch, which asked Slack who can see the event.
     assert len(harness.slack.calls("apps.event.authorizations.list")) == 4
 
 
@@ -851,50 +757,36 @@ async def test_retry_waits_for_a_committed_config(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
-async def test_watches_of_other_teams_are_not_looked_up(harness: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only a watch the event could be for costs a replay store read."""
-    watch = alice_watch(harness.paths)
-    assert harness.paths.control_state_root is not None
-    SlackWatchStore(harness.paths.control_state_root).put(
-        replace(watch, watch_id=_watch_id_for(BOB, "assistant", WATCH_ROOM), owner_id=BOB, team_id="T0OTHER00"),
-    )
-    looked_up: list[str] = []
-    bound_thread_root = DeliveryReplayStore.bound_thread_root
-
-    def spy(store: DeliveryReplayStore, scope: str, thread_key: str, *, now: int) -> tuple[str, str] | None:
-        looked_up.append(scope)
-        return bound_thread_root(store, scope, thread_key, now=now)
-
-    monkeypatch.setattr(DeliveryReplayStore, "bound_thread_root", spy)
+async def test_watches_of_other_teams_skip_authorizations_lookup(harness: Harness) -> None:
+    """Events from a workspace with no matching rule never call apps.event.authorizations.list."""
+    alice_slack_trigger(harness.paths, trigger_id="slack_watch_other", owner_user_id=BOB, team_id="T0OTHER00")
     reply = event_payload("message", author="dana", text="ping", ts=REPLY_TS, thread_ts=ROOT_TS, channel="C0456EFGH")
 
     assert await harness.deliver(reply) == "ignored"
-
-    assert looked_up == [f"slack:watch:{watch.watch_id}"]
+    assert harness.slack.calls("apps.event.authorizations.list") == []
 
 
 @pytest.mark.asyncio
 async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
-    watch = alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
 
     assert await harness.deliver(_dm()) == "delivered"
+    await harness.drain_triggers()
     assert await harness.deliver(_dm("or 4?", ts=REPLY_TS), now=NOW + 60) == "delivered"
-    await harness.settle()
+    await harness.drain_triggers()
 
     assistant_id = harness.agent_id("assistant")
     (room_id, content), (_, follow_up) = harness.matrix.sent
     assert room_id == WATCH_ROOM
-    assert content["body"] == (
-        f"{assistant_id} Slack direct message for you from Dana (@{SLACK_IDS['dana']}): "
-        f"{WORKSPACE_URL}archives/{DM}/p1700000000000100\n~~~slack-message\nare you free at 3?\n~~~"
-    )
+    assert "are you free at 3?" in content["body"]
+    assert "Slack direct message from Dana" in content["body"]
     assert content["m.mentions"] == {"user_ids": [assistant_id]}
-    assert content[SOURCE_KIND_KEY] == "hook_dispatch"
-    assert content[HOOK_SOURCE_KEY] == f"slack-watch/{watch.watch_id}"
+    assert content[SOURCE_KIND_KEY] == "reactive_trigger"
+    assert content[HOOK_SOURCE_KEY] == "event_source:slack"
     assert content[ORIGINAL_SENDER_KEY] == ALICE
     assert content[PER_FIRE_THREAD_ROOT_KEY] is True
-    # Further messages in the conversation join its thread.
+    # Further messages in the DM conversation join the same Matrix thread.
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
     assert harness.slack.calls("apps.event.authorizations.list") == [{"event_context": EVENT_CONTEXT}] * 2
     assert harness.bearer("apps.event.authorizations.list") == [APP_TOKEN, APP_TOKEN]
@@ -906,23 +798,22 @@ async def test_watch_dm_delivers_to_owner_room(harness: Harness) -> None:
 @pytest.mark.asyncio
 async def test_watch_group_dm_is_named_a_group_direct_message(harness: Harness) -> None:
     """A group direct message says so, since others in it read a reply there; it names no conversation."""
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     payload = event_payload("message", author="dana", text="lunch?", channel="G0123ABCD", channel_type="mpim")
 
     assert await harness.deliver(payload) == "delivered"
+    await harness.drain_triggers()
 
     ((_, content),) = harness.matrix.sent
-    assert content["body"].startswith(
-        f"{harness.agent_id('assistant')} Slack group direct message for you from Dana (@{SLACK_IDS['dana']}): "
-        f"{WORKSPACE_URL}archives/G0123ABCD/",
-    )
+    assert "Slack group direct message from Dana" in content["body"]
+    assert f"{WORKSPACE_URL}archives/G0123ABCD/" in content["body"]
     assert harness.slack.calls("conversations.info") == []
 
 
 @pytest.mark.asyncio
 async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> None:
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     mention = event_payload(
         "message",
@@ -933,59 +824,69 @@ async def test_watch_mention_in_a_channel_and_its_replies(harness: Harness) -> N
     reply = event_payload("message", author="dana", text="ping", ts=REPLY_TS, thread_ts=ROOT_TS, channel="C0456EFGH")
 
     assert await harness.deliver(mention) == "delivered"
+    await harness.drain_triggers()
     assert await harness.deliver(reply, now=NOW + 60) == "delivered"
+    await harness.drain_triggers()
 
     (_, content), (_, follow_up) = harness.matrix.sent
-    assert f" Slack mention for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in content["body"]
-    assert f" Slack thread reply for you from Dana (@{SLACK_IDS['dana']}) in #{CHANNEL_NAME}: " in follow_up["body"]
+    assert f"Slack message from Dana in #{CHANNEL_NAME}" in content["body"]
+    assert "ping" in follow_up["body"]
     assert follow_up["m.relates_to"]["event_id"] == "$sent1"
-    # A watch names the channel only for display, so one lookup serves both.
+    # A watch names the channel only for display, so one cached lookup serves both.
     assert harness.slack.calls("conversations.info") == [{"channel": "C0456EFGH"}]
 
 
 @pytest.mark.asyncio
 async def test_watch_gets_an_app_mention_from_a_channel_no_agent_answers(harness: Harness) -> None:
     """Slack sends no `app_mention` from a channel the app is not in, so the `message` naming both reaches the watch."""
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     text = f"<@{BOT_USER}> <@{SLACK_IDS['alice']}> can you look?"
     payload = event_payload("message", author="dana", text=text, channel="C0456EFGH")
 
     assert await harness.deliver(payload) == "delivered"
+    await harness.drain_triggers()
 
     ((room_id, content),) = harness.matrix.sent
     assert room_id == WATCH_ROOM
-    assert " Slack mention for you from Dana " in content["body"]
+    assert f"Slack message from Dana in #{CHANNEL_NAME}" in content["body"]
 
 
 @pytest.mark.asyncio
 async def test_watch_pauses_when_another_human_joined(harness: Harness) -> None:
-    """Review Focus 5: a second person in the watch room stops deliveries there."""
-    alice_watch(harness.paths)
+    """Review Focus 3: a second person in the watch room stops deliveries there."""
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
-    harness.bots["assistant"].client = room_state_client([ALICE, harness.agent_id("assistant"), BOB])
+    harness.bots["assistant"].client = room_state_client(
+        [ALICE, harness.agent_id("assistant"), BOB],
+        room_id=WATCH_ROOM,
+    )
 
-    assert await harness.deliver(_dm()) == "ignored"
+    assert await harness.deliver(_dm()) == "delivered"
+    await harness.drain_triggers()
     assert harness.matrix.sent == []
 
 
 @pytest.mark.asyncio
 async def test_watch_skips_after_owner_reconnects_as_other_account(harness: Harness) -> None:
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths, slack_user_id="U0OTHER00")
 
-    assert await harness.deliver(_dm()) == "ignored"
+    assert await harness.deliver(_dm()) == "delivered"
+    await harness.drain_triggers()
     assert harness.matrix.sent == []
 
 
 @pytest.mark.asyncio
 async def test_watch_skips_without_a_connection_or_the_app_token(harness: Harness) -> None:
-    alice_watch(harness.paths)
-    assert await harness.deliver(_dm()) == "ignored"
+    alice_slack_trigger(harness.paths)
+    assert await harness.deliver(_dm()) == "delivered"
+    await harness.drain_triggers()
 
     connect_alice(harness.paths)
     install_slack_state(harness.paths, app_token=None)
-    assert await harness.deliver(_dm()) == "ignored"
+    assert await harness.deliver(_dm(ts=REPLY_TS)) == "ignored"
+    await harness.drain_triggers()
 
     assert harness.matrix.sent == []
     assert len(harness.slack.calls("apps.event.authorizations.list")) == 1
@@ -993,43 +894,24 @@ async def test_watch_skips_without_a_connection_or_the_app_token(harness: Harnes
 
 @pytest.mark.asyncio
 async def test_watch_skips_when_the_owner_cannot_see_the_event(harness: Harness) -> None:
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.slack.answers["apps.event.authorizations.list"] = {"ok": True, "authorizations": []}
 
     assert await harness.deliver(_dm()) == "ignored"
+    await harness.drain_triggers()
     assert harness.matrix.sent == []
 
 
 @pytest.mark.asyncio
 async def test_watch_skips_an_agent_without_personal_slack(harness: Harness) -> None:
-    alice_watch(harness.paths)
+    alice_slack_trigger(harness.paths)
     connect_alice(harness.paths)
     harness.config = bind_runtime_paths(Config.model_validate(config_data(assistant_tools=())), harness.paths)
 
-    assert await harness.deliver(_dm()) == "ignored"
+    assert await harness.deliver(_dm()) == "delivered"
+    await harness.drain_triggers()
     assert harness.matrix.sent == []
-
-
-@pytest.mark.asyncio
-async def test_unexpected_watch_check_failure_retries(harness: Harness) -> None:
-    alice_watch(harness.paths)
-    connect_alice(harness.paths)
-    harness.bots["assistant"].client.room_get_state.side_effect = RuntimeError("boom")
-
-    assert await harness.deliver(_dm()) == "retry"
-    assert harness.matrix.sent == []
-
-
-@pytest.mark.asyncio
-async def test_corrupt_watch_store_still_delivers_to_the_project_agent(harness: Harness) -> None:
-    assert harness.paths.control_state_root is not None
-    watches = harness.paths.control_state_root / "slack" / "watches.json"
-    watches.parent.mkdir(parents=True, exist_ok=True)
-    watches.write_text('{"watches": ', encoding="utf-8")
-
-    assert await harness.deliver(event_payload()) == "delivered"
-    assert len(harness.matrix.sent) == 1
 
 
 @pytest.mark.parametrize("target", ["project", "watch"])
@@ -1037,12 +919,26 @@ async def test_corrupt_watch_store_still_delivers_to_the_project_agent(harness: 
 async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(harness: Harness, target: str) -> None:
     """The receiving agent trusts the metadata of its own Slack post: the turn's hook source and requester."""
     if target == "project":
-        payload, agent, requester, hook_source = event_payload(), "launch", ADA, f"slack/{CHANNEL}/{ROOT_TS}"
+        payload, agent, requester, hook_source, source_kind = (
+            event_payload(),
+            "launch",
+            ADA,
+            f"slack/{CHANNEL}/{ROOT_TS}",
+            "hook_dispatch",
+        )
     else:
-        watch = alice_watch(harness.paths)
+        alice_slack_trigger(harness.paths)
         connect_alice(harness.paths)
-        payload, agent, requester, hook_source = _dm(), "assistant", ALICE, f"slack-watch/{watch.watch_id}"
+        payload, agent, requester, hook_source, source_kind = (
+            _dm(),
+            "assistant",
+            ALICE,
+            "event_source:slack",
+            "reactive_trigger",
+        )
     assert await harness.deliver(payload) == "delivered"
+    if target == "watch":
+        await harness.drain_triggers()
     ((room_id, content),) = harness.matrix.sent
     matrix_id = entity_identity_registry(harness.config, harness.paths).current_id(agent)
     event = nio.RoomMessageText.from_dict(
@@ -1089,4 +985,4 @@ async def test_slack_turn_reaches_the_agent_with_its_hook_source_and_requester(h
     assert facts.run_requester_id == requester
     assert envelope.requester_id == requester
     assert envelope.hook_source == hook_source
-    assert envelope.source_kind == "hook_dispatch"
+    assert envelope.source_kind == source_kind

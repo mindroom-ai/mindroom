@@ -1,7 +1,7 @@
 {
   "description": "Realtime voice call: the chat system prompt and the tool schemas handed to the realtime model.",
   "exported": {
-    "instructions": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n- Load skills via `get_skill_instructions(skill_name)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n- Tools with `mindroom_output_path` accept an optional workspace-relative file path to save full supported output and return a receipt.\n\n<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
+    "instructions": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, single-responder rooms, thread continuation, or enabled automations); plain-text display names are not Matrix mentions. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Personality Context\nPreloaded every turn by path; do not re-read unless editing or marked truncated.\n### <TMP>/mindroom_data/agents/assistant/workspace/SOUL.md\nYou are calm and precise.\n\nAnswer questions about the team handbook.\n</your_role>\n\n- Answer in at most three paragraphs.\n- Load skills via `skill(action=\"instructions\", name=...)` if available (skill names are not callable tools); do not read global `SKILL.md` files directly.\n- Tools with `mindroom_output_path` accept an optional workspace-relative file path to save full supported output and return a receipt.\n\n<skills_system>\nAvailable skills (load via skill tool, not callable directly):\n<skill>\n  <name>expense-report</name>\n  <description>File an expense report from receipts.</description>\n</skill>\n</skills_system>\n\n<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
     "tools": [
       {
         "name": "add",
@@ -314,42 +314,25 @@
         }
       },
       {
-        "name": "get_skill_instructions",
-        "description": "Load the full instructions for a skill. Use this when you need to follow a skill's guidance.",
+        "name": "skill",
+        "description": "Load a skill's instructions (SKILL.md, listing available references/scripts), a reference doc, or a script (read-only; run scripts with shell if available).",
         "parameters": {
           "type": "object",
           "properties": {
-            "skill_name": {
+            "action": {
               "type": "string",
-              "description": "The name of the skill to get instructions for."
+              "enum": [
+                "instructions",
+                "reference",
+                "script"
+              ],
+              "description": "What to load."
             },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "skill_name"
-          ]
-        }
-      },
-      {
-        "name": "get_skill_reference",
-        "description": "Load a reference document from a skill (list available references with get_skill_instructions if available).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "skill_name": {
+            "name": {
               "type": "string",
-              "description": "The name of the skill."
+              "description": "Skill name."
             },
-            "reference_path": {
+            "path": {
               "anyOf": [
                 {
                   "type": "string"
@@ -358,7 +341,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The filename of the reference document."
+              "description": "Listed filename under references/ or scripts/ (required for reference/script; omit for instructions)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -372,44 +355,8 @@
             }
           },
           "required": [
-            "skill_name"
-          ]
-        }
-      },
-      {
-        "name": "get_skill_script",
-        "description": "Read a script from a skill without running it; run it with shell if available (list available scripts with get_skill_instructions if available).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "skill_name": {
-              "type": "string",
-              "description": "The name of the skill."
-            },
-            "script_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The filename of the script."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "skill_name"
+            "action",
+            "name"
           ]
         }
       }

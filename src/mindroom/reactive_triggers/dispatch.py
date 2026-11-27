@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
-from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
+from mindroom.constants import HOOK_SOURCE_KEY, ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
+from mindroom.event_sources import EventSourceContext, event_source_hook_source
 from mindroom.hooks.sender import send_matrix_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.event_sources import EventSourceRegistry
     from mindroom.reactive_triggers.models import FiringRecord, ReactiveTriggerRecord, TriggerEvent
 
 logger = get_logger(__name__)
@@ -57,15 +60,6 @@ class DispatchResult:
     status: Literal["delivered", "retry", "skipped"]
     matrix_event_id: str | None = None
     reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _ResolvedTargetThread:
-    """Resolved thread placement for one reactive trigger dispatch."""
-
-    thread_event_id: str | None
-    per_fire_root: bool
-    save_thread_key: bool
 
 
 def build_reactive_trigger_transaction_id(firing: FiringRecord) -> str:
@@ -131,6 +125,7 @@ async def check_reactive_source_access(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
     known_room_states: Mapping[str, RoomStateSnapshot] | None = None,
+    event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult | None:
     """Recheck source-side authorization and membership before triage and before every delivery."""
     if not is_human_requester_id(rule.owner_user_id, config, runtime_paths):
@@ -138,14 +133,15 @@ async def check_reactive_source_access(
 
     source = rule.source
     if isinstance(source, ExternalEventSourceSpec):
-        reason = check_external_event_source_access(
-            owner_user_id=rule.owner_user_id,
-            source_spec=source,
+        return await _check_external_source_access(
+            rule=rule,
             event=event,
+            source_bot=source_bot,
             config=config,
             runtime_paths=runtime_paths,
+            known_room_states=known_room_states,
+            event_sources=event_sources,
         )
-        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
     if isinstance(source, GitHubPRSourceSpec):
         fn = check_github_pr_source_access
@@ -164,6 +160,45 @@ async def check_reactive_source_access(
             known_room_states=known_room_states,
         )
     return None
+
+
+async def _check_external_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    event: TriggerEvent,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None,
+    event_sources: EventSourceRegistry | None,
+) -> DispatchResult | None:
+    source = rule.source
+    assert isinstance(source, ExternalEventSourceSpec)
+    if source.is_registered:
+        registered = event_sources.for_rule(rule) if event_sources is not None else None
+        if registered is None:
+            return DispatchResult(status="skipped", reason="source_removed")
+        ctx = EventSourceContext(
+            owner_user_id=rule.owner_user_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            target_room_id=rule.target.room_id,
+            target_agent=rule.target.agent,
+            target_room_state=(known_room_states.get(rule.target.room_id) if known_room_states is not None else None),
+            client=source_bot.client if source_bot is not None else None,
+        )
+        denial = await registered.check_delivery_access(ctx, rule=rule, event=event)
+        if denial is None:
+            return None
+        return DispatchResult(status="retry" if denial.retry else "skipped", reason=denial.reason)
+    reason = check_external_event_source_access(
+        owner_user_id=rule.owner_user_id,
+        source_spec=source,
+        event=event,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+    return DispatchResult(status="skipped", reason=reason) if reason is not None else None
 
 
 async def _resolve_source_room_state(
@@ -332,6 +367,7 @@ async def dispatch_reactive_trigger(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
+    event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult:
     """Verify owner-scoped policy/auth/membership/source access and post one Matrix wake-agent message."""
     rejection = await _check_dispatch_preconditions(
@@ -342,6 +378,7 @@ async def dispatch_reactive_trigger(
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
+        event_sources=event_sources,
     )
     if rejection is not None:
         return rejection
@@ -355,33 +392,35 @@ async def dispatch_reactive_trigger(
     )
     if isinstance(resolved_thread, DispatchResult):
         return resolved_thread
+    thread_event_id, thread_key = resolved_thread
+    per_fire_root = rule.target.new_thread and thread_event_id is None
 
     latest_thread_event_id: str | None = None
-    if resolved_thread.thread_event_id is not None:
+    if thread_event_id is not None:
         latest_thread_event_id = (
             await target_bot.conversation_reader.latest_thread_event_id(
                 room_id=rule.target.room_id,
-                thread_id=resolved_thread.thread_event_id,
+                thread_id=thread_event_id,
             )
-            or resolved_thread.thread_event_id
+            or thread_event_id
         )
 
     content = _build_dispatch_content(
         rule=rule,
         firing=firing,
         triage_reason=triage_reason,
-        thread_event_id=resolved_thread.thread_event_id,
+        thread_event_id=thread_event_id,
         latest_thread_event_id=latest_thread_event_id,
-        per_fire_root=resolved_thread.per_fire_root,
+        per_fire_root=per_fire_root,
         config=config,
         runtime_paths=runtime_paths,
     )
-    if rule.target.reopen_on_fire and resolved_thread.thread_event_id is not None and not resolved_thread.per_fire_root:
+    if rule.target.reopen_on_fire and thread_event_id is not None:
         try:
             await reopen_thread_if_resolved(
                 target_bot.client,
                 rule.target.room_id,
-                resolved_thread.thread_event_id,
+                thread_event_id,
                 requester_user_id=rule.owner_user_id,
             )
         except Exception:
@@ -389,7 +428,7 @@ async def dispatch_reactive_trigger(
                 "Failed to auto-reopen resolved thread before reactive trigger delivery",
                 trigger_id=rule.trigger_id,
                 room_id=rule.target.room_id,
-                thread_id=resolved_thread.thread_event_id,
+                thread_id=thread_event_id,
                 exc_info=True,
             )
 
@@ -403,13 +442,13 @@ async def dispatch_reactive_trigger(
     if delivered is None:
         return DispatchResult(status="retry", reason="matrix_send_failed")
 
-    if resolved_thread.save_thread_key and rule.target.thread_key is not None:
+    if thread_key is not None:
         _persist_thread_key_binding(
             store=store,
             trigger_id=rule.trigger_id,
             rule_uid=rule.rule_uid,
-            thread_key=rule.target.thread_key,
-            matrix_event_id=delivered.event_id,
+            thread_key=thread_key,
+            matrix_event_id=thread_event_id or delivered.event_id,
         )
 
     return DispatchResult(status="delivered", matrix_event_id=delivered.event_id)
@@ -425,7 +464,7 @@ async def check_reactive_target_access(
     room_states: dict[str, RoomStateSnapshot] | None = None,
 ) -> DispatchResult | None:
     """Verify policy, target bot readiness, owner reply authorization, and live owner target-room membership."""
-    if not config.external_trigger_policy.enabled or not config.external_trigger_policy.reactive_enabled:
+    if not config.external_trigger_policy.is_reactive_active:
         return DispatchResult(status="skipped", reason="reactive_triggers_disabled")
     if target_bot is None or not target_bot.running or target_bot.client is None:
         return DispatchResult(status="retry", reason="target_bot_unavailable")
@@ -467,6 +506,7 @@ async def _check_dispatch_preconditions(
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
+    event_sources: EventSourceRegistry | None = None,
 ) -> DispatchResult | None:
     """Return a skip/retry DispatchResult when preconditions are not met, or None to proceed."""
     room_states: dict[str, RoomStateSnapshot] = {}
@@ -491,6 +531,7 @@ async def _check_dispatch_preconditions(
         runtime_paths=runtime_paths,
         memberships=memberships,
         known_room_states=room_states,
+        event_sources=event_sources,
     )
 
 
@@ -554,6 +595,8 @@ def _build_dispatch_content(
         REACTIVE_TRIGGER_ID_KEY: rule.trigger_id,
         REACTIVE_TRIGGER_DEDUPE_KEY: firing.dedupe_key,
     }
+    if isinstance(rule.source, ExternalEventSourceSpec):
+        extra_content[HOOK_SOURCE_KEY] = event_source_hook_source(rule.source.source_id)
     if per_fire_root:
         extra_content[PER_FIRE_THREAD_ROOT_KEY] = True
 
@@ -583,7 +626,7 @@ def _persist_thread_key_binding(
             matrix_event_id,
             expected_rule_uid=rule_uid,
         )
-    except ReactiveTriggerStoreError:
+    except (ReactiveTriggerStoreError, sqlite3.Error):
         logger.warning(
             "Failed to persist reactive trigger thread_key binding after delivery",
             trigger_id=trigger_id,
@@ -611,38 +654,27 @@ def _resolve_target_thread(
     rule: ReactiveTriggerRecord,
     firing: FiringRecord,
     store: ReactiveTriggerStore,
-) -> _ResolvedTargetThread | DispatchResult:
-    """Resolve thread placement or return a skip/retry DispatchResult on mismatch or store failure."""
+) -> tuple[str | None, str | None] | DispatchResult:
+    """Resolve ``(thread_event_id, thread_key)`` or return a skip/retry DispatchResult."""
     if rule.target.new_thread:
-        return _resolve_new_thread_target(rule=rule, store=store)
+        effective_key = firing.event.thread_key if rule.target.thread_key_from_event else rule.target.thread_key
+        if effective_key is None:
+            return None, None
+        try:
+            return store.get_thread_key_binding(rule.trigger_id, effective_key), effective_key
+        except (ReactiveTriggerStoreError, sqlite3.Error):
+            logger.warning(
+                "Failed to read reactive trigger thread_key binding",
+                trigger_id=rule.trigger_id,
+                thread_key=effective_key,
+                exc_info=True,
+            )
+            return DispatchResult(status="retry", reason="store_error")
     if rule.target.thread_id == "origin":
         if firing.event.room_id != rule.target.room_id:
             return DispatchResult(status="skipped", reason="origin_room_mismatch")
-        return _ResolvedTargetThread(firing.event.thread_id or firing.event.event_id, False, False)
-    return _ResolvedTargetThread(rule.target.thread_id, False, False)
-
-
-def _resolve_new_thread_target(
-    *,
-    rule: ReactiveTriggerRecord,
-    store: ReactiveTriggerStore,
-) -> _ResolvedTargetThread | DispatchResult:
-    """Resolve per-fire or thread_key-grouped thread placement for new_thread targets."""
-    if rule.target.thread_key is None:
-        return _ResolvedTargetThread(None, True, False)
-    try:
-        existing_root = store.get_thread_key_binding(rule.trigger_id, rule.target.thread_key)
-    except ReactiveTriggerStoreError:
-        logger.warning(
-            "Failed to read reactive trigger thread_key binding",
-            trigger_id=rule.trigger_id,
-            thread_key=rule.target.thread_key,
-            exc_info=True,
-        )
-        return DispatchResult(status="retry", reason="store_error")
-    if existing_root is not None:
-        return _ResolvedTargetThread(existing_root, False, False)
-    return _ResolvedTargetThread(None, True, True)
+        return firing.event.thread_id or firing.event.event_id, None
+    return rule.target.thread_id, None
 
 
 def _truncate_text(value: str | None, *, limit: int = _MAX_DISPATCH_TEXT_CHARS) -> str | None:

@@ -85,6 +85,12 @@ _EXPORTS = [
     "CustomEventContext",
     "Done",
     "EnrichmentItem",
+    "EventSource",
+    "EventSourceAccessDenial",
+    "EventSourceContext",
+    "EventSourceDescriptor",
+    "EventSourceEmitter",
+    "EventSourceInactiveError",
     "File",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
@@ -142,6 +148,7 @@ _EXPORTS = [
     "TurnOrigin",
     "TurnOutcome",
     "TurnTrust",
+    "ValidatedSubscription",
     "Video",
     "WorkerService",
     "WorkerServiceError",
@@ -237,6 +244,17 @@ _SIGNATURES = {
     ),
     "Done": "(notice, resolve, on_loop)",
     "EnrichmentItem": "(key, text, cache_policy, persist, minimal_required)",
+    "EventSource": "()",
+    "EventSourceAccessDenial": "(reason, retry)",
+    "EventSourceContext": (
+        "(owner_user_id, config, runtime_paths, target_room_id, target_agent, target_room_state, "
+        "calling_room_state, client, credentials_manager)"
+    ),
+    "EventSourceDescriptor": (
+        "(source_id, description, allowed_kinds, match_fields, example, default_once, default_new_thread, "
+        "default_thread_key_from_event, default_reopen_on_fire, private_room_only, default_max_fires_per_hour)"
+    ),
+    "EventSourceEmitter": "(source_id, token)",
     "File": "(*, id, url, filepath, content, mime_type, file_type, filename, size, format, name, metadata)",
     "FinalResponseDraft": "(response_text, response_kind, envelope)",
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
@@ -326,6 +344,7 @@ _SIGNATURES = {
     "Toolkit": "(*, name, tools, instructions)",
     "TranscriptLine": "(role, sender, display_name, text)",
     "TurnLifecycleContext": f"({_HOOK}, envelope, outcome, *, {_HOOK_HELPERS})",
+    "ValidatedSubscription": "(kind, match, binding)",
     "Video": "(*, id, url, filepath, content, format, mime_type, duration, width, height, fps, eta, original_prompt, revised_prompt, metadata)",
     "WorkerService": "(name, module, idle_timeout_seconds)",
     "WorkerServiceState": "(state, port, exit_code)",
@@ -394,6 +413,7 @@ _SIGNATURES = {
 # pinning a constructor's parameters would make every new config, path, or trace field a plugin API change.
 _ANNOTATION_TYPES = [
     "Config",
+    "EventSourceInactiveError",
     "OAuthConnectionRequired",
     "OAuthProviderError",
     "RuntimePaths",
@@ -502,7 +522,24 @@ _MEMBERS = {
         "state_root": "property",
         "is_active": "(self)",
     },
-    "mindroom.plugin_api.PluginLifecycle": {"context": "(self)"},
+    "mindroom.plugin_api.EventSource": {
+        "describe_for_user": "(self, ctx)",
+        "validate_subscription": "(self, ctx, *, kind, match, existing_binding)",
+        "dry_run_audience": "(self, rule)",
+        "matches_rule": "(self, rule, event, *, audience, has_thread_binding)",
+        "check_delivery_access": "(self, ctx, *, rule, event)",
+        "check_history_access": "(self, ctx, *, rule, event)",
+    },
+    "mindroom.plugin_api.EventSourceEmitter": {
+        "emit": (
+            "(self, *, kind, event_id, text, title, summary, actor, thread_key, data, timestamp, "
+            "owner_user_ids, audience, dedupe_key)"
+        ),
+    },
+    "mindroom.plugin_api.PluginLifecycle": {
+        "context": "(self)",
+        "register_event_source": "(self, source)",
+    },
     "mindroom.plugin_api.HookMessageSender": {
         "__call__": (
             "(self, room_id, body, thread_id, source_hook, extra_content, *, trigger_dispatch, mentions, wake_mentioned)"
@@ -642,6 +679,7 @@ _HTTP_EXPORTS = [
     "client_rooms",
     "client_stream",
     "client_user_oauth_access_token",
+    "event_source_emitter",
     "plugin_context",
     "plugin_origin_url",
     "require_client_user",
@@ -672,6 +710,7 @@ _ELSEWHERE_SIGNATURES = {
     "mindroom.plugin_http.client_rooms": "(request, candidates)",
     "mindroom.plugin_http.client_stream": "(websocket, room_id, *, admit)",
     "mindroom.plugin_http.client_user_oauth_access_token": "(request, user, provider_id, agent_name)",
+    "mindroom.plugin_http.event_source_emitter": "(request, source_id)",
     "mindroom.plugin_http.plugin_context": "(connection)",
     "mindroom.plugin_http.plugin_origin_url": "(connection, label)",
     "mindroom.plugin_http.require_client_user": "(request)",
@@ -691,7 +730,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 37), "861010646d1d6fe5caeceda69a8bf2a948c82d2b115276566b8656c4abb27f72")
+_PINNED_VERSION = ((1, 38), "1cb04c1f2879837c596c46b52532fc5fefd73572dc66eacb4ae08a5cdb168fa6")
 
 
 def _is_enum(obj: object) -> bool:

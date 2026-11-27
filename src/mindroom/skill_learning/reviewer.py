@@ -22,10 +22,13 @@ from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.run import own_model_messages
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_run_usage
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import DeferredTools
 from mindroom.llm.runs import RunRecord
+from mindroom.llm.tool_search import resolve_call_tool_calls
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
@@ -35,6 +38,7 @@ from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_c
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_jobs.background_after import application_arguments
+from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_schema import validated_entrypoint
 from mindroom.tool_system.toolkits import adapt_toolkit
@@ -56,6 +60,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+_NO_DEFERRED_TOOLS = DeferredTools()
 
 # Hermes caps one review fork at 16 iterations and 75% of the review model's context window, at most 600k input
 # tokens across all of its requests, falling back to 120k when the window is unknown.
@@ -73,12 +78,9 @@ _SKILL_TOOL_LINES = {
     "skill_manage": 'skill_manage(action, name, ...): action "create" (full SKILL.md in content), "patch" '
     '(old_string/new_string, optionally file_path), "edit" (full SKILL.md replacement in content), "write_file" '
     '(file_path and file_content), or "remove_file" (file_path).',
-    "get_skill_instructions": "get_skill_instructions(skill_name): load a skill's full SKILL.md, its owner, and its "
-    "support files.",
-    "get_skill_reference": "get_skill_reference(skill_name, reference_path): load one support file under references/, "
-    "named as get_skill_instructions lists it or by its file name.",
-    "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/, named the "
-    "same way; scripts never run in a review.",
+    "skill": 'skill(action, name, path=None): action "instructions" loads a skill\'s full SKILL.md, its owner, '
+    'and its support files (omit path); "reference" or "script" loads one support file under references/ or '
+    "scripts/ (scripts never run in a review).",
 }
 
 
@@ -96,6 +98,7 @@ class _ReviewRequest:
     tools: PreparedTools
     settings: ModelRequest
     forked: bool
+    deferred_runnable: frozenset[str] = frozenset()
 
 
 def _transcript_budget_chars(counter: TokenCounter, messages: Sequence[Sequence[Utterance]], budget_tokens: int) -> int:
@@ -152,24 +155,60 @@ def _review_tools(
     tools: SkillTools,
     *,
     awaiting_decision: frozenset[str] = frozenset(),
-) -> tuple[PreparedTools, list[str]]:
+    deferred_tools: DeferredTools = _NO_DEFERRED_TOOLS,
+) -> tuple[PreparedTools, list[str], frozenset[str]]:
     """Answer the calls of every tool the request defines, but run only the skill tools, as the review's.
 
     Like Hermes' denial message, every other tool answers with the skill tools the review can use. A tool whose call
     waits for a decision (``awaiting_decision``) gets no function, so the loop answers that it does not exist or is not
-    available instead of pausing the review. Returns the functions and the skill tools that run, in the order the review
-    prompt lists them.
+    available instead of pausing the review. When portable tool search defers a runnable skill tool, ``tool_search``
+    returns only those deferred skill definitions and ``call_tool`` answers unresolved calls with a retry hint while
+    ``resolve_call_tool_calls`` rewrites only ``call_tool`` calls targeting deferred runnable skill tools before
+    dispatch.
     """
     # The functions run the review's own methods, which validate their arguments as the agent's coercing functions
     # would, such as refusing an action outside the enum.
     entrypoints: dict[str, Callable[..., Any]] = {
         "skill_manage": validated_entrypoint(tools.skill_manage),
-        "get_skill_instructions": validated_entrypoint(tools.get_skill_instructions),
-        "get_skill_reference": validated_entrypoint(tools.get_skill_reference),
-        "get_skill_script": validated_entrypoint(tools.get_skill_script),
+        "skill": validated_entrypoint(tools.skill),
     }
     answered = {definition.name: definition for definition in definitions if definition.name not in awaiting_decision}
     runnable = [name for name in _SKILL_TOOL_LINES if name in answered]
+    deferred_runnable = (
+        [answered[name] for name in runnable if name in deferred_tools.names] if deferred_tools.portable else []
+    )
+    if deferred_runnable:
+        if "tool_search" in answered:
+            deferred_toolkits = tuple(
+                DeferredToolkit(
+                    deferral=ToolDeferral(domain_name=definition.name, description="", instructions=None),
+                    functions=(
+                        ToolFunction(
+                            name=definition.name,
+                            description=definition.description,
+                            parameters=definition.parameters,
+                            entrypoint=entrypoints[definition.name],
+                        ),
+                    ),
+                )
+                for definition in deferred_runnable
+            )
+            entrypoints["tool_search"] = validated_entrypoint(
+                DynamicToolsToolkit(deferred_toolkits=lambda: deferred_toolkits).tool_search,
+            )
+        if "call_tool" in answered:
+            deferred_names = _listing([definition.name for definition in deferred_runnable])
+            example_name = deferred_runnable[0].name
+
+            async def review_call_tool(name: str = "", arguments: object = None, **_extra: object) -> str:
+                del arguments
+                subject = f"'{name}' was not called" if name else "Nothing was called"
+                return (
+                    f"{subject}. In this review, call {deferred_names} via "
+                    f'call_tool(name="{example_name}", arguments={{...}}) with arguments as a JSON object.'
+                )
+
+            entrypoints["call_tool"] = review_call_tool
 
     async def deny(**_arguments: object) -> str:
         verb = "runs" if len(runnable) == 1 else "run"
@@ -185,24 +224,53 @@ def _review_tools(
         )
         for name, definition in answered.items()
     }
-    return PreparedTools(functions=functions), runnable
+    return PreparedTools(functions=functions), runnable, frozenset(d.name for d in deferred_runnable)
 
 
 def _listing(names: Sequence[str]) -> str:
     return " and ".join(names) if len(names) < 3 else ", ".join(names[:-1]) + f", and {names[-1]}"
 
 
-def _review_prompt(config: Config, catalog: SkillCatalog, runnable: Sequence[str]) -> str:
+def _review_prompt(
+    config: Config,
+    catalog: SkillCatalog,
+    runnable: Sequence[str],
+    *,
+    deferred_tools: DeferredTools = _NO_DEFERRED_TOOLS,
+    has_tool_search: bool = False,
+) -> str:
     owners = "\n".join(
         f"- {entry.name} ({entry.owner}): {entry.description}"
         for entry in sorted(catalog.entries.values(), key=lambda item: item.name)
     )
     tool_lines = "\n".join(f"- {_SKILL_TOOL_LINES[name]}" for name in runnable)
+    deferred_note = ""
+    restriction = (
+        f"You can only call {_listing(runnable)} in this review; every other tool answers that it is not "
+        "available, so do not call one."
+    )
+    if "skill_manage" in deferred_tools.names:
+        if deferred_tools.portable:
+            search_hint = (
+                ' (or call `tool_search(query="skill_manage")` first for its schema)' if has_tool_search else ""
+            )
+            deferred_note = (
+                "\n`skill_manage` is deferred in this conversation; call it through "
+                f'`call_tool(name="skill_manage", arguments={{...}})`{search_hint}.'
+            )
+            via_tools = "`call_tool` and `tool_search`" if has_tool_search else "`call_tool`"
+            restriction = (
+                f"You can only use {_listing(runnable)} in this review (calling `skill_manage` through {via_tools}); "
+                "every other tool answers that it is not available, so do not call one."
+            )
+        else:
+            deferred_note = (
+                "\n`skill_manage` is deferred in this conversation and may require tool search before calling."
+            )
     return (
-        f"{config.get_prompt('SKILL_REVIEW_PROMPT')}\nTools:\n{tool_lines}\n\n"
+        f"{config.get_prompt('SKILL_REVIEW_PROMPT')}\nTools:\n{tool_lines}{deferred_note}\n\n"
         f"Skills and their owners:\n{owners or '(none yet)'}\n\n"
-        f"You can only call {_listing(runnable)} in this review; every other tool answers that it is not available, "
-        "so do not call one."
+        f"{restriction}"
     )
 
 
@@ -227,13 +295,32 @@ def _fork(
         return None
     # A gated call pauses its run, asks as its job, or runs elsewhere.
     awaiting_decision = frozenset(function.name for function in captured.functions if function.gate is not None)
-    functions, runnable = _review_tools(request.tools, tools, awaiting_decision=awaiting_decision)
+    functions, runnable, deferred_runnable = _review_tools(
+        request.tools,
+        tools,
+        awaiting_decision=awaiting_decision,
+        deferred_tools=request.deferred_tools,
+    )
     if "skill_manage" not in runnable:
+        return None
+    if "skill_manage" in deferred_runnable and "call_tool" not in functions.functions:
         return None
     return _ReviewRequest(
         model=captured.model,
         model_name=captured.model_name,
-        messages=[*request.messages, Message(role="user", content=_review_prompt(config, catalog, runnable))],
+        messages=[
+            *request.messages,
+            Message(
+                role="user",
+                content=_review_prompt(
+                    config,
+                    catalog,
+                    runnable,
+                    deferred_tools=request.deferred_tools,
+                    has_tool_search="tool_search" in functions.functions,
+                ),
+            ),
+        ],
         definitions=tuple(request.tools),
         tools=functions,
         # The loop sends its own messages and tools with the response's request settings. It only reads the system
@@ -246,6 +333,7 @@ def _fork(
             overrides=replace(request.overrides, wait_for_connectivity=False),
         ),
         forked=True,
+        deferred_runnable=deferred_runnable,
     )
 
 
@@ -333,7 +421,7 @@ async def _replay(
         skills_root,
         catalog,
     )
-    functions, runnable = _review_tools(definitions, tools)
+    functions, runnable, _ = _review_tools(definitions, tools)
     evidence = (
         "The conversation to review is supplied inside <conversation> tags as a transcript of the stored turns.\n"
         f"<conversation>\n{transcript}\n</conversation>"
@@ -388,6 +476,11 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
     return LoopHooks(
         before_request=(within_budget, offer_definitions),
         answer_tool_calls=output_limit_policy(),
+        rewrite_tool_calls=(
+            (lambda calls, _names: resolve_call_tool_calls(calls, review.deferred_runnable))
+            if review.deferred_runnable
+            else None
+        ),
     )
 
 

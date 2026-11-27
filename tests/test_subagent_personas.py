@@ -418,7 +418,7 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
     assert visible(_function("read_file", "filesystem"))
     assert not visible(_function("write_file", "filesystem"))
     assert not visible(_function("generated", None))
-    assert visible(_function("get_skill_instructions", None))
+    assert visible(_function("skill", None))
     assert disabled == frozenset({"shell", "dynamic_tools"})
     assert persona_tool_policy(None, lambda: ["filesystem"], caller_filter) == (caller_filter, frozenset())
 

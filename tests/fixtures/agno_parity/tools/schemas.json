@@ -704,7 +704,7 @@
       },
       {
         "name": "confluence_download_attachment",
-        "description": "Download one Confluence page attachment into this conversation.\nReturns a context attachment ID (att_...) that is usable in this turn only.\nOpen it with get_attachment(attachment_id), or save it to the workspace with\nget_attachment(attachment_id, mindroom_output_path=...); in a later turn, download it again.",
+        "description": "Download one Confluence page attachment into this conversation.\nReturns a context attachment ID (att_...) that is usable in this turn only.\nOpen it with attachment(action=\"get\", attachment_id=...), or save it to the workspace with\nattachment(action=\"get\", attachment_id=..., mindroom_output_path=...); in a later turn, download it again.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -893,12 +893,22 @@
     "guidance": null,
     "functions": [
       {
-        "name": "list_attachments",
-        "description": "List attachment metadata for current tool context.",
+        "name": "attachment",
+        "description": "Manage conversation attachments.\n- `list`: list context attachments (optional `attachment_id` filter).\n- `get`: inspect `attachment_id` metadata, save raw bytes to `mindroom_output_path`, or pass `view=True` to load image/audio/video/document (<=20 MiB) into model context.\n- `register`: register a local file at `path` as a context `attachment_id`.\n- `inline_image`: upload an image by `attachment_id` or `path` (not both; optional `alt`) and return `markdown` for a reply or `matrix_message` (on refusal, use `matrix_message(attachments=[...])`; never use placeholder URLs).",
         "parameters": {
           "type": "object",
           "properties": {
-            "target": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "list",
+                "get",
+                "register",
+                "inline_image"
+              ],
+              "description": "Operation to perform."
+            },
+            "attachment_id": {
               "anyOf": [
                 {
                   "type": "string"
@@ -906,24 +916,34 @@
                 {
                   "type": "null"
                 }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_attachment",
-        "description": "Inspect metadata, save a file, or send attachment content to the model.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "attachment_id": {
-              "type": "string",
-              "description": "Context-scoped attachment ID returned by list_attachments."
+              ],
+              "description": "Context attachment ID (list filter, get, or inline_image)."
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Local file path (register or inline_image)."
+            },
+            "view": {
+              "type": "boolean",
+              "description": "Load media into model context (get only; incompatible with mindroom_output_path)."
+            },
+            "alt": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Markdown alt text (inline_image)."
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -934,15 +954,11 @@
                   "type": "null"
                 }
               ],
-              "description": "Save attachment bytes to a workspace-relative file."
-            },
-            "view": {
-              "type": "boolean",
-              "description": "Send image, audio, video, or document content (including PDF) to the model; up to 20 MiB.\nImages use the same preparation, limits, and replay behavior as view_file.\nRequires a model that supports the media type. If inline media is unavailable, use\nget_attachment without view to get metadata or save the file, then use other available tools.\nCannot be combined with mindroom_output_path."
+              "description": "Optional workspace-relative path: save raw bytes (get) or JSON output to file and return a receipt."
             }
           },
           "required": [
-            "attachment_id"
+            "action"
           ]
         },
         "strict": null,
@@ -950,54 +966,8 @@
         "stop_after_tool_call": false
       },
       {
-        "name": "register_attachment",
-        "description": "Register a local file as a context attachment ID.\nPaths resolve from the agent workspace and must stay inside it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "file_path"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "inline_image",
-        "description": "Upload an image so it can appear inline in a reply.\nPaste the returned ``markdown`` into your reply or a ``matrix_message`` text where the image should appear.\nWhen this refuses, send the file with ``matrix_message(attachments=[...])`` instead.\nNever link an image to a placeholder or made-up address.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "reference": {
-              "type": "string"
-            },
-            "alt": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "reference"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
         "name": "view_file",
-        "description": "View an image in your own model context without posting or invoking another model.\nTo view an attachment ID, use get_attachment with view instead.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
+        "description": "View an image in your own model context without posting or invoking another model.\nTo view an attachment ID, use attachment(action=\"get\", attachment_id=..., view=True) instead.\nPNG, JPEG, GIF and WebP images are supported, up to 20 MiB and 40 million pixels.\nLarge images are resized to 2048 pixels; animation uses its first frame, with disclosure.\nThe source path and a reusable attachment handle are retained when available.\nUse read_file for ordinary text/code; use matrix_message only when sharing is requested.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -20828,6 +20798,12 @@
                       },
                       {
                         "type": "integer"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
                       }
                     ]
                   }
@@ -20906,7 +20882,14 @@
               ]
             },
             "new_thread": {
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "thread_key": {
               "anyOf": [

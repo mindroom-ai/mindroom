@@ -175,7 +175,7 @@ def _make_orchestrator(
     *,
     bots: dict[str, object] | None = None,
 ) -> SimpleNamespace:
-    reactive_triggers = SimpleNamespace(notify_work=MagicMock())
+    reactive_triggers = SimpleNamespace(notify_work=MagicMock(), event_sources=None)
     return SimpleNamespace(
         agent_bots=bots or {},
         reactive_triggers=reactive_triggers,
@@ -217,6 +217,16 @@ def _context(
 
 def _payload(raw: str) -> dict[str, Any]:
     return cast("dict[str, Any]", json.loads(raw))
+
+
+def _assert_redacted(row: dict[str, Any], *forbidden: str) -> None:
+    assert row["event"] is None
+    assert row["triage_reason"] is None
+    assert {"dedupe_key", "error_message"}.isdisjoint(row)
+    if forbidden:
+        serialized = json.dumps(row)
+        for secret in forbidden:
+            assert secret not in serialized
 
 
 @pytest.mark.asyncio
@@ -264,6 +274,7 @@ async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp
         "thread_id": "origin",
         "new_thread": False,
         "thread_key": None,
+        "thread_key_from_event": False,
         "reopen_on_fire": False,
         "prompt": "Alert me on urgent deploys.",
     }
@@ -1480,8 +1491,9 @@ async def test_history_pagination_owner_isolation_admin_visibility_and_truncatio
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         admin_hist = _payload(await tool.triggers(action="history", limit=500))
     assert admin_hist["status"] == "ok"
-    assert [row["dedupe_key"] for row in admin_hist["firings"]] == ["$ev3", "$ev2", "$ev1"]
-    assert all(row["event"] is None for row in admin_hist["firings"])
+    assert [row["trigger_id"] for row in admin_hist["firings"]] == ["owner-r", "other-r", "owner-r"]
+    for row in admin_hist["firings"]:
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -1948,12 +1960,14 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     ):
         admin_hist = _payload(await tool.triggers(action="history"))
     assert admin_hist["status"] == "ok"
-    assert [row["dedupe_key"] for row in admin_hist["firings"]] == [
-        "$ev_gh",
-        "$ev_priv_msg",
-        "$ev_priv_tag",
-        "$ev_lobby",
+    assert [row["trigger_id"] for row in admin_hist["firings"]] == [
+        "watch-gh",
+        "watch-priv-msg",
+        "watch-priv-tag",
+        "watch-lobby",
     ]
+    for row in admin_hist["firings"]:
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -2393,10 +2407,10 @@ async def test_history_rechecks_per_event_external_source_grants_for_non_admins(
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=narrowed_config)):
         admin_scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
         admin_unscoped = _payload(await tool.triggers(action="history"))
-    assert [row["dedupe_key"] for row in admin_scoped["firings"]] == ["$pr_org/b", "$pr_org/a"]
-    assert [row["dedupe_key"] for row in admin_unscoped["firings"]] == ["$pr_org/b", "$pr_org/a"]
-    assert all(row["event"] is None for row in admin_scoped["firings"])
-    assert all(row["event"] is None for row in admin_unscoped["firings"])
+    assert len(admin_scoped["firings"]) == 2
+    assert len(admin_unscoped["firings"]) == 2
+    for row in (*admin_scoped["firings"], *admin_unscoped["firings"]):
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
@@ -2440,6 +2454,7 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
         ),
     )
     owner_firing = store.list_firings(trigger_id="owner-private")[0]
+    assert store.claim_firing(owner_firing.id, now=1_001.5, triage_reason="Private body summary") == "claimed"
     assert store.mark_skipped(owner_firing.id, "delivery rate limited")
 
     store.enqueue_firing(
@@ -2466,32 +2481,34 @@ async def test_non_owner_admin_history_redacts_event_content_while_keeping_opera
     assert scoped_other["status"] == "ok"
     assert scoped_other["count"] == 1
     redacted_row = scoped_other["firings"][0]
-    assert redacted_row["id"] == owner_firing.id
-    assert redacted_row["trigger_id"] == "owner-private"
-    assert redacted_row["dedupe_key"] == "$ev_secret"
-    assert redacted_row["status"] == "skipped"
-    assert redacted_row["error_message"] == "delivery rate limited"
-    assert redacted_row["event"] is None
-    serialized_other = json.dumps(redacted_row)
-    assert "classified private room body" not in serialized_other
-    assert "@secret-sender:example.org" not in serialized_other
-    assert "Confidential Title" not in serialized_other
+    assert (redacted_row["id"], redacted_row["trigger_id"], redacted_row["status"]) == (
+        owner_firing.id,
+        "owner-private",
+        "skipped",
+    )
+    _assert_redacted(
+        redacted_row,
+        "classified private room body",
+        "@secret-sender:example.org",
+        "Confidential Title",
+        "delivery rate limited",
+        "$ev_secret",
+    )
 
     assert scoped_own["status"] == "ok"
     assert scoped_own["firings"][0]["event"]["text"] == "admin visible body"
 
-    by_id = {row["dedupe_key"]: row for row in unscoped["firings"]}
-    assert by_id["$ev_secret"]["event"] is None
-    assert by_id["$ev_secret"]["error_message"] == "delivery rate limited"
-    assert by_id["$ev_admin"]["event"]["text"] == "admin visible body"
+    by_trigger = {row["trigger_id"]: row for row in unscoped["firings"]}
+    _assert_redacted(by_trigger["owner-private"])
+    assert by_trigger["admin-own"]["event"]["text"] == "admin visible body"
 
     # Once admin leaves the watched room, even their own trigger's event content is redacted.
     live_members["!lobby:example.org"] = ["@owner:example.org"]
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config, client=client)):
         scoped_own_after_leave = _payload(await tool.triggers(action="history", trigger_id="admin-own"))
         unscoped_after_leave = _payload(await tool.triggers(action="history"))
-    assert scoped_own_after_leave["firings"][0]["event"] is None
-    assert all(row["event"] is None for row in unscoped_after_leave["firings"])
+    for row in (*scoped_own_after_leave["firings"], *unscoped_after_leave["firings"]):
+        _assert_redacted(row)
 
 
 @pytest.mark.asyncio
