@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_by_run
-from mindroom.delegation.background import delegation_child, job_acknowledgers
-from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key, receipt_delegation_ids
+from mindroom.delegation.background import carried_job_receipts, delegation_child
+from mindroom.delegation.cost import SubagentCost, merge_by_key
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -208,8 +208,7 @@ async def _continued_receipts(
         return receipts
     own_usd = child_own_usage(run, config)[1]
     ran = {**dict.fromkeys(prior_usage_by_run(run.metadata)), run.run_id: run.metadata}
-    needed = receipt_delegation_ids(ran)
-    received = carried_receipts(ran, job_acknowledgers(await runtime.delegation_jobs(needed))) if needed else {}
+    received = await carried_job_receipts(ran, runtime.delegation_jobs)
     return merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
 
 

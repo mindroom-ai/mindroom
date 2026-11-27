@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
+from unittest.mock import AsyncMock
 
 import pytest
 from structlog.testing import capture_logs
@@ -18,8 +19,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
-from mindroom.delegation.cost import carried_receipts, receipt_delegation_ids, receipts_metadata
+from mindroom.delegation.background import ACKNOWLEDGED_BY, _job_acknowledgers, carried_job_receipts
+from mindroom.delegation.cost import receipts_metadata
 from mindroom.event_journal import tool_jobs as event_journal_tool_jobs
 from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
@@ -46,6 +47,7 @@ from tests.tool_job_helpers import (
     lookup,
     pending_outcome,
     pending_outcomes,
+    rewrite_saved_job,
     saved_jobs,
     saved_payload,
     start_job,
@@ -611,7 +613,7 @@ async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(
             operation=operation,
         )
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        assert not any(job_acknowledgers([waited.job]).values())
+        assert not any(_job_acknowledgers([waited.job]).values())
         acknowledged = {ACKNOWLEDGED_BY: "first-run"} if kind == "delegation" else None
         await runtime.acknowledge_wait(job_id, waited.claim, adapter=acknowledged)
     await runtime.shutdown()
@@ -622,7 +624,7 @@ async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(
         await restored.acknowledge_wait("subagent", reread.claim, adapter={ACKNOWLEDGED_BY: "a-later-reader"})
         jobs = {job.job_id: job for job in restored.retained_jobs()}
         assert jobs["subagent"].consumed
-        assert job_acknowledgers(jobs.values()) == {child["child"]["delegation_id"]: "first-run"}
+        assert _job_acknowledgers(jobs.values()) == {child["child"]["delegation_id"]: "first-run"}
         assert jobs["subagent"].adapter["child"] == child["child"]
         assert "tool" not in jobs
         tool_job = await lookup(restored, "tool", owner=job_owner(), depth=0)
@@ -656,7 +658,7 @@ async def test_an_instance_that_runs_no_jobs_reads_the_saved_ones_that_parse_and
         assert [(job.job_id, job.consumed) for job in await runtime_module.saved_jobs(journal)] == [("kept", False)]
         # The runtime still owns the jobs, so its acknowledgement lands, and the next read finds it.
         await runtime.acknowledge_wait("kept", waited.claim, adapter={ACKNOWLEDGED_BY: "first-run"})
-        assert list(job_acknowledgers(await runtime_module.saved_jobs(journal)).values()) == ["first-run"]
+        assert list(_job_acknowledgers(await runtime_module.saved_jobs(journal)).values()) == ["first-run"]
     finally:
         await journal.close()
         await runtime.shutdown()
@@ -789,18 +791,9 @@ async def test_a_result_its_own_call_returned_inline_expires_after_a_day(tmp_pat
     finally:
         await runtime.shutdown()
     now = datetime.now(UTC)
-    persisted = await saved_jobs(tmp_path)
     for name in ("inline", "read", "unread"):
-        await write_saved_job(
-            tmp_path,
-            name,
-            json.dumps(asdict(replace(persisted[name], updated_at=(now - timedelta(days=2)).isoformat()))),
-        )
-    await write_saved_job(
-        tmp_path,
-        "recent inline",
-        json.dumps(asdict(replace(persisted["recent inline"], updated_at=(now - timedelta(hours=23)).isoformat()))),
-    )
+        await rewrite_saved_job(tmp_path, name, updated_at=(now - timedelta(days=2)).isoformat())
+    await rewrite_saved_job(tmp_path, "recent inline", updated_at=(now - timedelta(hours=23)).isoformat())
     restored = await tool_job_runtime(tmp_path)
     kept = {"recent inline", "read", "unread"}
     try:
@@ -2820,6 +2813,21 @@ async def test_shutdown_skips_saved_terminal_entries_while_retrying_unsaved_term
     assert (await saved_jobs(tmp_path))["unsaved-terminal"].status == "cancelled"
 
 
+async def _completed() -> BackgroundOutcome:
+    return BackgroundOutcome("completed", "ok")
+
+
+@asynccontextmanager
+async def _open_runtime(tmp_path: Path, *, recover: bool = False) -> AsyncIterator[ToolJobRuntime]:
+    runtime = await tool_job_runtime(tmp_path)
+    try:
+        if recover:
+            await runtime.recover()
+        yield runtime
+    finally:
+        await runtime.shutdown()
+
+
 async def _finish_and_ack(
     runtime: ToolJobRuntime,
     job_id: str,
@@ -2831,9 +2839,6 @@ async def _finish_and_ack(
     returned_inline: bool = False,
     ack_adapter: dict[str, object] | None = None,
 ) -> None:
-    async def done() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "ok")
-
     await start_job(
         runtime,
         job_id,
@@ -2842,7 +2847,7 @@ async def _finish_and_ack(
         kind=kind,
         adapter={} if adapter is None else adapter,
         owner=owner,
-        operation=done,
+        operation=_completed,
     )
     waited = await runtime.wait(job_id, owner=owner, depth=0)
     await runtime.acknowledge_wait(job_id, waited.claim, returned_inline=returned_inline, adapter=ack_adapter)
@@ -2852,27 +2857,23 @@ async def _finish_and_ack(
 async def test_recover_skips_cold_jobs_with_lookup_and_reattach_parity(tmp_path: Path) -> None:
     """recover() keeps cold consumed non-workflow jobs out of memory while preserving lookup, prefix, and reattach parity."""
     owner = job_owner()
-    cold_list_id = "abcdef01" + "0" * 56
-    hot_unconsumed_id = "abcdef01" + "1" * 56
-    cold_unique_id = "cafebabe" + "4" * 56
-    workflow_id = "11111111" + "6" * 56
-    workflow_node_id = "22222222" + "7" * 56
-    active_id = "33333333" + "8" * 56
+    cold_list_id, hot_unconsumed_id = "abcdef01" + "0" * 56, "abcdef01" + "1" * 56
+    cold_unique_id, workflow_id = "cafebabe" + "4" * 56, "11111111" + "6" * 56
+    workflow_node_id, active_id = "22222222" + "7" * 56, "33333333" + "8" * 56
     wf_node_child = asdict(replace(job_child(job_id="wf-deleg-1"), workflow_run_id="wf-run-1"))
-    gate = asyncio.Event()
 
-    async def done() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "ok")
-
-    async def parked() -> BackgroundOutcome:
-        await gate.wait()
-        return BackgroundOutcome("completed", "never")
-
-    runtime = await tool_job_runtime(tmp_path)
-    try:
+    async with _open_runtime(tmp_path) as runtime:
         await _finish_and_ack(runtime, cold_list_id, owner=owner, adapter={"k": 1})
         await _finish_and_ack(runtime, cold_unique_id, owner=owner)
-        await start_job(runtime, hot_unconsumed_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done)
+        await start_job(
+            runtime,
+            hot_unconsumed_id,
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=_completed,
+        )
         await _finish_and_ack(runtime, workflow_id, owner=owner, kind="workflow", tool_name="workflow")
         await _finish_and_ack(
             runtime,
@@ -2882,78 +2883,42 @@ async def test_recover_skips_cold_jobs_with_lookup_and_reattach_parity(tmp_path:
             tool_name="worker",
             adapter={"child": wf_node_child},
         )
-        await runtime.start(active_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=parked)
-    finally:
-        gate.set()
-        await runtime.shutdown()
+        await start_job(runtime, active_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=_completed)
 
-    persisted = await saved_jobs(tmp_path)
-    await write_saved_job(
-        tmp_path,
-        active_id,
-        json.dumps(asdict(replace(persisted[active_id], status="running", consumed=False))),
-    )
+    await rewrite_saved_job(tmp_path, active_id, status="running", consumed=False)
 
-    restored = await tool_job_runtime(tmp_path)
-    try:
-        await restored.recover()
+    async with _open_runtime(tmp_path, recover=True) as restored:
         assert set(restored._entries) == {active_id, hot_unconsumed_id, workflow_id, workflow_node_id}
-        assert restored._job_standing(workflow_id) == "ended"
-        assert restored._job_standing(workflow_node_id) == "ended"
-
+        assert (restored._job_standing(workflow_id), restored._job_standing(workflow_node_id)) == ("ended", "ended")
         with pytest.raises(ValueError, match=f"{cold_list_id}, {hot_unconsumed_id}"):
             await restored.wait("abcdef01", owner=owner, depth=0, timeout=0)
         assert (await restored.cancel("cafebabe", owner=owner, depth=0)).job_id == cold_unique_id
-
-        assert await restored.has_job(cold_list_id) is True
-        assert await restored.has_job("no-such-job") is False
+        assert (await restored.has_job(cold_list_id), await restored.has_job("no-such-job")) == (True, False)
+        reattach_kw = {"tool_name": "tool", "depth": 0, "owner": owner, "operation": _completed, "reattach": True}
         with pytest.raises(runtime_module.JobAccessError):
-            await restored.start(
-                cold_list_id,
-                tool_name="tool",
-                depth=0,
-                adapter={"k": 9},
-                owner=owner,
-                operation=done,
-                reattach=True,
-            )
-        reattached, claim = await restored.start(
-            cold_list_id,
-            tool_name="tool",
-            depth=0,
-            adapter={"k": 1},
-            owner=owner,
-            operation=done,
-            reattach=True,
-        )
+            await restored.start(cold_list_id, adapter={"k": 9}, **reattach_kw)  # type: ignore[arg-type]
+        reattached, claim = await restored.start(cold_list_id, adapter={"k": 1}, **reattach_kw)  # type: ignore[arg-type]
         assert (reattached.job_id, claim is not None) == (cold_list_id, True)
         await restored.release_wait(cold_list_id, claim)
         with pytest.raises(ValueError, match="no longer belongs"):
             await restored.acknowledge_wait(cold_unique_id, runtime_module.JobClaim("stale-nonce"))
-    finally:
-        await restored.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_cold_jobs_list_team_visibility_and_carried_receipts_parity(tmp_path: Path) -> None:
-    """list_jobs merges hot + cold jobs with pagination and team visibility; carried_receipts resolves cold delegations."""
+async def test_cold_jobs_list_team_visibility_and_carried_receipts_parity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_jobs merges hot + cold with tie-break parity; carried_job_receipts and delegation_jobs handle cold promotion."""
     owner = job_owner()
     team_member = replace(owner, agent_name="member", transport_agent_name="team", room_id="!team:test")
     team_caller = replace(owner, agent_name="team", transport_agent_name=None, room_id="!team:test")
-
-    cold_tool_id = "abcdef01" + "0" * 56
-    hot_unconsumed_id = "abcdef01" + "1" * 56
-    cold_team_id = "cafebabe" + "4" * 56
-    cold_deleg_id = "deadbeef" + "5" * 56
-    workflow_node_id = "22222222" + "7" * 56
-    deleg_child = asdict(job_child(job_id="cold-deleg-1"))
+    cold_tool_id, hot_unconsumed_id = "abcdef01" + "0" * 56, "abcdef01" + "1" * 56
+    cold_team_id, cold_deleg_id, workflow_node_id = "cafebabe" + "4" * 56, "deadbeef" + "5" * 56, "22222222" + "7" * 56
+    deleg_adapter = {"child": asdict(job_child(job_id="cold-deleg-1"))}
     wf_node_child = asdict(replace(job_child(job_id="wf-deleg-1"), workflow_run_id="wf-run-1"))
 
-    async def done() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "ok")
-
-    runtime = await tool_job_runtime(tmp_path)
-    try:
+    async with _open_runtime(tmp_path) as runtime:
         await _finish_and_ack(runtime, cold_tool_id, owner=owner)
         await _finish_and_ack(runtime, cold_team_id, owner=team_member)
         await _finish_and_ack(
@@ -2962,7 +2927,7 @@ async def test_cold_jobs_list_team_visibility_and_carried_receipts_parity(tmp_pa
             owner=owner,
             kind="delegation",
             tool_name="worker",
-            adapter={"child": deleg_child},
+            adapter=deleg_adapter,
             ack_adapter={ACKNOWLEDGED_BY: "run-1"},
         )
         await _finish_and_ack(
@@ -2973,75 +2938,107 @@ async def test_cold_jobs_list_team_visibility_and_carried_receipts_parity(tmp_pa
             tool_name="worker",
             adapter={"child": wf_node_child},
         )
-        await start_job(runtime, hot_unconsumed_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done)
-    finally:
-        await runtime.shutdown()
+        await start_job(
+            runtime,
+            hot_unconsumed_id,
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=owner,
+            operation=_completed,
+        )
 
-    restored = await tool_job_runtime(tmp_path)
-    try:
-        await restored.recover()
+    for jid in (cold_tool_id, hot_unconsumed_id, cold_deleg_id):
+        await rewrite_saved_job(tmp_path, jid, updated_at="2026-11-27T12:00:00+00:00")
+
+    async with _open_runtime(tmp_path, recover=True) as restored:
         assert set(restored._entries) == {hot_unconsumed_id, workflow_node_id}
         assert ("team", "!team:test") in restored.ended_rooms()
+        expected_order = [cold_tool_id, hot_unconsumed_id, cold_deleg_id]
+        assert [j.job_id for j in await restored.list_jobs(owner=owner, depth=0, limit=10)] == expected_order
+        assert [j.job_id for j in await restored.list_jobs(owner=owner, depth=0, limit=2, offset=1)] == expected_order[
+            1:3
+        ]
+        assert [j.job_id for j in await restored.list_jobs(owner=team_caller, depth=0)] == [cold_team_id]
 
-        listed = [job.job_id for job in await restored.list_jobs(owner=owner, depth=0, limit=10)]
-        assert set(listed) == {hot_unconsumed_id, cold_tool_id, cold_deleg_id}
-        assert [job.job_id for job in await restored.list_jobs(owner=owner, depth=0, limit=2, offset=1)] == listed[1:3]
-        assert [job.job_id for job in await restored.list_jobs(owner=team_caller, depth=0)] == [cold_team_id]
-
+        fail_load = AsyncMock(side_effect=AssertionError)
+        assert await carried_job_receipts({"empty": {}}, fail_load) == {}
+        fail_load.assert_not_called()
         ran = {"run-1": receipts_metadata({"cold-deleg-1": 0.42})}
-        assert receipt_delegation_ids(ran) == ("cold-deleg-1",)
-        assert receipt_delegation_ids({"empty": {}}) == ()
-        cold_deleg = await restored.delegation_jobs(("cold-deleg-1",))
-        assert [job.job_id for job in cold_deleg] == [cold_deleg_id]
-        assert carried_receipts(ran, job_acknowledgers(cold_deleg)) == {"cold-deleg-1": 0.42}
-    finally:
-        await restored.shutdown()
+        assert await carried_job_receipts(ran, restored.delegation_jobs) == {"cold-deleg-1": 0.42}
+
+        store_cls = type(restored._store)
+        original_load = store_cls.load_by_delegation_ids
+
+        async def promote_mid_await(store: ToolJobStore, ids: object) -> object:
+            rows = await original_load(store, ids)  # type: ignore[arg-type]
+            _, claim = await restored.start(
+                cold_deleg_id,
+                tool_name="worker",
+                depth=0,
+                kind="delegation",
+                adapter={**deleg_adapter, ACKNOWLEDGED_BY: "run-1"},
+                owner=owner,
+                operation=_completed,
+                reattach=True,
+            )
+            await restored.release_wait(cold_deleg_id, claim)
+            return rows
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store_cls, "load_by_delegation_ids", promote_mid_await)
+            assert [j.job_id for j in await restored.delegation_jobs(("cold-deleg-1",))] == [cold_deleg_id]
+        assert cold_deleg_id in restored._entries
 
 
 @pytest.mark.asyncio
-async def test_cold_job_expiry_and_ended_rooms_parity(tmp_path: Path) -> None:
-    """Cold inline jobs expire at 1 day, non-inline at 30 days, and ended_rooms drops rooms once emptied."""
-    cold_owner = replace(job_owner(), room_id="!cold:test")
-    cold_unique_id = "beefcafe" + "2" * 56
-    cold_inline_id = "feedface" + "3" * 56
+async def test_cold_job_expiry_and_ended_rooms_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cold inline/ended jobs honor retention cutoffs and refresh ended_rooms even when deletion is cancelled."""
+    cold_owner, cancel_owner = replace(job_owner(), room_id="!cold:test"), replace(job_owner(), room_id="!cancel:test")
+    cold_unique_id, cold_inline_id, cold_cancel_id = "beefcafe" + "2" * 56, "feedface" + "3" * 56, "deadc0de" + "4" * 56
 
-    runtime = await tool_job_runtime(tmp_path)
-    try:
+    async with _open_runtime(tmp_path) as runtime:
         await _finish_and_ack(runtime, cold_unique_id, owner=cold_owner)
         await _finish_and_ack(runtime, cold_inline_id, owner=cold_owner, returned_inline=True)
-    finally:
-        await runtime.shutdown()
+        await _finish_and_ack(runtime, cold_cancel_id, owner=cancel_owner)
 
     now = datetime.now(UTC)
-    persisted = await saved_jobs(tmp_path)
-    for jid in (cold_inline_id, cold_unique_id):
-        await write_saved_job(
-            tmp_path,
-            jid,
-            json.dumps(asdict(replace(persisted[jid], updated_at=(now - timedelta(days=2)).isoformat()))),
-        )
+    for jid in (cold_inline_id, cold_unique_id, cold_cancel_id):
+        await rewrite_saved_job(tmp_path, jid, updated_at=(now - timedelta(days=2)).isoformat())
 
-    restored = await tool_job_runtime(tmp_path)
-    try:
-        await restored.recover()
+    async with _open_runtime(tmp_path, recover=True) as restored:
         assert restored._entries == {}
-        assert ("parent", "!cold:test") in restored.ended_rooms()
-        assert [job.job_id for job in await restored.list_jobs(owner=cold_owner, depth=0)] == [cold_unique_id]
+        assert {("parent", "!cold:test"), ("parent", "!cancel:test")} <= restored.ended_rooms()
+        assert [j.job_id for j in await restored.list_jobs(owner=cold_owner, depth=0)] == [cold_unique_id]
         with pytest.raises(runtime_module.JobUnavailableError):
             await restored.cancel("feedface", owner=cold_owner, depth=0)
 
-        async def always_finished(_job: runtime_module.BackgroundJob) -> bool:
-            return True
-
-        expired_2d = await restored.expire_ended(now=now, source_finished=always_finished)
-        assert [job.job_id for job in expired_2d] == [cold_inline_id]
+        always_finished = AsyncMock(return_value=True)
+        expired = await restored.expire_ended(now=now, source_finished=always_finished)
+        assert [j.job_id for j in expired] == [cold_inline_id]
         assert ("parent", "!cold:test") in restored.ended_rooms()
 
-        expired_31d = await restored.expire_ended(now=now + timedelta(days=29), source_finished=always_finished)
-        assert [job.job_id for job in expired_31d] == [cold_unique_id]
+        store_cls = type(restored._store)
+        original_delete = store_cls.delete
+        expire_task: asyncio.Task[list[runtime_module.BackgroundJob]] | None = None
+
+        async def cancelling_delete(store: ToolJobStore, job_id: str) -> None:
+            if job_id == cold_cancel_id and expire_task is not None:
+                expire_task.cancel()
+            await original_delete(store, job_id)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store_cls, "delete", cancelling_delete)
+            expire_task = asyncio.create_task(
+                restored.expire_ended(now=now + timedelta(days=29), source_finished=always_finished),
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await expire_task
+        assert cold_cancel_id not in await saved_jobs(tmp_path)
+        assert ("parent", "!cancel:test") not in restored.ended_rooms()
+
+        await restored.expire_ended(now=now + timedelta(days=29), source_finished=always_finished)
         assert ("parent", "!cold:test") not in restored.ended_rooms()
-    finally:
-        await restored.shutdown()
 
 
 @pytest.mark.asyncio
@@ -3053,72 +3050,44 @@ async def test_start_avoids_redundant_load_by_id_reads_on_new_admissions(
     owner = job_owner()
     cold_id = "aaaa1111" + "0" * 56
 
-    async def done() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "ok")
-
-    runtime = await tool_job_runtime(tmp_path)
-    try:
+    async with _open_runtime(tmp_path) as runtime:
         await _finish_and_ack(runtime, cold_id, owner=owner, adapter={"k": 1})
-    finally:
-        await runtime.shutdown()
 
-    restored = await tool_job_runtime(tmp_path)
-    try:
-        await restored.recover()
+    async with _open_runtime(tmp_path, recover=True) as restored:
         assert restored._entries == {}
-
         reads: list[str] = []
         store_cls = type(restored._store)
         original_load_by_id = store_cls.load_by_id
 
-        async def tracked_load_by_id(store: ToolJobStore, job_id: str) -> object:
+        async def tracked_load_by_id(store: ToolJobStore, job_id: str, *, cold_only: bool = False) -> object:
             reads.append(job_id)
-            return await original_load_by_id(store, job_id)
+            return await original_load_by_id(store, job_id, cold_only=cold_only)
 
         monkeypatch.setattr(store_cls, "load_by_id", tracked_load_by_id)
+        start_kw = {"tool_name": "tool", "depth": 0, "owner": owner, "operation": _completed}
 
-        # Brand-new admission with reattach=False performs zero load_by_id reads.
-        _, claim_new = await restored.start(
-            "brand-new-1",
-            tool_name="tool",
-            depth=0,
-            adapter={},
-            owner=owner,
-            operation=done,
-        )
+        _, claim_new = await restored.start("brand-new-1", adapter={}, **start_kw)  # type: ignore[arg-type]
         assert reads == []
         await restored.release_wait("brand-new-1", claim_new)
 
-        # Duplicate cold ID with reattach=False is rejected atomically by accept without load_by_id.
         with pytest.raises(ValueError, match="already exists"):
-            await restored.start(cold_id, tool_name="tool", depth=0, adapter={"k": 1}, owner=owner, operation=done)
+            await restored.start(cold_id, adapter={"k": 1}, **start_kw)  # type: ignore[arg-type]
         assert reads == []
 
-        # Brand-new admission with reattach=True performs a single load_by_id read (never two).
         _, claim_reattach_new = await restored.start(
             "brand-new-2",
-            tool_name="tool",
-            depth=0,
             adapter={},
-            owner=owner,
-            operation=done,
             reattach=True,
+            **start_kw,  # type: ignore[arg-type]
         )
         assert reads == ["brand-new-2"]
         await restored.release_wait("brand-new-2", claim_reattach_new)
 
-        # Reattaching to a cold job performs one read and hydrates it cleanly.
         reattached, claim_cold = await restored.start(
             cold_id,
-            tool_name="tool",
-            depth=0,
             adapter={"k": 1},
-            owner=owner,
-            operation=done,
             reattach=True,
+            **start_kw,  # type: ignore[arg-type]
         )
-        assert (reattached.job_id, claim_cold is not None) == (cold_id, True)
-        assert reads == ["brand-new-2", cold_id]
+        assert (reattached.job_id, claim_cold is not None, reads) == (cold_id, True, ["brand-new-2", cold_id])
         await restored.release_wait(cold_id, claim_cold)
-    finally:
-        await restored.shutdown()

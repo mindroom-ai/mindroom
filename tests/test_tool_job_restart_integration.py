@@ -16,7 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.delegation.background import ACKNOWLEDGED_BY, delegation_outcome, job_acknowledgers
+from mindroom.delegation.background import ACKNOWLEDGED_BY, _job_acknowledgers, delegation_outcome
 from mindroom.delegation.state import DelegationChild
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.history.run_checkpoint import checkpoint_hooks
@@ -404,7 +404,7 @@ async def test_crash_after_checkpoint_preserves_mid_turn_consumption_across_rest
         assert deleg.consumed
         assert deleg.adapter[ACKNOWLEDGED_BY] == "scheduled-run"
         assert restored.retained_jobs() == ()
-        assert job_acknowledgers(await restored.delegation_jobs(("deleg-1",))) == {"deleg-1": "scheduled-run"}
+        assert _job_acknowledgers(await restored.delegation_jobs(("deleg-1",))) == {"deleg-1": "scheduled-run"}
 
         [inline_job] = [
             job for job in (await saved_jobs(paths.storage_root)).values() if job.tool_name == "inline_tool"

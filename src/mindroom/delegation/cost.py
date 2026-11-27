@@ -109,17 +109,23 @@ def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
     return receipts
 
 
-def receipt_delegation_ids(ran: Mapping[str, Mapping[str, Any] | None]) -> tuple[str, ...]:
-    """Return the distinct non-legacy delegation IDs referenced by *ran*'s stored receipts."""
-    return tuple(key for key in merge_by_key(map(stored_receipts, ran.values()), float) if key != LEGACY_COST_ID)
+def merged_stored_receipts(ran: Mapping[str, Mapping[str, Any] | None]) -> dict[str, float]:
+    """Return non-legacy receipts merged across *ran*'s stored metadata."""
+    merged = merge_by_key(map(stored_receipts, ran.values()), float)
+    merged.pop(LEGACY_COST_ID, None)
+    return merged
 
 
-def carried_receipts(ran: Mapping[str, Mapping[str, Any] | None], jobs: Mapping[str, str | None]) -> dict[str, float]:
+def carried_receipts(
+    ran: Mapping[str, Mapping[str, Any] | None],
+    jobs: Mapping[str, str | None],
+    *,
+    received: Mapping[str, float] | None = None,
+) -> dict[str, float]:
     """Return what a turn's cut-short runs received, from each one's stored metadata by run id, for the turn after them."""
-    # A sum stored without ids may cover them, and a job is the turn's whose run acknowledged it (``job_acknowledgers``).
-    left_out = {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
-    received = merge_by_key(map(stored_receipts, ran.values()), float)
-    return {key: usd for key, usd in received.items() if key not in left_out}
+    # A sum stored without ids may cover them, and a job is the turn's whose run acknowledged it (``_job_acknowledgers``).
+    merged = merged_stored_receipts(ran) if received is None else received
+    return {key: usd for key, usd in merged.items() if key != LEGACY_COST_ID and (key not in jobs or jobs[key] in ran)}
 
 
 def receipts_metadata(*views: Mapping[str, float]) -> dict[str, Any]:

@@ -31,7 +31,7 @@ from mindroom.constants import (
     SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
 )
 from mindroom.delegation import hooks as delegation_hooks
-from mindroom.delegation.background import ACKNOWLEDGED_BY, delegation_child, job_acknowledgers
+from mindroom.delegation.background import ACKNOWLEDGED_BY, _job_acknowledgers, delegation_child
 from mindroom.delegation.cost import (
     SubagentCost,
     merge_by_key,
@@ -1540,7 +1540,7 @@ def test_a_job_s_acknowledger_is_read_beside_the_id_its_saved_child_names_and_no
         job("delegation", "not a snapshot"),
         job("tool", {"delegation_id": "a tool's own adapter"}, consumed=True, run="run-1"),
     ]
-    assert job_acknowledgers(jobs) == {
+    assert _job_acknowledgers(jobs) == {
         "acknowledged": "run-1",
         "acknowledged by what is no run id": None,
         "acknowledged by an earlier release": None,

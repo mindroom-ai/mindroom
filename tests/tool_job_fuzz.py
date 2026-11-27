@@ -286,10 +286,17 @@ class JobFuzzRunner:
     def _current(self, job_id: str) -> BackgroundJob:
         return self.runtime._entries[job_id].job
 
+    @staticmethod
+    def _is_cold(job: BackgroundJob) -> bool:
+        return job.status in TERMINAL_STATUSES and job.consumed
+
+    def _hot(self, job_id: str) -> BackgroundJob | None:
+        entry = self.runtime._entries.get(job_id)
+        return None if entry is None else entry.job
+
     def _cause(self, job_id: str, cause: _Cause) -> None:
         """Record why work stopped while it still ran."""
-        entry = self.runtime._entries.get(job_id)
-        if entry is not None and entry.job.status not in TERMINAL_STATUSES:
+        if (job := self._hot(job_id)) is not None and job.status not in TERMINAL_STATUSES:
             self.jobs[job_id].causes.append(cause)
 
     async def _start(self, action: Action, job_id: str) -> None:
@@ -428,8 +435,7 @@ class JobFuzzRunner:
         for job_id in list(self.jobs):
             entry = self.runtime._entries.get(job_id)
             if entry is None:
-                cold = snapshots.get(job_id)
-                if cold is not None and cold.status in TERMINAL_STATUSES and cold.consumed:
+                if (cold := snapshots.get(job_id)) is not None and self._is_cold(cold):
                     self.jobs[job_id].consumed = True
                     continue
                 self._forget(job_id)
@@ -471,11 +477,8 @@ class JobFuzzRunner:
         assert set(saved) == set(self.jobs)
         restored_saved = await self._saved_jobs()
         for job_id, before in saved.items():
-            if job_id in self.runtime._entries:
-                after = self._current(job_id)
-            else:
-                assert before.status in TERMINAL_STATUSES, job_id
-                assert before.consumed, job_id
+            if (after := self._hot(job_id)) is None:
+                assert self._is_cold(before), job_id
                 after = restored_saved[job_id]
             if before.status in TERMINAL_STATUSES:
                 assert after == before, job_id
@@ -504,8 +507,7 @@ class JobFuzzRunner:
             self._observe(job)
         for job_id, cold in snapshots.items():
             if job_id not in entries:
-                assert cold.status in TERMINAL_STATUSES, job_id
-                assert cold.consumed, job_id
+                assert self._is_cold(cold), job_id
                 self._observe(cold)
         # A payload is saved with its outcome, which a failed later save cannot take back.
         payloads = {job_id for job_id in snapshots if await self._saved.tool_jobs("reader").load_payload(job_id)}
@@ -548,11 +550,10 @@ class JobFuzzRunner:
         assert set(self.runtime._follow_up_revisions) == set(expected_cands)
 
     def _pending(self, job_id: str) -> bool:
-        entry = self.runtime._entries.get(job_id)
-        if entry is None:
+        if (job := self._hot(job_id)) is None:
             assert self.jobs[job_id].consumed
             return False
-        job, model, held = entry.job, self.jobs[job_id], self.claims.get(job_id)
+        model, held = self.jobs[job_id], self.claims.get(job_id)
         claimed = held is not None and held.epoch == self._epoch
         return job.status in TERMINAL_STATUSES and not model.consumed and not claimed
 

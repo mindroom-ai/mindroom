@@ -8,7 +8,7 @@ import time
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -380,6 +380,12 @@ async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> Non
             await store.accept(job_id, job_json)
     finally:
         await journal.close()
+
+
+async def rewrite_saved_job(storage_root: Path, job_id: str, **changes: object) -> None:
+    """Rewrite one saved job's fields in place via dataclass replace, updating indexed metadata."""
+    updated = replace((await saved_jobs(storage_root))[job_id], **cast("dict[str, Any]", changes))
+    await write_saved_job(storage_root, job_id, json.dumps(asdict(updated)))
 
 
 async def saved_payload(storage_root: Path, job_id: str) -> object:
