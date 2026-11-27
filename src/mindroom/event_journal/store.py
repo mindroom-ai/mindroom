@@ -42,6 +42,7 @@ from .views import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import datetime
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -340,6 +341,46 @@ class ToolJobStore:
     async def load_all(self) -> tuple[SavedToolJob, ...]:
         """Return every saved job."""
         return await self._backend.read(tool_jobs.load_all)
+
+    async def load_startup(self) -> tuple[SavedToolJob, ...]:
+        """Return only active, unconsumed, workflow, or workflow-node jobs."""
+        return await self._backend.read(tool_jobs.load_startup)
+
+    async def load_ended_rooms(self) -> frozenset[tuple[str, str]]:
+        """Return distinct ``(recipient, room_id)`` pairs retaining terminal jobs."""
+        return await self._backend.read(tool_jobs.load_ended_rooms)
+
+    async def load_by_id(self, job_id: str) -> SavedToolJob | None:
+        """Return one saved job by its exact ID, or None."""
+        return await self._backend.read(lambda transaction: tool_jobs.load_by_id(transaction, job_id))
+
+    async def load_by_prefix(self, prefix: str) -> tuple[SavedToolJob, ...]:
+        """Return non-inline saved jobs whose ID starts with *prefix*."""
+        return await self._backend.read(lambda transaction: tool_jobs.load_by_prefix(transaction, prefix))
+
+    async def load_listable(self, *, recipient: str, room_id: str | None) -> tuple[SavedToolJob, ...]:
+        """Return non-inline saved jobs belonging to *(recipient, room_id)*."""
+        return await self._backend.read(
+            lambda transaction: tool_jobs.load_listable(transaction, recipient=recipient, room_id=room_id),
+        )
+
+    async def load_expirable(self, *, inline_before: datetime, ended_before: datetime) -> tuple[SavedToolJob, ...]:
+        """Return terminal saved jobs older than the inline or non-inline retention cutoff."""
+        return await self._backend.read(
+            lambda transaction: tool_jobs.load_expirable(
+                transaction,
+                inline_before=inline_before,
+                ended_before=ended_before,
+            ),
+        )
+
+    async def load_by_delegation_ids(self, delegation_ids: Sequence[str]) -> tuple[SavedToolJob, ...]:
+        """Return saved delegation jobs matching any ID in *delegation_ids*."""
+        if not delegation_ids:
+            return ()
+        return await self._backend.read(
+            lambda transaction: tool_jobs.load_by_delegation_ids(transaction, delegation_ids),
+        )
 
     async def accept(self, job_id: str, job_json: str) -> None:
         """Save a newly accepted job, refusing an ID that is still saved."""

@@ -395,7 +395,7 @@ async def saved_payload(storage_root: Path, job_id: str) -> object:
 async def lookup(runtime: ToolJobRuntime, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
     """Inspect an exact job as a caller would reach it, failing like any access when that caller cannot see it."""
     async with runtime._lock:
-        return deepcopy(runtime._entry(job_id, owner, depth).job)
+        return deepcopy((await runtime._entry(job_id, owner, depth)).job)
 
 
 def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
@@ -1015,7 +1015,8 @@ async def cancel_settled(
 ) -> BackgroundJob:
     """Cancel a job as its caller, then wait until the runtime drained it to its outcome."""
     requested = await runtime.cancel(job_id, owner=owner, depth=depth)
-    drain = runtime._entries[job_id].drain
+    entry = runtime._entries.get(requested.job_id)
+    drain = None if entry is None else entry.drain
     return requested if drain is None else await asyncio.shield(drain)
 
 

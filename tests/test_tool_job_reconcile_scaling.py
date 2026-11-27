@@ -142,7 +142,7 @@ def _assert_indexes(rt: ToolJobRuntime) -> None:
         (j.owner.recipient, j.owner.room_id) for j in retained if j.status in TERMINAL_STATUSES and j.owner.room_id
     )
     assert rt._ended_room_counts == dict(rooms)
-    assert rt.ended_rooms() == frozenset(rooms)
+    assert rt.ended_rooms() == frozenset(rooms) | rt._cold_ended_rooms
     cands = {k: {j.job_id for j in g} for k, g in _scan_candidates(retained).items()}
     revs = rt.follow_up_candidate_revisions()
     assert set(revs) == set(cands)
@@ -632,6 +632,8 @@ class _FullScanOracle:
         awaited = frozenset(jid for jid, e in rt._entries.items() if e.claim is not None)
         writes: list[tuple[str, str, dict[str, object]]] = []
         groups: dict[tuple[str, str], list[BackgroundJob]] = {pair: [] for pair in self.published}
+        for pair in rt._cold_ended_rooms:
+            groups.setdefault(pair, [])
         for job in retained:
             if job.owner.room_id is not None:
                 groups.setdefault((job.owner.recipient, job.owner.room_id), []).append(job)
@@ -639,7 +641,8 @@ class _FullScanOracle:
             pub = self.published.get((agent, room_id))
             listed = set() if pub is None else {str(item["job_id"]) for item in pub["jobs"]}  # type: ignore[attr-defined]
             content = _jobs_state_content(group, awaited=awaited, listed_before=listed)
-            if pub is None and not any(j.status in TERMINAL_STATUSES for j in group):
+            has_terminal = (agent, room_id) in rt._cold_ended_rooms or any(j.status in TERMINAL_STATUSES for j in group)
+            if pub is None and not has_terminal:
                 pub = _EMPTY
             if pub != content and (bot := bots.get(agent)) is not None and room_id in bot.client.rooms:
                 writes.append((agent, room_id, content))

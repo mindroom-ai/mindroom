@@ -403,9 +403,12 @@ async def test_crash_after_checkpoint_preserves_mid_turn_consumption_across_rest
         deleg = await lookup(restored, "deleg-1", owner=owner, depth=0)
         assert deleg.consumed
         assert deleg.adapter[ACKNOWLEDGED_BY] == "scheduled-run"
-        assert job_acknowledgers(restored.retained_jobs()) == {"deleg-1": "scheduled-run"}
+        assert restored.retained_jobs() == ()
+        assert job_acknowledgers(await restored.delegation_jobs(("deleg-1",))) == {"deleg-1": "scheduled-run"}
 
-        [inline_job] = [job for job in restored.retained_jobs() if job.tool_name == "inline_tool"]
+        [inline_job] = [
+            job for job in (await saved_jobs(paths.storage_root)).values() if job.tool_name == "inline_tool"
+        ]
         assert inline_job.consumed
         assert inline_job.returned_inline
 

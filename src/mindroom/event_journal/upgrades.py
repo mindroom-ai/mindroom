@@ -18,6 +18,7 @@ from .legacy_response_attempts import upgrade_continuation_identity
 from .legacy_schema import upgrade_hydration_walk_version, upgrade_legacy_journal, upgrade_outbox_reply_rows
 from .legacy_turn_rows import drop_dense_turn_source_indexes, upgrade_turn_records_to_rows
 from .schema import SQLITE_DIALECT, schema_statements
+from .tool_jobs import upgrade_tool_jobs_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +67,7 @@ _JOURNAL_UPGRADES: tuple[_JournalUpgrade, ...] = (
     upgrade_approval_records,
     drop_dense_turn_source_indexes,
     _drop_subsumed_reply_span_sources_index,
+    upgrade_tool_jobs_metadata,
 )
 
 

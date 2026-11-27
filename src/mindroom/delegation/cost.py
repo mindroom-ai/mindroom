@@ -109,6 +109,11 @@ def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
     return receipts
 
 
+def receipt_delegation_ids(ran: Mapping[str, Mapping[str, Any] | None]) -> tuple[str, ...]:
+    """Return the distinct non-legacy delegation IDs referenced by *ran*'s stored receipts."""
+    return tuple(key for key in merge_by_key(map(stored_receipts, ran.values()), float) if key != LEGACY_COST_ID)
+
+
 def carried_receipts(ran: Mapping[str, Mapping[str, Any] | None], jobs: Mapping[str, str | None]) -> dict[str, float]:
     """Return what a turn's cut-short runs received, from each one's stored metadata by run id, for the turn after them."""
     # A sum stored without ids may cover them, and a job is the turn's whose run acknowledged it (``job_acknowledgers``).

@@ -42,7 +42,7 @@ from mindroom.contacts.turns import contact_room, contact_turn_instructions, con
 from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.delegation.background import job_acknowledgers
-from mindroom.delegation.cost import carried_receipts, receipts_metadata
+from mindroom.delegation.cost import carried_receipts, receipt_delegation_ids, receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import log_reply_error, model_error_labels
@@ -1341,12 +1341,20 @@ class ResponseRunner:
                 natively=restarts <= _NATIVE_RECOVERY_LIMIT,
             )
             if turn.attempts:
-                runtime = get_background_runtime(self.deps.runtime_paths)
-                # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
-                journal = self.deps.runtime.orchestrator.event_journal_store()
-                jobs = runtime.retained_jobs() if runtime is not None else await saved_jobs(journal)
-                # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
-                received = receipts_metadata(carried_receipts(turn.ran, job_acknowledgers(jobs)))
+                needed = receipt_delegation_ids(turn.ran)
+                if needed:
+                    runtime = get_background_runtime(self.deps.runtime_paths)
+                    # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
+                    journal = self.deps.runtime.orchestrator.event_journal_store()
+                    jobs = (
+                        await runtime.delegation_jobs(needed)
+                        if runtime is not None
+                        else await saved_jobs(journal, delegation_ids=needed)
+                    )
+                    # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
+                    received = receipts_metadata(carried_receipts(turn.ran, job_acknowledgers(jobs)))
+                else:
+                    received = {}
                 carried = with_prior_usage({CONTINUED_RUNS_METADATA_KEY: turn.attempts, **received}, turn.usage) or {}
                 request = replace(request, matrix_run_metadata={**(request.matrix_run_metadata or {}), **carried})
         return self._with_recorded_interrupted_attempt(request, handle, recorded)

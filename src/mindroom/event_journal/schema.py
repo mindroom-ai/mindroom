@@ -452,11 +452,21 @@ _TABLES = (
     *APPROVAL_TABLES,
     """
     CREATE TABLE IF NOT EXISTS tool_jobs (
-        -- One accepted background tool job: its JSON snapshot, and the full
-        -- result payload of its outcome once it settled with one.
+        -- One accepted background tool job: its JSON snapshot, the full result
+        -- payload of its outcome once settled, and indexed metadata extracted
+        -- from job_json so startup and lookups avoid scanning cold rows.
         job_id TEXT NOT NULL PRIMARY KEY,
         job_json TEXT NOT NULL,
-        result_payload_json TEXT
+        result_payload_json TEXT,
+        status TEXT NOT NULL DEFAULT '',
+        consumed BOOLEAN NOT NULL DEFAULT FALSE,
+        returned_inline BOOLEAN NOT NULL DEFAULT FALSE,
+        kind TEXT NOT NULL DEFAULT 'tool',
+        is_workflow BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_at_ns BIGINT NOT NULL DEFAULT 0,
+        recipient TEXT,
+        room_id TEXT,
+        delegation_id TEXT
     )
     """,
     """
@@ -884,6 +894,54 @@ _INDEXES = (
     """,
     """
     CREATE INDEX IF NOT EXISTS turn_aliases_event ON turn_aliases (agent_name, event_id)
+    """,
+    """
+    -- Startup loads only active, unconsumed, or workflow/workflow-node jobs, not cold terminal rows.
+    CREATE INDEX IF NOT EXISTS tool_jobs_startup
+    ON tool_jobs (job_id/*bytes*/)
+    WHERE status NOT IN ('completed', 'failed', 'cancelled', 'denied', 'interrupted')
+       OR NOT consumed
+       OR is_workflow
+    """,
+    """
+    -- Room-state clearing reads distinct terminal (recipient, room_id) pairs without touching job_json.
+    CREATE INDEX IF NOT EXISTS tool_jobs_ended_rooms
+    ON tool_jobs (recipient, room_id)
+    WHERE status IN ('completed', 'failed', 'cancelled', 'denied', 'interrupted')
+      AND recipient IS NOT NULL
+      AND room_id IS NOT NULL
+    """,
+    """
+    -- list_jobs fetches cold non-inline jobs for one conversation's (recipient, room_id).
+    CREATE INDEX IF NOT EXISTS tool_jobs_list
+    ON tool_jobs (recipient, room_id, updated_at_ns DESC, job_id/*bytes*/)
+    WHERE status IN ('completed', 'failed', 'cancelled', 'denied', 'interrupted')
+      AND consumed
+      AND NOT is_workflow
+      AND NOT returned_inline
+    """,
+    """
+    -- Expiry sweeps cold inline and non-inline jobs past their respective retention cutoffs.
+    CREATE INDEX IF NOT EXISTS tool_jobs_expiry
+    ON tool_jobs (returned_inline, updated_at_ns, job_id/*bytes*/)
+    WHERE status IN ('completed', 'failed', 'cancelled', 'denied', 'interrupted')
+      AND consumed
+      AND NOT is_workflow
+    """,
+    """
+    -- Interrupted-turn cost recovery resolves only the delegation IDs referenced by run receipts.
+    CREATE INDEX IF NOT EXISTS tool_jobs_delegation
+    ON tool_jobs (delegation_id)
+    WHERE delegation_id IS NOT NULL
+    """,
+    """
+    -- Prefix lookups seek cold non-inline jobs in byte order on both SQLite and PostgreSQL.
+    CREATE INDEX IF NOT EXISTS tool_jobs_prefix
+    ON tool_jobs (job_id/*bytes*/)
+    WHERE status IN ('completed', 'failed', 'cancelled', 'denied', 'interrupted')
+      AND consumed
+      AND NOT is_workflow
+      AND NOT returned_inline
     """,
 )
 

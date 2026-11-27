@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
-from typing import TYPE_CHECKING
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -18,12 +22,16 @@ from mindroom.event_journal import (
     ToolJobSnapshotUpdate,
     tool_job_run_id,
 )
+from mindroom.event_journal import tool_jobs as event_journal_tool_jobs
+from mindroom.event_journal.schema import SQLITE_DIALECT, render, schema_statements
 from tests.approval_card_helpers import pending_card, terminal_edit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore
+    from mindroom.event_journal.backend import Transaction
 
 
 @pytest.mark.asyncio
@@ -208,3 +216,251 @@ async def test_save_many_updates_atomically_respects_ownership_and_denies_ended_
 
     await newer.save_many((ToolJobSnapshotUpdate("job-a", '{"status": "completed", "v": 2}', None, JOB_ENDED_REASON),))
     assert await newer.load_payload("job-a") == '{"value": "a"}'
+
+
+@pytest.mark.asyncio
+async def test_legacy_tool_jobs_table_upgrades_and_backfills_metadata(
+    journal_database: Callable[[], EventJournalStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-metadata tool_jobs table upgrades in bounded batches and backfills metadata on SQLite and PostgreSQL."""
+    now = datetime(2026, 11, 27, 12, 0, tzinfo=UTC)
+    old_inline = (now - timedelta(days=2)).isoformat()
+    old_ended = (now - timedelta(days=31)).isoformat()
+    recent = (now - timedelta(hours=1)).isoformat()
+    rows_to_seed = (
+        (
+            "00000001active",
+            json.dumps(
+                {
+                    "job_id": "00000001active",
+                    "status": "running",
+                    "consumed": False,
+                    "returned_inline": False,
+                    "kind": "tool",
+                    "updated_at": recent,
+                    "owner": {"agent_name": "code", "room_id": "!hot:test"},
+                },
+            ),
+        ),
+        (
+            "00000002unconsumed",
+            json.dumps(
+                {
+                    "job_id": "00000002unconsumed",
+                    "status": "completed",
+                    "consumed": False,
+                    "returned_inline": False,
+                    "kind": "tool",
+                    "updated_at": recent,
+                    "owner": {"agent_name": "code", "room_id": "!hot:test"},
+                },
+            ),
+        ),
+        (
+            "abcdef01coldinline",
+            json.dumps(
+                {
+                    "job_id": "abcdef01coldinline",
+                    "status": "completed",
+                    "consumed": True,
+                    "returned_inline": True,
+                    "kind": "tool",
+                    "updated_at": old_inline,
+                    "owner": {"agent_name": "code", "room_id": "!inline:test"},
+                },
+            ),
+        ),
+        (
+            "abcdef01coldlist",
+            json.dumps(
+                {
+                    "job_id": "abcdef01coldlist",
+                    "status": "failed",
+                    "consumed": True,
+                    "returned_inline": False,
+                    "kind": "tool",
+                    "updated_at": old_ended,
+                    "owner": {"agent_name": "member", "transport_agent_name": "team", "room_id": "!team:test"},
+                },
+            ),
+        ),
+        (
+            "abcdef02deleg",
+            json.dumps(
+                {
+                    "job_id": "abcdef02deleg",
+                    "status": "completed",
+                    "consumed": True,
+                    "returned_inline": False,
+                    "kind": "delegation",
+                    "updated_at": recent,
+                    "adapter": {"child": {"delegation_id": "deleg-cold-1"}},
+                    "owner": {"agent_name": "code", "room_id": None},
+                },
+            ),
+        ),
+        (
+            "wf000001main",
+            json.dumps(
+                {
+                    "job_id": "wf000001main",
+                    "status": "completed",
+                    "consumed": True,
+                    "returned_inline": False,
+                    "kind": "workflow",
+                    "updated_at": recent,
+                    "owner": {"agent_name": "code", "room_id": "!wf:test"},
+                },
+            ),
+        ),
+        (
+            "wf000002node",
+            json.dumps(
+                {
+                    "job_id": "wf000002node",
+                    "status": "completed",
+                    "consumed": True,
+                    "returned_inline": False,
+                    "kind": "delegation",
+                    "updated_at": recent,
+                    "adapter": {"child": {"delegation_id": "deleg-wf-1", "workflow_run_id": "run-1"}},
+                    "owner": {"agent_name": "code", "room_id": "!wf:test"},
+                },
+            ),
+        ),
+        ("zzzzcorrupt", "{not valid json"),
+    )
+
+    seed_store = journal_database()
+    try:
+        await seed_store.backend.write(
+            lambda tx: (
+                tx.execute("DROP TABLE tool_jobs"),
+                tx.execute(
+                    """
+                    CREATE TABLE tool_jobs (
+                        job_id TEXT NOT NULL PRIMARY KEY,
+                        job_json TEXT NOT NULL,
+                        result_payload_json TEXT
+                    )
+                    """,
+                ),
+                *[
+                    tx.execute("INSERT INTO tool_jobs (job_id, job_json) VALUES (?, ?)", (job_id, job_json))
+                    for job_id, job_json in rows_to_seed
+                ],
+            ),
+        )
+    finally:
+        await seed_store.close()
+
+    monkeypatch.setattr(event_journal_tool_jobs, "_BACKFILL_BATCH_SIZE", 2)
+    upgraded = journal_database()
+    try:
+        jobs = upgraded.tool_jobs("reader")
+        assert [row.job_id for row in await jobs.load_startup()] == [
+            "00000001active",
+            "00000002unconsumed",
+            "wf000001main",
+            "wf000002node",
+            "zzzzcorrupt",
+        ]
+        assert await jobs.load_ended_rooms() == frozenset(
+            {
+                ("code", "!hot:test"),
+                ("code", "!inline:test"),
+                ("team", "!team:test"),
+                ("code", "!wf:test"),
+            },
+        )
+        assert [row.job_id for row in await jobs.load_by_prefix("abcdef01")] == ["abcdef01coldlist"]
+        assert [row.job_id for row in await jobs.load_listable(recipient="team", room_id="!team:test")] == [
+            "abcdef01coldlist",
+        ]
+        assert [row.job_id for row in await jobs.load_listable(recipient="code", room_id=None)] == ["abcdef02deleg"]
+        assert {
+            row.job_id
+            for row in await jobs.load_expirable(
+                inline_before=now - timedelta(days=1),
+                ended_before=now - timedelta(days=30),
+            )
+        } == {"abcdef01coldinline", "abcdef01coldlist"}
+        assert [row.job_id for row in await jobs.load_by_delegation_ids(("deleg-cold-1", "missing"))] == [
+            "abcdef02deleg",
+        ]
+        assert (await jobs.load_by_id("abcdef01coldinline")) is not None
+    finally:
+        await upgraded.close()
+
+
+def test_tool_jobs_cold_queries_use_targeted_indexes_without_stat1(tmp_path: Path) -> None:
+    """Every targeted tool_jobs query uses its index on an un-ANALYZEd SQLite journal."""
+    db_path = tmp_path / "tool-jobs-plan.db"
+    now = datetime(2026, 11, 27, 12, 0, tzinfo=UTC)
+    with closing(sqlite3.connect(db_path)) as database:
+        for statement in schema_statements(SQLITE_DIALECT):
+            database.execute(statement)
+        for index in range(50):
+            job_id = f"abcdef01{index:04x}"
+            database.execute(
+                """
+                INSERT INTO tool_jobs (
+                    job_id, job_json, status, consumed, returned_inline, kind,
+                    is_workflow, updated_at_ns, recipient, room_id, delegation_id
+                ) VALUES (?, '{}', 'completed', TRUE, ?, 'tool', FALSE, ?, 'agent', '!r:test', ?)
+                """,
+                (job_id, index % 2 == 0, 1_000 + index, f"d-{index}" if index % 5 == 0 else None),
+            )
+        database.commit()
+        assert database.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone() is None
+
+        plans: dict[str, list[str]] = {}
+
+        def record(name: str, fn: Callable[[Transaction], object]) -> None:
+            captured: list[str] = []
+
+            class _Recorder:
+                def fetchall(self, sql: str, params: Sequence[object] = ()) -> tuple[Mapping[str, object], ...]:
+                    rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                    captured.append(" | ".join(row[-1] for row in rows))
+                    return ()
+
+                def fetchone(self, sql: str, params: Sequence[object] = ()) -> Mapping[str, object] | None:
+                    rows = database.execute("EXPLAIN QUERY PLAN " + render(sql, SQLITE_DIALECT), tuple(params))
+                    captured.append(" | ".join(row[-1] for row in rows))
+                    return None
+
+            fn(cast("Transaction", _Recorder()))
+            plans[name] = captured
+
+        record("load_startup", event_journal_tool_jobs.load_startup)
+        record("load_ended_rooms", event_journal_tool_jobs.load_ended_rooms)
+        record(
+            "load_listable_room",
+            lambda tx: event_journal_tool_jobs.load_listable(tx, recipient="agent", room_id="!r:test"),
+        )
+        record(
+            "load_listable_null",
+            lambda tx: event_journal_tool_jobs.load_listable(tx, recipient="agent", room_id=None),
+        )
+        record(
+            "load_expirable",
+            lambda tx: event_journal_tool_jobs.load_expirable(
+                tx,
+                inline_before=now - timedelta(days=1),
+                ended_before=now - timedelta(days=30),
+            ),
+        )
+        record("load_by_delegation_ids", lambda tx: event_journal_tool_jobs.load_by_delegation_ids(tx, ("d-5", "d-10")))
+        record("load_by_prefix", lambda tx: event_journal_tool_jobs.load_by_prefix(tx, "abcdef01"))
+        record("load_by_id", lambda tx: event_journal_tool_jobs.load_by_id(tx, "abcdef010001"))
+
+    assert "USING INDEX tool_jobs_startup" in plans["load_startup"][0], plans["load_startup"]
+    assert "USING INDEX tool_jobs_ended_rooms" in plans["load_ended_rooms"][0], plans["load_ended_rooms"]
+    assert "USING INDEX tool_jobs_list" in plans["load_listable_room"][0], plans["load_listable_room"]
+    assert "USING INDEX tool_jobs_list" in plans["load_listable_null"][0], plans["load_listable_null"]
+    assert all("USING INDEX tool_jobs_expiry" in p for p in plans["load_expirable"]), plans["load_expirable"]
+    assert "USING INDEX tool_jobs_delegation" in plans["load_by_delegation_ids"][0], plans["load_by_delegation_ids"]
+    assert "USING INDEX tool_jobs_prefix" in plans["load_by_prefix"][0], plans["load_by_prefix"]
+    assert "USING INDEX sqlite_autoindex_tool_jobs_1" in plans["load_by_id"][0], plans["load_by_id"]

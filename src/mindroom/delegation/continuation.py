@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.delegation.background import delegation_child, job_acknowledgers
-from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key
+from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key, receipt_delegation_ids
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -130,7 +130,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         child.workflow_node_key,
         child.workflow_generation,
     )
-    receipts = _continued_receipts(job, child, run, config, runtime)
+    receipts = await _continued_receipts(job, child, run, config, runtime)
     if receipts is not None:
         follow_up.cost_usd = follow_up.subagents_cost_usd = SubagentCost(receipts).usd
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
@@ -193,7 +193,7 @@ def _record_continuation_adapter(
         spec.adapter[_RECEIPTS_KEY] = receipts
 
 
-def _continued_receipts(
+async def _continued_receipts(
     job: BackgroundJob,
     child: DelegationChild,
     run: RunRecord | None,
@@ -208,7 +208,8 @@ def _continued_receipts(
         return receipts
     own_usd = child_own_usage(run, config)[1]
     ran = {**dict.fromkeys(prior_usage_by_run(run.metadata)), run.run_id: run.metadata}
-    received = carried_receipts(ran, job_acknowledgers(runtime.retained_jobs()))
+    needed = receipt_delegation_ids(ran)
+    received = carried_receipts(ran, job_acknowledgers(await runtime.delegation_jobs(needed))) if needed else {}
     return merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
 
 

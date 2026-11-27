@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.failure_text import failure_text
@@ -494,7 +494,7 @@ async def _run_managed_call(
                     span_stopped=None if span is None else span.stopped,
                 )
             except BaseException:
-                if job.refused is not None and runtime.retained_job(job_id) is None:
+                if job.refused is not None and not await run_coroutine_until_complete(runtime.has_job(job_id)):
                     # No job has this ID, so nothing owns what preparing it wrote: a refused or cancelled start
                     # takes it back, and holds the lock until it is gone.
                     await wait_for_future_until_complete(asyncio.ensure_future(job.refused()))
