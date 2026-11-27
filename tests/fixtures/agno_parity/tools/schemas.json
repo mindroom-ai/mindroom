@@ -911,7 +911,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -963,7 +963,7 @@
             "file_path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -991,7 +991,7 @@
             "reference"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -1009,7 +1009,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -3430,7 +3430,7 @@
             "b"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3454,7 +3454,7 @@
             "b"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3478,7 +3478,7 @@
             "b"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3502,7 +3502,7 @@
             "b"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3526,7 +3526,7 @@
             "b"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3545,7 +3545,7 @@
             "n"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3564,7 +3564,7 @@
             "n"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3583,7 +3583,7 @@
             "n"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -3718,7 +3718,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -3739,7 +3739,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -4116,7 +4116,7 @@
           "properties": {},
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -5469,9 +5469,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save full supported output to file and return a receipt."
+              ]
             }
           },
           "required": [
@@ -6564,7 +6562,7 @@
           "properties": {},
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -6625,7 +6623,7 @@
             "reason"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -7189,7 +7187,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -7235,7 +7233,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -7259,7 +7257,7 @@
             "content"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -7398,7 +7396,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -14717,7 +14715,7 @@
             "provider_id"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -16452,7 +16450,7 @@
             "emoji"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -16912,7 +16910,7 @@
             "confirm_public"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -16930,7 +16928,7 @@
             "slug"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -17733,7 +17731,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": "confirm",
         "stop_after_tool_call": false
       }
@@ -17935,7 +17933,7 @@
             "name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -17959,7 +17957,7 @@
             "agent_name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -17983,7 +17981,7 @@
             "agent_name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -18002,7 +18000,7 @@
             "name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -18014,7 +18012,7 @@
           "properties": {},
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -18038,7 +18036,7 @@
             "name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -18062,7 +18060,7 @@
             "name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -18796,7 +18794,7 @@
             "seconds"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19399,7 +19397,7 @@
             "agent_name"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19550,7 +19548,7 @@
             "reason"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19596,7 +19594,7 @@
           "properties": {},
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -19635,7 +19633,7 @@
           "properties": {},
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19671,7 +19669,7 @@
             "room_id"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19701,7 +19699,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -19725,7 +19723,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19772,7 +19770,7 @@
             "until"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -19796,7 +19794,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19843,7 +19841,7 @@
             "summary"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -19911,7 +19909,7 @@
             "tag"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -19952,7 +19950,7 @@
             "tag"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -20190,7 +20188,7 @@
             "action"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }

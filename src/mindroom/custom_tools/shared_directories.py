@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 def _payload(status: str, **fields: object) -> str:
@@ -133,6 +135,12 @@ class SharedDirectoryTools(Toolkit):
                 self.decline_shared_directory,
             ],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Keep wait budgets on recursive directory deletion while omitting them from metadata operations."""
+        if function.name == "delete_shared_directory":
+            return replace(function, offer_background_after=True)
+        return function
 
     def _context(self) -> tuple[ToolRuntimeContext, str] | str:
         context = get_tool_runtime_context()

@@ -606,15 +606,15 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
-    """Return ``function`` handling output files, and offering ``mindroom_output_path`` when ``offer_output_path`` is set.
+    """Return ``function`` handling output files, with unset ``strict`` made False and ``mindroom_output_path`` offered when ``offer_output_path`` is set.
 
-    When ``offer_output_path`` is True, its schema offers the argument as its last, optional property and its unset
-    ``strict`` becomes False. When ``offer_output_path`` is False, the schema and ``strict`` stay unchanged while the
-    entrypoint still wraps calls so large-result auto-save remains active and stray/replayed output-path arguments do
-    not fail with unexpected keyword errors. A strict function keeps its schema as its author made it, and a function
-    that takes the argument itself, by its entrypoint or its schema, stays as it is too. So does a function that can
-    stop the run (``controls_run``): its result answers the run, and a saved one would be a receipt that no longer stops
-    it.
+    When ``offer_output_path`` is True, its schema offers the argument as its last, optional property. When
+    ``offer_output_path`` is False, the schema stays unchanged while the entrypoint still wraps calls so large-result
+    auto-save remains active and stray/replayed output-path arguments do not fail with unexpected keyword errors;
+    ``strict`` still becomes False so OpenAI's Responses API does not default omitted ``strict`` to True on tools with
+    optional parameters. A strict function keeps its schema as its author made it, and a function that takes the
+    argument itself, by its entrypoint or its schema, stays as it is too. So does a function that can stop the run
+    (``controls_run``): its result answers the run, and a saved one would be a receipt that no longer stops it.
     """
     parameters = inspect.signature(function.entrypoint).parameters
     properties = function.parameters.get("properties")
@@ -629,7 +629,7 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
         return function
     entrypoint = _handling_output_files(function.entrypoint, policy, tool_name=function.name)
     if not function.offer_output_path:
-        return replace(function, entrypoint=entrypoint)
+        return replace(function, strict=False, entrypoint=entrypoint)
     return replace(
         function,
         parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),

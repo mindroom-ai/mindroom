@@ -20,6 +20,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.custom_tools.filesystem import FilesystemTools
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
@@ -28,6 +29,7 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
+from mindroom.providers.openai.responses_wire import _tool_dicts
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
@@ -1154,7 +1156,7 @@ def test_offer_output_path_false_hides_schema_while_preserving_auto_save(tmp_pat
     adapted = _first_function(toolkit)
 
     assert OUTPUT_PATH_ARGUMENT not in adapted.parameters["properties"]
-    assert adapted.strict is None
+    assert adapted.strict is False
 
     large = _execute(adapted, {"size": DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 128})
     assert large.status == "success"
@@ -1169,3 +1171,18 @@ def test_offer_output_path_false_hides_schema_while_preserving_auto_save(tmp_pat
     replayed = _execute(adapted, {"size": 4, OUTPUT_PATH_ARGUMENT: "replayed.txt"})
     assert replayed.status == "success"
     assert (tmp_path / "replayed.txt").read_text(encoding="utf-8") == "xxxx"
+
+
+def test_offer_output_path_false_serializes_strict_false_on_openai_responses_wire(tmp_path: Path) -> None:
+    """Opted-out tools still send strict=False on Responses wire so OpenAI does not default strict to True."""
+    toolkit = configure_toolkit_functions(FilesystemTools(base_dir=str(tmp_path)), output_files=_policy(tmp_path))
+    by_name = {function.name: function for function in adapt_toolkit(toolkit).functions}
+    ls_fn = by_name["ls"]
+
+    assert OUTPUT_PATH_ARGUMENT not in ls_fn.parameters["properties"]
+    assert ls_fn.strict is False
+
+    [wire_tool] = _tool_dicts([ls_fn.definition()])
+    assert wire_tool["name"] == "ls"
+    assert wire_tool["strict"] is False
+    assert OUTPUT_PATH_ARGUMENT not in wire_tool["parameters"]["properties"]

@@ -1085,7 +1085,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -1106,7 +1106,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -1206,7 +1206,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -2310,7 +2310,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -2356,7 +2356,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -2380,7 +2380,7 @@
             "content"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -2519,7 +2519,7 @@
           },
           "required": []
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       },
@@ -2538,7 +2538,7 @@
             "path"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
@@ -4948,7 +4948,7 @@
             "seconds"
           ]
         },
-        "strict": null,
+        "strict": false,
         "gate": null,
         "stop_after_tool_call": false
       }
