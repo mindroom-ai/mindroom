@@ -5250,3 +5250,47 @@ def test_preset_and_alias_toolkits_preserve_action_scoped_grant_operations() -> 
         )
         is None
     )
+
+
+@pytest.mark.parametrize("filter_key", ["include_tools", "exclude_tools"])
+def test_workflow_retired_filter_guidance_recommends_removal_and_approval_rules(
+    tmp_path: Path,
+    filter_key: str,
+) -> None:
+    """Workflow has supports_toolkit_filters=False, so retired filter errors never suggest keeping the filter."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+    from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
+    from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+    from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {
+            "a": {
+                "display_name": "A",
+                "tools": [{"workflow": {filter_key: ["workflow"]}}],
+                "include_default_tools": False,
+            },
+        },
+    }
+    expected = (
+        rf"`workflow` was split into `workflow_read`, `workflow_write` and `workflow` does not support "
+        rf"`{filter_key}`; remove `workflow\.{filter_key}` and use explicit `tool_approval\.rules` "
+        r"matching `workflow_read`, `workflow_write` instead"
+    )
+    with pytest.raises(ConfigRuntimeValidationError, match=expected) as exc_info:
+        Config.validate_with_runtime(data, runtime_paths)
+    assert "replace `workflow`" not in str(exc_info.value)
+
+    manager = get_runtime_credentials_manager(runtime_paths)
+    manager.save_credentials("workflow", {"_source": "ui", filter_key: ["workflow"]})
+    with pytest.raises(ToolConfigOverrideError, match=expected) as stored_exc:
+        get_tool_by_name(
+            "workflow",
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            credentials_manager=manager,
+            worker_target=None,
+        )
+    assert "replace `workflow`" not in str(stored_exc.value)

@@ -2089,18 +2089,27 @@ class BrowserTools(Toolkit):
         del profiles[profile_name]
 
     @staticmethod
+    def _find_existing_tab(
+        state: _BrowserProfileState,
+        target_id: str | None,
+    ) -> _BrowserTabState | None:
+        tab = state.tabs.get(target_id or state.active_target_id or "")
+        if tab is None or tab.page.is_closed():
+            # A tab the caller named is the one it means to act on, so only a call naming none takes another tab.
+            if target_id is not None:
+                msg = f"tab not found: {target_id}"
+                raise ValueError(msg)
+            return next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        return tab
+
+    @staticmethod
     def _resolve_read_tab(
         state: _BrowserProfileState,
         target_id: str | None,
         *,
         profile_name: str,
     ) -> tuple[str, _BrowserTabState]:
-        tab = state.tabs.get(target_id or state.active_target_id or "")
-        if tab is None or tab.page.is_closed():
-            if target_id is not None:
-                msg = f"tab not found: {target_id}"
-                raise ValueError(msg)
-            tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        tab = BrowserTools._find_existing_tab(state, target_id)
         if tab is None:
             msg = (
                 f"No open tab in browser profile {profile_name!r}. "
@@ -2114,13 +2123,7 @@ class BrowserTools(Toolkit):
         state: _BrowserProfileState,
         target_id: str | None,
     ) -> tuple[str, _BrowserTabState]:
-        tab = state.tabs.get(target_id or state.active_target_id or "")
-        if tab is None or tab.page.is_closed():
-            # A tab the caller named is the one it means to act on, so only a call naming none takes another tab.
-            if target_id is not None:
-                msg = f"tab not found: {target_id}"
-                raise ValueError(msg)
-            tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        tab = self._find_existing_tab(state, target_id)
         if tab is None:
             tab = state.tabs[self._register_tab(state, await state.context.new_page())]
         await self._activate_tab(state, tab.target_id, tab.page)

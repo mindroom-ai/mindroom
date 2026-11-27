@@ -924,6 +924,11 @@ def _retired_split_function_filter(
 
 def _retired_split_filter_guidance(tool_name: str, key: str, old: str, replacements: tuple[str, ...]) -> str:
     joined = ", ".join(f"`{name}`" for name in replacements)
+    if tool_name == "workflow":
+        return (
+            f"`{old}` was split into {joined} and `{tool_name}` does not support `{key}`; "
+            f"remove `{tool_name}.{key}` and use explicit `tool_approval.rules` matching {joined} instead"
+        )
     extra = " (alongside `run_desktop_shell` for shell commands)" if tool_name == "desktop" else ""
     return (
         f"`{old}` was split into {joined}{extra}; replace `{old}` in `{tool_name}.{key}` with the desired "
