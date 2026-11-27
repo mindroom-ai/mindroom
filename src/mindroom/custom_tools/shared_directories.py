@@ -115,6 +115,9 @@ def _answer_error(context: ToolRuntimeContext, agent: str, action: str) -> str |
 class SharedDirectoryTools(Toolkit):
     """Create directories other agents can read from their own workers."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(self, agent_name: str | None = None) -> None:
         # The calling agent, bound when the tool is built, so a team member shares as itself rather than as the team.
         self._agent_name = agent_name

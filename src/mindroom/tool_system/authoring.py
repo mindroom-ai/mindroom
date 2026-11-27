@@ -34,6 +34,8 @@ class _ToolMark:
     description: str | None
     # The schema ``passthrough_tool`` gave a function that takes the model's arguments as sent.
     parameters: Mapping[str, Any] | None = None
+    offer_background_after: bool | None = None
+    offer_output_path: bool | None = None
 
 
 @overload
@@ -41,7 +43,13 @@ def tool[F](function: F, /) -> F: ...
 
 
 @overload
-def tool[F](*, name: str | None = None, description: str | None = None) -> Callable[[F], F]: ...
+def tool[F](
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
+) -> Callable[[F], F]: ...
 
 
 def tool[F](
@@ -50,15 +58,27 @@ def tool[F](
     *,
     name: str | None = None,
     description: str | None = None,
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
 ) -> F | Callable[[F], F]:
     """Mark a method as one of its toolkit's functions and return it unchanged, so it stays directly callable.
 
     ``name`` replaces the function's own name for the model, and ``description`` its docstring's summary and body.
-    A static or class method may be marked before or after it becomes one.
+    ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
+    parameters in the schema. A static or class method may be marked before or after it becomes one.
     """
 
     def mark(marked: F) -> F:
-        setattr(_function_of(marked), _TOOL_MARK, _ToolMark(name=name, description=description))
+        setattr(
+            _function_of(marked),
+            _TOOL_MARK,
+            _ToolMark(
+                name=name,
+                description=description,
+                offer_background_after=offer_background_after,
+                offer_output_path=offer_output_path,
+            ),
+        )
         return marked
 
     return mark if function is None else mark(function)
@@ -69,15 +89,29 @@ def passthrough_tool[F](
     name: str | None = None,
     description: str | None = None,
     parameters: Mapping[str, Any],
+    offer_background_after: bool | None = None,
+    offer_output_path: bool | None = None,
 ) -> Callable[[F], F]:
     """Mark a function the model calls with the schema ``parameters`` and that takes the model's arguments as sent.
 
     Its arguments are not validated against its annotations, as an MCP server's tools take theirs, so its body checks
     them. ``name`` replaces the function's own name, and ``description`` is what the model reads of it.
+    ``offer_background_after`` and ``offer_output_path`` override the toolkit's defaults for advertising those reserved
+    parameters in the schema.
     """
 
     def mark(marked: F) -> F:
-        setattr(_function_of(marked), _TOOL_MARK, _ToolMark(name=name, description=description, parameters=parameters))
+        setattr(
+            _function_of(marked),
+            _TOOL_MARK,
+            _ToolMark(
+                name=name,
+                description=description,
+                parameters=parameters,
+                offer_background_after=offer_background_after,
+                offer_output_path=offer_output_path,
+            ),
+        )
         return marked
 
     return mark
@@ -122,6 +156,18 @@ def passthrough_parameters(function: Callable[..., Any]) -> Mapping[str, Any] | 
     return None if mark is None else mark.parameters
 
 
+def authored_offer_background_after(function: Callable[..., Any]) -> bool | None:
+    """Return whether ``@tool`` chose to offer ``background_after`` on ``function``; None inherits its toolkit's default."""
+    mark = _mark(function)
+    return None if mark is None else mark.offer_background_after
+
+
+def authored_offer_output_path(function: Callable[..., Any]) -> bool | None:
+    """Return whether ``@tool`` chose to offer ``mindroom_output_path`` on ``function``; None inherits its toolkit's default."""
+    mark = _mark(function)
+    return None if mark is None else mark.offer_output_path
+
+
 def _mark(function: object) -> _ToolMark | None:
     mark = getattr(function, _TOOL_MARK, None)
     return mark if isinstance(mark, _ToolMark) else None
@@ -147,6 +193,8 @@ class Toolkit:
     name: str = "toolkit"
     instructions: str | None = None
     requires_connect: bool = False
+    offer_background_after: bool = True
+    offer_output_path: bool = True
 
     def __init__(
         self,
@@ -254,6 +302,8 @@ __all__ = [
     "CurrentCall",
     "Toolkit",
     "authored_description",
+    "authored_offer_background_after",
+    "authored_offer_output_path",
     "current_call",
     "passthrough_parameters",
     "passthrough_tool",

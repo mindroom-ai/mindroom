@@ -16,6 +16,7 @@ class SleepTools(Toolkit):
     """Sleep toolkit whose pauses are capped and awaited on the event loop."""
 
     name = "sleep"
+    offer_output_path = False
 
     def __init__(
         self,

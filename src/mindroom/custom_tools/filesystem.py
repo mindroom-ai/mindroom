@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from contextlib import AbstractContextManager, closing, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from glob import has_magic
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Optional, cast
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_LINES = 2000
 _MAX_BYTES = 50 * 1024  # 50KB
@@ -760,6 +761,9 @@ def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
 class FilesystemTools(Toolkit):
     """Read, edit, write, search, list, and optionally delete files, with pagination hints and fuzzy edits."""
 
+    offer_background_after = False
+    offer_output_path = False
+
     def __init__(
         self,
         base_dir: str | None = None,
@@ -777,6 +781,12 @@ class FilesystemTools(Toolkit):
         self.in_sandbox_request = in_sandbox_request
         functions = [self.read_file, self.edit_file, self.write_file, self.grep, self.find_files, self.ls]
         super().__init__(name="filesystem", tools=[*functions, *([self.delete_file] if enable_delete_file else [])])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Keep wait budgets and output redirection on search tools whose results can be slow or large."""
+        if function.name in {"grep", "find_files"}:
+            return replace(function, offer_background_after=True, offer_output_path=True)
+        return function
 
     def _file_lock(self, resolved: Path) -> AbstractContextManager[None]:
         return _directory_lock(resolved) if self.in_sandbox_request else _primary_file_lock(resolved)

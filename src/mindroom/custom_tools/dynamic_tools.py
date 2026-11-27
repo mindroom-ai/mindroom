@@ -54,7 +54,7 @@ class DynamicToolsToolkit(Toolkit):
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("dynamic_tools", status, **kwargs)
 
-    @tool
+    @tool(offer_background_after=False)
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
         """Search deferred functions by name or keywords and return their full definitions, or list them.
 

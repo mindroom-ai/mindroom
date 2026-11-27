@@ -25,6 +25,8 @@ from mindroom.tool_system.agno_toolkits import Toolkit as AgnoToolkit
 from mindroom.tool_system.authoring import (
     CurrentCall,
     Toolkit,
+    authored_offer_background_after,
+    authored_offer_output_path,
     current_call,
     passthrough_tool,
     tool,
@@ -697,7 +699,7 @@ def test_a_toolkit_fits_a_derived_function_to_its_instance_before_the_output_pat
     assert untag.gate is ToolGate.CONFIRM
     assert list(untag.parameters["properties"]) == ["tag", OUTPUT_PATH_ARGUMENT]
     assert untag.parameters["required"] == []
-    assert untag.parameters["properties"][OUTPUT_PATH_ARGUMENT]["default"] is None
+    assert untag.parameters["properties"][OUTPUT_PATH_ARGUMENT] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
     assert untag.strict is False
 
 
@@ -759,3 +761,68 @@ def test_a_toolkit_routed_to_a_worker_connects_only_where_some_of_its_calls_run(
     assert not requires_connect(configure_toolkit_functions(_connecting(), to_worker=to_worker))
     assert requires_connect(configure_toolkit_functions(_connecting(), offered=()))
     assert requires_connect(configure_toolkit_functions(_connecting(_PlacingToolkit), to_worker=to_worker))
+
+
+def test_meta_schema_opt_out_flags_inherit_and_override_in_order() -> None:
+    """Toolkit defaults, @tool/@passthrough_tool overrides, and offered_function resolve in precedence order."""
+
+    class _MixedTools(Toolkit):
+        offer_background_after = False
+        offer_output_path = False
+
+        @tool
+        def inherited(self) -> str:
+            return "ok"
+
+        @tool(offer_background_after=True, offer_output_path=True)
+        def opted_in(self) -> str:
+            return "ok"
+
+        @passthrough_tool(
+            parameters={"type": "object", "properties": {}},
+            offer_background_after=True,
+        )
+        def passthrough(self) -> str:
+            return "ok"
+
+        @tool
+        def instance_override(self) -> str:
+            return "ok"
+
+        def offered_function(self, function: ToolFunction) -> ToolFunction:
+            if function.name == "instance_override":
+                return replace(function, offer_output_path=True)
+            return function
+
+    class _DefaultTools(Toolkit):
+        @tool
+        def plain(self) -> str:
+            return "ok"
+
+    mixed = _MixedTools()
+    assert authored_offer_background_after(mixed.inherited) is None
+    assert authored_offer_output_path(mixed.inherited) is None
+    assert authored_offer_background_after(mixed.opted_in) is True
+    assert authored_offer_output_path(mixed.opted_in) is True
+    assert authored_offer_background_after(mixed.passthrough) is True
+    assert authored_offer_output_path(mixed.passthrough) is None
+
+    by_name = _by_name(adapt_toolkit(mixed).functions)
+    assert (by_name["inherited"].offer_background_after, by_name["inherited"].offer_output_path) == (False, False)
+    assert (by_name["opted_in"].offer_background_after, by_name["opted_in"].offer_output_path) == (True, True)
+    assert (by_name["passthrough"].offer_background_after, by_name["passthrough"].offer_output_path) == (True, False)
+    assert (by_name["instance_override"].offer_background_after, by_name["instance_override"].offer_output_path) == (
+        False,
+        True,
+    )
+
+    plain = _by_name(adapt_toolkit(_DefaultTools()).functions)["plain"]
+    assert (plain.offer_background_after, plain.offer_output_path) == (True, True)
+    agno_tk = AgnoToolkit(name="external")
+
+    def ext() -> str:
+        return "ok"
+
+    agno_tk.register(ext)
+    external = _by_name(adapt_toolkit(agno_tk).functions)["ext"]
+    assert (external.offer_background_after, external.offer_output_path) == (True, True)

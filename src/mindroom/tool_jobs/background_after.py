@@ -16,15 +16,12 @@ def background_after_schema(default_wait: float | None) -> dict[str, Any]:
 
     ``default_wait`` is how many seconds a call that omits the budget or passes null waits, None for no limit.
     """
-    description = (
-        "Seconds before continuing in background (0 = immediately; omit/null = wait)."
-        if default_wait is None
-        else f"Seconds before continuing in background (0 = immediately; omit/null = up to {default_wait:g}s)."
-    )
-    return {
-        "anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}],
-        "description": description,
-    }
+    schema: dict[str, Any] = {"anyOf": [{"type": "number", "minimum": 0}, {"type": "null"}]}
+    if default_wait is not None:
+        schema["description"] = (
+            "Default: 0s (backgrounds immediately)." if default_wait == 0 else f"Default: {default_wait:g}s."
+        )
+    return schema
 
 
 def validate_wait_seconds(value: object, *, argument: str) -> float | None:

@@ -29,6 +29,8 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
+from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
+from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import (
@@ -83,10 +85,7 @@ def _execute(function: ToolFunction, arguments: dict[str, object]) -> _Executed:
 
 def _assert_output_path_schema_is_optional(parameters: Mapping[str, Any]) -> None:
     output_schema = parameters["properties"][OUTPUT_PATH_ARGUMENT]
-    assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
-    assert output_schema["default"] is None
-    assert output_schema["description"].startswith("Optional")
-    assert "workspace-relative path" in output_schema["description"]
+    assert output_schema == {"anyOf": [{"type": "string"}, {"type": "null"}]}
     assert OUTPUT_PATH_ARGUMENT not in parameters["required"]
 
 
@@ -1126,3 +1125,47 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
     assert result.is_error
     assert "[TOOL CALL DECLINED]" in result.content
     assert seen == [("after", True, result.content)]
+
+
+def test_workdir_output_path_schema_keeps_description_without_default() -> None:
+    parameters = with_optional_output_path(
+        {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        tools_use_workdir=True,
+    )
+
+    output_schema = parameters["properties"][OUTPUT_PATH_ARGUMENT]
+    assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert "default" not in output_schema
+    assert output_schema["description"].startswith("Optional path under saved tool outputs dir:")
+    assert OUTPUT_PATH_ARGUMENT not in parameters["required"]
+
+
+def test_offer_output_path_false_hides_schema_while_preserving_auto_save(tmp_path: Path) -> None:
+    """Opting out of schema projection keeps >50 KiB auto-save and stray output-path handling active."""
+
+    class _OptOutTools(OwnedToolkit):
+        offer_output_path = False
+
+        @tool
+        def dump(self, size: int) -> str:
+            return "x" * size
+
+    toolkit = configure_toolkit_functions(_OptOutTools(), output_files=_policy(tmp_path))
+    adapted = _first_function(toolkit)
+
+    assert OUTPUT_PATH_ARGUMENT not in adapted.parameters["properties"]
+    assert adapted.strict is None
+
+    large = _execute(adapted, {"size": DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 128})
+    assert large.status == "success"
+    assert isinstance(large.result, dict)
+    receipt = large.result["mindroom_tool_output"]
+    assert receipt["status"] == "saved_to_file"
+    assert receipt["auto_saved"] is True
+    assert (tmp_path / receipt["path"]).read_text(encoding="utf-8") == "x" * (
+        DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 128
+    )
+
+    replayed = _execute(adapted, {"size": 4, OUTPUT_PATH_ARGUMENT: "replayed.txt"})
+    assert replayed.status == "success"
+    assert (tmp_path / "replayed.txt").read_text(encoding="utf-8") == "xxxx"

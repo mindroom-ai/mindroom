@@ -519,11 +519,17 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     }
     assert schema["view"]["type"] == "boolean"
     assert "view" not in parameters["required"]
-    assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
-    assert schema["mindroom_output_path"]["default"] is None
-    assert "save full supported output to file" in schema["mindroom_output_path"]["description"]
+    assert schema["mindroom_output_path"] == {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "description": "Save attachment bytes to a workspace-relative file.",
+    }
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
+    assert toolkit_offers(tool, "get_attachment").offer_background_after is True
+    assert toolkit_offers(tool, "get_attachment").offer_output_path is True
+    for sibling in ("list_attachments", "register_attachment", "inline_image", "view_file"):
+        offered = toolkit_offers(tool, sibling)
+        assert (offered.offer_background_after, offered.offer_output_path) == (False, False)
 
 
 @pytest.mark.asyncio
