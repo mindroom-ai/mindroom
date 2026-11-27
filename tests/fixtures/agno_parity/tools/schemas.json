@@ -987,7 +987,7 @@
             },
             "maxChars": {
               "type": "integer",
-              "description": "Snapshot text char limit (0 = no limit)."
+              "description": "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."
             },
             "snapshotFormat": {
               "type": "string",

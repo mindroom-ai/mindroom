@@ -179,6 +179,7 @@ _HOST_READ_PARAM_DESCRIPTIONS: dict[str, str] = {
     "profile": "Profile name (default mindroom).",
     "targetId": "Tab ID (defaults to active tab; omit for all-tab console).",
     "limit": "Snapshot item limit.",
+    "maxChars": "Snapshot text char limit (0 = no limit).",
     "snapshotFormat": "Snapshot format (ai/aria).",
     "interactive": "Interactive-only snapshot filter.",
     "compact": "Compact snapshot output.",
@@ -968,7 +969,7 @@ class BrowserTools(Toolkit):
             profile: Host-target profile (default mindroom).
             targetId: Host tab ID (rejected by desktop; omit for active tab or all-tab console).
             limit: Host-target snapshot item limit.
-            maxChars: Snapshot text char limit (0 = no limit).
+            maxChars: Snapshot text char limit (0: unlimited on host; desktop keeps its cap).
             mode: Host-target snapshot mode.
             snapshotFormat: Host-target snapshot format (ai/aria).
             refs: Host-target snapshot refs mode.
