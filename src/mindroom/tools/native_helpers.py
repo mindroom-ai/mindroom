@@ -172,21 +172,61 @@ def require_non_blank_text(value: str | None, label: str) -> str:
     return value
 
 
-def validate_action_params(
-    function_name: str,
+def _param_names(fields: str | Collection[str]) -> Collection[str]:
+    return fields.split() if isinstance(fields, str) else fields
+
+
+def _unexpected_params(allowed: str | Collection[str], provided: Mapping[str, object]) -> list[str]:
+    allowed_names = _param_names(allowed)
+    return [name for name, value in provided.items() if value is not None and name not in allowed_names]
+
+
+def unexpected_action_args_error(
     action: str,
-    allowed_by_action: Mapping[str, Collection[str]],
-    params: Mapping[str, object],
+    allowed: str | Collection[str],
+    provided: Mapping[str, object],
+    *,
+    phrase: str = "not used",
+    hints: Mapping[str, str] | None = None,
 ) -> str | None:
-    """Validate ``action`` and reject non-``None`` parameters not allowed for that action."""
+    """Return an error string when ``provided`` has non-``None`` keys outside ``allowed``."""
+    unexpected = _unexpected_params(allowed, provided)
+    if not unexpected:
+        return None
+    verb = "is" if len(unexpected) == 1 else "are"
+    hint = next((hints[name] for name in unexpected if hints and name in hints), "")
+    return f"{', '.join(unexpected)} {verb} {phrase} for action {action!r}." + (f" {hint}" if hint else "")
+
+
+def validate_action_params(
+    function_name: str | None,
+    action: str,
+    allowed_by_action: Mapping[str, str | Collection[str]],
+    params: Mapping[str, object],
+    *,
+    required_by_action: Mapping[str, str | Collection[str]] | None = None,
+    reject_blank_required: bool = False,
+) -> str | None:
+    """Validate ``action``, reject unexpected non-``None`` parameters, and check required parameters."""
     allowed = allowed_by_action.get(action)
     if allowed is None:
+        label = f"{function_name} action" if function_name else "action"
         expected = ", ".join(allowed_by_action)
-        return f"Unsupported {function_name} action {action!r}. Expected one of: {expected}."
-    unexpected = [name for name, value in params.items() if value is not None and name not in allowed]
-    if unexpected:
+        return f"Unsupported {label} {action!r}. Expected one of: {expected}."
+    if unexpected := _unexpected_params(allowed, params):
         names = ", ".join(f"'{name}'" for name in unexpected)
         return f"Parameter(s) {names} cannot be used with action={action!r}."
+    if required_by_action is not None:
+        required = _param_names(required_by_action.get(action, ()))
+        missing = [
+            name
+            for name in required
+            if (value := params.get(name)) is None
+            or (reject_blank_required and isinstance(value, str) and not value.strip())
+        ]
+        if missing:
+            names = ", ".join(f"'{name}'" for name in missing)
+            return f"Parameter(s) {names} required for action={action!r}."
     return None
 
 
