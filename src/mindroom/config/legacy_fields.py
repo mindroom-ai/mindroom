@@ -359,27 +359,30 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 #   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
 #   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex,
 #   zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify,
-#   reddit, google_maps, brandfetch, mem0, zep), skills, attachments, Google Docs / Google Tasks (google_docs,
-#   google_tasks, including prefixed secondary Google Workspace plugin copies for all Google Workspace toolkits),
-#   and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model, usage_stats) previously exposed
-#   individual per-operation function names that could appear in tool_approval.rules[].match globs or
-#   include_tools/exclude_tools overrides.
-# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments: v2026.11.657;
+#   reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits (outlook_mail, outlook_calendar,
+#   microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote, microsoft_todo, microsoft_meetings,
+#   microsoft_people), skills, attachments, Google Docs / Google Tasks (google_docs, google_tasks, including prefixed
+#   secondary Google Workspace plugin copies for all Google Workspace toolkits), and runtime/session/thread toolkits
+#   (script, terminal, claude_agent, thread_model, usage_stats) previously exposed individual per-operation function
+#   names that could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
 #   google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659); replacement: unreleased; consolidated into
-#   action-dispatched and
-#   risk-scoped functions.
+#   action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
-#   reject tool_approval.rules when a retired function of a strict-wildcard toolkit (skills, attachments, script,
-#   terminal, claude_agent, thread_model, usage_stats) is decided by an approval script or any retired function's
-#   effective decision differs from the replacement's effective decision (regardless of other toolkits); also reject
-#   include_tools or exclude_tools naming retired functions on attachments, terminal, claude_agent, thread_model, or
-#   usage_stats entries, directing operators to the consolidated function names and `tool_approval.rules`.
+#   reject tool_approval.rules when a retired function of a strict-wildcard toolkit (skills, attachments, Microsoft 365,
+#   script, terminal, claude_agent, thread_model, usage_stats) is decided by an approval script or any retired
+#   function's effective decision differs from the replacement's effective decision (regardless of other toolkits); also
+#   reject include_tools or exclude_tools naming retired functions on attachments, terminal, claude_agent, thread_model,
+#   or usage_stats entries, directing operators to the consolidated function names and `tool_approval.rules`.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed_across_agents_sharing_name,
 #   tests/test_tool_approval_grants.py::test_secondary_google_workspace_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_microsoft_365_retired_approval_rules_fail_closed,
+#   tests/test_tool_approval_grants.py::test_outlook_mail_send_and_reply_migration_rules_fail_closed,
 #   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_skill_names,
+#   tests/test_tool_approval_grants.py::test_wildcard_approval_script_rule_fails_closed_for_retired_microsoft_365_names,
 #   tests/test_tool_approval_grants.py::test_retired_attachments_include_exclude_overrides_fail_config_load,
 #   tests/test_tool_approval_grants.py::test_runtime_crud_action_scoped_grants_and_fail_closed_migration,
 #   tests/api/test_plugin_room_agents.py::test_retired_stored_claude_agent_filters_fail_closed_and_block_workspace_write_grant,
@@ -898,6 +901,87 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
         "add_memory": "mem0_add",
         "delete_all_memories": "mem0_delete_all",
     },
+    "microsoft_teams": {
+        "microsoft_teams_list_teams": "microsoft_teams_read",
+        "microsoft_teams_list_channels": "microsoft_teams_read",
+        "microsoft_teams_list_channel_messages": "microsoft_teams_read",
+        "microsoft_teams_list_channel_message_replies": "microsoft_teams_read",
+        "microsoft_teams_list_chats": "microsoft_teams_read",
+        "microsoft_teams_list_chat_messages": "microsoft_teams_read",
+        "microsoft_teams_get_presence": "microsoft_teams_read",
+        "microsoft_teams_send_channel_message": "microsoft_teams_send",
+        "microsoft_teams_reply_to_channel_message": "microsoft_teams_send",
+        "microsoft_teams_send_chat_message": "microsoft_teams_send",
+        "microsoft_teams_start_chat": "microsoft_teams_send",
+    },
+    "microsoft_files": {
+        "microsoft_files_search": "microsoft_files_read",
+        "microsoft_files_list_folder": "microsoft_files_read",
+        "microsoft_files_get_file": "microsoft_files_read",
+        "microsoft_files_download_file": "microsoft_files_read",
+        "microsoft_files_excel_list_worksheets": "microsoft_files_read",
+        "microsoft_files_excel_read_range": "microsoft_files_read",
+        "microsoft_files_replace_file": "microsoft_files_write",
+        "microsoft_files_upload_file": "microsoft_files_write",
+        "microsoft_files_excel_update_range": "microsoft_files_write",
+    },
+    "microsoft_sharepoint": {
+        "microsoft_sharepoint_search_sites": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_site": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_lists": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_list": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_items": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_list_pages": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_get_page": "microsoft_sharepoint_read",
+        "microsoft_sharepoint_create_item": "microsoft_sharepoint_write",
+        "microsoft_sharepoint_update_item": "microsoft_sharepoint_write",
+    },
+    "microsoft_onenote": {
+        "microsoft_onenote_list_notebooks": "microsoft_onenote_read",
+        "microsoft_onenote_list_sections": "microsoft_onenote_read",
+        "microsoft_onenote_list_pages": "microsoft_onenote_read",
+        "microsoft_onenote_get_page": "microsoft_onenote_read",
+        "microsoft_onenote_create_page": "microsoft_onenote_write",
+        "microsoft_onenote_append_to_page": "microsoft_onenote_write",
+    },
+    "microsoft_todo": {
+        "microsoft_todo_list_lists": "microsoft_todo_read",
+        "microsoft_todo_list_tasks": "microsoft_todo_read",
+        "microsoft_todo_create_task": "microsoft_todo_write",
+        "microsoft_todo_update_task": "microsoft_todo_write",
+        "microsoft_todo_delete_task": "microsoft_todo_write",
+    },
+    "microsoft_meetings": {
+        "microsoft_meetings_find": "microsoft_meetings_read",
+        "microsoft_meetings_list_transcripts": "microsoft_meetings_read",
+        "microsoft_meetings_get_transcript": "microsoft_meetings_read",
+    },
+    "microsoft_people": {
+        "microsoft_people_search": "microsoft_people_read",
+        "microsoft_people_get_profile": "microsoft_people_read",
+        "microsoft_people_list_direct_reports": "microsoft_people_read",
+    },
+    "outlook_mail": {
+        "outlook_mail_search": "outlook_mail_read",
+        "outlook_mail_get_message": "outlook_mail_read",
+        "outlook_mail_download_attachment": "outlook_mail_read",
+        "outlook_mail_get_automatic_replies": "outlook_mail_read",
+        "outlook_mail_send": "outlook_mail_send_message",
+        "outlook_mail_reply": "outlook_mail_send_message",
+        "outlook_mail_mark_read": "outlook_mail_manage",
+        "outlook_mail_move": "outlook_mail_manage",
+        "outlook_mail_set_automatic_replies": "outlook_mail_manage",
+    },
+    "outlook_calendar": {
+        "outlook_calendar_list_calendars": "outlook_calendar_read",
+        "outlook_calendar_list_events": "outlook_calendar_read",
+        "outlook_calendar_get_event": "outlook_calendar_read",
+        "outlook_calendar_get_free_busy": "outlook_calendar_read",
+        "outlook_calendar_create_event": "outlook_calendar_write",
+        "outlook_calendar_update_event": "outlook_calendar_write",
+        "outlook_calendar_delete_event": "outlook_calendar_write",
+        "outlook_calendar_respond_to_event": "outlook_calendar_write",
+    },
     "zep": {
         "get_zep_memory": "zep_read",
         "search_zep_memory": "zep_read",
@@ -947,7 +1031,24 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
 }
 _STRICT_WILDCARD_SCRIPT_TOOLKITS = frozenset(
-    {"skills", "attachments", "script", "terminal", "claude_agent", "thread_model", "usage_stats"},
+    {
+        "skills",
+        "attachments",
+        "outlook_mail",
+        "outlook_calendar",
+        "microsoft_teams",
+        "microsoft_files",
+        "microsoft_sharepoint",
+        "microsoft_onenote",
+        "microsoft_todo",
+        "microsoft_meetings",
+        "microsoft_people",
+        "script",
+        "terminal",
+        "claude_agent",
+        "thread_model",
+        "usage_stats",
+    },
 )
 
 

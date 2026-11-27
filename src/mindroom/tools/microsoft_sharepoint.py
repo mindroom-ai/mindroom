@@ -49,15 +49,12 @@ if TYPE_CHECKING:
         "Store the Microsoft Entra app's client ID and secret in the microsoft_oauth_client credential service."
     ),
     function_names=(
-        "microsoft_sharepoint_search_sites",
-        "microsoft_sharepoint_get_site",
-        "microsoft_sharepoint_list_lists",
-        "microsoft_sharepoint_get_list",
-        "microsoft_sharepoint_list_items",
-        "microsoft_sharepoint_create_item",
-        "microsoft_sharepoint_update_item",
-        "microsoft_sharepoint_list_pages",
-        "microsoft_sharepoint_get_page",
+        "microsoft_sharepoint_read",
+        "microsoft_sharepoint_write",
+    ),
+    action_scoped_grants=(
+        "microsoft_sharepoint_read",
+        "microsoft_sharepoint_write",
     ),
 )
 def microsoft_sharepoint_tools() -> type[MicrosoftSharePointTools]:

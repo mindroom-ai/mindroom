@@ -70,6 +70,8 @@ class ScriptRunRecord:
     recovery_signature: str | None = None
     workflow_run_id: str | None = None
     """The workflow run this script run is an attempt of; `None` for a plain script."""
+    script_check_rule_uid: str | None = None
+    """The reactive trigger rule UID when this run is an ephemeral script_check tick."""
     name: str | None = None
     local_unsafe: bool = False
     resource_profile: str | None = None
@@ -87,6 +89,22 @@ class ScriptRunRecord:
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
 
+    def __post_init__(self) -> None:
+        """Reject runs marked as both a workflow attempt and a script_check tick."""
+        if self.workflow_run_id is not None and self.script_check_rule_uid is not None:
+            msg = "ScriptRunRecord cannot specify both workflow_run_id and script_check_rule_uid."
+            raise ValueError(msg)
+
+    @property
+    def is_script_check(self) -> bool:
+        """Whether this run is an ephemeral scheduled script_check tick."""
+        return self.script_check_rule_uid is not None
+
+    @property
+    def is_plain_script(self) -> bool:
+        """Whether this run is a standalone user-facing background script."""
+        return self.workflow_run_id is None and self.script_check_rule_uid is None
+
     @property
     def entry(self) -> Literal["script", "workflow"]:
         """What the shim does with the source: run it as `__main__`, or hand it to the workflow SDK."""
@@ -95,9 +113,9 @@ class ScriptRunRecord:
     def launch_allows(self, grant: ScriptToolGrant) -> bool:
         """Whether the launch lets the run call *grant*; the owner's live tools are checked at every call besides.
 
-        A plain script may call only its launch snapshot; a workflow attempt answers to the live tools alone.
+        A plain script may call only its launch snapshot; workflow and script_check runs answer to live tools alone.
         """
-        return self.workflow_run_id is not None or grant in self.grants
+        return (not self.is_plain_script) or grant in self.grants
 
     @property
     def accepts_calls(self) -> bool:

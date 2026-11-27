@@ -214,7 +214,7 @@ _SIGNATURES = {
     "AgentLifecycleContext": (
         f"({_HOOK}, entity_name, entity_type, rooms, matrix_user_id, joined_room_ids, stop_reason, *, {_HOOK_HELPERS})"
     ),
-    "ApprovalAlias": "(judged_as, judge)",
+    "ApprovalAlias": "(judged_as, judge, allow_non_resumable_passthrough)",
     "Ask": "(text, new_thread, then, summary)",
     "AutomationContext": (
         "(agent_name, config, runtime_paths, entry, options, settings, requester_id, execution_identity, workspace, "
@@ -338,7 +338,7 @@ _SIGNATURES = {
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
         "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown, turn_id, parent_turn_id, "
-        "fork_parent_scopes)"
+        "fork_parent_scopes, automation_origin)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
@@ -350,7 +350,7 @@ _SIGNATURES = {
     "WorkerServiceState": "(state, port, exit_code)",
     "TurnOrigin": (
         "(transport_sender_id, requester_id, sender_entity_name, requester_entity_name, sender_kind, requester_kind, "
-        "intent, source_kind, trust, acts_for_requester)"
+        "intent, source_kind, trust, acts_for_requester, automation_origin)"
     ),
     "atlassian_connection_oauth_provider": "(connection)",
     "automation": "(name, *, requires_file_memory)",
@@ -730,7 +730,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 38), "1cb04c1f2879837c596c46b52532fc5fefd73572dc66eacb4ae08a5cdb168fa6")
+_PINNED_VERSION = ((1, 39), "5d44dcd5f93ce664a4f822289b672c770761c7697806eff4bbb437759c3c849d")
 
 
 def _is_enum(obj: object) -> bool:

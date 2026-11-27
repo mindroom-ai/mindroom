@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 from mindroom.constants import (
+    AUTOMATION_ORIGIN_KEY,
     HOOK_SOURCE_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
@@ -120,7 +121,7 @@ class _HasSender(Protocol):
     sender: str
 
 
-def is_automation_source_kind(source_kind: str) -> bool:
+def is_automation_source_kind(source_kind: str | None) -> bool:
     """Return whether one source kind is synthetic automation."""
     return source_kind in _AUTOMATION_SOURCE_KINDS
 
@@ -149,6 +150,15 @@ def source_kind_from_content(content: Mapping[str, Any]) -> str | None:
     """Return canonical source-kind metadata from Matrix content."""
     source_kind = content.get(SOURCE_KIND_KEY)
     return _source_kind_from_value(source_kind)
+
+
+def automation_origin_from_content(content: Mapping[str, Any]) -> str | None:
+    """Return the canonical automation source kind from trusted Matrix content (direct or router-relayed)."""
+    source_kind = source_kind_from_content(content)
+    if is_automation_source_kind(source_kind):
+        return source_kind
+    relayed_origin = _source_kind_from_value(content.get(AUTOMATION_ORIGIN_KEY))
+    return relayed_origin if is_automation_source_kind(relayed_origin) else None
 
 
 def hook_source_from_content(content: Mapping[str, Any]) -> str | None:
