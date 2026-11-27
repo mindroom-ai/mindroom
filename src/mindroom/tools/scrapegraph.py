@@ -8,7 +8,14 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -247,48 +254,12 @@ class _ScrapeGraphTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_smartscraper",
-            label="Enable Smartscraper",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_markdownify",
-            label="Enable Markdownify",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_searchscraper",
-            label="Enable Searchscraper",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_scrape",
-            label="Enable Scrape",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="render_heavy_js",
-            label="Render Heavy Js",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_smartscraper", "Enable Smartscraper"),
+        bool_config_field("enable_markdownify", "Enable Markdownify", default=False),
+        bool_config_field("enable_crawl", "Enable Crawl", default=False),
+        bool_config_field("enable_searchscraper", "Enable Searchscraper", default=False),
+        bool_config_field("enable_scrape", "Enable Scrape", default=False),
+        bool_config_field("render_heavy_js", "Render Heavy Js", default=False),
         ConfigField(
             name="crawl_poll_interval",
             label="Crawl Poll Interval",
@@ -303,13 +274,7 @@ class _ScrapeGraphTools(Toolkit):
             required=False,
             default=180,
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["scrapegraph-py"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#scrapegraph",

@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -167,41 +174,11 @@ class _FirecrawlTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_scrape",
-            label="Enable Scrape",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_mapping",
-            label="Enable Mapping",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_search",
-            label="Enable Search",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_scrape", "Enable Scrape"),
+        bool_config_field("enable_crawl", "Enable Crawl", default=False),
+        bool_config_field("enable_mapping", "Enable Mapping", default=False),
+        bool_config_field("enable_search", "Enable Search", default=False),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="formats",
             label="Formats",

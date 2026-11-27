@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus, bool_config_field
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -22,20 +22,8 @@ if TYPE_CHECKING:
     icon="Clock",  # React icon name
     icon_color="text-purple-500",  # Tailwind color class
     config_fields=[
-        ConfigField(
-            name="enable_sleep",
-            label="Enable Sleep",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_sleep", "Enable Sleep"),
+        bool_config_field("all", "All", default=False),
     ],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#sleep",
     function_names=("sleep",),

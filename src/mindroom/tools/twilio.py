@@ -7,7 +7,14 @@ import re
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools._comms import restrict_actions
 
@@ -225,41 +232,11 @@ class _TwilioTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="debug",
-            label="Debug",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_send_sms",
-            label="Enable Send Sms",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_call_details",
-            label="Enable Get Call Details",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_messages",
-            label="Enable List Messages",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("debug", "Debug", default=False),
+        bool_config_field("enable_send_sms", "Enable Send Sms"),
+        bool_config_field("enable_get_call_details", "Enable Get Call Details"),
+        bool_config_field("enable_list_messages", "Enable List Messages"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["twilio"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",

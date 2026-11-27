@@ -14,7 +14,14 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -286,48 +293,12 @@ class _OpenBBTools(Toolkit):
             default="yfinance",
             description="Data provider: yfinance, benzinga, fmp, intrinio, polygon, tiingo, or tmx",
         ),
-        ConfigField(
-            name="enable_get_stock_price",
-            label="Enable Get Stock Price",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_company_symbol",
-            label="Enable Search Company Symbol",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_company_news",
-            label="Enable Get Company News",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_company_profile",
-            label="Enable Get Company Profile",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_get_price_targets",
-            label="Enable Get Price Targets",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_get_stock_price", "Enable Get Stock Price"),
+        bool_config_field("enable_search_company_symbol", "Enable Search Company Symbol", default=False),
+        bool_config_field("enable_get_company_news", "Enable Get Company News", default=False),
+        bool_config_field("enable_get_company_profile", "Enable Get Company Profile", default=False),
+        bool_config_field("enable_get_price_targets", "Enable Get Price Targets", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["openbb", "polars", "pyarrow"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#openbb",

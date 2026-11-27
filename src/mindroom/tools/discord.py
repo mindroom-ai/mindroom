@@ -9,7 +9,14 @@ from urllib.parse import quote
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools._comms import restrict_actions
 
@@ -214,48 +221,12 @@ class _DiscordTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_send_message",
-            label="Enable Send Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_channel_messages",
-            label="Enable Get Channel Messages",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_channel_info",
-            label="Enable Get Channel Info",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_list_channels",
-            label="Enable List Channels",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_delete_message",
-            label="Enable Delete Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_send_message", "Enable Send Message"),
+        bool_config_field("enable_get_channel_messages", "Enable Get Channel Messages"),
+        bool_config_field("enable_get_channel_info", "Enable Get Channel Info"),
+        bool_config_field("enable_list_channels", "Enable List Channels"),
+        bool_config_field("enable_delete_message", "Enable Delete Message"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",

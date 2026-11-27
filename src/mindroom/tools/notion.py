@@ -7,7 +7,14 @@ from typing import Any, Literal, cast
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -201,34 +208,10 @@ class _NotionTools(Toolkit):
             placeholder="Notion database ID",
             description="ID of the Notion database to work with",
         ),
-        ConfigField(
-            name="enable_create_page",
-            label="Enable Create Page",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_update_page",
-            label="Enable Update Page",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_pages",
-            label="Enable Search Pages",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_create_page", "Enable Create Page"),
+        bool_config_field("enable_update_page", "Enable Update Page"),
+        bool_config_field("enable_search_pages", "Enable Search Pages"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["notion-client"],
     docs_url="https://docs.mindroom.chat/tools/project-management/#notion",

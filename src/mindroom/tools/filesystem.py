@@ -14,6 +14,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -53,11 +54,9 @@ if TYPE_CHECKING:
             description="Working directory for file operations. Defaults to current directory.",
             authored_override=False,
         ),
-        ConfigField(
-            name="enable_delete_file",
-            label="Enable Delete File",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_delete_file",
+            "Enable Delete File",
             default=False,
             description="Offer delete_file, which removes a file or an empty directory.",
         ),

@@ -13,7 +13,14 @@ from mindroom.public_fetch import CONNECT_TIMEOUT_SECONDS, run_fetch_sync
 from mindroom.redaction import redact_sensitive_data
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, validate_server_fetch_url
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.string_mapping import parse_string_mapping
 
@@ -232,13 +239,7 @@ class _CustomApiTools(Toolkit):
             placeholder='{"X-Api-Key": "value"}',
             description="Default headers sent only to the Base URL (JSON format)",
         ),
-        ConfigField(
-            name="verify_ssl",
-            label="Verify Ssl",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("verify_ssl", "Verify Ssl"),
         ConfigField(
             name="timeout",
             label="Timeout",
@@ -246,20 +247,8 @@ class _CustomApiTools(Toolkit):
             required=False,
             default=30,
         ),
-        ConfigField(
-            name="enable_make_request",
-            label="Enable Make Request",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_make_request", "Enable Make Request"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["httpx"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#custom_api",

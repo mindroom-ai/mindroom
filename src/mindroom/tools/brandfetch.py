@@ -8,7 +8,14 @@ from urllib.parse import urlsplit
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -144,20 +151,8 @@ class _BrandfetchTools(Toolkit):
             required=False,
             description="Brandfetch Client ID for Brand Search API",
         ),
-        ConfigField(
-            name="enable_search_by_identifier",
-            label="Enable Search by Identifier",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_by_brand",
-            label="Enable Search by Brand",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_search_by_identifier", "Enable Search by Identifier"),
+        bool_config_field("enable_search_by_brand", "Enable Search by Brand", default=False),
         ConfigField(
             name="base_url",
             label="Base URL",
@@ -172,13 +167,7 @@ class _BrandfetchTools(Toolkit):
             required=False,
             default=20.0,
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=[],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#brandfetch",

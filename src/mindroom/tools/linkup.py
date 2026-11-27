@@ -7,7 +7,14 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -119,20 +126,8 @@ class _LinkupTools(Toolkit):
             required=False,
             default="searchResults",
         ),
-        ConfigField(
-            name="enable_web_search_with_linkup",
-            label="Enable Web Search With Linkup",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_web_search_with_linkup", "Enable Web Search With Linkup"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["linkup-sdk"],
     docs_url="https://docs.mindroom.chat/tools/web-search/#linkup",

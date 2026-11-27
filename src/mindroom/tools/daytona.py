@@ -12,7 +12,14 @@ import httpx
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import UNSET, prepare_python_code, require_non_empty, resolve_bool_toggle
 from mindroom.tools.string_mapping import parse_string_mapping
@@ -441,35 +448,21 @@ class _DaytonaTools(Toolkit):
             default=300,
             description="Timeout for sandbox operations in seconds",
         ),
-        ConfigField(
-            name="auto_create_sandbox",
-            label="Auto Create Sandbox",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "auto_create_sandbox",
+            "Auto Create Sandbox",
             description="Create a fallback sandbox after a sandbox-management error",
         ),
-        ConfigField(
-            name="verify_ssl",
-            label="Verify SSL",
-            type="boolean",
-            required=False,
-            default=True,
-            description="Whether to verify SSL certificates",
-        ),
-        ConfigField(
-            name="persistent",
-            label="Persistent",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field("verify_ssl", "Verify SSL", description="Whether to verify SSL certificates"),
+        bool_config_field(
+            "persistent",
+            "Persistent",
             description="Whether to reuse the same sandbox across calls within one reply",
         ),
-        ConfigField(
-            name="sandbox_public",
-            label="Sandbox Public",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "sandbox_public",
+            "Sandbox Public",
+            default=None,
             description="Whether the sandbox should be public",
         ),
         ConfigField(

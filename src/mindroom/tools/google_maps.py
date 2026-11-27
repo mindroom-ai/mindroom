@@ -10,7 +10,14 @@ from urllib.parse import quote
 from mindroom.failure_text import failure_text
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -287,62 +294,14 @@ class _GoogleMapTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="search_places",
-            label="Search Places",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="get_directions",
-            label="Get Directions",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="validate_address",
-            label="Validate Address",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="geocode_address",
-            label="Geocode Address",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="reverse_geocode",
-            label="Reverse Geocode",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="get_distance_matrix",
-            label="Get Distance Matrix",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="get_elevation",
-            label="Get Elevation",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="get_timezone",
-            label="Get Timezone",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("search_places", "Search Places"),
+        bool_config_field("get_directions", "Get Directions"),
+        bool_config_field("validate_address", "Validate Address"),
+        bool_config_field("geocode_address", "Geocode Address"),
+        bool_config_field("reverse_geocode", "Reverse Geocode"),
+        bool_config_field("get_distance_matrix", "Get Distance Matrix"),
+        bool_config_field("get_elevation", "Get Elevation"),
+        bool_config_field("get_timezone", "Get Timezone"),
     ],
     dependencies=["googlemaps", "google-maps-places"],
     docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#google_maps",

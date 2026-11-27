@@ -9,7 +9,14 @@ from typing import Any, Literal
 from mindroom.failure_text import failure_text
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -199,34 +206,10 @@ class _ZepTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="ignore_assistant_messages",
-            label="Ignore Assistant Messages",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_add_zep_message",
-            label="Enable Add Zep Message",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_zep_memory",
-            label="Enable Get Zep Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_zep_memory",
-            label="Enable Search Zep Memory",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("ignore_assistant_messages", "Ignore Assistant Messages", default=False),
+        bool_config_field("enable_add_zep_message", "Enable Add Zep Message"),
+        bool_config_field("enable_get_zep_memory", "Enable Get Zep Memory"),
+        bool_config_field("enable_search_zep_memory", "Enable Search Zep Memory"),
         ConfigField(
             name="instructions",
             label="Instructions",
@@ -234,13 +217,7 @@ class _ZepTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["zep-cloud"],
     docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#zep",

@@ -21,6 +21,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.browser_proxy import (
@@ -389,27 +390,9 @@ class _AgentQLTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_scrape_website",
-            label="Enable Scrape Website",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_custom_scrape_website",
-            label="Enable Custom Scrape Website",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_scrape_website", "Enable Scrape Website"),
+        bool_config_field("enable_custom_scrape_website", "Enable Custom Scrape Website", default=False),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="agentql_query",
             label="Agentql Query",

@@ -8,7 +8,14 @@ from urllib.parse import urlparse
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -343,11 +350,9 @@ class _OxylabsTools(Toolkit):
             placeholder="your_oxylabs_password",
             description="Oxylabs dashboard password",
         ),
-        ConfigField(
-            name="markdown",
-            label="Markdown",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "markdown",
+            "Markdown",
             default=False,
             description="Return scraped website content as Markdown instead of parsed HTML",
         ),

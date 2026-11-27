@@ -6,7 +6,14 @@ import json
 from typing import Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 _XReadAction = Literal["get_user_info", "get_home_timeline", "search_posts"]
@@ -286,20 +293,16 @@ class _XTools(Toolkit):
         ),
         # Feature flags/boolean parameters grouped by functionality
         # Search and content features
-        ConfigField(
-            name="include_post_metrics",
-            label="Include Post Metrics",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "include_post_metrics",
+            "Include Post Metrics",
             default=False,
             description="Enable including post metrics (likes, retweets, etc.) in search results",
         ),
         # API behavior settings
-        ConfigField(
-            name="wait_on_rate_limit",
-            label="Wait on Rate Limit",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "wait_on_rate_limit",
+            "Wait on Rate Limit",
             default=False,
             description="Enable waiting when rate limit is reached instead of failing",
         ),

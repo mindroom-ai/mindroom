@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -36,12 +37,9 @@ if TYPE_CHECKING:
     icon="FaSlack",
     icon_color="text-purple-600",
     config_fields=[
-        ConfigField(
-            name="write",
-            label="Allow Write Operations",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "write",
+            "Allow Write Operations",
             description="Allow posting, editing, and deleting messages, adding reactions, and uploading files.",
         ),
     ],

@@ -11,7 +11,14 @@ from uuid import uuid4
 from mindroom.llm.media import Image
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_function import ToolValue
 
@@ -366,41 +373,11 @@ class _BrightDataTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_scrape_markdown",
-            label="Enable Scrape Markdown",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_screenshot",
-            label="Enable Screenshot",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_search_engine",
-            label="Enable Search Engine",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_web_data_feed",
-            label="Enable Web Data Feed",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_scrape_markdown", "Enable Scrape Markdown"),
+        bool_config_field("enable_screenshot", "Enable Screenshot"),
+        bool_config_field("enable_search_engine", "Enable Search Engine"),
+        bool_config_field("enable_web_data_feed", "Enable Web Data Feed"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="serp_zone",
             env=("BRIGHT_DATA_SERP_ZONE",),
@@ -417,13 +394,7 @@ class _BrightDataTools(Toolkit):
             required=False,
             default="web_unlocker1",
         ),
-        ConfigField(
-            name="verbose",
-            label="Verbose",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("verbose", "Verbose", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",

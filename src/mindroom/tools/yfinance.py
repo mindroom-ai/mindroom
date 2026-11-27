@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolStatus, bool_config_field
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -229,76 +229,16 @@ class _YFinanceTools(Toolkit):
     icon="FaChartLine",
     icon_color="text-purple-600",
     config_fields=[
-        ConfigField(
-            name="enable_stock_price",
-            label="Enable Stock Price",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_company_info",
-            label="Enable Company Info",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_stock_fundamentals",
-            label="Enable Stock Fundamentals",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_income_statements",
-            label="Enable Income Statements",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_key_financial_ratios",
-            label="Enable Key Financial Ratios",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_analyst_recommendations",
-            label="Enable Analyst Recommendations",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_company_news",
-            label="Enable Company News",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_technical_indicators",
-            label="Enable Technical Indicators",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="enable_historical_prices",
-            label="Enable Historical Prices",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_stock_price", "Enable Stock Price"),
+        bool_config_field("enable_company_info", "Enable Company Info", default=False),
+        bool_config_field("enable_stock_fundamentals", "Enable Stock Fundamentals", default=False),
+        bool_config_field("enable_income_statements", "Enable Income Statements", default=False),
+        bool_config_field("enable_key_financial_ratios", "Enable Key Financial Ratios", default=False),
+        bool_config_field("enable_analyst_recommendations", "Enable Analyst Recommendations", default=False),
+        bool_config_field("enable_company_news", "Enable Company News", default=False),
+        bool_config_field("enable_technical_indicators", "Enable Technical Indicators", default=False),
+        bool_config_field("enable_historical_prices", "Enable Historical Prices", default=False),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["yfinance"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#yfinance",

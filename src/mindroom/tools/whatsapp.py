@@ -10,7 +10,14 @@ import httpx
 from pydantic import BaseModel, Field
 
 from mindroom.tool_system.authoring import Toolkit, tool
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools._comms import restrict_actions
 
@@ -508,78 +515,48 @@ class _WhatsAppTools(Toolkit):
             placeholder="+1234567890",
             description="Default recipient WhatsApp ID or phone number (optional)",
         ),
-        ConfigField(
-            name="enable_send_text_message",
-            label="Enable Send Text Message",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "enable_send_text_message",
+            "Enable Send Text Message",
             description="Enable plain text WhatsApp messages",
         ),
-        ConfigField(
-            name="enable_send_template_message",
-            label="Enable Send Template Message",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "enable_send_template_message",
+            "Enable Send Template Message",
             description="Enable WhatsApp template messages",
         ),
-        ConfigField(
-            name="enable_send_reply_buttons",
-            label="Enable Send Reply Buttons",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_reply_buttons",
+            "Enable Send Reply Buttons",
             default=False,
             description="Enable interactive reply button messages",
         ),
-        ConfigField(
-            name="enable_send_list_message",
-            label="Enable Send List Message",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_list_message",
+            "Enable Send List Message",
             default=False,
             description="Enable interactive list messages",
         ),
-        ConfigField(
-            name="enable_send_image",
-            label="Enable Send Image",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable image messages",
-        ),
-        ConfigField(
-            name="enable_send_document",
-            label="Enable Send Document",
-            type="boolean",
-            required=False,
+        bool_config_field("enable_send_image", "Enable Send Image", default=False, description="Enable image messages"),
+        bool_config_field(
+            "enable_send_document",
+            "Enable Send Document",
             default=False,
             description="Enable document messages",
         ),
-        ConfigField(
-            name="enable_send_location",
-            label="Enable Send Location",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_location",
+            "Enable Send Location",
             default=False,
             description="Enable location messages",
         ),
-        ConfigField(
-            name="enable_send_reaction",
-            label="Enable Send Reaction",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "enable_send_reaction",
+            "Enable Send Reaction",
             default=False,
             description="Enable reaction messages",
         ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Enable all WhatsApp tools",
-        ),
+        bool_config_field("all", "All", default=False, description="Enable all WhatsApp tools"),
         ConfigField(
             name="timeout",
             label="Timeout",

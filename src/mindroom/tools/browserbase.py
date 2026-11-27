@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -272,48 +279,12 @@ class _BrowserbaseTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_navigate_to",
-            label="Enable Navigate To",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_screenshot",
-            label="Enable Screenshot",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_page_content",
-            label="Enable Get Page Content",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_close_session",
-            label="Enable Close Session",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
-            name="parse_html",
-            label="Parse Html",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("enable_navigate_to", "Enable Navigate To"),
+        bool_config_field("enable_screenshot", "Enable Screenshot"),
+        bool_config_field("enable_get_page_content", "Enable Get Page Content"),
+        bool_config_field("enable_close_session", "Enable Close Session"),
+        bool_config_field("all", "All", default=False),
+        bool_config_field("parse_html", "Parse Html"),
         ConfigField(
             name="max_content_length",
             label="Max Content Length",

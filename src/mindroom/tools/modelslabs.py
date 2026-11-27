@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
@@ -68,11 +75,9 @@ if TYPE_CHECKING:
             placeholder="512",
             description="Output image height in pixels",
         ),
-        ConfigField(
-            name="wait_for_completion",
-            label="Wait for Completion",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "wait_for_completion",
+            "Wait for Completion",
             default=False,
             description="Whether to wait for the media generation to complete before returning",
         ),

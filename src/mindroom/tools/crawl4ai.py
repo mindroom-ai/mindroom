@@ -18,6 +18,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.worker_computer.browser_proxy import (
@@ -208,13 +209,7 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default=60,
         ),
-        ConfigField(
-            name="use_pruning",
-            label="Use Pruning",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("use_pruning", "Use Pruning", default=False),
         ConfigField(
             name="pruning_threshold",
             label="Pruning Threshold",
@@ -229,13 +224,7 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default=1.0,
         ),
-        ConfigField(
-            name="headless",
-            label="Headless",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("headless", "Headless"),
         ConfigField(
             name="wait_until",
             label="Wait Until",
@@ -243,20 +232,8 @@ class _Crawl4aiTools(Toolkit):
             required=False,
             default="domcontentloaded",
         ),
-        ConfigField(
-            name="enable_crawl",
-            label="Enable Crawl",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_crawl", "Enable Crawl"),
+        bool_config_field("all", "All", default=False),
     ],
     dependencies=["crawl4ai"],
     docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#crawl4ai",

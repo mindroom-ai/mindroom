@@ -10,7 +10,14 @@ from typing import Any, Literal
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -340,11 +347,9 @@ class _RedshiftTools(Toolkit):
             type="password",
             required=True,
         ),
-        ConfigField(
-            name="iam",
-            label="Use IAM Authentication",
-            type="boolean",
-            required=False,
+        bool_config_field(
+            "iam",
+            "Use IAM Authentication",
             default=False,
             description="Use IAM authentication instead of password",
         ),
@@ -407,13 +412,7 @@ class _RedshiftTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="ssl",
-            label="SSL",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
+        bool_config_field("ssl", "SSL"),
         ConfigField(
             name="table_schema",
             label="Table Schema",

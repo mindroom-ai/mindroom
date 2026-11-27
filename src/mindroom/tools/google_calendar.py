@@ -11,6 +11,7 @@ from mindroom.tool_system.declarations import (
     ToolFileAccess,
     ToolManagedInitArg,
     ToolStatus,
+    bool_config_field,
 )
 from mindroom.tool_system.registration import register_tool_with_metadata
 
@@ -40,12 +41,9 @@ if TYPE_CHECKING:
             placeholder="primary",
             description="The Google Calendar ID to use (default: 'primary' for the user's main calendar)",
         ),
-        ConfigField(
-            name="allow_update",
-            label="Allow Updates",
-            type="boolean",
-            required=False,
-            default=True,
+        bool_config_field(
+            "allow_update",
+            "Allow Updates",
             description="Allow the agent to create, update, and delete calendar events",
         ),
     ],

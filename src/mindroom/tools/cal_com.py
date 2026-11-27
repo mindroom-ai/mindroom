@@ -9,7 +9,14 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolStatus,
+    bool_config_field,
+)
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools.native_helpers import (
     UNSET,
@@ -283,48 +290,12 @@ class _CalComTools(Toolkit):
             required=False,
             default=None,
         ),
-        ConfigField(
-            name="enable_get_available_slots",
-            label="Enable Get Available Slots",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_create_booking",
-            label="Enable Create Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_get_upcoming_bookings",
-            label="Enable Get Upcoming Bookings",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_reschedule_booking",
-            label="Enable Reschedule Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="enable_cancel_booking",
-            label="Enable Cancel Booking",
-            type="boolean",
-            required=False,
-            default=True,
-        ),
-        ConfigField(
-            name="all",
-            label="All",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
+        bool_config_field("enable_get_available_slots", "Enable Get Available Slots"),
+        bool_config_field("enable_create_booking", "Enable Create Booking"),
+        bool_config_field("enable_get_upcoming_bookings", "Enable Get Upcoming Bookings"),
+        bool_config_field("enable_reschedule_booking", "Enable Reschedule Booking"),
+        bool_config_field("enable_cancel_booking", "Enable Cancel Booking"),
+        bool_config_field("all", "All", default=False),
         ConfigField(
             name="timeout",
             label="Timeout",
