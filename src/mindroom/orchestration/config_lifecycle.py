@@ -40,9 +40,9 @@ _REPLACEMENT_DRAIN_WARNING_INTERVAL_SECONDS = 30.0
 _REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 
 
-def _effective_config_state(config: Config) -> tuple[dict[str, object], str]:
-    """Compare runtime config alongside JSON-typed approval rules so ``True`` vs ``1`` triggers reload."""
-    return config.runtime_model_dump(), config.tool_approval.model_dump_json()
+def _effective_config_state(config: Config) -> tuple[dict[str, object], object]:
+    """Compare runtime config alongside approval rules so ``True`` vs ``1`` reloads without key-order churn."""
+    return config.runtime_model_dump(), config.tool_approval
 
 
 @dataclass

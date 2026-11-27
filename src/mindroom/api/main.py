@@ -425,7 +425,11 @@ def bind_external_trigger_runtime(
     """
     snapshot = config_lifecycle.require_api_state(api_app).snapshot
     app_state = config_lifecycle.app_state(api_app)
-    if snapshot.runtime_config is None or snapshot.runtime_config.model_dump() != runtime_config.model_dump():
+    if (
+        snapshot.runtime_config is None
+        or snapshot.runtime_config.model_dump() != runtime_config.model_dump()
+        or snapshot.runtime_config.tool_approval != runtime_config.tool_approval
+    ):
         app_state.external_trigger_runtime = None
         return
     app_state.external_trigger_runtime = ExternalTriggerRuntime(

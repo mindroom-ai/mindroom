@@ -249,7 +249,7 @@ def _call_agents_to_restart(
     return changed_agents
 
 
-def _authored_outside_knowledge_graph(config: Config) -> tuple[dict[str, object], str]:
+def _authored_outside_knowledge_graph(config: Config) -> tuple[dict[str, object], object]:
     """Return the authored config without the knowledge_graph section.
 
     A call in progress keeps its graph lookups on the settings it joined with, as a reply in progress does, rather than
@@ -257,7 +257,7 @@ def _authored_outside_knowledge_graph(config: Config) -> tuple[dict[str, object]
     """
     authored = config.authored_model_dump()
     authored.pop("knowledge_graph", None)
-    return authored, config.tool_approval.model_dump_json()
+    return authored, config.tool_approval
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> str | None:

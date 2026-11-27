@@ -1599,6 +1599,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         config=config,
         narrowed_tools=narrowed_tools,
         supports_native_tool_approval=supports_native_tool_approval,
+        agent_name=agent_name,
     )
     assembly = _AgentToolAssembly(
         entries=offered,
@@ -2019,7 +2020,7 @@ def create_agent(
         auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
     # Approval rules hide generated functions, so skill guidance and the catalog are omitted when approval hides `skill`.
-    skill_hidden = any(tool_may_require_approval(config, name) for name in SKILL_FUNCTION_NAMES)
+    skill_hidden = any(tool_may_require_approval(config, name, agent_name=agent_name) for name in SKILL_FUNCTION_NAMES)
     refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
@@ -2046,7 +2047,7 @@ def create_agent(
         knowledge
         if not disable_runtime_capabilities
         and kept_knowledge != ()
-        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME, agent_name=agent_name)
         else None
     )
     # Minimal mode presents skill contents as context documents instead of through skill functions.

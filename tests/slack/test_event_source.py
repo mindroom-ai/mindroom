@@ -882,6 +882,14 @@ def test_slack_integration_bind_migrates_and_registers_and_unbind_cleans_up(tmp_
         (["slack", "triggers"], [{"match": ["slack_watch", "slack_post"], "action": "require_approval"}], True),
         (
             ["slack", "triggers"],
+            [
+                {"match": ["slack_watch", "slack_post"], "action": "require_approval"},
+                {"match": "triggers", "action": "auto_approve"},
+            ],
+            True,
+        ),
+        (
+            ["slack", "triggers"],
             [{"match": "triggers", "arguments": {"action": "subscribe_event"}, "action": "require_approval"}],
             False,
         ),

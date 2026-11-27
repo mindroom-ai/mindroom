@@ -358,6 +358,10 @@ def test_retired_file_approval_check_handles_match_lists_and_conditional_rules(t
     for rules in (
         [{"match": ["save_file", "write_file"], "action": "require_approval"}],
         [{"match": "write_file", "arguments": {"path": "notes/*"}, "action": "auto_approve"}],
+        [
+            {"match": "*", "agents": "guest", "action": "require_approval"},
+            {"match": "write_file", "arguments": {"path": "private/*"}, "action": "require_approval"},
+        ],
     ):
         loaded = Config.validate_with_runtime({**base, "tool_approval": {"rules": rules}}, runtime_paths)
-        assert len(loaded.tool_approval.rules) == 1
+        assert len(loaded.tool_approval.rules) == len(rules)

@@ -39,15 +39,16 @@ tool_approval:
 | `timeout_days` | number, greater than 0 and at most 36500 | `7` | How long an approval card stays open before it expires |
 | `rules` | list | `[]` | Ordered rules; the first matching rule wins |
 | `rules[].match` | string or non-empty list of strings | Required | Case-sensitive glob (or list of globs) over exposed function names, not toolkit identifiers, so the same function name in another toolkit also matches |
-| `rules[].agents` | string or non-empty list of strings | Unset | Optional case-sensitive glob (or list of globs) over agent names; unset matches every agent |
+| `rules[].agents` | string or non-empty list of strings | Unset | Optional case-sensitive glob (or list of globs) over configured agent names (for personal agents, the generated instance name rather than the template name); unset matches every agent |
 | `rules[].arguments` | mapping | Unset | Optional mapping of supplied top-level argument names to scalar matchers or non-empty lists of matchers; every listed key must match |
 | `rules[].action` | `auto_approve` or `require_approval` | — | Fixed decision; set exactly one of `action` or `script` |
 | `rules[].script` | string | — | Config-relative Python file defining `check(tool_name, arguments, agent_name) -> bool`, which may be `async`; approval is required only when it returns `True` |
 | `rules[].timeout_days` | number, greater than 0 and at most 36500 | `tool_approval.timeout_days` | Expiry window for this rule |
 | `scheduled_any_arguments` | boolean | `true` | Let a requester approve a scheduled tool call for any arguments to the same tool, not only the exact arguments; see [Pre-Approved Tool Calls](scheduling.md#pre-approved-tool-calls) |
 
-`rules[].arguments` checks only the top-level arguments supplied on the call (omitted arguments with defaults do not match).
+`rules[].arguments` checks only the raw top-level arguments supplied on the call (omitted arguments with defaults do not match).
 String matchers use case-sensitive globs, booleans, numbers, and `null` use strict equality (`true` never matches `1`, and `false` never matches `0`), a list matches if any element matches, and multiple keys combine with AND.
+Prefer fail-closed allowlisting (`auto_approve` specific safe argument values, followed by a fallback `require_approval` rule) over denylisting dangerous values under `default: auto_approve`, because omitted defaults, coerced values (such as `"true"` or `1` for boolean parameters), and path variations (where `*` matches `/`) will not match a denylist rule; use a `script` rule when you need to denylist or normalize argument values.
 
 [`config_manager`](tools/agent-orchestration.md#config_manager) calls that only read configuration, `manage_config(operation="inspect")` and `manage_agent(operation="validate")`, never ask for approval, even when a rule matches them or `default` is `require_approval`.
 

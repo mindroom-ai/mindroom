@@ -4330,6 +4330,46 @@ def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(
         assert advertised not in prompt
 
 
+def test_create_agent_scopes_generated_function_hiding_to_matching_agents(tmp_path: Path) -> None:
+    """Agent-scoped rules hiding `skill` or `search_knowledge_base` omit tools and prompts only for matching agents."""
+    config = _config_with_workspace_skill(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    config.agents["guarded"] = AgentConfig(display_name="Guarded", knowledge_bases=["docs"])
+    config.agents["free"] = AgentConfig(display_name="Free", knowledge_bases=["docs"])
+    config = _bind_runtime_paths(config, runtime_paths)
+    for name in ("guarded", "free"):
+        skill_dir = agent_workspace_root_path(runtime_paths.storage_root, name) / "skills" / "scripted"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: scripted\ndescription: Scripted skill\n---\n\nSKILL BODY\n",
+            encoding="utf-8",
+        )
+    config.tool_approval = ToolApprovalConfig(
+        rules=[
+            ApprovalRuleConfig(
+                match=["skill", "search_knowledge_base"],
+                agents="guarded",
+                action="require_approval",
+            ),
+        ],
+    )
+
+    guarded = _create_agent_for_test("guarded", config, knowledge=_knowledge("docs"))
+    free = _create_agent_for_test("free", config, knowledge=_knowledge("docs"))
+    guarded_prompt = system_text(prompt_for_turn(guarded))
+    free_prompt = system_text(prompt_for_turn(free))
+
+    assert "skill" not in _offered(guarded)
+    assert "search_knowledge_base" not in _offered(guarded)
+    for advertised in ("<skills_system>", "skill(action=", "search_knowledge_base"):
+        assert advertised not in guarded_prompt
+
+    assert "skill" in _offered(free)
+    assert "search_knowledge_base" in _offered(free)
+    assert "<skills_system>" in free_prompt
+    assert "search_knowledge_base" in free_prompt
+
+
 @pytest.mark.asyncio
 async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_path: Path) -> None:
     """A plugin before-call gate can decline a function the build generates beside its toolkits."""
