@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import json
@@ -563,20 +564,31 @@ def _redirect_result_to_file(
     )
 
 
+def _serialized_auto_save_payload(
+    result: object,
+    *,
+    policy: ToolOutputFilePolicy,
+) -> _SerializedToolOutput | None:
+    if structured_result_requested():
+        return None
+    try:
+        serialized = _serialize_tool_output(result)
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
+        return None
+    if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
+        return None
+    return serialized
+
+
 def _auto_save_large_result(
     result: object,
     *,
     policy: ToolOutputFilePolicy,
     tool_name: str,
 ) -> object:
-    if structured_result_requested():
-        return result
-    try:
-        serialized = _serialize_tool_output(result)
-    except Exception as exc:
-        logger.warning("tool_output_auto_save_serialization_failed", error_type=type(exc).__name__)
-        return result
-    if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
+    serialized = _serialized_auto_save_payload(result, policy=policy)
+    if serialized is None:
         return result
     try:
         return _write_auto_saved_result(serialized, policy=policy, tool_name=tool_name)
@@ -633,15 +645,7 @@ def prepare_tool_output_file(
     return ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=validated)
 
 
-def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
-    """Apply the shared explicit redirect or large-result policy after execution."""
-    if isinstance(result, ToolOutputFileHandled):
-        return result.result
-    finalized = (
-        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
-        if request.path is None
-        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
-    )
+def _wrap_finalized_outcome(result: object, finalized: object) -> object:
     if isinstance(result, ToolOutcome) and result.is_error and finalized is not result:
         return ToolOutcome(
             content=str(finalized),
@@ -652,6 +656,46 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
             saved_output=saved_output_envelope(finalized),
         )
     return finalized
+
+
+def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply the shared explicit redirect or large-result policy after execution."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
+    finalized = (
+        _auto_save_large_result(result, policy=request.policy, tool_name=request.tool_name)
+        if request.path is None
+        else _redirect_result_to_file(result, policy=request.policy, validated_path=request.path)
+    )
+    return _wrap_finalized_outcome(result, finalized)
+
+
+async def _finalize_tool_output_file_async(request: ToolOutputFileRequest, result: object) -> object:
+    """Apply explicit redirect or large-result auto-save off the event-loop thread."""
+    if isinstance(result, ToolOutputFileHandled):
+        return result.result
+    if request.path is not None:
+        finalized = await asyncio.to_thread(
+            _redirect_result_to_file,
+            result,
+            policy=request.policy,
+            validated_path=request.path,
+        )
+        return _wrap_finalized_outcome(result, finalized)
+    serialized = _serialized_auto_save_payload(result, policy=request.policy)
+    if serialized is None:
+        return result
+    try:
+        finalized = await asyncio.to_thread(
+            _write_auto_saved_result,
+            serialized,
+            policy=request.policy,
+            tool_name=request.tool_name,
+        )
+    except Exception as exc:
+        logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
+        return result
+    return _wrap_finalized_outcome(result, finalized)
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
@@ -696,21 +740,31 @@ def _handling_output_files(
     """Return ``entrypoint`` taking ``mindroom_output_path`` out of each call and saving or redirecting its output.
 
     A synchronous entrypoint stays synchronous, so preparing the path, the call, and writing the file share its thread.
+    An async entrypoint offloads filesystem path validation and output writes off the event-loop thread.
     """
     if inspect.iscoroutinefunction(entrypoint):
         async_entrypoint = cast("Callable[..., Awaitable[object]]", entrypoint)
 
         @functools.wraps(entrypoint)
         async def async_wrapper(*args: object, mindroom_output_path: object = None, **kwargs: object) -> object:
-            request = prepare_tool_output_file(policy, tool_name=tool_name, output_path=mindroom_output_path)
-            if isinstance(request, dict):
-                return request
+            if normalize_output_path_argument(mindroom_output_path) is None:
+                request = ToolOutputFileRequest(policy=policy, tool_name=tool_name, path=None)
+            else:
+                prepared = await asyncio.to_thread(
+                    prepare_tool_output_file,
+                    policy,
+                    tool_name=tool_name,
+                    output_path=mindroom_output_path,
+                )
+                if isinstance(prepared, dict):
+                    return prepared
+                request = prepared
             token = _active_output_request.set(request)
             try:
                 result = await async_entrypoint(*args, **kwargs)
             finally:
                 _active_output_request.reset(token)
-            return finalize_tool_output_file(request, result)
+            return await _finalize_tool_output_file_async(request, result)
 
         return async_wrapper
 

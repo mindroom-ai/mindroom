@@ -42,6 +42,7 @@ import mindroom.constants as constants_module
 import mindroom.shell.execution as shell_execution_module
 import mindroom.shell.supervisor as shell_supervisor_module
 import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.output_files as output_files_module
 import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
@@ -114,7 +115,7 @@ from tests.conftest import preserved_builtin_tools, requires_linux
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     import httpx
 
@@ -1980,7 +1981,6 @@ def test_subprocess_config_projection_keeps_effective_policy_and_omits_agents() 
     payload = yaml_io.safe_load(sandbox_runner_module._subprocess_config_yaml(config, "shell"))
 
     assert payload == {
-        "plugins": [{"path": "./plugins/demo", "enabled": True}],
         "defaults": {
             "worker_grantable_credentials": ["github_private"],
             "tool_output_auto_save_threshold_bytes": 51200,
@@ -8428,3 +8428,343 @@ def test_execute_shell_scope_auto_backgrounds_and_kills_process_group(
         _wait_pid_dead(pid)
         _wait_pid_dead(child_pid)
         assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_builtin_subprocess_tool_does_not_import_plugins_in_child(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Built-in subprocess tools without RUNTIME_CONFIG omit plugins so children never import them."""
+    marker_path = tmp_path / "plugin_imports.log"
+    plugin_root = tmp_path / "plugins" / "import-marker"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "import_marker_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        f"import os\nfrom pathlib import Path\n"
+        f"with Path({str(marker_path)!r}).open('a', encoding='utf-8') as _f:\n"
+        f"    _f.write(f'{{os.getpid()}}\\n')\n",
+        encoding="utf-8",
+    )
+    Path(os.environ["MINDROOM_CONFIG_PATH"]).write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+        "agents: {}\nplugins:\n  - path: ./plugins/import-marker\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+
+    resp = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={"protocol": WORKER_PROTOCOL_VERSION, "tool_name": "calculator", "function_name": "add", "args": [2, 3]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    assert '"result": 5' in str(resp.json()["result"])
+    assert {int(line) for line in marker_path.read_text(encoding="utf-8").splitlines() if line} == {os.getpid()}
+
+
+@contextlib.contextmanager
+def _direct_shell_env(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    execution_mode: str,
+) -> Iterator[Callable[..., dict[str, object]]]:
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
+    _set_sandbox_token(monkeypatch)
+    for fn_name in ("_execute_request_forkserver", "_execute_request_spawn"):
+        monkeypatch.setattr(
+            sandbox_runner_module,
+            fn_name,
+            lambda *_a, _name=fn_name, **_kw: pytest.fail(f"{_name} must not run"),
+        )
+    manager = shell_supervisor_module._ShellSupervisorManager()
+    monkeypatch.setattr(shell_supervisor_module, "_manager", manager)
+
+    def post_shell(cmd: str, **extra: object) -> dict[str, object]:
+        body: dict[str, object] = {
+            "protocol": WORKER_PROTOCOL_VERSION,
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", cmd]],
+            "kwargs": {},
+            **extra,
+        }
+        return runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=body).json()
+
+    try:
+        yield post_shell
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_preserves_env_sandbox_output_and_startup_errors(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch preserves env, sandbox, output files, exit_code, and startup errors."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("HTTP_PROXY", "http://user:secret@proxy.invalid:8080")
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        saved = post_shell(
+            'printf "%s" "$CUSTOM_VAR"; exit 7',
+            kwargs={"mindroom_output_path": "saved.txt"},
+            base_dir=str(workspace),
+            execution_env={"PATH": os.environ["PATH"], "CUSTOM_VAR": "from-request"},
+            extra_env_passthrough="CUSTOM_VAR",
+            structured_result=True,
+        )
+        assert saved["ok"] is True
+        assert saved["is_error"] is True
+        assert saved["counts_as_tool_failure"] is False
+        assert saved["metadata"] == {"exit_code": 7}
+        assert (workspace / "saved.txt").read_text(encoding="utf-8") == "Exit code 7\nOutput:\nfrom-request"
+
+        nonzero = post_shell('echo "bad" >&2; exit 3', base_dir=str(workspace))
+        assert nonzero["ok"] is True
+        assert nonzero["is_error"] is True
+        assert nonzero["counts_as_tool_failure"] is False
+        assert "Exit code 3" in str(nonzero["result"])
+
+        sandboxed = post_shell(
+            'printf "%s" "${HTTP_PROXY:-stripped}"',
+            base_dir=str(workspace),
+            execution_env={"PATH": os.environ["PATH"], "HTTP_PROXY": "http://u:p@proxy.invalid:8080"},
+            sandbox=True,
+        )
+        assert sandboxed["ok"] is True
+        assert sandboxed["is_error"] is False
+        assert sandboxed["result"] == "stripped"
+
+        blocked = post_shell("echo no", kwargs={"mindroom_output_path": "x.txt"}, base_dir=str(workspace), sandbox=True)
+        assert blocked["ok"] is False
+        assert blocked["failure_kind"] == "tool"
+        assert "mindroom_output_path" in str(blocked["error"])
+
+        def fail_startup() -> str:
+            msg = "supervisor boot failed"
+            raise shell_supervisor_module.ShellSupervisorStartupError(msg)
+
+        monkeypatch.setattr(shell_supervisor_module, "ensure_shell_supervisor", fail_startup)
+        failed = post_shell("echo unreachable")
+        assert failed["ok"] is False
+        assert failed["failure_kind"] == "worker"
+        assert "supervisor boot failed" in str(failed["error"])
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_handles_scope_cancel_and_concurrent_env(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch isolates concurrent env, scopes backgrounding, and honors /execute/cancel."""
+    custom_tmp = tmp_path / "custom-tmp"
+    custom_tmp.mkdir()
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f1 = pool.submit(
+                post_shell,
+                'sleep 0.15; printf "%s" "$ISO_TOKEN"',
+                execution_env={"PATH": os.environ["PATH"], "ISO_TOKEN": "alpha"},
+                extra_env_passthrough="ISO_TOKEN",
+            )
+            f2 = pool.submit(
+                post_shell,
+                'sleep 0.15; printf "%s" "$ISO_TOKEN"',
+                execution_env={"PATH": os.environ["PATH"], "ISO_TOKEN": "beta"},
+                extra_env_passthrough="ISO_TOKEN",
+            )
+            r1, r2 = f1.result(timeout=30), f2.result(timeout=30)
+        assert r1["result"] == "alpha"
+        assert r2["result"] == "beta"
+        assert "ISO_TOKEN" not in os.environ
+
+        monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+        scope_id = f"direct-{execution_mode}"
+        bg = post_shell(
+            "echo bg-ready; sleep 60",
+            execution_env={"PATH": os.environ["PATH"], "TMPDIR": str(custom_tmp)},
+            shell_scope_id=scope_id,
+        )
+        assert bg["ok"] is True
+        assert bg["shell_backgrounded"] is True
+        pid_match = re.search(r"PID (\d+)", str(bg["result"]))
+        log_match = re.search(r"Log: (\S+)", str(bg["result"]))
+        assert pid_match is not None
+        assert log_match is not None
+        log_path = Path(log_match.group(1))
+        assert log_path.is_relative_to(custom_tmp)
+        kill_resp = runner_client.post(
+            "/api/sandbox-runner/execute/shell-scope/kill",
+            headers=SANDBOX_HEADERS,
+            json={"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": scope_id},
+        )
+        assert kill_resp.json() == {"ok": True}
+        _wait_pid_dead(int(pid_match.group(1)))
+        assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
+
+        request_id, pid_file = uuid4().hex, tmp_path / f"cancel-{execution_mode}.pid"
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(
+                post_shell,
+                f"echo $$ > {pid_file}; exec sleep 30",
+                kwargs={"timeout": 60},
+                request_id=request_id,
+            )
+            deadline = time.monotonic() + 20
+            while not pid_file.exists() or not pid_file.read_text(encoding="utf-8").strip():
+                assert time.monotonic() < deadline
+                time.sleep(0.05)
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            try:
+                cancel = runner_client.post(
+                    "/api/sandbox-runner/execute/cancel",
+                    headers=SANDBOX_HEADERS,
+                    json={"protocol": WORKER_PROTOCOL_VERSION, "request_id": request_id},
+                )
+                cancelled = running.result(timeout=20)
+                asyncio.run(assert_linux_pid_not_running(pid))
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        assert cancel.json() == {"cancelled": True}
+        assert cancelled["ok"] is False
+        assert cancelled["error"] == "Tool call was cancelled."
+        assert cancelled["failure_kind"] == "tool"
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_resolves_off_loop_and_expands_worker_home(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch resolves the toolkit off the event loop and expands ~/ against worker HOME."""
+    runner_home = tmp_path / "runner-home"
+    workspace = tmp_path / "ws"
+    runner_home.mkdir()
+    workspace.mkdir()
+    monkeypatch.setenv("HOME", str(runner_home))
+
+    resolve_threads: list[int] = []
+    invoke_threads: list[int] = []
+    orig_resolve = sandbox_runner_module._resolve_entrypoint
+    orig_invoke = sandbox_runner_module._invoke_resolved_entrypoint
+
+    def tracking_resolve(*args: object, **kwargs: object) -> object:
+        resolve_threads.append(threading.get_ident())
+        return orig_resolve(*args, **kwargs)
+
+    async def tracking_invoke(*args: object, **kwargs: object) -> object:
+        invoke_threads.append(threading.get_ident())
+        return await orig_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_runner_module, "_resolve_entrypoint", tracking_resolve)
+    monkeypatch.setattr(sandbox_runner_module, "_invoke_resolved_entrypoint", tracking_invoke)
+
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        res = post_shell(
+            'printf "%s" "$REPORT_FILE"',
+            base_dir=str(workspace),
+            execution_env={"PATH": os.environ["PATH"], "REPORT_FILE": "~/reports/latest"},
+            extra_env_passthrough="REPORT_FILE",
+        )
+
+    assert res["ok"] is True, res
+    assert res["result"] == str((workspace / "reports" / "latest").resolve())
+    assert str(runner_home) not in str(res["result"])
+    assert resolve_threads
+    assert invoke_threads
+    assert set(resolve_threads).isdisjoint(invoke_threads)
+
+
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
+def test_shell_direct_supervised_dispatch_output_files_run_off_loop(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    execution_mode: str,
+) -> None:
+    """Direct supervised shell dispatch runs large-output auto-save and explicit path prep off the event loop."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    def track_thread[**P, R](fn: Callable[P, R], threads: list[int]) -> Callable[P, R]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+            threads.append(threading.get_ident())
+            return fn(*args, **kwargs)
+
+        return wrapped
+
+    invoke_threads: list[int] = []
+    prepare_threads: list[int] = []
+    write_threads: list[int] = []
+    atomic_threads: list[int] = []
+    orig_invoke = sandbox_runner_module._invoke_resolved_entrypoint
+
+    async def tracking_invoke(*args: object, **kwargs: object) -> object:
+        invoke_threads.append(threading.get_ident())
+        return await orig_invoke(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox_runner_module, "_invoke_resolved_entrypoint", tracking_invoke)
+    monkeypatch.setattr(
+        output_files_module,
+        "prepare_tool_output_file",
+        track_thread(output_files_module.prepare_tool_output_file, prepare_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_auto_saved_result",
+        track_thread(output_files_module._write_auto_saved_result, write_threads),
+    )
+    monkeypatch.setattr(
+        output_files_module,
+        "_write_atomic",
+        track_thread(output_files_module._write_atomic, atomic_threads),
+    )
+
+    payload_size = output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES + 1024
+    with _direct_shell_env(runner_client, monkeypatch, execution_mode) as post_shell:
+        auto_saved = post_shell(
+            rf"head -c {payload_size} /dev/zero | tr '\0' 'x'",
+            base_dir=str(workspace),
+        )
+        explicit = post_shell(
+            'printf "%s" "explicit-shell-output"',
+            kwargs={"mindroom_output_path": "explicit.txt"},
+            base_dir=str(workspace),
+        )
+
+    assert auto_saved["ok"] is True, auto_saved
+    assert isinstance(auto_saved["result"], dict)
+    receipt = cast("dict[str, object]", auto_saved["result"])["mindroom_tool_output"]
+    assert isinstance(receipt, dict)
+    assert receipt["status"] == "saved_to_file"
+    assert receipt["auto_saved"] is True
+    saved_text = (workspace / cast("str", receipt["path"])).read_text(encoding="utf-8")
+    assert saved_text.endswith("x" * output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES)
+    assert len(saved_text.encode("utf-8")) > output_files_module.DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+
+    assert explicit["ok"] is True, explicit
+    assert (workspace / "explicit.txt").read_text(encoding="utf-8") == "explicit-shell-output"
+
+    assert invoke_threads
+    assert write_threads
+    assert atomic_threads
+    assert prepare_threads
+    assert set(write_threads).isdisjoint(invoke_threads)
+    assert set(atomic_threads).isdisjoint(invoke_threads)
+    assert set(prepare_threads).isdisjoint(invoke_threads)
