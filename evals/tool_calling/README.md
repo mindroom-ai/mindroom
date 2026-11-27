@@ -8,16 +8,18 @@ Every case builds a real MindRoom agent in a fresh temporary workspace with:
 - **Inline toolkits:** `shell`, `filesystem`, `attachments` (`attachment` + `view_file`), `matrix_message`, workspace `skill` (`deploy-check`), and `dynamic_tools` (`tool_search`, `call_tool`).
 - **Portable deferred toolkits (`defer: true`):** `chat_ui` (`enable_show_canvas: true`), `workflow`, `thread_tags`, `scheduler`, `memory`, `browser`.
 
-Workspace-local tools (`run_shell_command`, `filesystem`, `skill`, `view_file`, `tool_search`, `call_tool`) execute for real against the temporary workspace. Side-effecting / Matrix / browser tools validate kwargs against each tool's real Python signature (`inspect.signature(...).bind`) and JSON schema before returning concise realistic JSON stubs.
+Workspace-local tools (`run_shell_command`, `filesystem`, `skill`, `view_file`, `tool_search`, `call_tool`) execute for real against the temporary workspace. Side-effecting / Matrix / browser tools validate kwargs against each tool's real Python signature (`inspect.signature(...).bind`) and JSON schema before returning stateful per-case JSON stubs.
 
 ### Tracked Failure Kinds
 
-- `nested_call_tool_name`: `call_tool` failed to rewrite (missing/nested `name` or unresolvable wrapper call).
+- `nested_call_tool_name`: `call_tool` failed to rewrite due to missing/nested `name` or non-object `arguments`.
 - `shell_argv_syntax`: `run_shell_command` passed a multi-item argv `list` with shell syntax (`|`, `&&`, `||`, `;`, `>`, `<`, `~`, `$(`, `<<`).
 - `hallucinated_action`: passed `action=` to a function whose schema has no `action` parameter (e.g. `list_workflow_runs`, `list_thread_tags`, `view_file`).
 - `missing_required_param`, `unexpected_param`, `invalid_param_value`, `unknown_tool`, `tool_error`.
 
 ## Usage
+
+MindRoom logs are routed to `stderr` at `WARNING` by default so `stdout` is a clean Markdown table; pass `-v`/`--verbose` for full MindRoom logs on `stderr`.
 
 ```bash
 # Configured models from ~/.mindroom-chat/config.yaml:

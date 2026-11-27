@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import tempfile
 import time
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config.main import Config, load_config
 from mindroom.config.models import DebugConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.logging_config import use_library_logging
 from mindroom.providers.registry import build_model_provider
 
 from .cases import CASES, CASES_BY_ID
@@ -39,7 +41,16 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--max-turns", type=int, default=5, help="Max model requests per case.")
     p.add_argument("--concurrency", type=int, default=1, help="Concurrent cases per model.")
     p.add_argument("--out", type=Path, default=None, help="Optional JSON output path.")
+    p.add_argument("-v", "--verbose", action="store_true", help="Show MindRoom INFO/DEBUG logs on stderr.")
     return p
+
+
+def _configure_cli_logging(*, verbose: bool) -> None:
+    """Route MindRoom logs to stderr at WARNING by default (DEBUG with ``--verbose``)."""
+    use_library_logging()
+    level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(level=level, stream=sys.stderr, format="%(message)s", force=True)
+    logging.getLogger("mindroom").setLevel(level)
 
 
 def resolve_provider(model_spec: str, *, config_path: Path | None, base_url: str) -> ModelProvider:
@@ -123,10 +134,13 @@ async def run_cli(
     argv: Sequence[str],
     *,
     provider_factory: Callable[[str], ModelProvider] | None = None,
+    configure_logging: bool = False,
 ) -> dict[str, Any]:
     """Run the eval CLI for ``argv`` and return the JSON-serializable report."""
     parser = _parser()
     args = parser.parse_args(argv)
+    if configure_logging:
+        _configure_cli_logging(verbose=args.verbose)
     models = list(dict.fromkeys(x.strip() for entry in args.model for x in entry.split(",") if x.strip()))
     if not models:
         parser.error("at least one --model is required")
@@ -162,7 +176,7 @@ async def run_cli(
 
 def main() -> None:
     """CLI entrypoint."""
-    asyncio.run(run_cli(sys.argv[1:]))
+    asyncio.run(run_cli(sys.argv[1:], configure_logging=True))
 
 
 if __name__ == "__main__":

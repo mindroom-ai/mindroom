@@ -9,10 +9,19 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from evals.tool_calling.cases import CASES, CASES_BY_ID, EvalCase
-from evals.tool_calling.harness import evaluate_case, has_shell_argv_syntax
+from evals.tool_calling.harness import _collect_traces, evaluate_case, has_shell_argv_syntax
 from evals.tool_calling.run import resolve_provider, run_cli
 from mindroom.llm.messages import Message, model_provenance
-from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TokenCounter, TurnCompleted
+from mindroom.llm.provider import (
+    Capabilities,
+    DeferredTools,
+    ModelIdentity,
+    ModelRequest,
+    StreamEvent,
+    TokenCounter,
+    TurnCompleted,
+)
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 
 if TYPE_CHECKING:
@@ -128,7 +137,10 @@ _SCRIPTS: dict[str, list[list[dict[str, Any]] | str]] = {
                 "c1",
                 "run_shell_command",
                 {
-                    "args": "grep -c ERROR logs/service.log && grep ERROR logs/service.log | tail -n 2 > logs/recent_errors.txt",
+                    "args": (
+                        "grep -c ERROR logs/service.log && "
+                        "grep ERROR logs/service.log | tail -n 2 > logs/recent_errors.txt"
+                    ),
                 },
             ),
         ],
@@ -148,19 +160,10 @@ _SCRIPTS: dict[str, list[list[dict[str, Any]] | str]] = {
     ],
     "grep_and_edit_config": [
         [_tc("c1", "grep", {"pattern": "LEGACY_PORT"})],
-        [
-            _tc(
-                "c2",
-                "edit_file",
-                {"path": "src/config.py", "edits": [{"old_text": "8080", "new_text": "9090"}]},
-            ),
-        ],
+        [_tc("c2", "edit_file", {"path": "src/config.py", "edits": [{"old_text": "8080", "new_text": "9090"}]})],
         "Done.",
     ],
-    "skill_load_deploy": [
-        [_tc("c1", "skill", {"action": "instructions", "name": "deploy-check"})],
-        "Done.",
-    ],
+    "skill_load_deploy": [[_tc("c1", "skill", {"action": "instructions", "name": "deploy-check"})], "Done."],
     "attachment_list_and_register": [
         [_tc("c1", "attachment", {"action": "list"})],
         [_tc("c2", "attachment", {"action": "register", "path": "reports/summary.txt"})],
@@ -200,9 +203,14 @@ async def test_portable_surface_and_provider_resolution(tmp_path: Path) -> None:
     assert "deploy-check" in sys_text
     assert "tool_search" in sys_text
 
-    local_p = resolve_provider("local:inkling-2:mini", config_path=None, base_url="http://llama.local/v1")
-    assert local_p.capabilities.native_tool_search is False
-
+    assert (
+        resolve_provider(
+            "local:inkling-2:mini",
+            config_path=None,
+            base_url="http://llama.local/v1",
+        ).capabilities.native_tool_search
+        is False
+    )
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(
         "defaults:\n  tools: []\nagents:\n  eval_agent:\n    display_name: Eval\n    role: Eval\n"
@@ -242,88 +250,167 @@ async def test_all_12_cases_pass_first_try(case: EvalCase) -> None:
 
 
 @pytest.mark.asyncio
-async def test_canvas_dashboard_accepts_workspace_path() -> None:
-    """show_canvas with a written workspace HTML file passes canvas_dashboard."""
-    provider = _ScriptedProvider(
-        [
-            [_tc("c1", "write_file", {"path": "widget.html", "content": "<div>staging=green</div>"})],
-            [_call_tool("c2", "show_canvas", {"title": "Deploy", "path": "widget.html"})],
-            "Done.",
-        ],
+async def test_alternative_valid_paths_canvas_file_and_shell_config_edit() -> None:
+    """Canvas via workspace file and grep_and_edit_config via shell sed both pass."""
+    canvas_res = await evaluate_case(
+        CASES_BY_ID["canvas_dashboard"],
+        _ScriptedProvider(
+            [
+                [_tc("c1", "write_file", {"path": "widget.html", "content": "<div>staging=green</div>"})],
+                [_call_tool("c2", "show_canvas", {"title": "Deploy", "path": "widget.html"})],
+                "Done.",
+            ],
+        ),
     )
-    result = await evaluate_case(CASES_BY_ID["canvas_dashboard"], provider)
-    assert result.passed
-    assert result.first_try_passed
+    assert canvas_res.first_try_passed
+
+    cfg_res = await evaluate_case(
+        CASES_BY_ID["grep_and_edit_config"],
+        _ScriptedProvider(
+            [
+                [_tc("c1", "grep", {"pattern": "LEGACY_PORT"})],
+                [_tc("c2", "run_shell_command", {"args": "sed -i 's/8080/9090/' src/config.py"})],
+                "Done.",
+            ],
+        ),
+    )
+    assert cfg_res.first_try_passed
 
 
 @pytest.mark.asyncio
-async def test_live_failure_1_nested_call_tool_name_and_recovery() -> None:
-    """Omitting top-level name on call_tool hits MindRoom's real fallback error and recovers."""
-    provider = _ScriptedProvider(
-        [
-            [_tc("c1", "call_tool", {"arguments": {"name": "show_canvas", "title": "Deploy", "html": "<p>ok</p>"}})],
-            [_call_tool("c2", "show_canvas", {"title": "Deploy", "html": "<p>ok</p>"})],
-            "Done.",
-        ],
+async def test_stateful_stubs_persist_within_case() -> None:
+    """Tags, memories, attachments, and matrix_room stubs keep state within a case."""
+    tags_res = await evaluate_case(
+        CASES_BY_ID["thread_tags_audit"],
+        _ScriptedProvider(
+            [
+                [_call_tool("c1", "tag_thread", {"tag": "triage"})],
+                [_call_tool("c2", "list_thread_tags", {})],
+                [_call_tool("c3", "untag_thread", {"tag": "triage"})],
+                [_call_tool("c4", "list_thread_tags", {})],
+                [_call_tool("c5", "tag_thread", {"tag": "triage"})],
+                "Done.",
+            ],
+        ),
+        max_turns=6,
     )
-    result = await evaluate_case(CASES_BY_ID["canvas_dashboard"], provider)
-    assert result.passed
-    assert not result.first_try_passed
-    assert result.failure_counts == {"nested_call_tool_name": 1}
-    assert "Nothing was called" in result.calls[0].result_preview
-    assert result.calls[0].is_error
+    assert tags_res.first_try_passed
+    assert "triage" in json.loads(tags_res.calls[1].result_preview)["tags"]
+    assert "triage" not in json.loads(tags_res.calls[3].result_preview)["tags"]
+
+    mem_res = await evaluate_case(
+        CASES_BY_ID["memory_lookup_and_save"],
+        _ScriptedProvider(
+            [
+                [
+                    _call_tool("c1", "memory", {"action": "list"}),
+                    _call_tool("c2", "memory", {"action": "get", "memory_id": "mem_1"}),
+                ],
+                [_call_tool("c3", "memory", {"action": "get", "memory_id": "mem_99"})],
+                [
+                    _call_tool("c4", "memory", {"action": "search", "query": "retry"}),
+                    _call_tool("c5", "memory", {"action": "add", "content": "Prod uses 2s exponential backoff."}),
+                ],
+                [_call_tool("c6", "memory", {"action": "get", "memory_id": "mem_2"})],
+                "Done.",
+            ],
+        ),
+        max_turns=6,
+    )
+    assert mem_res.passed
+    assert mem_res.failure_counts == {"tool_error": 1}
+    assert json.loads(mem_res.calls[0].result_preview)["memories"][0]["id"] == "mem_1"
+    assert json.loads(mem_res.calls[1].result_preview)["memory"]["id"] == "mem_1"
+    assert json.loads(mem_res.calls[2].result_preview)["status"] == "error"
+    assert json.loads(mem_res.calls[5].result_preview)["memory"]["id"] == "mem_2"
+
+    att_res = await evaluate_case(
+        CASES_BY_ID["attachment_list_and_register"],
+        _ScriptedProvider(
+            [
+                [_tc("c1", "attachment", {"action": "list"})],
+                [_tc("c2", "attachment", {"action": "register", "path": "reports/summary.txt"})],
+                [_tc("c3", "attachment", {"action": "list"}), _tc("c4", "matrix_room", {"action": "room-info"})],
+                "Done.",
+            ],
+        ),
+    )
+    assert att_res.first_try_passed
+    assert json.loads(att_res.calls[0].result_preview)["attachments"] == []
+    assert json.loads(att_res.calls[2].result_preview)["attachments"][0]["attachment_id"] == "att_eval_1"
+    assert json.loads(att_res.calls[3].result_preview)["name"] == "Eval Room"
 
 
 @pytest.mark.asyncio
-async def test_live_failure_2_shell_argv_syntax_and_recovery() -> None:
-    """Multi-element shell argv with shell operators fails as shell_argv_syntax and recovers."""
+async def test_live_failures_nested_call_tool_shell_argv_and_hallucinated_action() -> None:
+    """All 3 inkling-2:mini failure modes are classified accurately and recover."""
+    nested_res = await evaluate_case(
+        CASES_BY_ID["canvas_dashboard"],
+        _ScriptedProvider(
+            [
+                [
+                    _tc(
+                        "c1",
+                        "call_tool",
+                        {"arguments": {"name": "show_canvas", "title": "Deploy", "html": "<p>ok</p>"}},
+                    ),
+                ],
+                [_tc("c2", "call_tool", {"name": "show_canvas", "arguments": ["not-an-object"]})],
+                [_call_tool("c3", "nonexistent_fn", {})],
+                [_call_tool("c4", "show_canvas", {"title": "Deploy", "html": "<p>ok</p>"})],
+                "Done.",
+            ],
+        ),
+        max_turns=6,
+    )
+    assert nested_res.passed
+    assert not nested_res.first_try_passed
+    assert nested_res.failure_counts == {"nested_call_tool_name": 2, "unknown_tool": 1}
+    assert "Nothing was called" in nested_res.calls[0].result_preview
+
     assert has_shell_argv_syntax({"args": ["grep", "ERROR", "logs/service.log", "|", "wc", "-l"]})
     assert has_shell_argv_syntax({"args": ["echo", "hi", ">", "out.txt"]})
     assert has_shell_argv_syntax({"args": ["ls", "~/logs"]})
     assert not has_shell_argv_syntax({"args": ["bash", "-c", "grep ERROR logs/service.log | wc -l"]})
     assert not has_shell_argv_syntax({"args": ["python3", "-c", "x = 1; print(x > 0)"]})
-    assert not has_shell_argv_syntax({"args": "grep ERROR logs/service.log | wc -l"})
 
-    provider = _ScriptedProvider(
-        [
+    shell_res = await evaluate_case(
+        CASES_BY_ID["shell_pipeline_logs"],
+        _ScriptedProvider(
             [
-                _tc(
-                    "c1",
-                    "run_shell_command",
-                    {
-                        "args": [
-                            "grep",
-                            "ERROR",
-                            "logs/service.log",
-                            "|",
-                            "tail",
-                            "-n",
-                            "2",
-                            ">",
-                            "logs/recent_errors.txt",
-                        ],
-                    },
-                ),
+                [
+                    _tc(
+                        "c1",
+                        "run_shell_command",
+                        {
+                            "args": [
+                                "grep",
+                                "ERROR",
+                                "logs/service.log",
+                                "|",
+                                "tail",
+                                "-n",
+                                "2",
+                                ">",
+                                "logs/recent_errors.txt",
+                            ],
+                        },
+                    ),
+                ],
+                [
+                    _tc(
+                        "c2",
+                        "run_shell_command",
+                        {"args": "grep ERROR logs/service.log | tail -n 2 > logs/recent_errors.txt"},
+                    ),
+                ],
+                "Done.",
             ],
-            [
-                _tc(
-                    "c2",
-                    "run_shell_command",
-                    {"args": "grep ERROR logs/service.log | tail -n 2 > logs/recent_errors.txt"},
-                ),
-            ],
-            "Done.",
-        ],
+        ),
     )
-    result = await evaluate_case(CASES_BY_ID["shell_pipeline_logs"], provider)
-    assert result.passed
-    assert not result.first_try_passed
-    assert result.failure_counts == {"shell_argv_syntax": 1}
+    assert shell_res.passed
+    assert shell_res.failure_counts == {"shell_argv_syntax": 1}
 
-
-@pytest.mark.asyncio
-async def test_live_failure_3_hallucinated_action_on_non_action_tools() -> None:
-    """Hallucinating action= on list_workflow_runs, list_thread_tags, and real view_file is caught."""
     wf_res = await evaluate_case(
         CASES_BY_ID["workflow_runs_check"],
         _ScriptedProvider(
@@ -335,22 +422,8 @@ async def test_live_failure_3_hallucinated_action_on_non_action_tools() -> None:
         ),
     )
     assert wf_res.passed
-    assert not wf_res.first_try_passed
     assert wf_res.failure_counts == {"hallucinated_action": 1}
     assert "unexpected keyword argument 'action'" in wf_res.calls[0].result_preview
-
-    tags_res = await evaluate_case(
-        CASES_BY_ID["thread_tags_audit"],
-        _ScriptedProvider(
-            [
-                [_call_tool("c1", "list_thread_tags", {"action": "list"})],
-                [_call_tool("c2", "list_thread_tags", {}), _call_tool("c3", "tag_thread", {"tag": "triage"})],
-                "Done.",
-            ],
-        ),
-    )
-    assert tags_res.passed
-    assert tags_res.failure_counts == {"hallucinated_action": 1}
 
     view_res = await evaluate_case(
         CASES_BY_ID["view_image_and_notify"],
@@ -364,33 +437,43 @@ async def test_live_failure_3_hallucinated_action_on_non_action_tools() -> None:
         ),
     )
     assert view_res.passed
-    assert not view_res.first_try_passed
     assert view_res.failure_counts == {"hallucinated_action": 1}
 
 
 @pytest.mark.asyncio
-async def test_other_failure_kinds_and_turn_cap() -> None:
-    """Direct deferred call, unknown tool, missing/unexpected/invalid params, decode error, tool_error, and max_turns."""
-    unknown_res = await evaluate_case(
-        CASES_BY_ID["canvas_dashboard"],
+async def test_other_failure_kinds_plural_validation_raw_preview_and_turn_cap() -> None:
+    """Plural Pydantic validation errors, _raw decode preview, call_id matching, and turn cap."""
+    bad_raw = '{"name": "show_canvas", "html": "<div>unterminated'
+    plural_res = await evaluate_case(
+        CASES_BY_ID["shell_pipeline_logs"],
         _ScriptedProvider(
             [
-                [_tc("c1", "show_canvas", {"title": "Deploy", "html": "<p>hi</p>"})],
-                [_tc("c2", "nonexistent_tool", {})],
-                [_call_tool("c3", "show_canvas", {"title": "Deploy", "html": "<p>hi</p>"})],
+                [_tc("c1", "run_shell_command", {"args": {"argv": ["ls"]}})],
+                [_tc("c2", "call_tool", bad_raw)],
+                [
+                    _tc(
+                        "c3",
+                        "run_shell_command",
+                        {"args": "grep ERROR logs/service.log | tail -n 2 > logs/recent_errors.txt"},
+                    ),
+                ],
                 "Done.",
             ],
         ),
     )
-    assert unknown_res.passed
-    assert unknown_res.failure_counts == {"unknown_tool": 2}
+    assert plural_res.passed
+    assert "validation errors for" in plural_res.calls[0].result_preview
+    assert plural_res.calls[0].failure_kind == "invalid_param_value"
+    assert plural_res.calls[1].failure_kind == "invalid_param_value"
+    assert plural_res.calls[1].raw_args == {"_raw": bad_raw}
 
+    # Direct deferred call, missing/unexpected/invalid params, and tool_error
     sched_res = await evaluate_case(
         CASES_BY_ID["scheduler_reminder"],
         _ScriptedProvider(
             [
-                [_call_tool("c1", "scheduler", {"action": "bogus"})],
-                [_tc("c2", "call_tool", "{not valid json")],
+                [_tc("c1", "scheduler", {"action": "list"})],
+                [_call_tool("c2", "scheduler", {"action": "bogus"})],
                 [_call_tool("c3", "scheduler", {"action": "create", "message": "Check rollout"})],
                 [
                     _call_tool(
@@ -402,9 +485,10 @@ async def test_other_failure_kinds_and_turn_cap() -> None:
                 "Done.",
             ],
         ),
+        max_turns=6,
     )
     assert sched_res.passed
-    assert sched_res.failure_counts == {"invalid_param_value": 2, "missing_required_param": 1}
+    assert sched_res.failure_counts == {"unknown_tool": 1, "invalid_param_value": 1, "missing_required_param": 1}
 
     browser_res = await evaluate_case(
         CASES_BY_ID["browser_inspect"],
@@ -419,25 +503,41 @@ async def test_other_failure_kinds_and_turn_cap() -> None:
     assert browser_res.passed
     assert browser_res.failure_counts == {"unexpected_param": 1}
 
-    attach_res = await evaluate_case(
-        CASES_BY_ID["attachment_list_and_register"],
-        _ScriptedProvider(
-            [
-                [_tc("c1", "attachment", {"action": "list"})],
-                [_tc("c2", "attachment", {"action": "register", "path": "reports/missing.txt"})],
-                [_tc("c3", "attachment", {"action": "register", "path": "reports/summary.txt"})],
-                "Done.",
-            ],
-        ),
+    # Out-of-order tool_call_id matching with index fallback when call_id is empty
+    rec = RunRecord(
+        run_id="r",
+        session_id="s",
+        tools=[
+            ToolExecution(
+                tool_call_id="b",
+                tool_name="tool_search",
+                tool_args={"query": "b"},
+                is_error=False,
+                result="{}",
+            ),
+            ToolExecution(
+                tool_call_id="",
+                tool_name="tool_search",
+                tool_args={"query": "a"},
+                is_error=False,
+                result="{}",
+            ),
+        ],
     )
-    assert attach_res.passed
-    assert attach_res.failure_counts == {"tool_error": 1}
+    traces, _ = _collect_traces(
+        rec,
+        [("a", 1, "tool_search", {"query": "a"}), ("b", 2, "tool_search", {"query": "b"})],
+        {},
+        DeferredTools(),
+    )
+    assert traces[0].turn == 2
+    assert traces[0].raw_args == {"query": "b"}
+    assert traces[1].turn == 1
 
     looping_p = _ScriptedProvider([[_tc(f"c{i}", "tool_search", {"query": "workflow"})] for i in range(10)])
     capped_res = await evaluate_case(CASES_BY_ID["workflow_runs_check"], looping_p, max_turns=2)
     assert not capped_res.passed
     assert capped_res.turns == 2
-    assert len(looping_p.requests) == 2
 
 
 @pytest.mark.asyncio

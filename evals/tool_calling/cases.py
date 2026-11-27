@@ -142,7 +142,8 @@ def _v_calc(ws: Path, c: Sequence[CallTrace]) -> bool:
 
 def _v_cfg(ws: Path, c: Sequence[CallTrace]) -> bool:
     cfg = ws / "src" / "config.py"
-    if not (_ok(c, "grep") and (_ok(c, "edit_file") or _ok(c, "write_file")) and cfg.is_file()):
+    searched = _ok(c, "grep") or _ok(c, "run_shell_command", lambda a: "LEGACY_PORT" in str(a.get("args", "")))
+    if not (searched and cfg.is_file()):
         return False
     return "LEGACY_PORT = 9090" in (text := cfg.read_text(encoding="utf-8")) and "8080" not in text
 
