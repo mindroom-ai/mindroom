@@ -885,19 +885,37 @@ def _collect_consolidated_approval_targets(
     return targets_by_old, split_checks
 
 
+def _normalize_consolidated_toolkit_checks(
+    toolkit_or_checks: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
+    renames: Mapping[str, str] | None,
+    reject_wildcard_scripts: bool | None,
+) -> Sequence[tuple[str, Mapping[str, str], bool | None]]:
+    if not isinstance(toolkit_or_checks, str):
+        return toolkit_or_checks
+    effective_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_or_checks) if renames is None else renames
+    if not effective_renames and toolkit_or_checks not in RETIRED_SPLIT_FUNCTIONS:
+        return ()
+    return [(toolkit_or_checks, effective_renames or {}, reject_wildcard_scripts)]
+
+
 def retired_consolidated_approval_error(
-    toolkit_checks: Sequence[tuple[str, Mapping[str, str], bool | None]],
+    toolkit_or_checks: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
+    renames: Mapping[str, str] | None = None,
     agent_names: Collection[str] = (),
+    *,
+    reject_wildcard_scripts: bool | None = None,
 ) -> str | None:
     """Return a migration error when approval rules decide consolidated/split functions differently from retired names.
 
-    Groups enabled consolidated/normalized replacements by retired name so a shared bare name across multiple enabled
-    toolkits (such as ``run_query`` across ``postgres`` and ``redshift``) names every failing replacement at once,
-    and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS``.
+    Accepts either a single toolkit name (with optional ``renames``/``reject_wildcard_scripts`` for direct callers and
+    plugins) or a sequence of ``(toolkit_name, renames, reject_wildcard_scripts)`` checks grouped across enabled
+    toolkits so shared bare names (such as ``run_query`` across ``postgres`` and ``redshift``) name every failing
+    replacement at once, and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS``.
     """
+    toolkit_checks = _normalize_consolidated_toolkit_checks(toolkit_or_checks, renames, reject_wildcard_scripts)
     targets_by_old, split_checks = _collect_consolidated_approval_targets(toolkit_checks)
 
     probes = _probe_agents(rules, agent_names)

@@ -5454,3 +5454,25 @@ def test_workflow_retired_filter_guidance_recommends_removal_and_approval_rules(
             worker_target=None,
         )
     assert "replace `workflow`" not in str(stored_exc.value)
+
+
+def test_retired_consolidated_approval_error_accepts_single_toolkit_and_renames() -> None:
+    """External plugins calling ``retired_consolidated_approval_error(toolkit_name, ..., renames=...)`` keep working."""
+    from mindroom.config.legacy_fields import retired_consolidated_approval_error  # noqa: PLC0415
+
+    approval = Config(
+        tool_approval={
+            "default": "auto_approve",
+            "rules": [{"match": "link_pull_request", "action": "require_approval"}],
+        },
+    ).tool_approval
+    error = retired_consolidated_approval_error(
+        "pull_requests",
+        approval.rules,
+        approval.default,
+        approval.timeout_days,
+        renames={"link_pull_request": "pull_requests"},
+    )
+    assert error is not None
+    assert "link_pull_request" in error
+    assert "pull_requests" in error

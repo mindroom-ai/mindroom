@@ -606,7 +606,7 @@ def test_website_tool_splits_long_pages_into_5000_char_chunks_preserving_json_sc
     assert len(words) > 5000
     _serve(monkeypatch, lambda _url: _page(f"<main><p>{words}</p></main>"))
 
-    payload = json.loads(WebsiteTools().read_url(start_url))
+    payload = json.loads(WebsiteTools().website_read_url(start_url))
 
     assert len(payload) > 1
     for expected_chunk, entry in enumerate(payload, start=1):
