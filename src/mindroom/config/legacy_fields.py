@@ -899,7 +899,7 @@ def _normalize_consolidated_toolkit_checks(
 
 
 def retired_consolidated_approval_error(
-    toolkit_or_checks: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
+    toolkit_name: str | Sequence[tuple[str, Mapping[str, str], bool | None]],
     rules: Sequence[_ApprovalRule],
     default: str,
     default_timeout_days: float = 7.0,
@@ -915,7 +915,7 @@ def retired_consolidated_approval_error(
     toolkits so shared bare names (such as ``run_query`` across ``postgres`` and ``redshift``) name every failing
     replacement at once, and also validates 1-to-N split toolkits from ``RETIRED_SPLIT_FUNCTIONS``.
     """
-    toolkit_checks = _normalize_consolidated_toolkit_checks(toolkit_or_checks, renames, reject_wildcard_scripts)
+    toolkit_checks = _normalize_consolidated_toolkit_checks(toolkit_name, renames, reject_wildcard_scripts)
     targets_by_old, split_checks = _collect_consolidated_approval_targets(toolkit_checks)
 
     probes = _probe_agents(rules, agent_names)

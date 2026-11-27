@@ -5467,10 +5467,10 @@ def test_retired_consolidated_approval_error_accepts_single_toolkit_and_renames(
         },
     ).tool_approval
     error = retired_consolidated_approval_error(
-        "pull_requests",
-        approval.rules,
-        approval.default,
-        approval.timeout_days,
+        toolkit_name="pull_requests",
+        rules=approval.rules,
+        default=approval.default,
+        default_timeout_days=approval.timeout_days,
         renames={"link_pull_request": "pull_requests"},
     )
     assert error is not None
