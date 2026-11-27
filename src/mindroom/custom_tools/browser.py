@@ -160,21 +160,46 @@ _OMITTED_READ_PROPERTIES = frozenset({"node", "frame", "labels", "refs", "mode"}
 _DESKTOP_ONLY_READ_PROPERTIES = frozenset({"target", "returnAttachment", "element"})
 _OMITTED_CONTROL_PROPERTIES = frozenset({"node", "inputRef", "element"})
 _DESKTOP_ONLY_CONTROL_PROPERTIES = frozenset({"target"})
-_HOST_BROWSER_READ_DESCRIPTION = (
-    "Inspect MindRoom's worker Chromium browser without mutating pages: check status/profiles/tabs, "
-    "snapshot element refs (for browser_control), take a screenshot, read console, or fetch help/actions.\n"
-    'Examples: {"action":"snapshot"} | {"action":"screenshot","fullPage":true}.\n'
-    "tabs returns empty when stopped without launching Chromium."
-)
-_HOST_BROWSER_CONTROL_DESCRIPTION = (
-    "Drive MindRoom's worker Chromium browser: start/stop profiles, open URLs or local HTML, focus/close tabs, "
-    "navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. "
-    "Use browser_read for status/tabs/snapshot/screenshot/console/help.\n"
-    'Examples: {"action":"open","targetUrl":"https://example.org"} | {"action":"open","paths":["page.html"]} '
-    '(omit targetUrl, incl. about:blank) | {"action":"act","request":{"kind":"click","ref":"e1"}}.\n'
-    "open takes targetUrl OR one local HTML file in paths, never both. First call auto-shows the Computer panel "
-    "if chat_ui is present (open_panel(panel='computer') only reopens it)."
-)
+
+
+def _browser_read_description(*, offers_desktop: bool) -> str:
+    subject = "Chromium" if offers_desktop else "MindRoom's worker Chromium browser"
+    target_note = (
+        "target=host uses MindRoom's worker browser "
+        "(tabs returns empty when stopped without launching Chromium). "
+        "target=desktop observes the user's browser."
+        if offers_desktop
+        else "tabs returns empty when stopped without launching Chromium."
+    )
+    return (
+        f"Inspect {subject} without mutating pages: check status/profiles/tabs, "
+        "snapshot element refs (for browser_control), take a screenshot, read console, or fetch help/actions.\n"
+        'Examples: {"action":"snapshot"} | {"action":"screenshot","fullPage":true}.\n'
+        f"{target_note}"
+    )
+
+
+def _browser_control_description(*, offers_desktop: bool) -> str:
+    subject = "Chromium" if offers_desktop else "MindRoom's worker Chromium browser"
+    host_target = '"target":"host",' if offers_desktop else ""
+    target_note = (
+        "target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, "
+        "open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only."
+        if offers_desktop
+        else "First call auto-shows the Computer panel if chat_ui is present "
+        "(open_panel(panel='computer') only reopens it)."
+    )
+    return (
+        f"Drive {subject}: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, "
+        "act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. "
+        "Use browser_read for status/tabs/snapshot/screenshot/console/help.\n"
+        'Examples: {"action":"open","targetUrl":"https://example.org"} | '
+        f'{{"action":"open",{host_target}"paths":["page.html"]}} (omit targetUrl, incl. about:blank) | '
+        f'{{"action":"act",{host_target}"request":{{"kind":"click","ref":"e1"}}}}.\n'
+        f"open takes targetUrl OR one local HTML file in paths, never both. {target_note}"
+    )
+
+
 _HOST_READ_PARAM_DESCRIPTIONS: dict[str, str] = {
     "profile": "Profile name (default mindroom).",
     "targetId": "Tab ID (defaults to active tab; omit for all-tab console).",
@@ -792,12 +817,12 @@ class BrowserTools(Toolkit):
         if function.name == "browser_read":
             always_hidden = _OMITTED_READ_PROPERTIES
             desktop_only = _DESKTOP_ONLY_READ_PROPERTIES
-            host_description = _HOST_BROWSER_READ_DESCRIPTION
+            description_builder = _browser_read_description
             host_param_descriptions = _HOST_READ_PARAM_DESCRIPTIONS
         elif function.name == "browser_control":
             always_hidden = _OMITTED_CONTROL_PROPERTIES
             desktop_only = _DESKTOP_ONLY_CONTROL_PROPERTIES
-            host_description = _HOST_BROWSER_CONTROL_DESCRIPTION
+            description_builder = _browser_control_description
             host_param_descriptions = _HOST_CONTROL_PARAM_DESCRIPTIONS
         else:
             return function
@@ -816,8 +841,9 @@ class BrowserTools(Toolkit):
             properties[name] = schema
         return replace(
             function,
-            description=function.description if offers_desktop else host_description,
+            description=description_builder(offers_desktop=offers_desktop),
             parameters={**function.parameters, "properties": properties},
+            compat_parameters=hidden,
         )
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
@@ -957,17 +983,14 @@ class BrowserTools(Toolkit):
         returnAttachment: bool = False,
         level: str | None = None,
     ) -> str | ToolValue:
-        """Inspect Chromium without mutating pages: check status/profiles/tabs, snapshot element refs (for browser_control), take a screenshot, read console, or fetch help/actions.
-
-        Examples: {"action":"snapshot"} | {"action":"screenshot","fullPage":true}.
-        target=host uses MindRoom's worker browser (tabs returns empty when stopped without launching Chromium). target=desktop observes the user's browser.
+        """Inspect a Chromium browser without mutating pages.
 
         Args:
             action: Read action (help for full table).
             target: host (worker browser) or desktop (user's browser).
             node: Unsupported compatibility field.
             profile: Host-target profile (default mindroom).
-            targetId: Host tab ID (rejected by desktop; omit for active tab or all-tab console).
+            targetId: Host tab ID (rejected by desktop; desktop observes active tab only; host omits for active tab or all-tab console).
             limit: Host-target snapshot item limit.
             maxChars: Snapshot text char limit (0: unlimited on host; desktop keeps its cap).
             mode: Host-target snapshot mode.
@@ -1039,14 +1062,11 @@ class BrowserTools(Toolkit):
         promptText: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> str | ToolValue:
-        """Drive Chromium: start/stop profiles, open URLs or local HTML, focus/close tabs, navigate, act (click/type/fill/press/select/drag/wait/evaluate), save PDF, upload files, arm dialogs. Use browser_read for status/tabs/snapshot/screenshot/console/help.
-
-        Examples: {"action":"open","targetUrl":"https://example.org"} | {"action":"open","target":"host","paths":["page.html"]} (omit targetUrl, incl. about:blank) | {"action":"act","target":"host","request":{"kind":"click","ref":"e1"}}.
-        open takes targetUrl OR one local HTML file in paths, never both. target=host (worker browser; first call auto-shows Computer panel if chat_ui is present, open_panel(panel='computer') only reopens it). target=desktop supports start, stop, open only.
+        """Drive a live Chromium browser.
 
         Args:
             action: Control action; page interactions use action='act' with request.kind.
-            target: host (worker browser) or desktop (user's browser: start, stop, open only; existing-page control requires upstream stable targeting).
+            target: host (worker browser) or desktop (user's browser: start, stop, open only; existing-page control requires upstream stable targeting and reconnecting does not enable it).
             node: Unsupported compatibility field.
             profile: Host-target profile (default mindroom).
             targetUrl: URL for open/navigate (omit when using paths).

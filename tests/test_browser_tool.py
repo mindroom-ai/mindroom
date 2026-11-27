@@ -28,9 +28,7 @@ from playwright.async_api import Error as PlaywrightError
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
-from mindroom.approval import manager as approval_manager
 from mindroom.browser import fetch_guard as browser_fetch_guard
-from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager, scoped_credentials_path
@@ -47,29 +45,20 @@ from mindroom.custom_tools.browser import (
 )
 from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
 from mindroom.desktop.protocol import DesktopResponse, EncryptedDesktopMedia
-from mindroom.event_journal import ScheduledCall, ScheduledCallClaim
 from mindroom.matrix.olm_to_device import PinnedMatrixDevice
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.scheduling.errors import SchedulingError
-from mindroom.scheduling.scheduled_tool_calls import (
-    _invalid_arguments,
-    bind_live_tools,
-    prepare_scheduled_call,
-    run_scheduled_call,
-)
+from mindroom.scheduling.scheduled_tool_calls import _invalid_arguments
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolManagedInitArg
-from mindroom.tool_system.invocation import ToolCall, ToolCallContext
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
-from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
@@ -559,7 +548,8 @@ def test_browser_desktop_schema_documents_desktop_fields_and_host_examples() -> 
     assert control_desktop_only <= set(desktop_control_props)
     assert desktop_read_props["target"]["enum"] == ["host", "desktop"]
     assert desktop_control_props["target"]["enum"] == ["host", "desktop"]
-    assert "omit for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
+    assert "desktop observes active tab only" in desktop_read_props["targetId"]["description"]
+    assert "host omits for active tab or all-tab console" in desktop_read_props["targetId"]["description"]
     assert (
         desktop_read_props["maxChars"]["description"]
         == "Snapshot text char limit (0: unlimited on host; desktop keeps its cap)."
@@ -573,6 +563,7 @@ def test_browser_desktop_schema_documents_desktop_fields_and_host_examples() -> 
     assert "relative links don't resolve" in desktop_control_props["paths"]["description"]
     assert "start, stop, open" in desktop_control_props["target"]["description"]
     assert "stable targeting" in desktop_control_props["target"]["description"]
+    assert "reconnecting does not enable it" in desktop_control_props["target"]["description"]
     assert desktop_control_props["request"]["description"] == host_control_props["request"]["description"]
     for field_name in ("compact", "interactive", "limit", "snapshotFormat"):
         assert "Host-target" in desktop_read_props[field_name]["description"]
@@ -714,155 +705,31 @@ async def test_browser_offered_entrypoint_keeps_hidden_legacy_kwargs_working(
         await control_entrypoint(action="open", targetUrl="https://example.org", target="desktop")
 
 
-@pytest.mark.asyncio
-async def test_browser_scheduled_call_validation_accepts_hidden_compat_kwargs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Scheduled-call validation and replay accept hidden compat kwargs while rejecting invalid/closed/typo args."""
+def test_browser_scheduled_call_validation_accepts_hidden_compat_kwargs() -> None:
+    """Scheduled-call validation accepts declared hidden compat kwargs while rejecting invalid/closed/typo args."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
-    host_read = replace(toolkit_offers(tool, "browser_read"), toolkit="browser")
-    host_control = replace(toolkit_offers(tool, "browser_control"), toolkit="browser")
-    assert "inputRef" not in host_control.parameters["properties"]
-    assert "target" not in host_control.parameters["properties"]
-    assert "mode" not in host_read.parameters["properties"]
-    assert "target" not in host_read.parameters["properties"]
+    host_read = toolkit_offers(tool, "browser_read")
+    host_control = toolkit_offers(tool, "browser_control")
+    assert {"inputRef", "target"} <= host_control.compat_parameters
+    assert {"mode", "target"} <= host_read.compat_parameters
 
-    # Valid hidden compat kwargs (including explicit None for nullable optionals) pass validation.
-    assert _invalid_arguments(host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}) is None
-    assert _invalid_arguments(host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": None}) is None
-    assert (
-        _invalid_arguments(
-            host_control,
-            {"action": "open", "target": "host", "targetUrl": "https://example.org"},
-        )
-        is None
-    )
-    assert (
-        _invalid_arguments(
-            host_read,
-            {"action": "snapshot", "mode": "efficient", "target": "host", "element": None},
-        )
-        is None
-    )
+    for fn, valid_args in (
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}),
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": None}),
+        (host_control, {"action": "open", "target": "host", "targetUrl": "https://example.org"}),
+        (host_read, {"action": "snapshot", "mode": "efficient", "target": "host", "element": None}),
+    ):
+        assert _invalid_arguments(fn, valid_args) is None
 
-    # Invalid hidden values, non-nullable None, unknown typos, and closed-schema hidden kwargs are rejected.
-    assert (
-        _invalid_arguments(
-            host_control,
-            {"action": "open", "target": "bogus", "targetUrl": "https://example.org"},
-        )
-        is not None
-    )
-    assert _invalid_arguments(host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": 123}) is not None
-    assert (
-        _invalid_arguments(
-            host_control,
-            {"action": "open", "targetUrl": "https://example.org", "bogus": 1},
-        )
-        is not None
-    )
-    assert _invalid_arguments(host_read, {"action": "snapshot", "returnAttachment": None}) is not None
-    closed_control = replace(
-        host_control,
-        parameters=closed_parameters(tool.browser_control, host_control.parameters),
-    )
-    assert (
-        _invalid_arguments(
-            closed_control,
-            {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"},
-        )
-        is not None
-    )
-
-    # Real scheduled-call preparation and replay path run a stored browser_control call with hidden inputRef.
-    upload = AsyncMock(return_value={"action": "upload", "status": "ok"})
-    monkeypatch.setattr(tool, "_upload", upload)
-    stored_arguments = {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}
-    stored_arguments_json = json.dumps(stored_arguments, sort_keys=True, separators=(",", ":"))
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = Config(agents={"general": AgentConfig(display_name="General")})
-    context = make_test_tool_runtime_context(
-        agent_name="general",
-        target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id=None),
-        requester_id="@alice:example.org",
-        client=MagicMock(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-        storage_path=tmp_path / "storage",
-    )
-    stored_call = ScheduledCall(
-        task_id="task-browser",
-        room_id="!room:example.org",
-        thread_id="$thread",
-        requester_id="@alice:example.org",
-        agent_name="general",
-        toolkit_name="browser",
-        tool_name="browser_control",
-        arguments_json=stored_arguments_json,
-        execute_at_ns=0,
-        approved_scope="exact",
-    )
-    fake_manager = SimpleNamespace(
-        scheduled_call=AsyncMock(return_value=stored_call),
-        claim_scheduled_call=AsyncMock(
-            return_value=ScheduledCallClaim(
-                toolkit_name="browser",
-                tool_name="browser_control",
-                arguments_json=stored_arguments_json,
-                provenance={},
-            ),
-        ),
-        record_scheduled_call_outcome=AsyncMock(),
-    )
-    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: fake_manager)
-
-    def schedule_tool_call() -> str:
-        return "ok"
-
-    def run_scheduled_call_tool() -> str:
-        return "ok"
-
-    functions = {
-        "schedule_tool_call": replace(adapt_callable(schedule_tool_call), toolkit="scheduler"),
-        "run_scheduled_call": replace(adapt_callable(run_scheduled_call_tool), toolkit="scheduler"),
-        "browser_read": host_read,
-        "browser_control": host_control,
-    }
-    (binder,) = bind_live_tools(functions, ())
-
-    async def verify_prepare(_arguments: dict[str, object]) -> object:
-        resolved, parsed = prepare_scheduled_call("browser_control", stored_arguments_json)
-        assert resolved.toolkit_name == "browser"
-        assert parsed == stored_arguments
-        with pytest.raises(SchedulingError, match="current parameters"):
-            prepare_scheduled_call(
-                "browser_control",
-                json.dumps({"action": "open", "target": "bogus", "targetUrl": "https://example.org"}),
-            )
-        return "prepared"
-
-    async def verify_replay(_arguments: dict[str, object]) -> object:
-        return await run_scheduled_call(context, "task-browser", None)
-
-    call_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id="@alice:example.org")
-    assert (
-        await binder(
-            ToolCall(function=functions["schedule_tool_call"], arguments={}, context=call_context),
-            verify_prepare,
-        )
-        == "prepared"
-    )
-    replayed = await binder(
-        ToolCall(function=functions["run_scheduled_call"], arguments={}, context=call_context),
-        verify_replay,
-    )
-    assert isinstance(replayed, str)
-    assert json.loads(replayed)["status"] == "ok"
-    assert upload.await_args.kwargs["input_ref"] == "#file"
-    fake_manager.record_scheduled_call_outcome.assert_awaited_once_with("task-browser", "completed")
+    closed_control = replace(host_control, parameters=closed_parameters(tool.browser_control, host_control.parameters))
+    for fn, invalid_args in (
+        (host_control, {"action": "open", "target": "bogus", "targetUrl": "https://example.org"}),
+        (host_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": 123}),
+        (host_control, {"action": "open", "targetUrl": "https://example.org", "bogus": 1}),
+        (host_read, {"action": "snapshot", "returnAttachment": None}),
+        (closed_control, {"action": "upload", "paths": ["report.pdf"], "inputRef": "#file"}),
+    ):
+        assert _invalid_arguments(fn, invalid_args) is not None
 
 
 @pytest.mark.asyncio

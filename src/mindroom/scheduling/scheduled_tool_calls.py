@@ -271,7 +271,7 @@ def _hidden_entrypoint_arguments_valid(
     arguments: dict[str, object],
     hidden_names: set[str],
 ) -> bool:
-    """Return whether keys omitted from an open offered schema fit the entrypoint's own parameters."""
+    """Return whether declared compat keys omitted from an open offered schema fit the entrypoint's parameters."""
     if not callable(function.entrypoint):
         return False
     try:
@@ -301,12 +301,14 @@ def _invalid_arguments(function: ToolFunction, arguments: dict[str, object]) -> 
     except ValueError:
         return "the arguments do not match the tool's current parameters"
     # Tool entrypoints reject arguments they do not take, which would fail only after the approval is spent.
-    # Open schemas that hide legacy or capability-gated kwargs from the model still accept those kwargs on their
-    # entrypoint, so validate hidden keys against the entrypoint's derived parameter schemas.
+    # Open schemas that hide legacy or capability-gated kwargs opt them in via ``compat_parameters`` so stored
+    # calls validate against the entrypoint without reopening parameters hidden because an action was disabled.
     if (
         unknown
         and schema.get("additionalProperties") is not True
-        and not _hidden_entrypoint_arguments_valid(function, arguments, unknown)
+        and not (
+            unknown <= function.compat_parameters and _hidden_entrypoint_arguments_valid(function, arguments, unknown)
+        )
     ):
         return "the arguments do not match the tool's current parameters"
     return None
