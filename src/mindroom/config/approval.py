@@ -41,6 +41,14 @@ def _argument_scalar_matches(actual: object, expected: object) -> bool:
     return False
 
 
+def _argument_value_matches(actual: object, expected: object) -> bool:
+    return (
+        any(_argument_scalar_matches(actual, item) for item in expected)
+        if isinstance(expected, list)
+        else _argument_scalar_matches(actual, expected)
+    )
+
+
 def _canonical_arguments_json(arguments: Mapping[str, Any] | None) -> str:
     return json.dumps(arguments, sort_keys=True, separators=(",", ":"))
 
@@ -173,18 +181,28 @@ class ApprovalRuleConfig(BaseModel):
         """Return whether ``arguments`` matches every authored ``arguments`` key matcher."""
         if self.arguments is None:
             return True
+        return all(
+            key in arguments and _argument_value_matches(arguments[key], expected)
+            for key, expected in self.arguments.items()
+        )
+
+    def fixed_arguments_match(self, fixed_arguments: Mapping[str, Any]) -> Literal["no", "partial", "full"]:
+        """Classify how this rule's ``arguments`` filter relates to known ``fixed_arguments``.
+
+        Returns ``"no"`` if any known key fails its matcher, ``"full"`` if every authored key is in
+        ``fixed_arguments`` and matches (or ``arguments`` is unset), and ``"partial"`` if all known keys match
+        while other authored keys remain unconstrained.
+        """
+        if self.arguments is None:
+            return "full"
+        all_known = True
         for key, expected in self.arguments.items():
-            if key not in arguments:
-                return False
-            actual = arguments[key]
-            matched = (
-                any(_argument_scalar_matches(actual, item) for item in expected)
-                if isinstance(expected, list)
-                else _argument_scalar_matches(actual, expected)
-            )
-            if not matched:
-                return False
-        return True
+            if key not in fixed_arguments:
+                all_known = False
+                continue
+            if not _argument_value_matches(fixed_arguments[key], expected):
+                return "no"
+        return "full" if all_known else "partial"
 
     def __eq__(self, other: object) -> bool:
         """Compare rules with type-sensitive argument equality so ``True`` never equals ``1``."""

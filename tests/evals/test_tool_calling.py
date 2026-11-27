@@ -272,8 +272,9 @@ async def test_stateful_stubs_and_attachment_validation() -> None:
     assert "triage" not in json.loads(tags_res.calls[3].result_preview)["tags"]
 
     wf_err = [wf(action="get"), wf(action="save", run_id="wf_01"), wf(action="start"), tt(action="tag")]
-    wf_res = await _run("workflow_runs_check", wf_err, [wf(action="list", run_id=None)])
-    assert (wf_res.passed, wf_res.failure_counts) == (True, {"missing_required_param": 4})
+    wf_bad = [wf(action="list", run_id="wf-1"), tt(action="list", note="extra")]
+    wf_res = await _run("workflow_runs_check", [*wf_err, *wf_bad], [wf(action="list", run_id=None)])
+    assert (wf_res.passed, wf_res.failure_counts) == (True, {"missing_required_param": 4, "unexpected_param": 2})
 
     mem_res = await _run(
         "memory_lookup_and_save",

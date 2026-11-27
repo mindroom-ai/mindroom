@@ -151,16 +151,24 @@ def _candidate_rules(
     tool_name: str,
     *,
     agent_name: str | None = None,
+    fixed_arguments: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[ApprovalRuleConfig, ...], bool]:
-    """Return ordered rules that could match ``tool_name`` (and ``agent_name`` when given) and whether default is reachable."""
+    """Return ordered rules that could match ``tool_name`` (and ``agent_name`` / ``fixed_arguments``) and whether default is reachable."""
     applicable: list[ApprovalRuleConfig] = []
     for rule in config.tool_approval.rules:
         if not rule.matches_tool(tool_name):
             continue
         if agent_name is not None and not rule.matches_agent(agent_name):
             continue
+        if fixed_arguments is not None:
+            arg_match = rule.fixed_arguments_match(fixed_arguments)
+            if arg_match == "no":
+                continue
+            arguments_unconditional = arg_match == "full"
+        else:
+            arguments_unconditional = rule.arguments is None
         applicable.append(rule)
-        if rule.arguments is None and (agent_name is not None or rule.agents is None):
+        if arguments_unconditional and (agent_name is not None or rule.agents is None):
             return tuple(applicable), False
     return tuple(applicable), True
 
@@ -219,9 +227,15 @@ def _rules_may_ask(
     tool_name: str,
     *,
     agent_name: str | None = None,
+    fixed_arguments: Mapping[str, Any] | None = None,
 ) -> tuple[bool, float]:
     """Return whether the rules matching ``tool_name`` may ask about a call of it, and how long its card stays open."""
-    applicable, reaches_default = _candidate_rules(config, tool_name, agent_name=agent_name)
+    applicable, reaches_default = _candidate_rules(
+        config,
+        tool_name,
+        agent_name=agent_name,
+        fixed_arguments=fixed_arguments,
+    )
     default_timeout = config.tool_approval.timeout_days
     if config.approved_egress_enabled and _APPROVED_EGRESS_RULE.matches_tool(tool_name):
         asking_timeouts = [
@@ -245,12 +259,13 @@ def tool_may_require_approval(
     alias: ApprovalAlias | None = None,
     *,
     agent_name: str | None = None,
+    fixed_arguments: Mapping[str, Any] | None = None,
 ) -> bool:
     """Return whether one tool must use the persisted confirmation boundary.
 
     A function with an approval ``alias`` must also when the function it is judged as must.
     """
-    return _rules_may_ask(config, tool_name, agent_name=agent_name)[0] or (
+    return _rules_may_ask(config, tool_name, agent_name=agent_name, fixed_arguments=fixed_arguments)[0] or (
         alias is not None and _rules_may_ask(config, alias.judged_as, agent_name=agent_name)[0]
     )
 

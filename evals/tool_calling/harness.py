@@ -23,6 +23,8 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths, workspace_home_identity_env
+from mindroom.custom_tools.thread_tags import validate_thread_tags_params
+from mindroom.custom_tools.workflow import validate_workflow_params
 from mindroom.entity_resolution import persist_offline_entity_accounts
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
@@ -59,9 +61,11 @@ _SHELL_FLAGS = frozenset({"-c", "-lc", "-ec", "-e"})
 _PORTABLE_PROJ = RequestProjection(lambda _inner, req: portable_tool_search_request(req))
 _DECODE_KEYS = ("decoding function arguments", "not a valid json object", "invalid json", "must be a json object")
 _INVALID_KEYS = ("invalid value for parameter", "type=literal_error", "validation error", "must be a positive")
+_REQ_KEYS = ("missing a required", "type=missing_argument", "missing required parameter", "is required for action=")
+_UNEXP_KEYS = ("unexpected keyword argument", "type=unexpected_keyword_argument", "cannot be used with action=")
 _FAIL_RULES = (
-    ("missing_required_param", ("missing a required argument", "type=missing_argument", "missing required parameter")),
-    ("unexpected_param", ("unexpected keyword argument", "type=unexpected_keyword_argument")),
+    ("missing_required_param", _REQ_KEYS),
+    ("unexpected_param", _UNEXP_KEYS),
     ("invalid_param_value", (*_INVALID_KEYS, *_DECODE_KEYS)),
 )
 _EVAL_TOOLS: list[Any] = [
@@ -138,17 +142,15 @@ def _check_attachment(action: str, kw: Mapping[str, Any], ws: Path) -> None:
 
 
 def _check_workflow_or_tags(name: str, action: str, kw: Mapping[str, Any]) -> None:
+    args = {k: v for k, v in kw.items() if k != "action"}
     if name == "thread_tags":
-        if action in {"tag", "untag"}:
-            _need(_str(kw.get("tag")), f"Missing required parameter 'tag' for action={action!r}.")
+        _need(not (err := validate_thread_tags_params(action, args)), err or "")
         return
-    if action in {"get", "cancel", "resume", "save"}:
-        _need(_str(kw.get("run_id")), f"Missing required parameter 'run_id' for action={action!r}.")
-    if action == "save":
-        _need(_str(kw.get("name")), "Missing required parameter 'name' for action='save'.")
-    elif action == "start":
-        has_src = any(_str(kw.get(k)) for k in ("source", "path", "name"))
-        _need(has_src, "Missing required parameter: give 'source', 'path', or 'name' for action='start'.")
+    validate_workflow_params(action, args)
+    if action == "start":
+        sources = sum(_str(args.get(k)) for k in ("source", "path", "name"))
+        _need(sources >= 1, "Missing required parameter: give one of source, path, or name.")
+        _need(sources == 1, "Invalid value for parameter: give only one of source, path, or name.")
 
 
 def _check_semantics(name: str, action: str, kw: Mapping[str, Any], ws: Path) -> None:
