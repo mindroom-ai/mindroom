@@ -24,7 +24,7 @@ from mindroom.personal_agents import (
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.tools.native_helpers import require_enabled_action, restrict_actions
+from mindroom.tools.native_helpers import require_enabled_action, restrict_actions, validate_action_params
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,15 +44,6 @@ _WRITE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "set_avatar": ("attachment_id",),
     "delete": (),
 }
-
-
-def _validate_write_params(action: str, params: dict[str, object]) -> str | None:
-    allowed = frozenset(_WRITE_ACTION_FIELDS[action].split())
-    if unexpected := [field for field, value in params.items() if value is not None and field not in allowed]:
-        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
-    if missing := [field for field in _WRITE_REQUIRED_FIELDS[action] if params[field] is None]:
-        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
-    return None
 
 
 class AgentManagerTools(Toolkit):
@@ -137,8 +128,14 @@ class AgentManagerTools(Toolkit):
             "changes": changes,
             "attachment_id": attachment_id,
         }
-        if (error := _validate_write_params(action, params)) is not None:
-            return error
+        if error := validate_action_params(
+            None,
+            action,
+            _WRITE_ACTION_FIELDS,
+            params,
+            required_by_action=_WRITE_REQUIRED_FIELDS,
+        ):
+            return f"Error: {error}"
         return await self._dispatch_write(
             action,
             name=name,

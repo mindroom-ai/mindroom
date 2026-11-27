@@ -13,6 +13,7 @@ from mindroom.knowledge_graph.scope import graph_scope
 from mindroom.knowledge_graph.store import knowledge_graph_store
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -53,17 +54,6 @@ def _render_fact(fact: GraphFact, *, with_id: bool = False) -> str:
         sources = f"{sources}; and {earlier} earlier"
     fact_id = f"\n  id: {fact.uuid}" if with_id else ""
     return f"- {fact.fact}{fact_id}\n  {validity}\n  sources: {sources}"
-
-
-def _validate_write_params(action: str, params: dict[str, str | None]) -> str | None:
-    required = _WRITE_ACTIONS.get(action)
-    if required is None:
-        return f"Error: Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
-    if unexpected := [field for field, value in params.items() if value is not None and field not in required]:
-        return f"Error: Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
-    if missing := [field for field in required if params[field] is None]:
-        return f"Error: Parameter(s) {', '.join(missing)} required for action {action!r}."
-    return None
 
 
 @dataclass(frozen=True)
@@ -211,8 +201,8 @@ class KnowledgeGraphTools(Toolkit):
             "into_id": into_id,
             "summary": summary,
         }
-        if (error := _validate_write_params(action, params)) is not None:
-            return error
+        if error := validate_action_params(None, action, _WRITE_ACTIONS, params, required_by_action=_WRITE_ACTIONS):
+            return f"Error: {error}"
         if action == "merge" and duplicate_id == into_id:
             return "An entity cannot be merged into itself."
         return await self._in_graph(

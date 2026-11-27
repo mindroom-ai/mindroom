@@ -25,6 +25,7 @@ from mindroom.shared_directories.store import (
 )
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -32,13 +33,13 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
 
-_WRITE_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "create": ((), ("agent_name", "owner")),
-    "invite": (("agent_name",), ("owner",)),
-    "accept": (("owner",), ("agent_name",)),
-    "decline": (("owner",), ("agent_name",)),
-    "remove": (("agent_name",), ("owner",)),
-    "delete": ((), ("agent_name", "owner")),
+_WRITE_ACTIONS: dict[str, tuple[str, ...]] = {
+    "create": (),
+    "invite": ("agent_name",),
+    "accept": ("owner",),
+    "decline": ("owner",),
+    "remove": ("agent_name",),
+    "delete": (),
 }
 
 
@@ -120,22 +121,6 @@ def _answer_error(context: ToolRuntimeContext, agent: str, action: str) -> str |
             f"The user you act for has no access to {agent} outside the current room, so it cannot be {action}; "
             "access through access.current_room_members does not count."
         )
-    return None
-
-
-def _validate_write_params(action: str, name: str, agent_name: str | None, owner: str | None) -> str | None:
-    spec = _WRITE_ACTIONS.get(action)
-    if spec is None:
-        msg = f"Unsupported action {action!r}. Expected one of: {', '.join(_WRITE_ACTIONS)}."
-        return _payload("error", action=action, name=name, message=msg)
-    required, forbidden = spec
-    params = {"agent_name": agent_name, "owner": owner}
-    if unexpected := [field for field in forbidden if params[field] is not None]:
-        msg = f"Parameter(s) {', '.join(unexpected)} cannot be used with action {action!r}."
-        return _payload("error", action=action, name=name, message=msg)
-    if missing := [field for field in required if not (value := params[field]) or not value.strip()]:
-        msg = f"Parameter(s) {', '.join(missing)} required for action {action!r}."
-        return _payload("error", action=action, name=name, message=msg)
     return None
 
 
@@ -335,8 +320,15 @@ class SharedDirectoryTools(Toolkit):
             owner: Owning agent name (required for `accept` and `decline`).
 
         """
-        if (error := _validate_write_params(action, name, agent_name, owner)) is not None:
-            return error
+        if error := validate_action_params(
+            None,
+            action,
+            _WRITE_ACTIONS,
+            {"agent_name": agent_name, "owner": owner},
+            required_by_action=_WRITE_ACTIONS,
+            reject_blank_required=True,
+        ):
+            return _payload("error", action=action, name=name, message=error)
         resolved = self._context()
         if isinstance(resolved, str):
             return resolved
