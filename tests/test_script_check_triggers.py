@@ -4,15 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from agno.tools import Toolkit
+from agno.tools.function import Function
+from fastapi import FastAPI
+from httpx import ASGITransport
 
+import mindroom.tools  # noqa: F401
+from mindroom.api.script_gateway import bind_script_tool_broker
+from mindroom.api.script_gateway import router as script_gateway_router
+from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
+from mindroom.hooks import HookBindings, HookRegistry
+from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers import (
     GitHubPRCheckpoint,
     GitHubPRSourceSpec,
@@ -39,9 +54,21 @@ from mindroom.reactive_triggers.script_check import (
     validate_script_check_source,
     validate_script_check_state,
 )
+from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, ScriptToolCallRequest
+from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManager, ScriptRunManagerError
+from mindroom.script_runs.models import ScriptCallState, ScriptRunRecord, ScriptToolGrant
+from mindroom.script_runs.policy import resolve_current_script_tool
+from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.script_runs.worker_client import ScriptWorkerClient
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
+from tests.scripted_agent_helpers import registered_toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _OWNER = "@alice:example.org"
 _OTHER_OWNER = "@bob:example.org"
@@ -462,3 +489,424 @@ async def test_script_check_poller_outcomes_concurrency_and_inflight(tmp_path: P
     assert (cp_def.state, cp_def.consecutive_errors, cp_def.next_poll_at) == ({"k": "t_def"}, 0, 1030.0)
     cp_un = _require_cp(store, "t_unauth")
     assert (cp_un.state, cp_un.consecutive_errors, cp_un.next_poll_at) == ({"k": "t_unauth"}, 0, 1120.0)
+
+
+class _CheckProbeToolkit(Toolkit):
+    """Test toolkit with one read function and one ToolGate.CONFIRM function."""
+
+    def __init__(self) -> None:
+        super().__init__(name="check_probe")
+        self.register(Function(name="read_item", entrypoint=self.read_item))
+        self.register(Function(name="confirm_action", entrypoint=self.confirm_action, requires_confirmation=True))
+
+    def read_item(self) -> str:
+        return "ok-value"
+
+    def confirm_action(self) -> str:
+        return "confirmed"
+
+
+def _script_context(
+    tmp_path: Path,
+    *,
+    tools: list[str],
+    policy: dict[str, Any] | None = None,
+    tool_approval: dict[str, Any] | None = None,
+    allow_local: bool = False,
+) -> ToolRuntimeContext:
+    env = {"MATRIX_HOMESERVER": "https://example.org", "MATRIX_SERVER_NAME": "example.org"}
+    if allow_local:
+        env["MINDROOM_SANDBOX_EXECUTION_MODE"] = "local"
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env=env,
+    )
+    raw: dict[str, Any] = {
+        "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+        "router": {"model": "default"},
+        "defaults": {"tools": [], "allow_shell_without_worker": allow_local},
+        "agents": {"coder": {"display_name": "Coder", "include_default_tools": False, "tools": tools}},
+    }
+    if policy is not None:
+        raw["external_trigger_policy"] = policy
+    if tool_approval is not None:
+        raw["tool_approval"] = tool_approval
+    cfg = bind_runtime_paths(Config.model_validate(raw), paths)
+    return make_test_tool_runtime_context(
+        agent_name="coder",
+        target=MessageTarget.resolve(
+            room_id=_ROOM,
+            thread_id="$thread:example.org",
+            reply_to_event_id="$e:example.org",
+        ),
+        requester_id=_OWNER,
+        client=SimpleNamespace(),
+        config=cfg,
+        runtime_paths=runtime_paths_for(cfg),
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        hooks=HookBindings(registry=HookRegistry.empty()),
+    )
+
+
+class _SimpleResolver:
+    def __init__(self, context: ToolRuntimeContext) -> None:
+        self.context = context
+        self.approval_requests = 0
+        self.settled_runs: list[str] = []
+
+    def is_authorized(self, _run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
+        del config
+        return True
+
+    def resolve(self, _run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+        return replace(self.context, correlation_id=correlation_id)
+
+    def resolve_worker_authority(
+        self,
+        _run: ScriptRunRecord,
+        *,
+        context: ToolRuntimeContext,
+    ) -> ScriptRuntimeWorkerAuthority:
+        return ScriptRuntimeWorkerAuthority(
+            worker_id=None,
+            local_unsafe=True,
+            worker_target=context.resolve_worker_target(),
+        )
+
+    async def request_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        context: ToolRuntimeContext,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> ToolApprovalDecision:
+        del origin, context, grant, arguments, timeout_seconds
+        self.approval_requests += 1
+        return ToolApprovalDecision(approved=True)
+
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        del origin, reason
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del reason
+        self.settled_runs.append(run_id)
+
+
+def _create_script_run(
+    store: ScriptRunStore,
+    ctx: ToolRuntimeContext,
+    run_id: str,
+    *,
+    workflow_run_id: str | None = None,
+    script_check_rule_uid: str | None = None,
+) -> tuple[ScriptRunRecord, str]:
+    token, token_hash = mint_script_capability()
+    run = ScriptRunRecord(
+        run_id=run_id,
+        agent_name=ctx.agent_name,
+        owner_user_id=ctx.requester_id,
+        room_id=ctx.room_id,
+        thread_root_event_id=ctx.resolved_thread_id,
+        execution_identity=serialize_tool_execution_identity(ctx.execution_identity),
+        source_digest=_SAMPLE_DIGEST,
+        grants=(),
+        token_hash=token_hash,
+        workflow_run_id=workflow_run_id,
+        script_check_rule_uid=script_check_rule_uid,
+        local_unsafe=True,
+    )
+    return store.create_run(run), token
+
+
+def test_script_runs_store_migrates_script_check_rule_uid(tmp_path: Path) -> None:
+    """ScriptRunStore adds script_check_rule_uid to legacy DBs and enforces model discriminator invariants."""
+    paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(paths)
+    ctx = _script_context(tmp_path, tools=["calculator"])
+    plain, _ = _create_script_run(store, ctx, f"script-{'1' * 32}")
+
+    # Simulate legacy table without script_check_rule_uid
+    with closing(sqlite3.connect(store.database_path)) as conn:
+        conn.execute("ALTER TABLE script_runs DROP COLUMN script_check_rule_uid")
+        conn.commit()
+
+    migrated = ScriptRunStore(paths)
+    loaded_plain = migrated.get_run(plain.run_id)
+    assert loaded_plain.script_check_rule_uid is None
+    assert (loaded_plain.is_plain_script, loaded_plain.is_script_check) == (True, False)
+
+    sc_run, _ = _create_script_run(migrated, ctx, f"script-{'2' * 32}", script_check_rule_uid="rule-uid-1")
+    loaded_sc = migrated.get_run(sc_run.run_id)
+    assert (loaded_sc.script_check_rule_uid, loaded_sc.is_script_check, loaded_sc.is_plain_script, loaded_sc.entry) == (
+        "rule-uid-1",
+        True,
+        False,
+        "script",
+    )
+    assert loaded_sc.launch_allows(ScriptToolGrant("calculator", "add")) is True
+
+    with pytest.raises(ValueError, match="both workflow_run_id and script_check_rule_uid"):
+        ScriptRunRecord(
+            run_id=f"script-{'3' * 32}",
+            agent_name="coder",
+            owner_user_id=_OWNER,
+            room_id=_ROOM,
+            source_digest=_SAMPLE_DIGEST,
+            grants=(),
+            token_hash="0" * 64,
+            workflow_run_id="wf-1",
+            script_check_rule_uid="rule-1",
+        )
+
+
+def test_script_check_policy_restricts_toolkits_and_honors_allowlist(tmp_path: Path) -> None:
+    """script_check blocks restricted toolkits and enforces optional script_check_allowed_tools allowlist."""
+    ctx_open = _script_context(tmp_path / "open", tools=["calculator", "website", "triggers", "scheduler", "terminal"])
+    assert resolve_current_script_tool(ctx_open, ScriptToolGrant("calculator", "add"), script_check=True) is not None
+    assert resolve_current_script_tool(ctx_open, ScriptToolGrant("website", "read_url"), script_check=True) is not None
+    for blocked_tk, fn in (("triggers", "triggers"), ("scheduler", "schedule_task"), ("terminal", "run_command")):
+        assert resolve_current_script_tool(ctx_open, ScriptToolGrant(blocked_tk, fn), script_check=True) is None
+
+    # Allowlist narrows to allowed toolkits while restricted toolkits remain blocked even if listed.
+    ctx_limited = _script_context(
+        tmp_path / "limited",
+        tools=["calculator", "website", "triggers"],
+        policy={"script_check_allowed_tools": ["calculator", "triggers"]},
+    )
+    assert resolve_current_script_tool(ctx_limited, ScriptToolGrant("calculator", "add"), script_check=True) is not None
+    assert resolve_current_script_tool(ctx_limited, ScriptToolGrant("website", "read_url"), script_check=True) is None
+    assert resolve_current_script_tool(ctx_limited, ScriptToolGrant("triggers", "triggers"), script_check=True) is None
+
+
+@pytest.mark.asyncio
+async def test_script_check_broker_fails_closed_on_confirm_and_policy_approval(tmp_path: Path) -> None:
+    """script_check ticks fail closed on ToolGate.CONFIRM and policy approval without posting cards or settling approvals."""
+    with registered_toolkit("check_probe", _CheckProbeToolkit):
+        ctx_default = _script_context(tmp_path / "d", tools=["check_probe"])
+        store = ScriptRunStore(ctx_default.runtime_paths)
+        resolver = _SimpleResolver(ctx_default)
+        broker = ScriptToolBroker(store=store, runtime_resolver=resolver)
+        broker.open_call_admission()
+
+        sc_run, token = _create_script_run(store, ctx_default, f"script-{'a' * 32}", script_check_rule_uid="rule-1")
+        auth = f"Bearer {token}"
+        with broker.check_tick(
+            sc_run.run_id,
+            source=_SAMPLE_SOURCE,
+            source_digest=_SAMPLE_DIGEST,
+            initial_state={},
+        ) as slot:
+            # Auto-approved read tool succeeds cleanly
+            ok_req = ScriptToolCallRequest(sc_run.run_id, "c1", ScriptToolGrant("check_probe", "read_item"), {})
+            await broker.accept_authenticated(ok_req, auth)
+            ok_rec = await broker._tasks[(sc_run.run_id, "c1")]
+            assert (ok_rec.state, ok_rec.result, slot.approval_denied) == (ScriptCallState.COMPLETED, "ok-value", False)
+
+            # ToolGate.CONFIRM fails closed immediately, records approval_denied on slot, 0 approval requests
+            cfm_req = ScriptToolCallRequest(sc_run.run_id, "c2", ScriptToolGrant("check_probe", "confirm_action"), {})
+            await broker.accept_authenticated(cfm_req, auth)
+            cfm_rec = await broker._tasks[(sc_run.run_id, "c2")]
+            assert cfm_rec.state is ScriptCallState.FAILED
+            assert isinstance(cfm_rec.error, dict)
+            assert cfm_rec.error["kind"] == "approval_denied"
+            assert slot.approval_denied is True
+            assert resolver.approval_requests == 0
+
+        # cancel_run skips settle_run_approvals for script_check runs, but still calls it for plain runs
+        await broker.cancel_run(sc_run.run_id)
+        assert resolver.settled_runs == []
+        plain_run, _ = _create_script_run(store, ctx_default, f"script-{'b' * 32}")
+        await broker.cancel_run(plain_run.run_id)
+        assert resolver.settled_runs == [plain_run.run_id]
+
+        # Policy require_approval also fails closed without requesting interactive approval
+        ctx_strict = _script_context(
+            tmp_path / "s",
+            tools=["check_probe"],
+            tool_approval={"default": "require_approval"},
+        )
+        store_s = ScriptRunStore(ctx_strict.runtime_paths)
+        resolver_s = _SimpleResolver(ctx_strict)
+        broker_s = ScriptToolBroker(store=store_s, runtime_resolver=resolver_s)
+        broker_s.open_call_admission()
+        sc_strict, token_s = _create_script_run(
+            store_s,
+            ctx_strict,
+            f"script-{'c' * 32}",
+            script_check_rule_uid="rule-2",
+        )
+        with broker_s.check_tick(
+            sc_strict.run_id,
+            source=_SAMPLE_SOURCE,
+            source_digest=_SAMPLE_DIGEST,
+            initial_state={},
+        ) as slot_s:
+            req = ScriptToolCallRequest(sc_strict.run_id, "c3", ScriptToolGrant("check_probe", "read_item"), {})
+            await broker_s.accept_authenticated(req, f"Bearer {token_s}")
+            rec = await broker_s._tasks[(sc_strict.run_id, "c3")]
+            assert rec.state is ScriptCallState.FAILED
+            assert isinstance(rec.error, dict)
+            assert rec.error["kind"] == "approval_denied"
+            assert slot_s.approval_denied is True
+            assert resolver_s.approval_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_script_gateway_check_routes_auth_conflict_and_bounds(tmp_path: Path) -> None:
+    """Gateway /check-input and /check-result enforce auth, slot presence, idempotency, 409 conflict, 422, 413, and 503."""
+    ctx = _script_context(tmp_path, tools=["calculator"])
+    store = ScriptRunStore(ctx.runtime_paths)
+    broker = ScriptToolBroker(store=store, runtime_resolver=_SimpleResolver(ctx))
+    broker.open_call_admission()
+
+    sc_run, sc_tok = _create_script_run(store, ctx, f"script-{'d' * 32}", script_check_rule_uid="rule-gw")
+    plain_run, plain_tok = _create_script_run(store, ctx, f"script-{'e' * 32}")
+    wf_run, wf_tok = _create_script_run(store, ctx, f"script-{'f' * 32}", workflow_run_id="wf-1")
+
+    app = FastAPI()
+    app.include_router(script_gateway_router)
+    bind_script_tool_broker(app, broker)
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Missing active slot -> 404
+        assert (
+            await client.get(
+                f"/api/script-gateway/runs/{sc_run.run_id}/check-input",
+                headers={"Authorization": f"Bearer {sc_tok}"},
+            )
+        ).status_code == 404
+
+        with broker.check_tick(
+            sc_run.run_id,
+            source=_SAMPLE_SOURCE,
+            source_digest=_SAMPLE_DIGEST,
+            initial_state={"k": 1},
+        ) as slot:
+            # Plain script and workflow tokens rejected -> 404
+            for rid, tok in ((plain_run.run_id, plain_tok), (wf_run.run_id, wf_tok)):
+                assert (
+                    await client.get(
+                        f"/api/script-gateway/runs/{rid}/check-input",
+                        headers={"Authorization": f"Bearer {tok}"},
+                    )
+                ).status_code == 404
+                assert (
+                    await client.post(
+                        f"/api/script-gateway/runs/{rid}/check-result",
+                        headers={"Authorization": f"Bearer {tok}"},
+                        json={},
+                    )
+                ).status_code == 404
+
+            # Valid check-input -> 200
+            inp = await client.get(
+                f"/api/script-gateway/runs/{sc_run.run_id}/check-input",
+                headers={"Authorization": f"Bearer {sc_tok}"},
+            )
+            assert inp.status_code == 200
+            assert inp.json() == {"source": _SAMPLE_SOURCE, "source_digest": _SAMPLE_DIGEST, "state": {"k": 1}}
+
+            # Invalid extra field & NaN -> 422; oversized > 128 KiB -> 413
+            hdr = {"Authorization": f"Bearer {sc_tok}"}
+            url = f"/api/script-gateway/runs/{sc_run.run_id}/check-result"
+            assert (await client.post(url, headers=hdr, json={"extra": 1})).status_code == 422
+            assert (
+                await client.post(url, headers={**hdr, "Content-Type": "application/json"}, content='{"result": NaN}')
+            ).status_code == 422
+            assert (
+                await client.post(
+                    url,
+                    headers={**hdr, "Content-Type": "application/json"},
+                    content=json.dumps({"result": "x" * (129 * 1024)}),
+                )
+            ).status_code == 413
+
+            # Valid submit -> 200, idempotent repeat -> 200, conflicting second submit -> 409
+            body = {"result": {"hits": 2}, "state": {"k": 2}, "state_changed": True, "error": None}
+            assert (await client.post(url, headers=hdr, json=body)).status_code == 200
+            assert slot.done.is_set()
+            assert (slot.result, slot.state, slot.state_changed, slot.error) == ({"hits": 2}, {"k": 2}, True, None)
+            assert (await client.post(url, headers=hdr, json=body)).status_code == 200
+            assert (await client.post(url, headers=hdr, json={**body, "result": {"hits": 9}})).status_code == 409
+
+        # Closed admission -> 503; unbound broker -> 503
+        broker.close_call_admission()
+        with broker.check_tick(sc_run.run_id, source=_SAMPLE_SOURCE, source_digest=_SAMPLE_DIGEST, initial_state={}):
+            assert (
+                await client.get(
+                    f"/api/script-gateway/runs/{sc_run.run_id}/check-input",
+                    headers={"Authorization": f"Bearer {sc_tok}"},
+                )
+            ).status_code == 503
+        bind_script_tool_broker(app, None)
+        assert (
+            await client.get(
+                f"/api/script-gateway/runs/{sc_run.run_id}/check-input",
+                headers={"Authorization": f"Bearer {sc_tok}"},
+            )
+        ).status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_script_run_manager_hides_script_check_runs_and_skips_plain_limits(tmp_path: Path) -> None:
+    """ScriptRunManager accepts run_id/script_check_rule_uid/max_runtime_seconds and hides ticks from plain script APIs."""
+    ctx = _script_context(tmp_path, tools=["calculator"], allow_local=True)
+    store = ScriptRunStore(ctx.runtime_paths)
+    broker = ScriptToolBroker(store=store, runtime_resolver=_SimpleResolver(ctx))
+    manager = ScriptRunManager(
+        store=store,
+        broker=broker,
+        worker_client=ScriptWorkerClient(),
+        worker_backend=None,
+        gateway_url="http://127.0.0.1:8765",
+    )
+
+    explicit_id = f"script-{'9' * 32}"
+    with (
+        patch("mindroom.script_runs.manager.background_script_supervision_supported", return_value=True),
+        patch("mindroom.script_runs.manager.ensure_shell_supervisor", return_value=tmp_path / "sup.sock"),
+        patch("mindroom.script_runs.manager.launch_supervised_script", new=AsyncMock(return_value=None)),
+    ):
+        with pytest.raises(ScriptRunManagerError, match="both workflow_run_id and script_check_rule_uid"):
+            await manager.run(ctx, source=_SAMPLE_SOURCE, workflow_run_id="wf-1", script_check_rule_uid="r-1")
+        with pytest.raises(ScriptRunManagerError, match="Script run ID"):
+            await manager.run(ctx, source=_SAMPLE_SOURCE, run_id="bad-id", script_check_rule_uid="r-1")
+
+        sc_run = await manager.run(
+            ctx,
+            source=_SAMPLE_SOURCE,
+            run_id=explicit_id,
+            script_check_rule_uid="rule-uid-9",
+            max_runtime_seconds=25,
+        )
+        assert (
+            sc_run.run_id,
+            sc_run.script_check_rule_uid,
+            sc_run.grants,
+            sc_run.recovery_signature,
+            sc_run.max_runtime_seconds,
+        ) == (
+            explicit_id,
+            "rule-uid-9",
+            (),
+            None,
+            25,
+        )
+        assert await manager.list(ctx) == []
+        with pytest.raises(ScriptRunManagerError, match="not found"):
+            await manager.status(ctx, run_id=explicit_id)
+        with pytest.raises(ScriptRunManagerError, match="not found"):
+            await manager.cancel(ctx, run_id=explicit_id)
+
+        # Plain script with max_concurrent_runs=1 still launches alongside active script_check run
+        plain = await manager.run(ctx, source=_SAMPLE_SOURCE, limits=ScriptRunLimits(max_concurrent_runs=1))
+        assert [r.run_id for r in await manager.list(ctx)] == [plain.run_id]
+
+        # workflow_placement refuses local execution when allow_shell_without_worker is disabled without a worker
+        ctx_no_local = _script_context(tmp_path / "nolocal", tools=["calculator"], allow_local=False)
+        with pytest.raises(ScriptRunManagerError, match=r"worker|sandbox|local|shell"):
+            await manager.run(ctx_no_local, source=_SAMPLE_SOURCE, script_check_rule_uid="rule-denied")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from threading import Event
@@ -32,6 +32,7 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
+    ScriptCallConflictError,
     ScriptCallNotFoundError,
     ScriptCapabilityError,
     ScriptReceiptTooLargeError,
@@ -72,7 +73,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workflow_runs.faults import hold
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ScriptBrokerAuthenticationError",
     "ScriptCallPreparationPendingError",
+    "ScriptCheckTickSlot",
     "ScriptRuntimeResolver",
     "ScriptRuntimeUnavailableError",
     "ScriptRuntimeWorkerAuthority",
@@ -218,6 +220,24 @@ class _InvalidToolResultError(ValueError):
     """Raised when a successful tool result is not strict JSON data."""
 
 
+@dataclass(slots=True)
+class ScriptCheckTickSlot:
+    """In-memory mailbox for one active scheduled script_check tick."""
+
+    source: str
+    source_digest: str
+    initial_state: dict[str, object]
+    done: asyncio.Event = field(default_factory=asyncio.Event)
+    submitted: bool = False
+    payload_digest: str | None = None
+    result: object = None
+    state: dict[str, object] | None = None
+    state_changed: bool = False
+    error: str | None = None
+    approval_denied: bool = False
+    approval_denied_reason: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ScriptToolCallRequest:
     """One token-free request for a stable logical tool call."""
@@ -259,6 +279,7 @@ class ScriptToolBroker:
         init=False,
     )
     _call_admission_open: Event = field(default_factory=Event, init=False)
+    _check_ticks: dict[str, ScriptCheckTickSlot] = field(default_factory=dict, init=False)
 
     def open_call_admission(self) -> None:
         """Allow new call claims only after lifecycle startup cleanup completes."""
@@ -431,10 +452,16 @@ class ScriptToolBroker:
                 state=ScriptCallState.INDETERMINATE,
                 error=_INDETERMINATE_ERROR,
             )
-        await self.runtime_resolver.settle_run_approvals(
-            run_id,
-            reason="Background script ownership was cancelled.",
-        )
+        is_script_check = False
+        try:
+            is_script_check = (await asyncio.to_thread(self.store.get_run, run_id)).is_script_check
+        except ScriptRunNotFoundError:
+            is_script_check = False
+        if not is_script_check:
+            await self.runtime_resolver.settle_run_approvals(
+                run_id,
+                reason="Background script ownership was cancelled.",
+            )
 
     async def accept_authenticated(
         self,
@@ -490,12 +517,79 @@ class ScriptToolBroker:
         run = await asyncio.to_thread(self._authenticate_plain, run_id, authorization)
         self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
-        if receipt.state is ScriptCallState.INDETERMINATE:
+        if receipt.state is ScriptCallState.INDETERMINATE and not run.is_script_check:
             await self.runtime_resolver.settle_approval(
                 _background_origin(run, receipt),
                 reason="Background script call ownership was orphaned after restart.",
             )
         return receipt
+
+    @contextmanager
+    def check_tick(
+        self,
+        run_id: str,
+        *,
+        source: str,
+        source_digest: str,
+        initial_state: dict[str, object],
+    ) -> Iterator[ScriptCheckTickSlot]:
+        """Register an active script_check tick mailbox before process launch."""
+        if run_id in self._check_ticks:
+            msg = f"Script check tick slot already registered for run '{run_id}'."
+            raise ValueError(msg)
+        slot = ScriptCheckTickSlot(source=source, source_digest=source_digest, initial_state=initial_state)
+        self._check_ticks[run_id] = slot
+        try:
+            yield slot
+        finally:
+            self._check_ticks.pop(run_id, None)
+
+    def _authenticate_script_check(self, run_id: str, authorization: str | None) -> ScriptCheckTickSlot:
+        run = self.authenticate(run_id, authorization)
+        if not run.is_script_check:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        self._require_call_admission()
+        slot = self._check_ticks.get(run_id)
+        if slot is None:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        return slot
+
+    async def get_authenticated_check_input(self, run_id: str, authorization: str | None) -> dict[str, object]:
+        """Authenticate a script_check tick and return its snapshotted source and initial state."""
+        slot = await asyncio.to_thread(self._authenticate_script_check, run_id, authorization)
+        if self._check_ticks.get(run_id) is not slot:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        return {"source": slot.source, "source_digest": slot.source_digest, "state": slot.initial_state}
+
+    async def submit_authenticated_check_result(
+        self,
+        run_id: str,
+        authorization: str | None,
+        *,
+        result: object,
+        state: dict[str, object],
+        state_changed: bool,
+        error: str | None,
+    ) -> None:
+        """Authenticate a script_check tick and record its final check result idempotently."""
+        slot = await asyncio.to_thread(self._authenticate_script_check, run_id, authorization)
+        if self._check_ticks.get(run_id) is not slot:
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        payload_digest = digest_arguments(
+            {"result": result, "state": state, "state_changed": state_changed, "error": error},
+        )
+        if slot.submitted:
+            if slot.payload_digest != payload_digest:
+                msg = f"Conflicting check-result submission for run '{run_id}'."
+                raise ScriptCallConflictError(msg)
+            return
+        slot.submitted = True
+        slot.payload_digest = payload_digest
+        slot.result = result
+        slot.state = state
+        slot.state_changed = state_changed
+        slot.error = error
+        slot.done.set()
 
     async def detach_runs(self, run_ids: set[str], *, timeout_seconds: float) -> None:
         """Drain primary-owned calls, retaining each worker process and its durable capability."""
@@ -624,6 +718,7 @@ class ScriptToolBroker:
         """Run the call through the tool-call policy; return what it came to."""
         context = prepared.context
         function = prepared.function
+        tick_slot = self._check_ticks.get(run.run_id) if run.is_script_check else None
         with tool_runtime_context(context):
             authored_decision = await _request_authored_confirmation(
                 runtime_resolver=self.runtime_resolver,
@@ -634,6 +729,7 @@ class ScriptToolBroker:
                 arguments=arguments,
                 approval_config=prepared.approval_config,
                 required=function.gate is ToolGate.CONFIRM,
+                tick_slot=tick_slot,
             )
             approval_gate = _build_background_approval_gate(
                 runtime_resolver=self.runtime_resolver,
@@ -643,6 +739,7 @@ class ScriptToolBroker:
                 approval_config=prepared.approval_config,
                 authored_decision=authored_decision,
                 execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
+                tick_slot=tick_slot,
             )
             policy = build_tool_hook_middleware(
                 context.hooks,
@@ -731,6 +828,7 @@ class ScriptToolBroker:
             context,
             call.grant,
             workflow=run.workflow_run_id is not None,
+            script_check=run.is_script_check,
             rejected_toolkit_cleanup=self._close_rejected_toolkit,
         )
         if resolved is None:
@@ -883,6 +981,13 @@ async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: 
     return decision
 
 
+def _deny_script_check_approval(tick_slot: ScriptCheckTickSlot | None, reason: str) -> ToolApprovalDecision:
+    if tick_slot is not None:
+        tick_slot.approval_denied = True
+        tick_slot.approval_denied_reason = reason
+    return ToolApprovalDecision(approved=False, reason=reason)
+
+
 def _build_background_approval_gate(
     *,
     runtime_resolver: ScriptRuntimeResolver,
@@ -892,6 +997,7 @@ def _build_background_approval_gate(
     approval_config: Config,
     authored_decision: ToolApprovalDecision | None,
     execution_gate: Callable[[], Awaitable[ToolApprovalDecision]],
+    tick_slot: ScriptCheckTickSlot | None = None,
 ) -> _BackgroundApprovalGate:
 
     async def approval_gate(
@@ -916,14 +1022,21 @@ def _build_background_approval_gate(
                 ),
             )
             if policy_requires_approval:
-                decision = await _request_approval(
-                    runtime_resolver,
-                    origin=origin,
-                    context=context,
-                    grant=call.grant,
-                    arguments=arguments,
-                    timeout_seconds=timeout_seconds,
-                )
+                if run.is_script_check:
+                    reason = (
+                        f"Tool '{call.grant.function_name}' requires approval, which is not allowed during "
+                        "non-interactive script_check ticks."
+                    )
+                    decision = _deny_script_check_approval(tick_slot, reason)
+                else:
+                    decision = await _request_approval(
+                        runtime_resolver,
+                        origin=origin,
+                        context=context,
+                        grant=call.grant,
+                        arguments=arguments,
+                        timeout_seconds=timeout_seconds,
+                    )
         if decision is not None and not decision.approved:
             return decision
         return await execution_gate()
@@ -941,10 +1054,17 @@ async def _request_authored_confirmation(
     arguments: dict[str, object],
     approval_config: Config,
     required: bool,
+    tick_slot: ScriptCheckTickSlot | None = None,
 ) -> ToolApprovalDecision | None:
     """Ask for a function-authored confirmation before the call's hooks and policy approval run."""
     if not required:
         return None
+    if run.is_script_check:
+        reason = (
+            f"Tool '{call.grant.function_name}' requires confirmation, which is not allowed during "
+            "non-interactive script_check ticks."
+        )
+        return _deny_script_check_approval(tick_slot, reason)
     # The function asks whatever the rules say; its own rules only say how long the card stays open.
     _, timeout_seconds = await evaluate_tool_approval(
         approval_config,
@@ -968,8 +1088,8 @@ def _background_approval_config(
     context: ToolRuntimeContext,
     run: ScriptRunRecord,
 ) -> Config:
-    if run.workflow_run_id is not None:
-        # A workflow's calls answer to the operator's own default and rules, as its owner's calls do.
+    if run.workflow_run_id is not None or run.is_script_check:
+        # Workflow and script_check calls answer to the operator's live default and rules.
         return context.current_config
     return build_automation_approval_config(
         context.current_config,

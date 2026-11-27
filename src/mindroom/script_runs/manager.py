@@ -35,6 +35,7 @@ from mindroom.script_runs.models import (
     ScriptToolGrant,
     script_worker_key_belongs_to_run,
     script_worker_key_for_run,
+    validated_script_run_id,
 )
 from mindroom.script_runs.policy import resolve_script_launch_grants, resolve_script_launch_toolkit_names
 from mindroom.script_runs.reasons import (
@@ -354,14 +355,23 @@ class ScriptRunManager:
         resource_profile: ScriptResourceProfileName | None = None,
         limits: ScriptRunLimits | None = None,
         workflow_run_id: str | None = None,
+        run_id: str | None = None,
+        script_check_rule_uid: str | None = None,
+        max_runtime_seconds: int | None = None,
     ) -> ScriptRunRecord:
         """Snapshot and launch one Python source under its resolved execution scope.
 
-        With *workflow_run_id* the run is one attempt of that workflow run: the shim hands the source to the workflow
-        SDK, and placement, the grant surface and the runtime limit follow the workflow rules.
+        With *workflow_run_id* or *script_check_rule_uid*, placement follows workflow_placement, launch grants stay
+        empty (live tools are checked per call), and the run is hidden from plain-script listings and limits.
         """
-        workflow = workflow_run_id is not None
-        effective_limits = limits or ScriptRunLimits()
+        resolved_run_id, resolved_max_runtime = _validate_run_options(
+            workflow_run_id=workflow_run_id,
+            script_check_rule_uid=script_check_rule_uid,
+            run_id=run_id,
+            max_runtime_seconds=max_runtime_seconds,
+            effective_limits=(effective_limits := limits or ScriptRunLimits()),
+        )
+        managed_run = workflow_run_id is not None or script_check_rule_uid is not None
         source_bytes = await self.resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
         execution_identity = context.execution_identity
@@ -373,9 +383,8 @@ class ScriptRunManager:
             runtime_paths=context.runtime_paths,
         )
         execution_mode = sandbox_proxy_config(context.runtime_paths).execution_mode
-        run_id = f"script-{uuid.uuid4().hex}"
         worker_spec: WorkerSpec | None
-        if self._launches_on_worker(context, workflow=workflow):
+        if self._launches_on_worker(context, workflow=managed_run):
             _require_supported_private_script_worker_scope(context)
             if not self.gateway_url:
                 msg = "Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL."
@@ -385,12 +394,12 @@ class ScriptRunManager:
                 msg = "Background script worker scope could not be resolved for this requester."
                 raise ScriptRunManagerError(msg)
             worker_spec = WorkerSpec(
-                worker_key=script_worker_key_for_run(worker_target.worker_key, run_id),
+                worker_key=script_worker_key_for_run(worker_target.worker_key, resolved_run_id),
                 private_agent_names=worker_target.private_agent_names,
                 mirror_grantable_credentials=False,
                 state_scope_worker_key=worker_target.worker_key,
             )
-        elif workflow or execution_mode in _LOCAL_EXECUTION_MODES:
+        elif managed_run or execution_mode in _LOCAL_EXECUTION_MODES:
             if resource_profile is not None:
                 msg = "Resource profiles require a worker backend that advertises enforceable profiles."
                 raise ScriptRunManagerError(msg)
@@ -402,11 +411,11 @@ class ScriptRunManager:
             msg = "Background scripts require a worker or an explicitly disabled sandbox."
             raise ScriptRunManagerError(msg)
 
-        # A workflow attempt keeps no list: each of its calls is resolved from its owner's tools when it is made.
-        launch_grants = () if workflow else await self._resolve_launch_grants(context, effective_limits)
+        # Workflow attempts and script_check ticks resolve live tools per call instead of capturing launch grants.
+        launch_grants = () if managed_run else await self._resolve_launch_grants(context, effective_limits)
         token, token_hash = mint_script_capability()
         run = ScriptRunRecord(
-            run_id=run_id,
+            run_id=resolved_run_id,
             agent_name=context.agent_name,
             owner_user_id=context.requester_id,
             room_id=context.room_id,
@@ -415,16 +424,15 @@ class ScriptRunManager:
             source_digest=source_digest,
             grants=launch_grants,
             token_hash=token_hash,
-            preapprove_launch_grants=effective_limits.allowed_tools is not None,
+            preapprove_launch_grants=(not managed_run) and effective_limits.allowed_tools is not None,
             worker_key=None if worker_spec is None else worker_spec.worker_key,
             worker_backend_locator=None,
             workflow_run_id=workflow_run_id,
+            script_check_rule_uid=script_check_rule_uid,
             name=_validated_name(name),
             local_unsafe=worker_spec is None,
             max_tool_calls_per_minute=effective_limits.max_tool_calls_per_minute,
-            max_runtime_seconds=(
-                _WORKFLOW_ATTEMPT_SECONDS if workflow else max(1, round(effective_limits.max_runtime_hours * 60 * 60))
-            ),
+            max_runtime_seconds=resolved_max_runtime,
         )
         await self._admit_launch()
         try:
@@ -471,7 +479,7 @@ class ScriptRunManager:
                 worker_backend_locator=backend.cleanup_locator,
                 # A workflow attempt stores none: a new primary retires its process and the engine starts the next.
                 recovery_signature=None
-                if run.workflow_run_id is not None
+                if not run.is_plain_script
                 else script_recovery_signature(
                     backend=self.worker_backend,
                     # The config the worker launches with, so recovery binds to the authority it actually got.
@@ -509,8 +517,8 @@ class ScriptRunManager:
                     )
                     # The limit is the plain scripts': the workflow store limits its owner's top-level runs, and
                     # the attempt of a run inside another takes no slot.
-                    plain = sum(active_run.workflow_run_id is None for active_run in active)
-                    if run.workflow_run_id is None and plain >= max_concurrent_runs:
+                    plain = sum(active_run.is_plain_script for active_run in active)
+                    if run.is_plain_script and plain >= max_concurrent_runs:
                         _raise_concurrent_run_limit()
                     await run_blocking_until_complete(self.store.create_run, run)
                 created = await asyncio.to_thread(self.store.get_run, run.run_id)
@@ -680,7 +688,7 @@ class ScriptRunManager:
             owner_user_id=context.requester_id,
             include_finished=include_finished,
         )
-        return [run for run in runs if run.workflow_run_id is None]
+        return [run for run in runs if run.is_plain_script]
 
     async def reconcile_durable(
         self,
@@ -864,7 +872,7 @@ class ScriptRunManager:
             raise ScriptRunManagerError(not_found) from None
         mine = run.agent_name == context.agent_name and run.owner_user_id == context.requester_id
         # A workflow's attempt is no script of its owner's: only its run starts and stops it.
-        if not mine or run.workflow_run_id is not None:
+        if not mine or not run.is_plain_script:
             raise ScriptRunManagerError(not_found)
         return run
 
@@ -1265,6 +1273,39 @@ def _validate_cancel_receipt(receipt: WorkerScriptCancel) -> None:
 def _runtime_expired(run: ScriptRunRecord, *, now: datetime) -> bool:
     started = datetime.fromisoformat(run.started_at or run.created_at)
     return (now - started).total_seconds() >= run.max_runtime_seconds
+
+
+def _validate_run_options(
+    *,
+    workflow_run_id: str | None,
+    script_check_rule_uid: str | None,
+    run_id: str | None,
+    max_runtime_seconds: int | None,
+    effective_limits: ScriptRunLimits,
+) -> tuple[str, int]:
+    if workflow_run_id is not None and script_check_rule_uid is not None:
+        msg = "Cannot specify both workflow_run_id and script_check_rule_uid."
+        raise ScriptRunManagerError(msg)
+    if max_runtime_seconds is not None and max_runtime_seconds <= 0:
+        msg = "max_runtime_seconds must be positive."
+        raise ScriptRunManagerError(msg)
+    if run_id is not None:
+        try:
+            resolved_run_id = validated_script_run_id(run_id)
+        except ValueError as exc:
+            raise ScriptRunManagerError(str(exc)) from exc
+    else:
+        resolved_run_id = f"script-{uuid.uuid4().hex}"
+    resolved_max_runtime = (
+        max_runtime_seconds
+        if max_runtime_seconds is not None
+        else (
+            _WORKFLOW_ATTEMPT_SECONDS
+            if workflow_run_id is not None
+            else max(1, round(effective_limits.max_runtime_hours * 60 * 60))
+        )
+    )
+    return resolved_run_id, resolved_max_runtime
 
 
 def _validated_name(name: str | None) -> str | None:
