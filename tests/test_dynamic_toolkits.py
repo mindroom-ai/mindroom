@@ -35,7 +35,7 @@ from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
-from mindroom.tool_system.invocation import parse_tool_arguments
+from mindroom.tool_system.invocation import ToolCallContext, parse_tool_arguments, run_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -2076,6 +2076,92 @@ def test_tool_search_fresh_toolkit_instance_has_no_cross_turn_dedup() -> None:
     assert [match["name"] for match in payload["matches"]] == ["crm_lookup", "crm_notes"]
     assert all("parameters" in match and "already_returned" not in match for match in payload["matches"])
     assert payload["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+
+@pytest.mark.asyncio
+async def test_tool_search_dedup_is_scoped_per_run_id_on_reused_toolkit() -> None:
+    """A reused DynamicToolsToolkit deduplicates within one run_id without leaking state into a later run_id."""
+    toolkit = _search_toolkit(_deferred(_CrmTools(), "Customer records"))
+    search_fn = toolkit_offers(toolkit, "tool_search")
+
+    async def search(run_id: str, query: str) -> dict[str, Any]:
+        result = await run_tool_call(
+            search_fn,
+            {"query": query},
+            ToolCallContext(run_id=run_id, session_id="team-session", user_id="@alice:localhost"),
+            middleware=(),
+        )
+        assert result.succeeded
+        return _tool_payload(cast("str", result.value))
+
+    run_one_first = await search("run-1", "crm")
+    assert all("parameters" in match and "already_returned" not in match for match in run_one_first["matches"])
+    assert run_one_first["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+    run_one_repeat = await search("run-1", "customer lookup")
+    assert run_one_repeat["matches"] == [
+        {"name": "crm_lookup", "toolkit": "crm", "already_returned": True},
+        {"name": "crm_notes", "toolkit": "crm", "already_returned": True},
+    ]
+    assert "instructions" not in run_one_repeat
+
+    run_two = await search("run-2", "crm")
+    assert [match["name"] for match in run_two["matches"]] == ["crm_lookup", "crm_notes"]
+    assert all("parameters" in match and "already_returned" not in match for match in run_two["matches"])
+    assert run_two["instructions"] == {"crm": "Prefer exact customer IDs."}
+
+
+def test_tool_search_preserves_unsplit_camelcase_spelling_for_branded_toolkits() -> None:
+    """CamelCase terms match both compound toolkit names (Crawl4AI, GitHub) and split snake_case names."""
+
+    @tool(name="crawl_url", description="Fetch markdown from a webpage.")
+    def crawl_url(url: str) -> str:
+        return url
+
+    @tool(name="ai_summarize", description="Summarize text with AI.")
+    def ai_summarize(text: str) -> str:
+        return text
+
+    @tool(name="fetch_page", description="Extract page content using Crawl4AI.")
+    def fetch_page(url: str) -> str:
+        return url
+
+    @tool(name="git_status", description="Show working tree status.")
+    def git_status() -> str:
+        return "clean"
+
+    @tool(name="show_canvas", description="Render a canvas panel.")
+    def show_canvas() -> str:
+        return "ok"
+
+    @tool(name="canvas_only", description="Inspect a canvas.")
+    def canvas_only() -> str:
+        return "ok"
+
+    deferred = (
+        _deferred(Toolkit(name="crawl4ai", tools=[crawl_url]), "Web crawling"),
+        _deferred(Toolkit(name="ai_helper", tools=[ai_summarize]), "AI text helper"),
+        _deferred(Toolkit(name="scraper", tools=[fetch_page]), "Page extraction"),
+        _deferred(_GithubTools(), "GitHub"),
+        _deferred(Toolkit(name="git", tools=[git_status]), "Local git"),
+        _deferred(_JiraTools(), "Jira"),
+        _deferred(Toolkit(name="chat_ui", tools=[show_canvas, canvas_only]), "Chat panels"),
+    )
+
+    crawl_matches = _tool_payload(_search_toolkit(*deferred).tool_search("Crawl4AI"))["matches"]
+    assert crawl_matches[0]["name"] == "crawl_url"
+
+    lower_crawl_matches = _tool_payload(_search_toolkit(*deferred).tool_search("crawl4ai"))["matches"]
+    assert {"crawl_url", "fetch_page"} <= {match["name"] for match in lower_crawl_matches}
+
+    github_matches = _tool_payload(_search_toolkit(*deferred).tool_search("GitHub"))["matches"]
+    assert [match["toolkit"] for match in github_matches[:2]] == ["github", "github"]
+
+    github_issue_matches = _tool_payload(_search_toolkit(*deferred).tool_search("GitHub issue"))["matches"]
+    assert github_issue_matches[0]["toolkit"] == "github"
+
+    canvas_matches = _tool_payload(_search_toolkit(*deferred).tool_search("showCanvas"))["matches"]
+    assert canvas_matches[0]["name"] == "show_canvas"
 
 
 def test_call_tool_fallback_accepts_non_object_arguments() -> None:

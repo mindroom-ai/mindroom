@@ -7,12 +7,14 @@ import math
 import re
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.tool_search import arguments_object
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import tool_definition
 
 if TYPE_CHECKING:
@@ -21,9 +23,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
 
 
+_CHUNK_RE = re.compile(r"[A-Za-z0-9]+")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
 _CAMEL_UPPER_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
-_WORD_RE = re.compile(r"[a-z0-9]+")
 _STOP_WORDS = frozenset(
     {
         "a",
@@ -70,9 +72,9 @@ _CALL_TOOL_PARAMETERS = {
 }
 
 
-def _split_words(text: str) -> list[str]:
-    split = _CAMEL_UPPER_RE.sub(r"\1 \2", _CAMEL_BOUNDARY_RE.sub(r"\1 \2", text))
-    return _WORD_RE.findall(split.lower())
+def _camel_parts(chunk: str) -> list[str]:
+    split = _CAMEL_UPPER_RE.sub(r"\1 \2", _CAMEL_BOUNDARY_RE.sub(r"\1 \2", chunk))
+    return split.lower().split()
 
 
 def _stem(word: str) -> str:
@@ -85,26 +87,56 @@ def _stem(word: str) -> str:
     return word
 
 
+def _alias_terms(*candidates: str) -> set[str]:
+    terms: set[str] = set()
+    # A toolkit's other names find it too.
+    for candidate in candidates:
+        if (canonical := canonical_tool_name(candidate)) != candidate:
+            terms.update(_tokenize(canonical))
+    return terms
+
+
 def _tokenize(text: str) -> list[str]:
-    return [_stem(word) for word in _split_words(text) if word not in _STOP_WORDS]
+    tokens: list[str] = []
+    for chunk in _CHUNK_RE.findall(text):
+        parts = _camel_parts(chunk)
+        tokens.extend(_stem(part) for part in parts if part not in _STOP_WORDS)
+        if len(parts) > 1 and (whole := chunk.lower()) not in _STOP_WORDS:
+            tokens.append(_stem(whole))
+    return tokens
+
+
+def _chunk_query_groups(chunk: str, *, drop_stop_words: bool) -> list[frozenset[str]]:
+    parts = _camel_parts(chunk)
+    selected = [part for part in parts if part not in _STOP_WORDS] if drop_stop_words else parts
+    whole_raw = chunk.lower()
+    whole = _stem(whole_raw)
+    whole_terms = {whole, *_alias_terms(whole_raw, whole)} if len(parts) > 1 else set()
+    if not selected:
+        if len(parts) > 1 and whole_raw not in _STOP_WORDS:
+            return [frozenset(whole_terms)]
+        return []
+    groups: list[frozenset[str]] = []
+    for part in selected:
+        stemmed = _stem(part)
+        groups.append(frozenset({stemmed, *_alias_terms(part, stemmed), *whole_terms}))
+    return groups
 
 
 def _query_term_groups(query: str) -> list[frozenset[str]]:
-    raw_words = _split_words(query)
-    if not raw_words:
+    chunks = _CHUNK_RE.findall(query)
+    if not chunks:
         return []
-    words = [word for word in raw_words if word not in _STOP_WORDS] or raw_words
-    groups: list[frozenset[str]] = []
-    for word in words:
-        stemmed = _stem(word)
-        terms = {stemmed}
-        # A toolkit's other names find it too.
-        for candidate in (word, stemmed):
-            if (canonical := canonical_tool_name(candidate)) != candidate:
-                terms.update(_tokenize(canonical))
-        if (group := frozenset(terms)) not in groups:
-            groups.append(group)
-    return groups
+    raw_groups = [group for chunk in chunks for group in _chunk_query_groups(chunk, drop_stop_words=True)]
+    if not raw_groups:
+        raw_groups = [group for chunk in chunks for group in _chunk_query_groups(chunk, drop_stop_words=False)]
+    return list(dict.fromkeys(raw_groups))
+
+
+@dataclass(slots=True)
+class _RunSearchState:
+    returned_functions: set[str] = field(default_factory=set)
+    returned_instructions: dict[str, str] = field(default_factory=dict)
 
 
 class _IndexedFunction(NamedTuple):
@@ -135,16 +167,20 @@ class DynamicToolsToolkit(Toolkit):
 
     def __init__(self, *, deferred_toolkits: Callable[[], Sequence[DeferredToolkit]]) -> None:
         self._deferred_toolkits = deferred_toolkits
-        # Fresh instance per turn, so dedup state stays strictly within-turn.
-        self._returned_functions: set[str] = set()
-        self._returned_instructions: dict[str, str] = {}
+        # Keyed per run_id so reused toolkit builds (such as team member builds across delegations) stay isolated per run.
+        self._returned_by_run: dict[str | None, _RunSearchState] = {}
         super().__init__(name="dynamic_tools")
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("dynamic_tools", status, **kwargs)
 
+    def _run_state(self) -> _RunSearchState:
+        run_id = call.context.run_id if (call := current_tool_call()) is not None else None
+        return self._returned_by_run.setdefault(run_id, _RunSearchState())
+
     def _render_matches(self, matches: Sequence[_SearchMatch]) -> tuple[list[dict[str, Any]], dict[str, str], bool]:
+        state = self._run_state()
         rendered: list[dict[str, Any]] = []
         exact_domains: set[str] = set()
         fresh_domains: set[str] = set()
@@ -153,19 +189,19 @@ class DynamicToolsToolkit(Toolkit):
             definition = match.doc.definition
             name = definition["name"]
             domain = match.doc.deferred.deferral.domain_name
-            if not match.exact and name in self._returned_functions:
+            if not match.exact and name in state.returned_functions:
                 any_stubbed = True
                 rendered.append({"name": name, "toolkit": domain, "already_returned": True})
                 continue
             rendered.append({**definition, "toolkit": domain})
-            self._returned_functions.add(name)
+            state.returned_functions.add(name)
             (exact_domains if match.exact else fresh_domains).add(domain)
 
         instructions: dict[str, str] = {}
         for domain, text in _domain_instructions(match.doc.deferred for match in matches).items():
-            if domain in exact_domains or (domain in fresh_domains and self._returned_instructions.get(domain) != text):
+            if domain in exact_domains or (domain in fresh_domains and state.returned_instructions.get(domain) != text):
                 instructions[domain] = text
-                self._returned_instructions[domain] = text
+                state.returned_instructions[domain] = text
         return rendered, instructions, any_stubbed
 
     @tool(offer_background_after=False)
