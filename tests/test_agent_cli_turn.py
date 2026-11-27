@@ -2316,3 +2316,67 @@ async def test_shorthand_call_and_explicit_retry_with_same_call_id_execute_once(
         "ran:list",
     )
     assert calls == ["list"]
+
+
+@pytest.mark.asyncio
+async def test_shorthand_describe_and_nonblocking_call_do_not_wait_on_running_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block() -> str:
+        started.set()
+        await release.wait()
+        return "unblocked"
+
+    def ping() -> str:
+        return "pong"
+
+    catalog = await _catalog(tmp_path, [_toolkit("slow", block), _toolkit("fast", ping)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    loop = asyncio.get_running_loop()
+
+    class LocalClient:
+        def operation(self, payload: dict[str, object]) -> dict[str, object]:
+            coro = owner.operation(window="bash", operation=parse_operation(payload))
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=SETTLE_TIMEOUT_SECONDS)
+
+        def receipt(self, call_id: str) -> dict[str, object]:
+            pytest.fail(f"--timeout 0 must not poll receipt {call_id}")
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", LocalClient)
+    try:
+        async with owner._window("bash"):
+            slow_receipt = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="slow", function="block"),
+            )
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await started.wait()
+                described = await owner.operation(
+                    window="bash",
+                    operation=ToolDescribeOperation(operation="tools.describe", toolkit="fast"),
+                )
+                assert (described["toolkit"], described["function"]) == ("fast", "ping")
+                assert await asyncio.to_thread(cli_main, ["tools", "call", "fast", "--timeout", "0"]) == 3
+                queued = json.loads(capsys.readouterr().out)
+                assert (queued["toolkit"], queued["function"], queued["status"]) == ("fast", "ping", "queued")
+                assert not release.is_set()
+
+                release.set()
+                slow_done = await settled_receipt(owner, slow_receipt["call_id"])
+                fast_done = await settled_receipt(owner, queued["call_id"])
+    finally:
+        release.set()
+        await owner.close()
+
+    assert (slow_done["status"], slow_done["outcome"]) == ("completed", "unblocked")
+    assert (fast_done["status"], fast_done["outcome"]) == ("completed", "pong")

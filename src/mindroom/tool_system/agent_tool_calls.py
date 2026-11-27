@@ -266,6 +266,27 @@ class PreparedAgentToolCatalog:
             for item in self._deferred.values()
         ]
 
+    def _lookup_binding(self, key: ToolKey | str) -> PreparedAgentToolBinding:
+        if isinstance(key, str):
+            matches = [binding for known, binding in self._bindings.items() if known.toolkit == key]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                functions = sorted(binding.key.function for binding in matches)
+                msg = f"Toolkit {key!r} has multiple functions: {', '.join(functions)}; specify TOOLKIT.FUNCTION"
+            else:
+                msg = f"No toolkit {key!r}"
+            raise UnknownToolError(msg)
+        binding = self._bindings.get(key)
+        if binding is None:
+            functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)
+            if functions:
+                msg = f"Toolkit {key.toolkit!r} has no function {key.function!r}; its functions: {', '.join(functions)}"
+            else:
+                msg = f"No toolkit {key.toolkit!r}"
+            raise UnknownToolError(msg)
+        return binding
+
     async def bind(
         self,
         key: ToolKey | str,
@@ -273,7 +294,14 @@ class PreparedAgentToolCatalog:
         check_current: Callable[[], None] | None = None,
     ) -> PreparedAgentToolBinding:
         """Materialize one deferred toolkit once, under the owning turn's context."""
+        self._check_open()
+        if check_current is not None:
+            check_current()
         toolkit_name = key if isinstance(key, str) else key.toolkit
+        # Already-prepared toolkits do not need the execution lock; a deferred toolkit stays in ``_deferred`` across
+        # its materialization awaits and is deleted synchronously right after ``_prepare`` populates ``_bindings``.
+        if toolkit_name not in self._deferred:
+            return self._lookup_binding(key)
         async with self._lock:
             self._check_open()
             if check_current is not None:
@@ -287,28 +315,7 @@ class PreparedAgentToolCatalog:
                 # build gives as the registered tool they come from.
                 self._prepare(toolkit, toolkit.functions, deferred.name)
                 del self._deferred[toolkit_name]
-            if isinstance(key, str):
-                matches = [binding for known, binding in self._bindings.items() if known.toolkit == toolkit_name]
-                if len(matches) == 1:
-                    return matches[0]
-                if matches:
-                    functions = sorted(binding.key.function for binding in matches)
-                    msg = (
-                        f"Toolkit {toolkit_name!r} has multiple functions: {', '.join(functions)}; "
-                        "specify TOOLKIT.FUNCTION"
-                    )
-                else:
-                    msg = f"No toolkit {toolkit_name!r}"
-                raise UnknownToolError(msg)
-            binding = self._bindings.get(key)
-            if binding is None:
-                functions = sorted(known.function for known in self._bindings if known.toolkit == key.toolkit)
-                if functions:
-                    msg = f"Toolkit {key.toolkit!r} has no function {key.function!r}; its functions: {', '.join(functions)}"
-                else:
-                    msg = f"No toolkit {key.toolkit!r}"
-                raise UnknownToolError(msg)
-            return binding
+            return self._lookup_binding(key)
 
     def approved_binding(self, toolkit: str, function: str) -> PreparedAgentToolBinding:
         """Return the binding of ``function`` whose calls an approval naming ``toolkit`` approves.

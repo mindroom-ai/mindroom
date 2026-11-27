@@ -699,15 +699,14 @@ def _submit_tool_call(
 ) -> dict[str, object]:
     """Validate arguments, resolve single-function toolkits, submit ``tools.call``, and wait."""
     arguments = read_call_arguments(args)
+    call_id = str(args.call_id or uuid4())
+    # Explicit calls retain their call ID if authority setup fails; shorthand waits until describe succeeds.
+    if args.function is not None:
+        remember_call_id(call_id)
+    client = AgentCliClient()
     if args.function is None:
-        client = AgentCliClient()
         payload["toolkit"], payload["function"] = _resolve_single_function(client, args.toolkit)
-        call_id = str(args.call_id or uuid4())
         remember_call_id(call_id)
-    else:
-        call_id = str(args.call_id or uuid4())
-        remember_call_id(call_id)
-        client = AgentCliClient()
     payload.update(call_id=call_id, arguments=arguments)
     result = client.operation(payload)
     # The call is admitted; if polling fails, print its submission receipt so `calls wait` can resume.
