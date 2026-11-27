@@ -331,7 +331,7 @@ async def _declined(actor: ContactActor, record: ContactRecord, agent_name: str)
         agent_name,
         declined.origin_room_id,
         declined.origin_thread_id,
-        f"{declined.target.id} declined contact {declined.id}; remove it with remove_contact to ask again.",
+        f'{declined.target.id} declined contact {declined.id}; remove it with contacts_write(action="remove", ...) to ask again.',
     )
     await leave_contact_room(actor, declined, declined.room_id)
 

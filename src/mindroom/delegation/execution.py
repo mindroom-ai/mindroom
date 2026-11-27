@@ -1019,7 +1019,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return result
 
     # Approval and the before hook must settle before a child can start.
-    gated = tool_may_require_approval(config, tool_name)
+    gated = tool_may_require_approval(config, tool_name, agent_name=caller)
     card_approved = card is not None and card.approved
     if gated and retained is None and not card_approved and state.gates.get(requirement_key) is not False:
         # Saved gates live in session storage that worker code can write, so only an approval

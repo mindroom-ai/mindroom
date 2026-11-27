@@ -216,7 +216,8 @@ def test_leads_are_distinct_counted_newest_first_and_capped(tmp_path: Path) -> N
 def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> None:
     """The graph's own lookups and exploration's own calls are not leads."""
     config, paths = _config(), _paths(tmp_path)
-    _seed(config, paths, "!room:x:$a", [_tool("search_graph", query="atlas")], created_at=100)
+    _seed(config, paths, "!room:x:$a", [_tool("knowledge_graph_read", action="search", query="atlas")], created_at=100)
+    _seed(config, paths, "!room:x:$a2", [_tool("search_graph", query="atlas")], created_at=101)
     _seed(
         config,
         paths,

@@ -9,7 +9,6 @@ import json
 import threading
 from collections.abc import Buffer, Mapping, Sequence
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
@@ -147,21 +146,65 @@ def _load_script_module(
 _APPROVED_EGRESS_RULE = ApprovalRuleConfig(match="request_network_access", action="require_approval")
 
 
-def _matching_tool_approval_rule(config: Config, tool_name: str) -> ApprovalRuleConfig | None:
-    rule = next((rule for rule in config.tool_approval.rules if fnmatchcase(tool_name, rule.match)), None)
+def _candidate_rules(
+    config: Config,
+    tool_name: str,
+    *,
+    agent_name: str | None = None,
+) -> tuple[tuple[ApprovalRuleConfig, ...], bool]:
+    """Return ordered rules that could match ``tool_name`` (and ``agent_name`` when given) and whether default is reachable."""
+    applicable: list[ApprovalRuleConfig] = []
+    for rule in config.tool_approval.rules:
+        if not rule.matches_tool(tool_name):
+            continue
+        if agent_name is not None and not rule.matches_agent(agent_name):
+            continue
+        applicable.append(rule)
+        if rule.arguments is None and (agent_name is not None or rule.agents is None):
+            return tuple(applicable), False
+    return tuple(applicable), True
+
+
+def _matching_tool_approval_rule(
+    config: Config,
+    tool_name: str,
+    *,
+    agent_name: str | None = None,
+    arguments: Mapping[str, Any] | None = None,
+) -> ApprovalRuleConfig | None:
+    rule = next(
+        (
+            candidate
+            for candidate in config.tool_approval.rules
+            if candidate.matches_tool(tool_name)
+            and (candidate.agents is None or (agent_name is not None and candidate.matches_agent(agent_name)))
+            and (candidate.arguments is None or (arguments is not None and candidate.matches_arguments(arguments)))
+        ),
+        None,
+    )
     if (
         config.approved_egress_enabled
-        and fnmatchcase(tool_name, _APPROVED_EGRESS_RULE.match)
+        and _APPROVED_EGRESS_RULE.matches_tool(tool_name)
         and (rule is None or rule.action != "require_approval")
     ):
         return _APPROVED_EGRESS_RULE
     return rule
 
 
-def effective_tool_approval_policy(config: Config, tool_name: str) -> ApprovalRuleConfig | str:
-    """Return the winning approval rule for ``tool_name``, or the default action when no rule matches."""
-    rule = _matching_tool_approval_rule(config, tool_name)
-    return rule if rule is not None else config.tool_approval.default
+def effective_tool_approval_policy(
+    config: Config,
+    tool_name: str,
+    *,
+    agent_name: str | None = None,
+) -> tuple[tuple[str, ...], str | None, bool]:
+    """Return the canonical approval policy affecting ``tool_name`` (and ``agent_name`` when given)."""
+    applicable, reaches_default = _candidate_rules(config, tool_name, agent_name=agent_name)
+    canonical_rules = tuple(json.dumps(rule.model_dump(), sort_keys=True, separators=(",", ":")) for rule in applicable)
+    return (
+        canonical_rules,
+        config.tool_approval.default if reaches_default else None,
+        config.approved_egress_enabled and _APPROVED_EGRESS_RULE.matches_tool(tool_name),
+    )
 
 
 def _rule_outcome(config: Config, rule: ApprovalRuleConfig | None) -> tuple[bool, float]:
@@ -171,17 +214,45 @@ def _rule_outcome(config: Config, rule: ApprovalRuleConfig | None) -> tuple[bool
     return may_ask, timeout_days * 24 * 60 * 60
 
 
-def _rules_may_ask(config: Config, tool_name: str) -> tuple[bool, float]:
+def _rules_may_ask(
+    config: Config,
+    tool_name: str,
+    *,
+    agent_name: str | None = None,
+) -> tuple[bool, float]:
     """Return whether the rules matching ``tool_name`` may ask about a call of it, and how long its card stays open."""
-    return _rule_outcome(config, _matching_tool_approval_rule(config, tool_name))
+    applicable, reaches_default = _candidate_rules(config, tool_name, agent_name=agent_name)
+    default_timeout = config.tool_approval.timeout_days
+    if config.approved_egress_enabled and _APPROVED_EGRESS_RULE.matches_tool(tool_name):
+        asking_timeouts = [
+            (rule.timeout_days or default_timeout) if rule.action == "require_approval" else default_timeout
+            for rule in applicable
+        ]
+        if reaches_default:
+            asking_timeouts.append(default_timeout)
+    else:
+        asking_timeouts = [rule.timeout_days or default_timeout for rule in applicable if rule.action != "auto_approve"]
+        if reaches_default and config.tool_approval.default == "require_approval":
+            asking_timeouts.append(default_timeout)
+    if not asking_timeouts:
+        return False, default_timeout * 24 * 60 * 60
+    return True, min(asking_timeouts) * 24 * 60 * 60
 
 
-def tool_may_require_approval(config: Config, tool_name: str, alias: ApprovalAlias | None = None) -> bool:
+def tool_may_require_approval(
+    config: Config,
+    tool_name: str,
+    alias: ApprovalAlias | None = None,
+    *,
+    agent_name: str | None = None,
+) -> bool:
     """Return whether one tool must use the persisted confirmation boundary.
 
     A function with an approval ``alias`` must also when the function it is judged as must.
     """
-    return _rules_may_ask(config, tool_name)[0] or (alias is not None and _rules_may_ask(config, alias.judged_as)[0])
+    return _rules_may_ask(config, tool_name, agent_name=agent_name)[0] or (
+        alias is not None and _rules_may_ask(config, alias.judged_as, agent_name=agent_name)[0]
+    )
 
 
 def toolkit_approval_alias(
@@ -271,7 +342,7 @@ async def evaluate_tool_approval(
     requires_approval, timeout_seconds = await _evaluate_rules(config, runtime_paths, tool_name, arguments, agent_name)
     if requires_approval or alias is None:
         return requires_approval, timeout_seconds
-    judged_may_ask, judged_timeout_seconds = _rules_may_ask(config, alias.judged_as)
+    judged_may_ask, judged_timeout_seconds = _rules_may_ask(config, alias.judged_as, agent_name=agent_name)
     if not judged_may_ask:
         return False, timeout_seconds
     judged_calls = await _judged_calls(alias, tool_name, arguments)
@@ -323,7 +394,7 @@ async def _evaluate_rules(
     if tool_call_is_approval_exempt(tool_name, arguments, runtime_paths):
         return False, config.tool_approval.timeout_days * 24 * 60 * 60
 
-    rule = _matching_tool_approval_rule(config, tool_name)
+    rule = _matching_tool_approval_rule(config, tool_name, agent_name=agent_name, arguments=arguments)
     may_ask, timeout_seconds = _rule_outcome(config, rule)
     if rule is None or rule.script is None:
         return may_ask, timeout_seconds

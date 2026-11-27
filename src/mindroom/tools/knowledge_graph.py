@@ -31,6 +31,7 @@ register_builtin_tool_metadata(
         icon_color="text-teal-500",
         config_fields=[],
         dependencies=["graphiti-core"],
-        function_names=("graph_entity", "search_graph", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS),
+        function_names=("knowledge_graph_read", *KNOWLEDGE_GRAPH_EDIT_FUNCTIONS),
+        action_scoped_grants=("knowledge_graph_read", "knowledge_graph_write"),
     ),
 )

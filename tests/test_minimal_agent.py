@@ -742,8 +742,8 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
                 operation=ToolCallOperation(
                     operation="tools.call",
                     toolkit="thread_model",
-                    function="switch_thread_model",
-                    arguments={"model_name": "other", "when": "after-toolcall"},
+                    function="thread_model_write",
+                    arguments={"action": "switch", "model_name": "other", "when": "after-toolcall"},
                     call_id=switch_id,
                 ),
             )

@@ -1292,6 +1292,54 @@ def test_bind_and_unbind_external_trigger_runtime_with_reactive_callback(tmp_pat
         api_main.unbind_external_trigger_runtime(api_main.app)
 
 
+def test_bind_external_trigger_runtime_distinguishes_bool_from_int_in_approval_arguments(tmp_path: Path) -> None:
+    """bind_external_trigger_runtime clears binding when snapshot and runtime differ only by True vs 1 in arguments."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig  # noqa: PLC0415
+
+    _, config = _setup_event_source_api(tmp_path, event_sources={})
+    bool_cfg = config.model_copy(
+        update={
+            "tool_approval": ToolApprovalConfig(
+                rules=[
+                    ApprovalRuleConfig(
+                        match="run_shell_command",
+                        arguments={"dry_run": True},
+                        action="require_approval",
+                    ),
+                ],
+            ),
+        },
+    )
+    int_cfg = config.model_copy(
+        update={
+            "tool_approval": ToolApprovalConfig(
+                rules=[
+                    ApprovalRuleConfig(match="run_shell_command", arguments={"dry_run": 1}, action="require_approval"),
+                ],
+            ),
+        },
+    )
+    state = config_lifecycle.require_api_state(api_main.app)
+    state.snapshot = replace(state.snapshot, runtime_config=bool_cfg)
+    try:
+        api_main.bind_external_trigger_runtime(
+            api_main.app,
+            runtime_config=int_cfg,
+            target_bot=lambda _name: cast("AgentBot | None", None),
+        )
+        assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
+        api_main.bind_external_trigger_runtime(
+            api_main.app,
+            runtime_config=bool_cfg,
+            target_bot=lambda _name: cast("AgentBot | None", None),
+        )
+        assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is not None
+    finally:
+        api_main.unbind_external_trigger_runtime(api_main.app)
+
+
 def test_event_sources_endpoint_sqlite_error_returns_503(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

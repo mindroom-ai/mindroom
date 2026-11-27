@@ -1224,6 +1224,27 @@ def test_toolkit_scoped_dispatch_grant_operation_binds_to_owner_and_value(
         (None, "get_skill_instructions", "skill"),
         (None, "get_skill_reference", "skill"),
         (None, "get_skill_script", "skill"),
+        ("script", "start_script", "script_write"),
+        ("script", "cancel_script", "script_write"),
+        ("script", "get_script", "script_read"),
+        ("script", "list_scripts", "script_read"),
+        ("script", "get_script_resource_profiles", "script_read"),
+        ("terminal", "terminal_open", "terminal_write"),
+        ("terminal", "terminal_run", "terminal_write"),
+        ("terminal", "terminal_send", "terminal_write"),
+        ("terminal", "terminal_list", "terminal_read"),
+        ("claude_agent", "claude_session_status", "claude_agent_status"),
+        ("claude_agent", "claude_start_session", "claude_agent_write"),
+        ("claude_agent", "claude_send", "claude_agent_write"),
+        ("claude_agent", "claude_interrupt", "claude_agent_write"),
+        ("claude_agent", "claude_end_session", "claude_agent_write"),
+        ("thread_model", "list_models", "thread_model_read"),
+        ("thread_model", "get_thread_model", "thread_model_read"),
+        ("thread_model", "switch_thread_model", "thread_model_write"),
+        ("thread_model", "reset_thread_model", "thread_model_write"),
+        ("usage_stats", "get_my_usage", "usage_stats"),
+        ("usage_stats", "get_my_private_usage", "usage_stats"),
+        ("usage_stats", "get_all_usage", "usage_stats"),
     ],
 )
 def test_retired_consolidated_approval_rules_fail_closed(
@@ -3344,6 +3365,117 @@ def test_wildcard_approval_script_rule_fails_closed_for_retired_attachment_and_s
     assert [rule.match for rule in loaded.tool_approval.rules] == matches
 
 
+def test_wildcard_approval_script_with_shared_conditional_prefix_for_retired_skill_names(tmp_path: Path) -> None:
+    """A script-free shared prefix ahead of explicit `skill` loads, while a leading wildcard script still fails closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "review.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    base: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": [], "include_default_tools": False}},
+    }
+
+    allowed = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "agents": "trusted", "action": "require_approval"},
+                {"match": "skill", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(allowed, runtime_paths).tool_approval.rules) == 3
+
+    shared_argument_prefix = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "action": "require_approval"},
+                {"match": "skill", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(shared_argument_prefix, runtime_paths).tool_approval.rules) == 3
+
+    leading_argument_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "arguments": {"mindroom_output_path": "*"}, "script": "review.py"},
+                {"match": "skill", "action": "auto_approve"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(leading_argument_script, runtime_paths)
+
+    leading_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "*", "agents": "trusted", "script": "review.py"},
+                {"match": "skill", "action": "auto_approve"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(leading_script, runtime_paths)
+
+    grouped_script = {
+        **base,
+        "tool_approval": {
+            "rules": [{"match": ["skill", "get_*"], "script": "review.py"}],
+        },
+    }
+    assert len(Config.validate_with_runtime(grouped_script, runtime_paths).tool_approval.rules) == 1
+
+    agent_scoped_explicit_and_retired = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "script": "review.py"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert len(Config.validate_with_runtime(agent_scoped_explicit_and_retired, runtime_paths).tool_approval.rules) == 2
+
+    agent_scoped_explicit_action_and_retired_script = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "require_approval"},
+                {"match": "get_*", "agents": "research", "script": "review.py"},
+            ],
+        },
+    }
+    assert (
+        len(
+            Config.validate_with_runtime(
+                agent_scoped_explicit_action_and_retired_script,
+                runtime_paths,
+            ).tool_approval.rules,
+        )
+        == 2
+    )
+
+    agent_scoped_explicit_before_unconditional_wildcard = {
+        **base,
+        "tool_approval": {
+            "rules": [
+                {"match": "skill", "agents": "research", "action": "auto_approve"},
+                {"match": "*", "script": "review.py"},
+            ],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"review\.py.*skill"):
+        Config.validate_with_runtime(agent_scoped_explicit_before_unconditional_wildcard, runtime_paths)
+
+
 @pytest.mark.parametrize(
     ("tools", "matches", "error_pattern"),
     [
@@ -3478,6 +3610,429 @@ def test_attachments_exclude_view_file_override_loads_cleanly(tmp_path: Path) ->
         runtime_paths,
     )
     assert valid.agents["a"].tools[0].overrides == {"exclude_tools": ["view_file"]}
+
+
+def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:
+    """Consolidated runtime/session/thread CRUD tools enforce action-scoped grants, wildcard scripts, and filter migration."""
+    from mindroom.approval.tool_approval import scheduled_call_offers_any_arguments  # noqa: PLC0415
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    config = Config()
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    action_cases = (
+        ("script", "script_read", "list", "get"),
+        ("script", "script_write", "start", "cancel"),
+        ("terminal", "terminal_read", "list", "read"),
+        ("terminal", "terminal_write", "open", "run"),
+        ("claude_agent", "claude_agent_write", "start", "send"),
+        ("thread_model", "thread_model_read", "list", "get"),
+        ("thread_model", "thread_model_write", "switch", "reset"),
+        ("usage_stats", "usage_stats", "self", "all"),
+    )
+    for toolkit_name, tool_name, first_action, second_action in action_cases:
+        assert tool_name in registry.entries[toolkit_name].action_scoped_grants
+        op_a = grant_operation(config, tool_name, {"action": first_action}, tools=registry, toolkit_name=toolkit_name)
+        op_b = grant_operation(config, tool_name, {"action": second_action}, tools=registry, toolkit_name=toolkit_name)
+        assert op_a is not None
+        assert op_b is not None
+        assert op_a != op_b
+        assert (op_a.mcp_server_id, op_a.mcp_tool_name) == (toolkit_name, first_action)
+        assert grant_operation(config, tool_name, {}, tools=registry, toolkit_name=toolkit_name) is None
+        assert grant_operation(config, tool_name, {"action": "  "}, tools=registry, toolkit_name=toolkit_name) is None
+        assert not scheduled_call_offers_any_arguments(
+            config,
+            tool_name,
+            {"action": first_action},
+            requester_id="@alice:example.org",
+            approver_id="@alice:example.org",
+            authored_confirmation=False,
+            tools=registry,
+            toolkit_name=toolkit_name,
+        )
+
+    # Single-verb claude_agent_status has no action= param and is NOT action-scoped.
+    assert "claude_agent_status" not in registry.entries["claude_agent"].action_scoped_grants
+    status_op = grant_operation(config, "claude_agent_status", {}, tools=registry, toolkit_name="claude_agent")
+    assert status_op is not None
+    assert (status_op.tool_name, status_op.mcp_server_id, status_op.mcp_tool_name) == (
+        "claude_agent_status",
+        None,
+        None,
+    )
+    assert scheduled_call_offers_any_arguments(
+        config,
+        "claude_agent_status",
+        {},
+        requester_id="@alice:example.org",
+        approver_id="@alice:example.org",
+        authored_confirmation=False,
+        tools=registry,
+        toolkit_name="claude_agent",
+    )
+
+    # Wildcard approval scripts fail closed for all 5 toolkits until explicit rules precede `*`.
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+    wildcard_cases = (
+        ("script", ["script_read", "script_write"]),
+        ("terminal", ["terminal_read", "terminal_write"]),
+        ("claude_agent", ["claude_agent_status", "claude_agent_write"]),
+        ("thread_model", ["thread_model_read", "thread_model_write"]),
+        ("usage_stats", ["usage_stats"]),
+    )
+    for toolkit_name, explicit_matches in wildcard_cases:
+        stale = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            "agents": {"a": {"display_name": "A", "tools": [toolkit_name], "include_default_tools": False}},
+            "tool_approval": {
+                "rules": [
+                    {"match": "skill", "script": "check.py"},
+                    {"match": "*", "script": "check.py"},
+                ],
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py"):
+            Config.validate_with_runtime(stale, runtime_paths)
+        explicit = {
+            **stale,
+            "tool_approval": {
+                "rules": [
+                    {"match": "skill", "script": "check.py"},
+                    *[{"match": match, "script": "check.py"} for match in explicit_matches],
+                    {"match": "*", "script": "check.py"},
+                ],
+            },
+        }
+        loaded = Config.validate_with_runtime(explicit, runtime_paths)
+        assert [rule.match for rule in loaded.tool_approval.rules] == ["skill", *explicit_matches, "*"]
+
+    # Retired include_tools/exclude_tools filters fail closed on the 4 filterable toolkits.
+    retired_filter_cases = (
+        ("terminal", {"exclude_tools": ["terminal_open"]}, "terminal_write"),
+        ("terminal", {"include_tools": ["terminal_list"]}, "terminal_read"),
+        ("claude_agent", {"include_tools": ["claude_send"]}, "claude_agent_write"),
+        ("claude_agent", {"exclude_tools": ["claude_session_status"]}, "claude_agent_status"),
+        ("thread_model", {"exclude_tools": ["switch_thread_model"]}, "thread_model_write"),
+        ("usage_stats", {"exclude_tools": ["get_all_usage"]}, "usage_stats"),
+    )
+    for toolkit_name, overrides, replacement in retired_filter_cases:
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        expected_verb = "enables" if "include_tools" in overrides else "disables"
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match=rf"{toolkit_name}\.(in|ex)clude_tools:.*{replacement}.*{expected_verb} all of `{replacement}`'s actions",
+        ):
+            Config.validate_with_runtime(bad, runtime_paths)
+
+    # Kept name `terminal_read` in terminal include_tools still loads cleanly.
+    valid_terminal = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {
+                    "display_name": "A",
+                    "tools": [{"terminal": {"include_tools": ["terminal_read"]}}],
+                    "include_default_tools": False,
+                },
+            },
+        },
+        runtime_paths,
+    )
+    assert valid_terminal.agents["a"].tools[0].overrides == {"include_tools": ["terminal_read"]}
+
+
+def test_identity_access_graph_action_scoped_grants_and_fail_closed_migration(tmp_path: Path) -> None:
+    """Action-scoped grants separate actions; retired exact, glob, and wildcard script rules fail closed."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    registry = builtin_tool_registry()
+    config = Config()
+
+    for toolkit, fn, first_action, second_action in (
+        ("shared_directories", "shared_directories_write", "create", "delete"),
+        ("contacts", "contacts_write", "request", "remove"),
+        ("knowledge_graph", "knowledge_graph_read", "search", "entity"),
+        ("knowledge_graph", "knowledge_graph_write", "update_summary", "delete_fact"),
+        ("agent_manager", "agent_manager_write", "create", "delete"),
+        ("email_invite", "email_invite_write", "invite", "revoke"),
+    ):
+        op_a = grant_operation(config, fn, {"action": first_action}, tools=registry, toolkit_name=toolkit)
+        op_b = grant_operation(config, fn, {"action": second_action}, tools=registry, toolkit_name=toolkit)
+        assert op_a is not None
+        assert op_b is not None
+        assert op_a.mcp_server_id == toolkit
+        assert (op_a.mcp_tool_name, op_b.mcp_tool_name) == (first_action, second_action)
+        assert op_a.key != op_b.key
+        assert grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit) is None
+
+    # Kept zero-arg reads remain tool-wide grants (not action-scoped).
+    for toolkit, fn in (
+        ("shared_directories", "list_shared_directories"),
+        ("contacts", "list_contacts"),
+        ("agent_manager", "agent_settings"),
+        ("email_invite", "list_email_invites"),
+    ):
+        op = grant_operation(config, fn, {}, tools=registry, toolkit_name=toolkit)
+        assert op is not None
+        assert op.mcp_server_id is None
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    (tmp_path / "check.py").write_text("def check(tool_name, arguments, agent_name): return True\n", encoding="utf-8")
+
+    # Exact, glob, and wildcard script approval rules targeting retired names fail closed for all 5 toolkits.
+    cases: list[tuple[dict[str, object], str, str, list[str]]] = [
+        (
+            {"agents": {"a": {"display_name": "A", "tools": ["shared_directories"], "include_default_tools": False}}},
+            "delete_shared_directory",
+            "*_shared_directory",
+            ["shared_directories_write"],
+        ),
+        (
+            {
+                "agents": {
+                    "a": {"display_name": "A", "tools": ["email_invite"], "include_default_tools": False},
+                },
+            },
+            "invite_by_email",
+            "*_email*",
+            ["email_invite_write"],
+        ),
+        (
+            {
+                "knowledge_graph": {"model": "default"},
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "knowledge_graph": True,
+                        "knowledge_graph_edits": True,
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            "delete_graph_fact",
+            "delete_graph_*",
+            ["knowledge_graph_read", "knowledge_graph_write"],
+        ),
+        (
+            {
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "created_agents_per_owner": 1,
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            "create_agent",
+            "*_agent",
+            ["agent_manager_write"],
+        ),
+        (
+            {
+                "personal_agents": {
+                    "mind": {
+                        "agent": {
+                            "display_name": "{user_first_name}",
+                            "role": "Personal",
+                            "contacts": {},
+                            "include_default_tools": False,
+                        },
+                    },
+                },
+            },
+            "request_contact",
+            "*_contact",
+            ["agent_manager_write", "contacts_write"],
+        ),
+    ]
+    for extra, exact_old, glob_old, replacements in cases:
+        base: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "defaults": {"tools": []},
+            **extra,
+        }
+        expected_target = replacements[-1]
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": exact_old, "action": "require_approval"}]}},
+                runtime_paths,
+            )
+        with pytest.raises(ConfigRuntimeValidationError, match=expected_target):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": glob_old, "action": "require_approval"}]}},
+                runtime_paths,
+            )
+        with pytest.raises(ConfigRuntimeValidationError, match=r"check\.py"):
+            Config.validate_with_runtime(
+                {**base, "tool_approval": {"rules": [{"match": "*", "script": "check.py"}]}},
+                runtime_paths,
+            )
+        loaded = Config.validate_with_runtime(
+            {
+                **base,
+                "tool_approval": {
+                    "rules": [
+                        *[{"match": name, "script": "check.py"} for name in (*replacements, "skill")],
+                        {"match": "*", "script": "check.py"},
+                    ],
+                },
+            },
+            runtime_paths,
+        )
+        assert loaded.tool_approval.rules[-1].match == "*"
+
+
+@pytest.mark.parametrize(
+    ("template_extra", "defaults_extra", "retired_match", "replacement"),
+    [
+        # Template-only personal_agents enables agent_manager even before any generated agent exists.
+        ({}, {}, "update_agent", "agent_manager_write"),
+        ({}, {}, "set_avatar", "agent_manager_write"),
+        # Contacts enabled on template or in a per-user override.
+        ({"agent_extra": {"contacts": {}}}, {}, "request_contact", "contacts_write"),
+        ({"users": {"@alice:example.org": {"contacts": {}}}}, {}, "remove_contact", "contacts_write"),
+        # Knowledge graph enabled on template, defaults, or per-user override.
+        ({"agent_extra": {"knowledge_graph": True}}, {}, "search_graph", "knowledge_graph_read"),
+        ({}, {"knowledge_graph": True}, "graph_entity", "knowledge_graph_read"),
+        (
+            {"users": {"@alice:example.org": {"knowledge_graph": True}}},
+            {},
+            "merge_graph_entities",
+            "knowledge_graph_write",
+        ),
+        # Tools enabled via template.users overrides.
+        (
+            {"users": {"@alice:example.org": {"tools": ["email_invite"]}}},
+            {},
+            "revoke_email_invite",
+            "email_invite_write",
+        ),
+        (
+            {"users": {"@alice:example.org": {"tools": ["shared_directories"]}}},
+            {},
+            "accept_shared_directory",
+            "shared_directories_write",
+        ),
+    ],
+)
+def test_template_only_personal_agents_fail_closed_for_retired_approval_rules(
+    tmp_path: Path,
+    template_extra: dict[str, object],
+    defaults_extra: dict[str, object],
+    retired_match: str,
+    replacement: str,
+) -> None:
+    """Template-only personal_agents configs fail closed on retired approval rules before any user is onboarded."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    agent_cfg: dict[str, object] = {
+        "display_name": "{user_first_name}",
+        "role": "Personal assistant",
+        "include_default_tools": False,
+        **dict(template_extra.get("agent_extra", {})),  # type: ignore[arg-type]
+    }
+    template: dict[str, object] = {"agent": agent_cfg}
+    if "users" in template_extra:
+        template["users"] = template_extra["users"]
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "knowledge_graph": {"model": "default"},
+        "defaults": {"tools": [], **defaults_extra},
+        "personal_agents": {"mind": template},
+        "tool_approval": {"rules": [{"match": retired_match, "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=replacement):
+        Config.validate_with_runtime(data, runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("toolkit", "retired_name", "replacement", "kept_read"),
+    [
+        ("shared_directories", "delete_shared_directory", "shared_directories_write", "list_shared_directories"),
+        ("contacts", "request_contact", "contacts_write", None),
+        ("knowledge_graph", "search_graph", "knowledge_graph_read", None),
+        ("knowledge_graph", "delete_graph_fact", "knowledge_graph_write", None),
+        ("agent_manager", "create_agent", "agent_manager_write", None),
+        ("email_invite", "invite_by_email", "email_invite_write", "list_email_invites"),
+    ],
+)
+def test_retired_identity_access_graph_include_exclude_overrides_fail_config_load(
+    tmp_path: Path,
+    toolkit: str,
+    retired_name: str,
+    replacement: str,
+    kept_read: str | None,
+) -> None:
+    """Retired include_tools/exclude_tools fail closed at config load while kept read names stay valid."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    for filter_key in ("include_tools", "exclude_tools"):
+        data: dict[str, object] = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {
+                    "display_name": "A",
+                    "tools": [{toolkit: {filter_key: [retired_name]}}],
+                    "include_default_tools": False,
+                },
+            },
+        }
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match=rf"{toolkit}\.{filter_key}: {retired_name} was removed; .*`{replacement}`",
+        ):
+            Config.validate_with_runtime(data, runtime_paths)
+
+    if kept_read is not None:
+        valid = Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "x"}},
+                "agents": {
+                    "a": {
+                        "display_name": "A",
+                        "tools": [{toolkit: {"exclude_tools": [kept_read]}}],
+                        "include_default_tools": False,
+                    },
+                },
+            },
+            runtime_paths,
+        )
+        assert valid.agents["a"].tools[0].overrides == {"exclude_tools": [kept_read]}
+
+
+def test_malformed_personal_agent_user_override_keeps_template_error_path_with_approval_rules(
+    tmp_path: Path,
+) -> None:
+    """Malformed personal_agents user tool overrides still report the template path when approval rules are active."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "personal_agents": {
+            "mind": {
+                "agent": {
+                    "display_name": "{user_first_name}",
+                    "role": "Personal assistant",
+                    "include_default_tools": False,
+                },
+                "users": {"@alice:example.org": {"tools": [123]}},
+            },
+        },
+        "tool_approval": {"rules": [{"match": "agent_manager_write", "action": "require_approval"}]},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match="personal_agents"):
+        Config.validate_with_runtime(data, runtime_paths)
 
 
 @pytest.mark.parametrize(

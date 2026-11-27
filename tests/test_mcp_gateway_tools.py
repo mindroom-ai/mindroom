@@ -154,7 +154,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("approved_egress", "request_network_access"),
         ("attachments", "attachment"),
         ("callback_manager", "mint_callback"),
-        ("claude_agent", "claude_send"),
+        ("claude_agent", "claude_agent_write"),
         ("dynamic_workflow", "workflow"),
         ("workflow", "workflow"),
         ("external_trigger_manager", "triggers"),
@@ -163,11 +163,10 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("matrix_room", "matrix_room"),
         ("report_publishing", "publish_report"),
         ("scheduler", "scheduler"),
-        ("thread_model", "list_models"),
+        ("thread_model", "thread_model_read"),
         ("thread_summary", "set_thread_summary"),
         ("triggers", "triggers"),
-        ("usage_stats", "get_my_usage"),
-        ("usage_stats", "get_my_private_usage"),
+        ("usage_stats", "usage_stats"),
     ],
 )
 async def test_room_and_conversation_tools_are_hidden_and_cannot_be_selected(
@@ -516,6 +515,14 @@ async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_re
     found = {item["function"] for item in search_result["results"]}
     assert "calculate" not in found
     await _assert_add_needs_approval(context)
+
+    other_agent_config = context.config.model_copy(deep=True)
+    other_agent_config.tool_approval.rules = [
+        ApprovalRuleConfig(match="run_shell_command", agents="other_agent", action="require_approval"),
+    ]
+    other_search = await gateway.search_tools(replace(context, config=other_agent_config), toolkit="calculator")
+    assert "error" not in other_search
+    assert "add" in {item["function"] for item in other_search["results"]}
 
 
 async def _assert_add_needs_approval(context: AgentToolContext) -> None:

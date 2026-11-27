@@ -326,7 +326,7 @@ Reply with one line saying what you changed."""
 EXPLORATION_PROMPT_TEMPLATE = """🔭 Exploration: grow your knowledge graph by exploring the sources your tools reach.
 The graph records the people, organizations, projects, documents, tasks, and events your conversations and tools reveal, with when each fact held and where it came from, and every tool result in this thread is added to it as evidence.
 
-1. Check what `search_graph` and `graph_entity` already know about the leads below.
+1. Check what `knowledge_graph_read` already knows about the leads below.
 2. Re-read the sources behind them to catch what changed, and follow references to projects, folders, channels, and documents the graph does not know yet.
 3. Look for owners, dates, decisions, and links between things that the graph lacks.{fix_step}
 

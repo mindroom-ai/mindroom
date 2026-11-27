@@ -254,7 +254,7 @@ async def test_private_usage_tool_uses_requester_context(tmp_path: Path, monkeyp
     context = replace(_context(tmp_path), agent_name="shared", config=data.config, runtime_paths=data.paths)
     monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
     tools = UsageStatsTools(agent_name="shared")
-    report = json.loads(await tools.get_my_private_usage(include_daily=True))
+    report = json.loads(await tools.usage_stats("private", include_daily=True))
     assert report["status"] == "ok"
     assert report["totals"]["total_tokens"] == 150
     assert {row["agent_name"] for row in report["private_agent_breakdown"]} == {"code", "helper"}

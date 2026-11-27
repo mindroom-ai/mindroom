@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
     requires_room_context=True,
-    function_names=("invite_by_email", "list_email_invites", "revoke_email_invite"),
+    function_names=("list_email_invites", "email_invite_write"),
+    action_scoped_grants=("email_invite_write",),
 )
 def email_invite_tools() -> type[EmailInviteTools]:
     """Return the email invite tools."""

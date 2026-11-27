@@ -1005,19 +1005,35 @@ async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team:
         # The resumed run switches the thread's model for this response, and the fresh attempt reports nothing.
         pytest.param(
             [
-                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                calls(
+                    tool_call(
+                        "thread_model_write",
+                        "call-2",
+                        action="switch",
+                        model_name="default",
+                        when="after-toolcall",
+                    ),
+                ),
                 answer("NO_REPLY"),
             ],
-            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            "🔧 `echo` [1]\n\n🔧 `thread_model_write` [2]",
             id="fresh-attempt",
         ),
         # The fresh attempt answers nothing: a quiet turn neither retries it nor answers with the empty-reply notice.
         pytest.param(
             [
-                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                calls(
+                    tool_call(
+                        "thread_model_write",
+                        "call-2",
+                        action="switch",
+                        model_name="default",
+                        when="after-toolcall",
+                    ),
+                ),
                 answer(""),
             ],
-            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            "🔧 `echo` [1]\n\n🔧 `thread_model_write` [2]",
             id="empty-fresh-attempt",
         ),
     ],

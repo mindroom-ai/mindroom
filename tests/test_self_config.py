@@ -334,7 +334,7 @@ class TestUpdateOwnConfig:
             tool = _self_config_tools(agent_name="coder_helper", config_path=config_path)
             with _as_requester(tool):
                 result = tool.update_own_config(role="Changed")
-            assert "its owners change it with update_agent" in result
+            assert 'its owners change it with agent_manager_write(action="update", ...)' in result
             assert "coder_helper" not in config_path.read_text(encoding="utf-8")
         finally:
             config_path.unlink(missing_ok=True)

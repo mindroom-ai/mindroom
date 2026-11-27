@@ -207,26 +207,15 @@ def _terms(agent_name: str, rules: str, tools: str) -> str:
     """Return how a toolkit result names the rules and tools the caller's agent has in a contact."""
     return (
         f"\nRules {agent_name} follows in this contact:\n{rules}\n"
-        f"Tools it may use there: {tools}. Change them with update_contact."
+        f'Tools it may use there: {tools}. Change them with contacts_write(action="update", ...).'
     )
 
 
 def test_confirm_gates() -> None:
-    """A model's request, acceptance, and change of rules always ask the owner; the rest only take access away or read."""
+    """All contact writes always ask the owner on a card; listing stays an ungated zero-arg read."""
     functions = adapt_toolkit(ContactsTools("mind_alice")).functions
-    assert {function.name for function in functions} == {
-        "list_contacts",
-        "request_contact",
-        "accept_contact",
-        "decline_contact",
-        "update_contact",
-        "remove_contact",
-    }
-    assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == {
-        "request_contact",
-        "accept_contact",
-        "update_contact",
-    }
+    assert {function.name for function in functions} == {"list_contacts", "contacts_write"}
+    assert {function.name for function in functions if function.gate is ToolGate.CONFIRM} == {"contacts_write"}
 
 
 @pytest.mark.asyncio
@@ -444,7 +433,7 @@ async def test_asking_again_with_other_rules_or_tools_is_refused_and_changes_not
     record = await _pending(config, paths, runtime, rules="Be brief", tools=["calculator"])
     refusal = (
         rf"^Contact {record.id} with mind_bob already exists and is pending; "
-        r"change your side's rules or tools with update_contact$"
+        r'change your side\'s rules or tools with contacts_write\(action="update", \.\.\.\)$'
     )
 
     with _delivered() as send:
@@ -477,11 +466,11 @@ async def test_asking_again_says_the_existing_contact_is_unchanged(tmp_path: Pat
     runtime = _runtime()
     tool = ContactsTools("mind_alice")
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered() as send:
-        await tool.request_contact("mind_bob", "Plan the dinner")
-        again = await tool.request_contact("mind_bob", "Another reason")
-        with_rules = await tool.request_contact("mind_bob", "Another reason", rules="Be kind")
+        await tool.contacts_write("request", target="mind_bob", reason="Plan the dinner")
+        again = await tool.contacts_write("request", target="mind_bob", reason="Another reason")
+        with_rules = await tool.contacts_write("request", target="mind_bob", reason="Another reason", rules="Be kind")
     with tool_runtime_context(_context(config, paths, "mind_bob", CO_OWNER, runtime)):
-        reverse = await ContactsTools("mind_bob").request_contact("mind_alice", "Plan it too")
+        reverse = await ContactsTools("mind_bob").contacts_write("request", target="mind_alice", reason="Plan it too")
 
     (record,) = _stored(paths)
     send.assert_awaited_once()
@@ -495,13 +484,13 @@ async def test_asking_again_says_the_existing_contact_is_unchanged(tmp_path: Pat
     )
     assert with_rules == (
         f"Error: Contact {record.id} with mind_bob already exists and is pending; "
-        "change your side's rules or tools with update_contact"
+        'change your side\'s rules or tools with contacts_write(action="update", ...)'
     )
     assert (record.reason, record.requester_side.rules) == ("Plan the dinner", None)
 
     _activate(paths, record.id)
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)):
-        active = await tool.request_contact("mind_bob", "Another reason")
+        active = await tool.contacts_write("request", target="mind_bob", reason="Another reason")
     assert active.startswith(
         f"Contact {record.id} with mind_bob already exists and is active in the contact room {CONTACT_ROOM}; "
         "it is returned unchanged.",
@@ -843,12 +832,20 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
     assert "only works while answering a request" in await tool.list_contacts()
 
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered():
-        refused = await tool.request_contact("nobody", "Say hi")
-        requested = await tool.request_contact("mind_bob", "Say hi", rules="Be brief", tools=["calculator"])
+        refused = await tool.contacts_write("request", target="nobody", reason="Say hi")
+        requested = await tool.contacts_write(
+            "request",
+            target="mind_bob",
+            reason="Say hi",
+            rules="Be brief",
+            tools=["calculator"],
+        )
         listing = yaml.safe_load(await tool.list_contacts())
-        updated = await tool.update_contact(listing["contacts"][0]["id"], rules="Be kind")
-        removed = await tool.remove_contact(listing["contacts"][0]["id"])
-        unknown = await tool.decline_contact("nope")
+        contact_id = listing["contacts"][0]["id"]
+        updated = await tool.contacts_write("update", contact_id=contact_id, rules="Be kind")
+        cleared = await tool.contacts_write("update", contact_id=contact_id, rules="", tools=[])
+        removed = await tool.contacts_write("remove", contact_id=contact_id)
+        unknown = await tool.contacts_write("decline", contact_id="nope")
 
     (record,) = _stored(paths)
     assert refused.startswith("Error: nobody cannot be contacted")
@@ -862,10 +859,16 @@ async def test_toolkit_calls_run_the_flow_and_report_errors_as_text(tmp_path: Pa
         "- Never share keys.\n- Be kind",
         "calculator, matrix_message",
     )
+    assert cleared == f"Updated contact {record.id}." + _terms(
+        "mind_alice",
+        "- Never share keys.",
+        "matrix_message",
+    )
     assert removed == f"Removed contact {record.id}."
     assert unknown == "Error: There is no contact nope"
     assert record.status == "removed"
-    assert record.requester_side.rules == "Be kind"
+    assert record.requester_side.rules is None
+    assert record.requester_side.tools == []
 
 
 @pytest.mark.asyncio
@@ -875,7 +878,11 @@ async def test_the_owner_sees_the_default_tools_of_a_contact_when_the_call_names
     runtime = _runtime()
 
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered() as send:
-        requested = await ContactsTools("mind_alice").request_contact("mind_bob", "Plan the dinner")
+        requested = await ContactsTools("mind_alice").contacts_write(
+            "request",
+            target="mind_bob",
+            reason="Plan the dinner",
+        )
 
     assert requested.endswith(_terms("mind_alice", "- Never share keys.", "calculator, matrix_message"))
     notice = send.await_args.args[2]["body"]
@@ -890,7 +897,12 @@ async def test_a_request_as_oneself_says_that_the_invitation_brings_the_acceptan
     runtime = _runtime()
 
     with tool_runtime_context(_context(config, paths, "mind_alice", OWNER, runtime)), _delivered():
-        requested = await ContactsTools("mind_alice").request_contact("mind_bob", "Say hi", party="me")
+        requested = await ContactsTools("mind_alice").contacts_write(
+            "request",
+            target="mind_bob",
+            reason="Say hi",
+            party="me",
+        )
 
     (record,) = _stored(paths)
     assert record.requester.kind == "person"
@@ -931,14 +943,7 @@ def test_a_personal_agent_with_contacts_is_built_with_the_contacts_tools_and_mat
     )
     offered = {toolkit.name: {function.name for function in toolkit.functions} for toolkit in build.spec.toolkits}
 
-    assert offered["contacts"] == {
-        "list_contacts",
-        "request_contact",
-        "accept_contact",
-        "decline_contact",
-        "update_contact",
-        "remove_contact",
-    }
+    assert offered["contacts"] == {"list_contacts", "contacts_write"}
     assert "matrix_message" in offered
 
 
@@ -971,3 +976,39 @@ async def test_declining_dates_the_decision(tmp_path: Path) -> None:
     assert record.requested_at is not None
     assert declined.decided_at >= record.requested_at
     assert _stored(paths) == [declined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "kwargs", "fragment"),
+    [
+        ("bogus", {}, "Unsupported action"),
+        ("request", {"target": "mind_bob"}, "reason"),
+        ("request", {"reason": "Hi"}, "target"),
+        ("request", {"target": "mind_bob", "reason": "Hi", "contact_id": "c1"}, "cannot be used"),
+        ("accept", {}, "contact_id"),
+        ("accept", {"contact_id": "c1", "target": "mind_bob"}, "cannot be used"),
+        ("accept", {"contact_id": "c1", "party": "me"}, "cannot be used"),
+        ("decline", {}, "contact_id"),
+        ("decline", {"contact_id": "c1", "rules": "x"}, "cannot be used"),
+        ("decline", {"contact_id": "c1", "tools": []}, "cannot be used"),
+        ("update", {}, "contact_id"),
+        ("update", {"contact_id": "c1", "reason": "x"}, "cannot be used"),
+        ("update", {"contact_id": "c1", "party": "agent"}, "cannot be used"),
+        ("remove", {}, "contact_id"),
+        ("remove", {"contact_id": "c1", "rules": ""}, "cannot be used"),
+        ("remove", {"contact_id": "c1", "party": "me"}, "cannot be used"),
+    ],
+)
+async def test_contacts_write_validates_action_and_parameters(
+    action: str,
+    kwargs: dict[str, object],
+    fragment: str,
+) -> None:
+    """Invalid actions, missing required parameters, and mismatched cross-action parameters fail cleanly."""
+    tool = ContactsTools("mind_alice")
+
+    result = await tool.contacts_write(action, **kwargs)  # type: ignore[arg-type]
+
+    assert result.startswith("Error: ")
+    assert fragment in result

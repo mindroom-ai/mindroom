@@ -913,10 +913,17 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, registered_tool_name: str) -> bool:
+def _approval_may_gate(
+    config: Config,
+    tools: ToolRegistry,
+    function_name: str,
+    registered_tool_name: str,
+    *,
+    agent_name: str | None = None,
+) -> bool:
     """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     return any(
-        tool_may_require_approval(config, name)
+        tool_may_require_approval(config, name, agent_name=agent_name)
         for name in approval_policy_names(config, tools, registered_tool_name, function_name)
     )
 
@@ -1018,6 +1025,7 @@ def apply_tool_approval_capability(
     registered_tool_name: str,
     resumable: bool,
     approvals_as_jobs: bool,
+    agent_name: str | None = None,
 ) -> AdaptedToolkit:
     """Apply the approval rules to the functions of ``adapted``, the toolkit ``toolkit`` was adapted to.
 
@@ -1043,8 +1051,12 @@ def apply_tool_approval_capability(
 
     def offered(function: ToolFunction) -> ToolFunction | None:
         policy_names = approval_policy_names(config, tools, registered_tool_name, function.name)
-        own_may_gate = function.name in policy_names and tool_may_require_approval(config, function.name)
-        may_gate = any(tool_may_require_approval(config, name) for name in policy_names)
+        own_may_gate = function.name in policy_names and tool_may_require_approval(
+            config,
+            function.name,
+            agent_name=agent_name,
+        )
+        may_gate = any(tool_may_require_approval(config, name, agent_name=agent_name) for name in policy_names)
         if not resumable:
             return offered_non_resumable(function, own_may_gate=own_may_gate, may_gate=may_gate)
         delegation = is_delegation_function(function)
@@ -1142,9 +1154,11 @@ def _generated_function_visible(
     config: Config,
     tool_function_filter: Callable[[ToolFunction], bool] | None,
     function: ToolFunction,
+    *,
+    agent_name: str | None = None,
 ) -> bool:
     """Hide generated functions an approval rule may gate, because they have no toolkit origin to pause and resume."""
-    return not tool_may_require_approval(config, function.name) and (
+    return not tool_may_require_approval(config, function.name, agent_name=agent_name) and (
         tool_function_filter is None or tool_function_filter(function)
     )
 
@@ -1204,6 +1218,7 @@ def _deferred_entry_has_schedulable_gated_function(
     room_tools: bool,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
+    agent_name: str | None = None,
 ) -> bool:
     """Return whether a CLI-deferred toolkit entry may offer any policy-gated schedulable function."""
     if (
@@ -1219,12 +1234,13 @@ def _deferred_entry_has_schedulable_gated_function(
         return False
     if functions is None:
         return config.tool_approval.default == "require_approval" or any(
-            rule.action != "auto_approve" for rule in config.tool_approval.rules
+            rule.action != "auto_approve" and (agent_name is None or rule.matches_agent(agent_name))
+            for rule in config.tool_approval.rules
         )
     return any(
         (room_tools or offered_without_room(entry.name, name))
         and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-        and _approval_may_gate(config, agent_tools.tools, name, entry.name)
+        and _approval_may_gate(config, agent_tools.tools, name, entry.name, agent_name=agent_name)
         for name in functions
     )
 
@@ -1256,6 +1272,7 @@ def _prompt_tool_capabilities(
     config: Config,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
+    agent_name: str | None = None,
 ) -> tuple[bool, bool]:
     """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
 
@@ -1281,7 +1298,10 @@ def _prompt_tool_capabilities(
         return any(
             (functions is None or name in functions)
             and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
-            and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
+            and (
+                supports_native_tool_approval
+                or not _approval_may_gate(config, agent_tools.tools, name, entry.name, agent_name=agent_name)
+            )
             for name in candidates
         )
 
@@ -1452,6 +1472,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=toolkit_calls_as_jobs,
+            agent_name=agent_name,
         )
         # Instructions describe only the functions offered by the toolkit.
         adapted = with_offered_instructions(toolkit, adapted)
@@ -1583,6 +1604,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             registered_tool_name=peer_tools.name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=False,
+            agent_name=agent_name,
         )
         if peer_adapted.functions:
             entries.append(_ToolkitEntry(adapted=peer_adapted, toolkit=peer_tools))
@@ -1593,7 +1615,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
             entries,
             knowledge,
             skills,
-            partial(_generated_function_visible, config, tool_function_filter),
+            partial(_generated_function_visible, config, tool_function_filter, agent_name=agent_name),
         ),
     ]
     offered, left_out = _offered_entries(built, agent_name=agent_name)
@@ -1619,6 +1641,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
                 room_tools=room_tools,
                 narrowed_tools=narrowed_tools,
                 supports_native_tool_approval=supports_native_tool_approval,
+                agent_name=agent_name,
             )
             for entry in deferred_configs.values()
         )
@@ -1693,6 +1716,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0912, PLR0915 - eager and deferr
         config=config,
         narrowed_tools=narrowed_tools,
         supports_native_tool_approval=supports_native_tool_approval,
+        agent_name=agent_name,
     )
     assembly = _AgentToolAssembly(
         entries=offered,
@@ -2113,7 +2137,7 @@ def create_agent(
         auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
     # Approval rules hide generated functions, so skill guidance and the catalog are omitted when approval hides `skill`.
-    skill_hidden = any(tool_may_require_approval(config, name) for name in SKILL_FUNCTION_NAMES)
+    skill_hidden = any(tool_may_require_approval(config, name, agent_name=agent_name) for name in SKILL_FUNCTION_NAMES)
     refused_skills: list[RefusedWorkspaceSkill] = []
     skills = (
         None
@@ -2130,7 +2154,7 @@ def create_agent(
         )
     )
     prompt_skills = None if skill_hidden else skills
-    # The graph is one more source of the knowledge search, which agents call far more than search_graph.
+    # The graph is one more source of the knowledge search, which agents call far more than knowledge_graph_read.
     # A persona that names its knowledge bases searches only those, as it skips file memory.
     if agent.knowledge_graph and kept_knowledge is None:
         from mindroom.custom_tools.knowledge_graph import with_knowledge_graph  # noqa: PLC0415
@@ -2140,7 +2164,7 @@ def create_agent(
         knowledge
         if not disable_runtime_capabilities
         and kept_knowledge != ()
-        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME)
+        and not tool_may_require_approval(config, KNOWLEDGE_SEARCH_TOOL_NAME, agent_name=agent_name)
         else None
     )
     # Minimal mode presents skill contents as context documents instead of through skill functions.

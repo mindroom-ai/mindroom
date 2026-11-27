@@ -56,9 +56,9 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 
 - A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval, except a function whose [approval alias](https://docs.mindroom.chat/plugins/#approval-aliases) judges it as a function that would still need approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
-- Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
+- Unknown or ineligible toolkit names, including `*`, make `script_write(action="start")` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `memory`, `self_config`, `skill_manage`, `slack`, and `workflow` toolkits are never available to scripts, even when the agent has them.
-- Functions that can stop the agent's current model step, such as `thread_model`'s `switch_thread_model`, are never available to scripts either; the toolkit's other functions are.
+- Functions that can stop the agent's current model step, such as `thread_model`'s `thread_model_write`, are never available to scripts either; the toolkit's other functions are.
 - Listing `config_manager` or `scheduler` in `allowed_tools` does not auto-approve their calls; only a `tool_approval` rule can.
 - Operator [`tool_approval`](https://docs.mindroom.chat/tool-approval/) rules are checked first, so a matching `require_approval` rule still pauses the call, and functions that declare their own confirmation still ask for it.
 - Only the original requester can approve or deny a script's call, and approval cards for a cancelled or finished run are settled without running the call.
@@ -69,32 +69,36 @@ Adding toolkits later, including expanding `allowed_tools`, never gives a runnin
 
 ## Control Functions
 
-The agent receives five control functions.
+The agent receives two control functions (`script_read` and `script_write`).
 
 ```text
-start_script(
+script_read(
+    action: Literal["list", "get", "resource_profiles"],
+    run_id: str | None = None,
+    include_finished: bool | None = None,
+)
+script_write(
+    action: Literal["start", "cancel"],
     source: str | None = None,
     path: str | None = None,
     name: str | None = None,
     resource_profile: Literal["small", "standard", "large"] | None = None,
+    run_id: str | None = None,
+    force: bool | None = None,
 )
-get_script_resource_profiles()
-get_script(run_id: str)
-cancel_script(run_id: str, force: bool = False)
-list_scripts(include_finished: bool = True)
 ```
 
-- `start_script` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
+- `script_write(action="start")` requires exactly one of `source` (inline Python) or `path` (relative to the agent workspace), limited to 128 KiB.
   A `path` file is copied at launch, so later edits do not change the running program.
   The script runs with no command-line arguments, so `sys.argv` holds only its own path.
   `name` is an optional label shown in status and list results.
 - `resource_profile` selects a Kubernetes CPU and memory profile; omitting it uses the configured default.
-  `get_script_resource_profiles` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
+  `script_read(action="resource_profiles")` shows the default and each profile's exact requests and limits, and start, status, and list results report the selected profile.
   An explicit profile fails on a backend that cannot enforce resource profiles.
   Operators define the profiles as described in [Kubernetes deployment](https://docs.mindroom.chat/deployment/kubernetes/) and the [environment variable reference](https://docs.mindroom.chat/configuration/#workers-and-background-scripts).
-- `get_script` returns the run state plus recent process output when available.
-- `list_scripts` returns only runs owned by the current requester and agent.
-- `cancel_script` immediately revokes the script's tool access, requests graceful termination, force-kills after a short grace period, and reports `cancelled` once the process has exited.
+- `script_read(action="get", run_id=...)` returns the run state plus recent process output when available.
+- `script_read(action="list")` returns only runs owned by the current requester and agent (`include_finished` defaults to `True`).
+- `script_write(action="cancel", run_id=...)` immediately revokes the script's tool access, requests graceful termination, force-kills after a short grace period, and reports `cancelled` once the process has exited.
   `force=True` kills the process without the graceful step.
 
 ## Calling Agent Tools From A Script
@@ -189,7 +193,7 @@ Make the watcher edge-triggered: update its observed value before sending, and n
 Run scripts on a dedicated Docker or Kubernetes worker backend as described in [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 The shared `static_runner` sandbox is not supported.
 Workers should run the same MindRoom release as the primary; see [Keeping worker versions matched](https://docs.mindroom.chat/deployment/sandbox-proxy/#keeping-worker-versions-matched).
-Without a worker backend or explicit local execution, `start_script` fails with `Background scripts require a worker or an explicitly disabled sandbox.`
+Without a worker backend or explicit local execution, `script_write(action="start")` fails with `Background scripts require a worker or an explicitly disabled sandbox.`
 
 Workers must reach the primary's script gateway over the network.
 Set `MINDROOM_SCRIPT_GATEWAY_URL` to the complete worker-reachable gateway base, including `/api/script-gateway`.
@@ -206,7 +210,7 @@ export MINDROOM_SCRIPT_GATEWAY_URL=https://mindroom.example.org/api/script-gatew
 ### Kubernetes
 
 Kubernetes scripts stay disabled until the gateway runs on a listener that exposes no other primary API routes, because workers that can reach the general API listener get more authority than the script gateway grants.
-Until then, `start_script` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
+Until then, `script_write(action="start")` fails with `Kubernetes background scripts require a gateway-only listener; use Docker or explicit unsafe-local mode until that boundary is configured.`
 
 - `MINDROOM_SCRIPT_GATEWAY_PORT` makes the primary serve a second listener that answers only `/api/script-gateway` and the capability-authenticated [`/api/agent-cli`](https://docs.mindroom.chat/tools/agent-cli/#shell-in-a-worker) routes.
 - `MINDROOM_SCRIPT_GATEWAY_URL` must name that listener explicitly; `MINDROOM_PUBLIC_URL` is not used on Kubernetes.
@@ -276,6 +280,6 @@ Restore the previous settings, restart once so MindRoom can retire those runs, t
 
 ### Output and retention
 
-`get_script(run_id)` keeps returning up to 64 KiB of process output after the run ends.
+`script_read(action="get", run_id=...)` keeps returning up to 64 KiB of process output after the run ends.
 Finished runs, their tool-call receipts, and approval records are kept for 30 days by default.
 Set `MINDROOM_SCRIPT_RETENTION_SECONDS` to change the window; see the [environment variable reference](https://docs.mindroom.chat/configuration/#workers-and-background-scripts).

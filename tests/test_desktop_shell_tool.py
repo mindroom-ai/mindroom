@@ -183,6 +183,20 @@ def test_shell_job_wait_seconds_covers_both_shell_and_desktop_shell() -> None:
     assert "background_after" in projected.parameters["properties"]
 
 
+def test_run_desktop_shell_args_schema_prefers_string() -> None:
+    """The desktop shell args schema lists string before argv array and explains shell syntax guidance."""
+    shell_fn = next(fn for fn in adapt_toolkit(DesktopTools()).functions if fn.name == "run_desktop_shell")
+    args_schema = shell_fn.parameters["properties"]["args"]
+
+    assert args_schema["anyOf"] == [
+        {"type": "string"},
+        {"type": "array", "items": {"type": "string"}},
+    ]
+    assert args_schema["description"] == (
+        "Shell command string (preferred; cd, &&, pipes, redirects), or argv list (no shell syntax)."
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("args", "kwargs", "expected_error"),

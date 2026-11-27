@@ -69,7 +69,7 @@ async def _call(function: ToolFunction, **arguments: object) -> str:
 
 
 async def _open(functions: dict[str, ToolFunction]) -> str:
-    opened = await _call(functions["terminal_open"])
+    opened = await _call(functions["terminal_write"], action="open")
     assert opened.startswith("Opened terminal ")
     return opened.removeprefix("Opened terminal ").removesuffix(".")
 
@@ -78,46 +78,68 @@ async def test_an_agent_runs_commands_types_keys_reads_and_lists_its_terminals(t
     """A run waits for the shell's prompt and reports the exit status; keys reach whatever runs in the terminal."""
     paths = primary_paths(tmp_path, runner)
     functions = _functions(_config(paths, ["shell", "terminal"]), paths)
-    assert await _call(functions["terminal_list"]) == "No terminals are open. Open one with terminal_open."
+    assert (
+        await _call(functions["terminal_read"], action="list")
+        == 'No terminals are open. Open one with terminal_write(action="open").'
+    )
     session_id = await _open(functions)
 
-    assert await _call(functions["terminal_run"], session_id=session_id, command="echo hi; false") == (
+    assert await _call(functions["terminal_write"], action="run", session_id=session_id, command="echo hi; false") == (
         "hi\n[Exit status 1.]"
     )
-    running = await _call(functions["terminal_run"], session_id=session_id, command="sleep 30", timeout_s=0.5)
+    running = await _call(
+        functions["terminal_write"],
+        action="run",
+        session_id=session_id,
+        command="sleep 30",
+        timeout_s=0.5,
+    )
     assert running == "[Still running after 0.5 s.]"
-    assert (await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>")).startswith(
+    assert (await _call(functions["terminal_write"], action="send", session_id=session_id, keys="<ctrl-c>")).startswith(
         "Sent. New output:\n^C\n",
     )
     # A command that ends with a newline is still one line.
-    assert await _call(functions["terminal_run"], session_id=session_id, command="echo $((6*7))\n") == (
+    assert await _call(functions["terminal_write"], action="run", session_id=session_id, command="echo $((6*7))\n") == (
         "42\n[Exit status 0.]"
     )
-    assert "42" in await _call(functions["terminal_read"], session_id=session_id)
+    assert "42" in await _call(functions["terminal_read"], action="read", session_id=session_id)
     # With the terminal's echo off, readline still ends the line before the output, which stays whole.
-    assert await _call(functions["terminal_run"], session_id=session_id, command="stty -echo") == "[Exit status 0.]"
-    assert await _call(functions["terminal_run"], session_id=session_id, command="echo $((6*7))") == (
+    assert (
+        await _call(functions["terminal_write"], action="run", session_id=session_id, command="stty -echo")
+        == "[Exit status 0.]"
+    )
+    assert await _call(functions["terminal_write"], action="run", session_id=session_id, command="echo $((6*7))") == (
         "42\n[Exit status 0.]"
     )
-    await _call(functions["terminal_run"], session_id=session_id, command="stty echo")
+    await _call(functions["terminal_write"], action="run", session_id=session_id, command="stty echo")
     # The echo of a command wider than the terminal is redrawn across rows, and is no output either.
     wide = "echo " + "a" * 150 + " $((2+3))"
-    assert await _call(functions["terminal_run"], session_id=session_id, command=wide) == (
+    assert await _call(functions["terminal_write"], action="run", session_id=session_id, command=wide) == (
         "a" * 150 + " 5\n[Exit status 0.]"
     )
-    assert await _call(functions["terminal_list"]) == f"- {session_id}: running"
-    refused = await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>echo hi<enter>")
+    assert await _call(functions["terminal_read"], action="list") == f"- {session_id}: running"
+    refused = await _call(
+        functions["terminal_write"],
+        action="send",
+        session_id=session_id,
+        keys="<ctrl-c>echo hi<enter>",
+    )
     assert refused.startswith("Error: send <ctrl-c> on its own")
-    too_long = await _call(functions["terminal_send"], session_id=session_id, keys="x" * 16385)
+    too_long = await _call(functions["terminal_write"], action="send", session_id=session_id, keys="x" * 16385)
     assert too_long == "Error: Type at most 16384 characters at once; send a long text in parts."
     for command in ("ls\x01", "\x03ls", "cd /tmp\nls", "ls\x7f", "ls\x9b"):
-        refused = await _call(functions["terminal_run"], session_id=session_id, command=command)
+        refused = await _call(functions["terminal_write"], action="run", session_id=session_id, command=command)
         assert refused.startswith("Error: a command is one line of plain text;")
     # A line longer than any answer keeps its newest part.
-    long_line = await _call(functions["terminal_run"], session_id=session_id, command="printf 'x%.0s' $(seq 300000)")
+    long_line = await _call(
+        functions["terminal_write"],
+        action="run",
+        session_id=session_id,
+        command="printf 'x%.0s' $(seq 300000)",
+    )
     assert long_line == "x" * 16_000 + "\n[Exit status 0.]"
-    assert await _call(functions["terminal_read"], session_id="nope") == (
-        "Error: there is no terminal 'nope'; terminal_list shows yours."
+    assert await _call(functions["terminal_read"], action="read", session_id="nope") == (
+        "Error: there is no terminal 'nope'; terminal_read(action=\"list\") shows yours."
     )
 
 
@@ -154,6 +176,8 @@ async def test_an_agent_whose_shell_runs_in_the_primary_gets_no_terminal_functio
         ({"rules": [{"match": "run_*", "script": "rm_review.py"}]}, True),
         ({}, False),
         ({"default": "require_approval", "rules": [{"match": "run_shell_command", "action": "auto_approve"}]}, False),
+        ({"rules": [{"match": "run_shell_command", "agents": "code", "action": "require_approval"}]}, True),
+        ({"rules": [{"match": "run_shell_command", "agents": "other", "action": "require_approval"}]}, False),
     ],
 )
 async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_ask(
@@ -169,7 +193,7 @@ async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_a
     terminals = _terminals(config, paths)
     session_id = (await terminals.open()).id
 
-    assert {"terminal_open", "terminal_run", "terminal_send"}.isdisjoint(functions) == restricted
+    assert ("terminal_write" not in functions) == restricted
     instructions = agent_toolkit("terminal", config, paths).instructions or ""
     assert ("run commands with run_shell_command" in instructions) == restricted
     if restricted:
@@ -177,9 +201,9 @@ async def test_an_agent_types_in_terminals_only_while_its_shell_commands_never_a
         async with terminals.attach(session_id) as person:
             await person.send_input("echo ran-$((6*7))\r")
     else:
-        await _call(functions["terminal_run"], session_id=session_id, command="echo ran-$((6*7))")
-    assert "ran-42" in await _call(functions["terminal_read"], session_id=session_id)
-    assert f"- {session_id}: running" in await _call(functions["terminal_list"])
+        await _call(functions["terminal_write"], action="run", session_id=session_id, command="echo ran-$((6*7))")
+    assert "ran-42" in await _call(functions["terminal_read"], action="read", session_id=session_id)
+    assert f"- {session_id}: running" in await _call(functions["terminal_read"], action="list")
 
 
 async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve(tmp_path: Path, runner: str) -> None:
@@ -187,9 +211,9 @@ async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve
     paths = primary_paths(tmp_path, runner)
     config = _config(paths, ["shell", "terminal"], {"default": "require_approval"})
     functions = _functions(config, paths)
-    assert sorted(functions) == ["terminal_list", "terminal_read"]
+    assert sorted(functions) == ["terminal_read"]
     # Nor is it told to open one.
-    assert await _call(functions["terminal_list"]) == "No terminals are open."
+    assert await _call(functions["terminal_read"], action="list") == "No terminals are open."
 
     # The agent CLI, through the catalog of the response it belongs to.
     catalog = agent_tool_calls.PreparedAgentToolCatalog(
@@ -213,8 +237,8 @@ async def test_under_a_default_that_asks_no_path_offers_a_typing_call_to_approve
         max_tool_calls_per_turn=None,
     )
     await catalog.prepare([AdaptedToolkit(name="terminal", functions=tuple(functions.values()), instructions=None)])
-    with pytest.raises(UnknownToolError, match="its functions: terminal_list, terminal_read"):
-        await catalog.bind(ToolKey("terminal", "terminal_send"))
+    with pytest.raises(UnknownToolError, match="its functions: terminal_read"):
+        await catalog.bind(ToolKey("terminal", "terminal_write"))
 
 
 async def test_a_shell_started_in_a_terminal_keeps_runs_out_until_it_exits(tmp_path: Path, runner: str) -> None:
@@ -222,15 +246,18 @@ async def test_a_shell_started_in_a_terminal_keeps_runs_out_until_it_exits(tmp_p
     paths = primary_paths(tmp_path, runner)
     functions = _functions(_config(paths, ["shell", "terminal"]), paths)
     session_id = await _open(functions)
-    run, send = functions["terminal_run"], functions["terminal_send"]
+    write = functions["terminal_write"]
 
-    await _call(send, session_id=session_id, keys="bash --norc -i<enter>")
+    await _call(write, action="send", session_id=session_id, keys="bash --norc -i<enter>")
     for _ in range(2):
-        await _call(send, session_id=session_id, keys="true<enter>")
-    assert (await _call(run, session_id=session_id, command="echo inside")).startswith(_NOT_AT_PROMPT)
-    await _call(send, session_id=session_id, keys="exit<enter>")
-    await _call(send, session_id=session_id, keys="<ctrl-c>")
-    assert await _call(run, session_id=session_id, command="echo back-$((2*3))") == "back-6\n[Exit status 0.]"
+        await _call(write, action="send", session_id=session_id, keys="true<enter>")
+    assert (await _call(write, action="run", session_id=session_id, command="echo inside")).startswith(_NOT_AT_PROMPT)
+    await _call(write, action="send", session_id=session_id, keys="exit<enter>")
+    await _call(write, action="send", session_id=session_id, keys="<ctrl-c>")
+    assert (
+        await _call(write, action="run", session_id=session_id, command="echo back-$((2*3))")
+        == "back-6\n[Exit status 0.]"
+    )
 
 
 async def test_named_keys_are_keys_and_other_text_is_typed_as_written() -> None:
@@ -355,8 +382,8 @@ async def test_typing_reaches_the_shell_in_the_order_it_was_recorded(
             # The line is empty only once the shell prompts after a Ctrl-C, which a Ctrl-C right after typing can
             # leave out, keeping the typing; the agent then sends another, as the run's refusal says.
             for _ in range(5):
-                await _call(functions["terminal_send"], session_id=session_id, keys="<ctrl-c>")
-                ran = await _call(functions["terminal_run"], session_id=session_id, command="m -rf tmp")
+                await _call(functions["terminal_write"], action="send", session_id=session_id, keys="<ctrl-c>")
+                ran = await _call(functions["terminal_write"], action="run", session_id=session_id, command="m -rf tmp")
                 if not ran.startswith(_NOT_AT_PROMPT):
                     break
 
@@ -372,14 +399,18 @@ async def test_an_agent_is_told_when_a_terminal_s_shell_has_exited(tmp_path: Pat
     ran_exit = await _open(functions)
     exited = "[The terminal's shell has exited.]"
 
-    assert (await _call(functions["terminal_send"], session_id=session_id, keys="exit<enter>")).endswith(exited)
+    assert (
+        await _call(functions["terminal_write"], action="send", session_id=session_id, keys="exit<enter>")
+    ).endswith(exited)
     # Bash says `exit` as it leaves, after the echo of the command.
-    assert await _call(functions["terminal_run"], session_id=ran_exit, command="exit") == f"exit\n{exited}"
+    assert (
+        await _call(functions["terminal_write"], action="run", session_id=ran_exit, command="exit") == f"exit\n{exited}"
+    )
     for terminal in (session_id, ran_exit):
-        assert (await _call(functions["terminal_read"], session_id=terminal)).endswith(f"\n{exited}")
-    for function, arguments in (("terminal_send", {"keys": "<ctrl-c>"}), ("terminal_run", {"command": "ls"})):
-        answer = await _call(functions[function], session_id=session_id, **arguments)
-        assert answer == "Error: the terminal's shell has exited; open another with terminal_open."
+        assert (await _call(functions["terminal_read"], action="read", session_id=terminal)).endswith(f"\n{exited}")
+    for action, arguments in (("send", {"keys": "<ctrl-c>"}), ("run", {"command": "ls"})):
+        answer = await _call(functions["terminal_write"], action=action, session_id=session_id, **arguments)
+        assert answer == 'Error: the terminal\'s shell has exited; open another with terminal_write(action="open").'
 
 
 class _TwoPrompts:
@@ -401,3 +432,43 @@ async def test_a_run_ends_at_its_own_prompt_even_when_a_later_one_arrives_with_i
     output = await terminal_tools._output(_TwoPrompts(), 10, after=1)  # type: ignore[arg-type]
 
     assert output == (b"\x1b]133;D;0;mindroom=1\x07bash$ echo hi; false\r\nhi\r\n", False, True, 1)
+
+
+async def test_terminal_validation_and_space_key_preservation(tmp_path: Path, runner: str) -> None:
+    """Validation rejects missing/cross-action params before side effects, while send preserves literal spaces."""
+    paths = primary_paths(tmp_path, runner)
+    toolkit = agent_toolkit("terminal", _config(paths, ["shell", "terminal"]), paths)
+
+    assert "Unsupported terminal_read action" in await toolkit.terminal_read(action="nope")  # type: ignore[arg-type]
+    assert "'session_id'" in await toolkit.terminal_read(action="list", session_id="t1")
+    assert "session_id is required" in await toolkit.terminal_read(action="read")
+    assert "session_id is required" in await toolkit.terminal_read(action="read", session_id="  ")
+    assert "Unsupported terminal_write action" in await toolkit.terminal_write(action="nope")  # type: ignore[arg-type]
+    assert "'session_id'" in await toolkit.terminal_write(action="open", session_id="t1")
+    assert "'keys'" in await toolkit.terminal_write(action="run", session_id="t1", command="ls", keys="x")
+    assert "'command'" in await toolkit.terminal_write(action="send", session_id="t1", command="ls", keys="x")
+    assert "session_id is required" in await toolkit.terminal_write(action="run", command="ls")
+    assert "command is required" in await toolkit.terminal_write(action="run", session_id="t1", command="   ")
+    assert "keys is required" in await toolkit.terminal_write(action="send", session_id="t1")
+    assert "keys is required" in await toolkit.terminal_write(action="send", session_id="t1", keys="")
+
+    # Spaces are valid literal terminal input and must NEVER be stripped.
+    opened = await toolkit.terminal_write(action="open")
+    session_id = opened.removeprefix("Opened terminal ").removesuffix(".")
+    await toolkit.terminal_write(action="send", session_id=session_id, keys="echo hi")
+    sent_space = await toolkit.terminal_write(action="send", session_id=session_id, keys=" ")
+    assert sent_space.startswith("Sent.")
+    sent_rest = await toolkit.terminal_write(action="send", session_id=session_id, keys="there<enter>")
+    assert "hi there" in sent_rest
+
+    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
+
+    offered = {fn.name: fn for fn in adapt_toolkit(toolkit).functions}
+    assert (offered["terminal_read"].offer_background_after, offered["terminal_read"].offer_output_path) == (
+        False,
+        True,
+    )
+    assert (offered["terminal_write"].offer_background_after, offered["terminal_write"].offer_output_path) == (
+        True,
+        True,
+    )

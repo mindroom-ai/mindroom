@@ -1678,6 +1678,59 @@ def test_approval_rules_that_decide_triggers_load(tmp_path: Path, match: str) ->
     assert _load_trigger_approval_rules(tmp_path, match).tool_approval.rules[0].match == match
 
 
+def test_declarative_trigger_approval_rules_enforce_retired_name_safety(tmp_path: Path) -> None:
+    """Conditional `triggers` rules load cleanly while retired list/conditional rules and broad globs fail closed."""
+    base = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["triggers"]}},
+    }
+    for approval in (
+        {
+            "default": "require_approval",
+            "rules": [{"match": "triggers", "arguments": {"action": "list"}, "action": "auto_approve"}],
+        },
+        {
+            "default": "auto_approve",
+            "rules": [{"match": "triggers", "arguments": {"action": "delete"}, "action": "require_approval"}],
+        },
+        {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "*", "agents": "guest", "action": "require_approval"},
+                {"match": "triggers", "action": "auto_approve"},
+                {"match": "*", "action": "require_approval"},
+            ],
+        },
+        {
+            "default": "auto_approve",
+            "rules": [
+                {"match": "*", "arguments": {"action": "list"}, "action": "auto_approve"},
+                {"match": "triggers", "action": "auto_approve"},
+                {"match": "*", "action": "require_approval"},
+            ],
+        },
+    ):
+        assert Config.validate_with_runtime({**base, "tool_approval": approval}, _runtime_paths(tmp_path))
+
+    for approval in (
+        {"rules": [{"match": ["delete_trigger", "slack_post"], "action": "require_approval"}]},
+        {"rules": [{"match": "delete_trigger", "agents": "research", "action": "require_approval"}]},
+        {
+            "default": "require_approval",
+            "rules": [{"match": "*triggers", "arguments": {"action": "list"}, "action": "auto_approve"}],
+        },
+        {
+            "rules": [
+                {"match": "delete_trigger", "agents": "ops", "action": "require_approval"},
+                {"match": "*", "agents": "ops", "action": "auto_approve"},
+                {"match": "triggers", "action": "require_approval"},
+            ],
+        },
+    ):
+        with pytest.raises(ConfigRuntimeValidationError, match="triggers"):
+            Config.validate_with_runtime({**base, "tool_approval": approval}, _runtime_paths(tmp_path))
+
+
 @pytest.mark.parametrize(
     "rules",
     [

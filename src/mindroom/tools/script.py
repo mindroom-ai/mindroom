@@ -71,14 +71,9 @@ if TYPE_CHECKING:
         ),
     ],
     requires_room_context=True,
-    function_names=(
-        "start_script",
-        "get_script_resource_profiles",
-        "get_script",
-        "cancel_script",
-        "list_scripts",
-    ),
-    workspace_writers=("start_script",),
+    function_names=("script_read", "script_write"),
+    workspace_writers=("script_write",),
+    action_scoped_grants=("script_read", "script_write"),
     supports_toolkit_filters=False,
 )
 def script_tools() -> type[ScriptTools]:

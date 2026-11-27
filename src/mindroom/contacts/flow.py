@@ -186,7 +186,7 @@ def own_side_terms(actor: ContactActor, record: ContactRecord) -> str:
     rules, tools = _side_terms(actor.config, actor.runtime_paths, record, side)
     return (
         f"\nRules {party.id} follows in this contact:\n{rules}\n"
-        f"Tools it may use there: {tools}. Change them with update_contact."
+        f'Tools it may use there: {tools}. Change them with contacts_write(action="update", ...).'
     )
 
 
@@ -302,7 +302,7 @@ def existing_contact(
         if existing.status == "declined":
             if existing.target.kind == "remote_agent":
                 # The owner who declined is out of reach, so the asking owner clears the decline here.
-                msg = f"{existing.target.id} declined contact {existing.id}; remove it with remove_contact to ask again"
+                msg = f'{existing.target.id} declined contact {existing.id}; remove it with contacts_write(action="remove", ...) to ask again'
             else:
                 msg = f"{existing.target.owner} declined this contact; they can remove it to allow a new request"
             raise ValueError(msg)
@@ -312,7 +312,7 @@ def existing_contact(
         if asked != stored:
             msg = (
                 f"Contact {existing.id} with {target.id} already exists and is {existing.status}; "
-                "change your side's rules or tools with update_contact"
+                'change your side\'s rules or tools with contacts_write(action="update", ...)'
             )
             raise ValueError(msg)
         return existing
@@ -352,7 +352,7 @@ async def request_contact(
     pending or active contact between the same two parties, in either direction, is returned instead of a new one; a
     pending one's request notice is posted when it never landed, and a repeat by its requester then replaces its reason
     and the room and thread its answer goes to. Asking again with other rules or tools is refused, because only
-    ``update_contact`` changes them.
+    ``contacts_write(action="update", ...)`` changes them.
     """
     actor = tool_actor(context, agent_name)
     config, paths = actor.config, actor.runtime_paths

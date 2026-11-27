@@ -288,9 +288,40 @@ def test_automation_thread_renders_nothing() -> None:
 @pytest.mark.parametrize(
     "tools",
     [
-        # Graph lookups returned to the graph would read as fresh evidence.
-        pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="graph"),
+        # Graph lookups and edits (both consolidated and pre-upgrade retired names) are never evidence.
+        pytest.param(
+            [_tool("knowledge_graph_read", "Alice leads Atlas", action="search", query="Atlas")],
+            id="graph-read",
+        ),
+        pytest.param(
+            [
+                _tool(
+                    "knowledge_graph_write",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    action="delete_fact",
+                    fact_id="f1",
+                ),
+            ],
+            id="graph-write",
+        ),
+        pytest.param([_tool("search_graph", "Alice leads Atlas", query="Atlas")], id="retired-graph-read"),
+        pytest.param(
+            [_tool("delete_graph_fact", "Deleted the fact 'Alice leads Atlas'.", fact_id="f1")],
+            id="retired-graph-write",
+        ),
         # A shell or minimal-mode lookup returns the graph's facts as its output; the whole command is searched.
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "Alice leads Atlas",
+                    command="cd /work && "
+                    + "echo setup; " * 60
+                    + "mindroom-agent tools call knowledge_graph.knowledge_graph_read --json '{}'",
+                ),
+            ],
+            id="shell-lookup",
+        ),
         pytest.param(
             [
                 _tool(
@@ -301,9 +332,19 @@ def test_automation_thread_renders_nothing() -> None:
                     + "mindroom-agent tools call knowledge_graph search_graph --json '{}'",
                 ),
             ],
-            id="shell-lookup",
+            id="retired-shell-lookup",
         ),
         # A graph edit through a shell echoes the facts and names it changed.
+        pytest.param(
+            [
+                _tool(
+                    "bash",
+                    "Deleted the fact 'Alice leads Atlas'.",
+                    command="mindroom-agent tools call knowledge_graph.knowledge_graph_write --json '{}'",
+                ),
+            ],
+            id="shell-edit",
+        ),
         pytest.param(
             [
                 _tool(
@@ -312,7 +353,7 @@ def test_automation_thread_renders_nothing() -> None:
                     command="mindroom-agent tools call knowledge_graph delete_graph_fact --json '{}'",
                 ),
             ],
-            id="shell-edit",
+            id="retired-shell-edit",
         ),
         # A graph-enabled agent's knowledge search returns graph facts beside its documents, directly or through a shell.
         pytest.param(
@@ -342,6 +383,7 @@ def test_automation_thread_renders_nothing() -> None:
             [
                 _tool("job", "Job `j2` (run_subagent subagent) succeeded:\nI think Bob owns Atlas.", action="collect"),
                 _tool("claude_send", "Bob owns it", prompt="who"),
+                _tool("claude_agent_write", "Bob owns it", action="send", prompt="who"),
             ],
             id="jobs-and-claude",
         ),
@@ -360,6 +402,16 @@ def test_graph_lookups_and_model_prose_are_never_rendered(tools: list[ToolExecut
     run = _run("r1", tools=tools)
 
     assert [item.episode.kind for item in _episodes([run], "conversation")] == ["conversation"]
+
+
+def test_claude_agent_prose_exclusion_only_drops_send_and_legacy_claude_send() -> None:
+    """Historical claude_send and claude_agent_write(action='send') are excluded; lifecycle/status calls stay evidence."""
+    assert not is_evidence(_tool("claude_send", "Bob owns it", prompt="who"))
+    assert not is_evidence(_tool("claude_agent_write", "Bob owns it", action="send", prompt="who"))
+    assert is_evidence(_tool("claude_agent_write", "Started Claude session `s1`.", action="start"))
+    assert is_evidence(_tool("claude_agent_write", "Interrupt sent to Claude session `s1`.", action="interrupt"))
+    assert is_evidence(_tool("claude_agent_write", "Closed Claude session `s1`.", action="end"))
+    assert is_evidence(_tool("claude_agent_status", "Claude session `s1` is active."))
 
 
 class _Index:

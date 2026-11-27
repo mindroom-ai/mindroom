@@ -330,22 +330,22 @@ EOF
 `terminal` gives an agent persistent terminals: interactive Bash shells in its workspace that keep running between calls, which people in the room can watch live and type in from a chat client that shows terminals, as far as the agent's [`terminals`](../configuration/agents.md) setting allows.
 Use it for work people should see or that keeps state between commands, such as a dev server, a REPL, an interactive program, or a long build.
 
-- `terminal_open(cwd)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
-- `terminal_run(session_id, command, timeout_s)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30, at most 600) for its next prompt, and returns the output and exit status; a command still running then keeps running.
-- `terminal_send(session_id, keys)` types text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
-- `terminal_read(session_id)` returns the terminal's recent output as text.
-- `terminal_list()` lists the workspace's terminals, including the ones people opened.
+- `terminal_write(action="open", cwd=...)` opens a terminal in `cwd`, a folder of the workspace, by default the workspace itself.
+- `terminal_write(action="run", session_id=..., command=..., timeout_s=...)` types one command line while the shell waits at an empty prompt, waits up to `timeout_s` seconds (default 30, at most 600) for its next prompt, and returns the output and exit status; a command still running then keeps running.
+- `terminal_write(action="send", session_id=..., keys=...)` types verbatim text and named keys, such as `<enter>`, `<tab>`, `<up>`, and `<ctrl-c>`, without waiting for a command; `<ctrl-c>` goes on its own, since the terminal may drop keys typed right after it.
+- `terminal_read(action="read", session_id=...)` returns the terminal's recent output as text.
+- `terminal_read(action="list")` lists the workspace's terminals, including the ones people opened.
 
 An agent has terminals only when it also has [`shell`] with `run_shell_command` and that shell runs in a worker; otherwise it is offered none of these functions.
 A terminal runs in that worker with the environment and workspace of the agent's shell commands, except that it never gets the response's `mindroom-agent` CLI access, because it outlives the response.
 It also starts with `INPUTRC=/dev/null`, so it and the readline programs started in it keep their built-in key bindings and read no readline settings, such as a `~/.inputrc` in the workspace.
 Everyone whose turns reach the same agent workspace in the same worker shares its terminals.
 With [`terminals: type`](../configuration/agents.md), people who may post messages in the room type in them where the worker mounts the agent's workspace, a dedicated Docker or Kubernetes worker or a `static_runner` with [`MINDROOM_STATIC_RUNNER_AGENT_STORAGE`](../deployment/sandbox-proxy.md#filesystem-isolation-and-agent-data); everyone else who may use the agent watches.
-After keys typed while a command runs, such as an answer to its prompt, `terminal_run` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_send`.
+After keys typed while a command runs, such as an answer to its prompt, `terminal_write(action="run")` refuses until the agent sends `<ctrl-c>` at the prompt that follows, and inside a shell started in the terminal, such as `bash` or `nix-shell`, it refuses until that shell exits, so the agent types into it with `terminal_write(action="send")`.
 A terminal ends 30 minutes after its last input while nobody watches, and when its worker stops.
 
 An agent types in terminals only while its `run_shell_command` calls never ask for approval: the first [approval rule](../tool-approval.md) that matches `run_shell_command` is `auto_approve`, or no rule matches and `tool_approval.default` is `auto_approve`; a rule with an approval script counts as one that may ask.
-Otherwise the agent is offered only `terminal_read` and `terminal_list`, and its instructions tell it to run commands with `run_shell_command`; people the agent's `terminals` setting lets type still type in the terminals.
+Otherwise the agent is offered only `terminal_read` (`list` and `read`), and its instructions tell it to run commands with `run_shell_command`; people the agent's `terminals` setting lets type still type in the terminals.
 The rules can't judge typing into a terminal, because what a line runs there depends on what ran in it before, such as aliases, functions, shell options, and programs reading the keys.
 
 ```yaml
@@ -394,7 +394,7 @@ agents:
 ## [`shared_directories`]
 
 `shared_directories` lets an agent create a directory, write files into it, and invite other agents to read them.
-It provides `create_shared_directory(name)`, `invite_to_shared_directory(name, agent_name)`, `remove_from_shared_directory(name, agent_name)`, `delete_shared_directory(name)`, `list_shared_directories()`, `accept_shared_directory(owner, name)`, and `decline_shared_directory(owner, name)`, and has no configuration fields.
+It provides `list_shared_directories()` and `shared_directories_write(action, name, agent_name=None, owner=None)` (actions: `create`, `invite`, `accept`, `decline`, `remove`, `delete`), and has no configuration fields.
 
 ### Setup
 
@@ -422,7 +422,7 @@ agents:
 ```
 
 Then ask `researcher` in `lobby`, for example: "Save your notes in a shared directory called report and invite writer."
-It calls `create_shared_directory("report")` and `invite_to_shared_directory("report", "writer")`, and from then on both agents see the directory's path in their prompts.
+It calls `shared_directories_write(action="create", name="report")` and `shared_directories_write(action="invite", name="report", agent_name="writer")`, and from then on both agents see the directory's path in their prompts.
 `list_shared_directories()` shows each directory an agent owns or joined, with its path and access, the pending invitations of each directory it owns, and the invitations waiting for it.
 
 ### Sharing between personal agents
@@ -450,7 +450,7 @@ agents:
 
 Ann asks `ann_assistant`: "Share your notes with ben_assistant in a shared directory called notes."
 Ann cannot use `ben_assistant`, so the invitation is pending, and `ben_assistant` sees only the directory's owner and name, never its path or files; `list_shared_directories()` also shows who asked and when.
-When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `accept_shared_directory("ann_assistant", "notes")` and reads the files from then on.
+When Ben next talks to `ben_assistant`, its prompt mentions the invitation; Ben says "Accept the notes directory from ann_assistant", and it calls `shared_directories_write(action="accept", owner="ann_assistant", name="notes")` and reads the files from then on.
 The same works from `ben_assistant` to `ann_assistant`, and between `team_helper` and either person's agent: `team_helper` invites at once when the person asking can use the invited agent, and otherwise that agent's person accepts.
 
 ### Rules
@@ -462,10 +462,10 @@ Creating or deleting a directory, and adding or removing a member, restarts each
 
 An invitation applies at once when the user who asks for it may use the invited agent outside the current room.
 Access through `access.users`, administrator rights, `access.members_of_rooms`, or the default grant to members of the agent's managed `rooms` counts, but `access.current_room_members` does not; see [Responder access](../authorization.md#responder-access).
-Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `accept_shared_directory(owner, name)` or declines it with `decline_shared_directory(owner, name)`.
+Otherwise the invitation is pending until a user who may use the invited agent, by the same rule, accepts it through that agent with `shared_directories_write(action="accept", owner=..., name=...)` or declines it with `shared_directories_write(action="decline", owner=..., name=...)`.
 A pending agent sees no path or file of the directory and its worker mounts nothing until the accept; inviting it again while pending changes nothing.
 An agent holds at most 10 pending invitations; a further invitation fails until it accepts or declines one, or an owner cancels one.
-The owner's `remove_from_shared_directory` and `delete_shared_directory` also cancel a pending invitation.
+The owner's `shared_directories_write(action="remove", ...)` and `shared_directories_write(action="delete", ...)` also cancel a pending invitation.
 
 Under `file_access: workspace`, `filesystem` accepts paths inside the agent's shared directories when it runs in a worker or when MindRoom runs without workers.
 When MindRoom uses workers but an agent's `filesystem` runs in the primary process, `workspace` keeps it out of shared directories; add it to the agent's `worker_tools`.

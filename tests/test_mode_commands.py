@@ -21,6 +21,7 @@ from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import primary_records_dir
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
@@ -568,10 +569,14 @@ def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path) -> None
 
     assert "uses `minimal`" in result, result
     assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
+    context.config.agents["gated"] = AgentConfig(display_name="Gated", tools=["shell"], memory_backend="file")
+    context.config.tool_approval = ToolApprovalConfig(
+        rules=[ApprovalRuleConfig(match="run_shell_command", agents="gated", action="require_approval")],
+    )
     candidates = minimal_mode_preflight.minimal_subagent_candidates(
         context.config,
         context.runtime_paths,
-        ["helper"],
+        ["helper", "gated"],
         identity,
     )
     assert candidates == ["helper"]
