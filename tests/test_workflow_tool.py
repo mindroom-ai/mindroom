@@ -1613,13 +1613,12 @@ _OFFERED_DESCRIPTION = """\
 Start, cancel, resume, or save durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs). Use `workflow_read(action="list"|"get")` to list runs/saved workflows or inspect run status.
 
 Actions (only pass parameters for the chosen action):
-- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.
+- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile`, `max_cost_usd`.
 - `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).
 - `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=["n4"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).
 - `save`: save a run's script as `workflows/<name>.py` for `action="start", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {"arg": "meaning"}`.
 
 Script authoring (`action="start"`):
-Use when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.
 Define `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.
 
     from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
@@ -1652,7 +1651,7 @@ SDK:
 Durability & execution:
 - Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.
 - `action="resume"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.
-- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `workflow_read(action="get")` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
+- `action="start"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; top-level calls require `background_tool_jobs.enabled: true`, while nested calls wait inline; reports with failed calls note it on line 1). `workflow_read(action="get")` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.
 
 Models: haiku, opus (add an effort as in opus@high).
 Agents you can run with agent=: helper, roommate."""
@@ -1806,10 +1805,18 @@ async def test_workflow_read_and_write_reject_cross_boundary_actions(stack: Work
     from mindroom.workflow_runs.store import WorkflowRunStoreError  # noqa: PLC0415
 
     toolkit = WorkflowTools(stack.context.config)
-    with pytest.raises(WorkflowRunStoreError, match="Unsupported workflow_read action"):
+    with pytest.raises(
+        WorkflowRunStoreError,
+        match=r"Unsupported workflow_read action 'start'.*Use workflow_write\(action='start'\) instead\.",
+    ):
         await toolkit.workflow_read(action="start")  # type: ignore[arg-type]
-    with pytest.raises(WorkflowRunStoreError, match="Unsupported workflow_write action"):
+    with pytest.raises(
+        WorkflowRunStoreError,
+        match=r"Unsupported workflow_write action 'list'.*Use workflow_read\(action='list'\) instead\.",
+    ):
         await toolkit.workflow_write(action="list")  # type: ignore[arg-type]
+    with pytest.raises(WorkflowRunStoreError, match=r"Unsupported workflow_read action 123\."):
+        await toolkit.workflow_read(action=123)  # type: ignore[arg-type]
     assert await toolkit.managed_job("workflow_read", {"action": "get"}, job_id="j1", runtime=stack.jobs) is None
     assert await toolkit.managed_job("workflow_read", {"action": "start"}, job_id="j1", runtime=stack.jobs) is None
     assert await toolkit.managed_job("workflow_write", {"action": "cancel"}, job_id="j1", runtime=stack.jobs) is None

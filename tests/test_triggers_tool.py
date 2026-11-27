@@ -1178,18 +1178,20 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
             ({"action": "delete"}, "trigger_id is required"),
             ({"action": "rotate_key", "public_key": _PUBLIC_KEY}, "trigger_id is required"),
             ({"action": "rotate_key", "trigger_id": "x"}, "public_key is required"),
-            ({"action": "list"}, "Unsupported triggers_write action"),
+            ({"action": "list"}, "Use triggers_read(action='list') instead."),
             ({"action": "bogus"}, "Unsupported triggers_write action"),
         ]
         for kwargs, expected_msg in write_cases:
             res = _payload(await tool.triggers_write(**kwargs))
             assert res["status"] == "error", (kwargs, res)
             assert expected_msg in res["message"], (kwargs, res)
+            if kwargs["action"] == "bogus":
+                assert "Use " not in res["message"]
 
         read_cases: list[tuple[dict[str, Any], str]] = [
             ({"action": "test"}, "trigger_id is required"),
-            ({"action": "watch_room"}, "Unsupported triggers_read action"),
-            ({"action": "delete"}, "Unsupported triggers_read action"),
+            ({"action": "watch_room"}, "Use triggers_write(action='watch_room') instead."),
+            ({"action": "delete"}, "Use triggers_write(action='delete') instead."),
             ({"action": "bogus"}, "Unsupported triggers_read action"),
         ]
         for kwargs, expected_msg in read_cases:

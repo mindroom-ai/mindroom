@@ -922,7 +922,7 @@ async def test_browser_primary_placement_binds_positional_arguments(
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [
-        ({"target": "host", "node": "unsupported"}, "node parameter is not supported"),
+        ({"target": "host", "node": "unsupported"}, "unexpected keyword argument 'node'"),
         ({"target": "desktop"}, "configured Matrix desktop device identity"),
     ],
 )
@@ -947,7 +947,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
     worker_requests: list[dict[str, object]],
     action: str,
 ) -> None:
-    """Discovery ignores target/node hints, including a desktop default."""
+    """Discovery ignores target hints, including a desktop default."""
     agent, context = _context_agent(
         tmp_path / "primary",
         "browser",
@@ -957,7 +957,7 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
         response = await run_offered(
             agent,
             "browser_read",
-            {"action": action, "target": "desktop", "node": "ignored"},
+            {"action": action, "target": "desktop"},
         )
 
     assert not response.is_error
