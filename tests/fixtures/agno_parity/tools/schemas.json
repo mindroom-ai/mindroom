@@ -19851,13 +19851,28 @@
     "guidance": null,
     "functions": [
       {
-        "name": "tag_thread",
-        "description": "Add or update one topic tag; lifecycle state requires thread_resolution.",
+        "name": "thread_tags",
+        "description": "Add, remove, or list topic tags on Matrix threads (only pass parameters for the chosen action; `room_id` defaults to current room).\n- `tag`: add/update `tag` on `thread_id` (defaults to current thread); optional `room_id`, `note`, `data` (JSON object).\n- `untag`: remove `tag` from `thread_id` (defaults to current thread); optional `room_id`, `canonical=True` (skip root lookup).\n- `list`: inspect one thread or room-wide (`thread_id` omitted inspects current thread only when no `room_id`, tag filter, or `include_untagged=True` is passed; otherwise queries room-wide, e.g. unresolved: `action=\"list\", exclude_tag=\"resolved\", include_untagged=True`). Filters: `tag` (exact, excludes untagged), `include_tag` (has tag, excludes untagged), `exclude_tag` (lacks tag, untagged pass), `include_untagged=True` (enumerate every thread root via `/threads` with empty `tags`, adds `include_untagged` & `truncated`, incompatible with `thread_id`; defaults to False).\n\nTags normalize to lowercase hyphenated slugs (canonical IDs <=50 chars preserved; new free-form tags <=25 chars, e.g. `\"feature-request\"`). Prefer existing tags (1-3 typical, <=5 max). Thread lifecycle state cannot be changed with this tool (use `thread_resolution` / `thread_snooze` when configured).",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "tag",
+                "untag",
+                "list"
+              ]
+            },
             "tag": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "thread_id": {
               "anyOf": [
@@ -19902,95 +19917,9 @@
                   "type": "null"
                 }
               ]
-            }
-          },
-          "required": [
-            "tag"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "untag_thread",
-        "description": "Remove one topic tag; lifecycle state requires thread_resolution.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "tag": {
-              "type": "string"
-            },
-            "thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "room_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
             },
             "canonical": {
               "type": "boolean"
-            }
-          },
-          "required": [
-            "tag"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_thread_tags",
-        "description": "List Matrix thread tags for one thread or across a room (filters normalize like `tag_thread`).\nOmitting `thread_id` inspects the current thread only when no `room_id`, tag filter, or `include_untagged=True` is provided; passing any filter, `room_id`, or `include_untagged=True` without `thread_id` queries room-wide.\nFor unresolved threads, call `list_thread_tags(exclude_tag=\"resolved\", include_untagged=True)`.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Restrict to one thread root (incompatible with `include_untagged=True`)."
-            },
-            "room_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Target room (defaults to current room)."
-            },
-            "tag": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Keep only threads carrying this exact tag (excludes untagged)."
             },
             "include_tag": {
               "anyOf": [
@@ -20000,8 +19929,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Keep only threads with this tag (excludes untagged)."
+              ]
             },
             "exclude_tag": {
               "anyOf": [
@@ -20011,12 +19939,10 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Keep threads lacking this tag (untagged threads pass)."
+              ]
             },
             "include_untagged": {
-              "type": "boolean",
-              "description": "When True, also enumerate every thread root via `/threads` with empty `tags` (adds `include_untagged` and `truncated`). Defaults to False."
+              "type": "boolean"
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -20029,7 +19955,9 @@
               ]
             }
           },
-          "required": []
+          "required": [
+            "action"
+          ]
         },
         "strict": false,
         "gate": null,
@@ -21953,11 +21881,32 @@
     "guidance": null,
     "functions": [
       {
-        "name": "start_workflow",
-        "description": "Run a workflow: a Python script that puts many agents to work in the background.\n\nUse when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.\nPass exactly one of source (inline Python), path (workspace file), or name (saved workflows/<name>.py).\nDefine `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.\n\n    from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,\n                                   run, send, inbox, state, now, random, PartialFailure)\n    def main(args):\n        phase(\"Research\")\n        try: notes = foreach(args[\"topics\"], lambda t: agent(f\"Research {t}. Cite sources.\"))\n        except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run\n        draft = agent(\"Write report:\\n\\n\" + \"\\n\\n\".join(notes))\n        for _ in range(3):\n            chk = agent(\"List factual issues:\\n\\n\" + draft, schema={\"type\": \"object\", \"required\": [\"problems\"],\n                        \"properties\": {\"problems\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}})\n            if not chk[\"problems\"]: break\n            draft = agent(f\"Fix: {chk['problems']}\\n\\n{draft}\")\n        return draft\n    # Multi-turn loop: dev, rev = spawn(\"dev\"), spawn(\"rev\", system=\"Review diffs. Reply APPROVE or list issues.\")\n    #   tests, r = shell(cmd), rev.ask(\"Review `git diff main`.\"); dev.ask(f\"Fix:\\n{tests.output}\\n{r}\")\n    # Peers: parallel([lambda: agent(\"Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.\", name=\"be\"),\n    #                  lambda: agent(\"Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.\", name=\"fe\")]); return state.get(\"contract\")\n\nSDK:\n- agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None, profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None): fresh copy of you (all tools, no conversation memory—include full context in prompt); returns text or parsed JSON if schema (JSON Schema dict; retries up to 5 turns, then AgentError kind \"schema\", or \"indeterminate\" if a turn used tools; mutually exclusive with output_path). agent=\"other\" runs that configured agent; name is label/peer address only. model: from Models below. system: replaces prompt; tools/skills/knowledge: subset lists (require system). profile: subagents/<profile>.md. minimal=True: cheap single-shell copy. timeout: seconds before cancel. output_path: also writes workspace file. dedicated_worker=True: isolated container; resource_profile: worker size. Failures raise AgentError.\n- foreach(items, fn) / parallel([fn1, fn2]): run in parallel (up to max_concurrent), returning ordered results (use foreach over items, not lambda lists; may nest). On any failure, waits for siblings then raises PartialFailure (.ok, .results, .errors; uncaught fails run).\n- s = spawn(name, **agent_opts): stateful session; s.ask(message, *, schema=None, timeout=None) continues it (concurrent asks on one session fail; run two sessions via parallel).\n- ask_user(question, options=None): asks user in thread (option buttons or free text); only this branch waits while parallel branches continue.\n- shell(command) -> .ok, .exit_code, .output (last 50 KiB max; redirect to file for more). tool(toolkit, function, **arguments) calls any other tool of yours.\n- phase(title) groups calls; log(text) emits progress; run(name, args) runs a nested saved workflow.\n- Peers & shared state: every agent automatically has send_peer_message(to, text), read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value), ask_user(question, options=None). Address by name, \"*\" (all unfinished agents), or \"script\"; tell agents in prompts whom to message. Unread-only cursor: read_peer_messages/inbox return {messages: [{from, text, sent_at}], note?}; waiting frees slot until mail or timeout (\"No message arrived within <N> s.\")—prefer short bounded loops (10-30s x N rounds); mail to unstarted peers is queued. Script uses send(to, text), inbox(wait_seconds=0), state.get(key, default=None) (returns value directly), state.set(key, value). set_shared_state/state.set accept raw JSON values (don't json.dumps), last-write-wins (one writer/key); get_shared_state(key) returns {key, found, value} (or full dict if omitted).\n\nDurability & execution:\n- Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.\n- resume_workflow reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in rerun.\n- Returns {run_id, job_id, status, title} immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). get_workflow(run_id) shows calls and cost_usd/attempt_cost_usd. Uncapped unless max_cost_usd is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher max_cost_usd). Agents needing approval wait for user without failing.\n\nModels: default.\nAgents you can run with agent=: helper.",
+        "name": "workflow",
+        "description": "Run and manage durable background Python workflows (parallel agent/tool fan-out, verification loops, cost caps, resumable runs).\n\nActions (only pass parameters for the chosen action):\n- `start`: run a workflow. Pass exactly one of `source` (inline Python), `path` (workspace file), or `name` (saved `workflows/<name>.py`). Optional: `args` (JSON dict for `main(args)`), `title` (3-6 words), `max_concurrent` (default 16), `resource_profile` (`small`|`standard`|`large`), `max_cost_usd`.\n- `get`: run status, cost, open questions, failed calls, and nodes (`run_id`; optional `nodes`: `\"active\"` default, `\"failed\"`, or `\"all\"`; `messages=True` adds peer messages & shared state).\n- `cancel`: stop a run and its agents (`run_id`; finished calls stay saved for `resume`).\n- `resume`: continue a stopped/failed run or rerun a finished one (`run_id`; optional `source` or `path` to edit script, `rerun=[\"n4\"]` to re-run saved/indeterminate calls, higher `max_cost_usd`).\n- `list`: recent runs in this conversation and saved workflows (`name`, `description`, `args`)—no other parameters.\n- `save`: save a run's script as `workflows/<name>.py` for `action=\"start\", name=...` (`run_id`, `name` 1-64 lowercase `[a-z0-9_-]`; optional one-line `description`). Saved files self-document via docstring line 1 and optional `ARGS = {\"arg\": \"meaning\"}`.\n\nScript authoring (`action=\"start\"`):\nUse when a task needs parallel fan-out, many agents, independent verification, or a bounded loop.\nDefine `def main(args):` returning the final report (str or JSON); MindRoom calls `main`—do not call it yourself.\n\n    from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,\n                                   run, send, inbox, state, now, random, PartialFailure)\n    def main(args):\n        phase(\"Research\")\n        try: notes = foreach(args[\"topics\"], lambda t: agent(f\"Research {t}. Cite sources.\"))\n        except PartialFailure as e: notes = e.ok  # or leave uncaught to fail run\n        draft = agent(\"Write report:\n\n\" + \"\n\n\".join(notes))\n        for _ in range(3):\n            chk = agent(\"List factual issues:\n\n\" + draft, schema={\"type\": \"object\", \"required\": [\"problems\"],\n                        \"properties\": {\"problems\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}}})\n            if not chk[\"problems\"]: break\n            draft = agent(f\"Fix: {chk['problems']}\n\n{draft}\")\n        return draft\n    # Multi-turn loop: dev, rev = spawn(\"dev\"), spawn(\"rev\", system=\"Review diffs. Reply APPROVE or list issues.\")\n    #   tests, r = shell(cmd), rev.ask(\"Review `git diff main`.\"); dev.ask(f\"Fix:\n{tests.output}\n{r}\")\n    # Peers: parallel([lambda: agent(\"Propose API to 'fe' via send_peer_message; poll read_peer_messages(20) x4; set_shared_state('contract', d); send DONE.\", name=\"be\"),\n    #                  lambda: agent(\"Poll read_peer_messages(20) x4; reply via send_peer_message; stop on DONE.\", name=\"fe\")]); return state.get(\"contract\")\n\nSDK:\n- agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None, profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None): fresh copy of you (all tools, no conversation memory—include full context in prompt); returns text or parsed JSON if schema (JSON Schema dict; retries up to 5 turns, then AgentError kind \"schema\", or \"indeterminate\" if a turn used tools; mutually exclusive with output_path). agent=\"other\" runs that configured agent; name is label/peer address only. model: from Models below. system: replaces prompt; tools/skills/knowledge: subset lists (require system). profile: subagents/<profile>.md. minimal=True: cheap single-shell copy. timeout: seconds before cancel. output_path: also writes workspace file. dedicated_worker=True: isolated container; resource_profile: worker size. Failures raise AgentError.\n- foreach(items, fn) / parallel([fn1, fn2]): run in parallel (up to max_concurrent), returning ordered results (use foreach over items, not lambda lists; may nest). On any failure, waits for siblings then raises PartialFailure (.ok, .results, .errors; uncaught fails run).\n- s = spawn(name, **agent_opts): stateful session; s.ask(message, *, schema=None, timeout=None) continues it (concurrent asks on one session fail; run two sessions via parallel).\n- ask_user(question, options=None): asks user in thread (option buttons or free text); only this branch waits while parallel branches continue.\n- shell(command) -> .ok, .exit_code, .output (last 50 KiB max; redirect to file for more). tool(toolkit, function, **arguments) calls any other tool of yours.\n- phase(title) groups calls; log(text) emits progress; run(name, args) runs a nested saved workflow.\n- Peers & shared state: every agent automatically has send_peer_message(to, text), read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value), ask_user(question, options=None). Address by name, \"*\" (all unfinished agents), or \"script\"; tell agents in prompts whom to message. Unread-only cursor: read_peer_messages/inbox return {messages: [{from, text, sent_at}], note?}; waiting frees slot until mail or timeout (\"No message arrived within <N> s.\")—prefer short bounded loops (10-30s x N rounds); mail to unstarted peers is queued. Script uses send(to, text), inbox(wait_seconds=0), state.get(key, default=None) (returns value directly), state.set(key, value). set_shared_state/state.set accept raw JSON values (don't json.dumps), last-write-wins (one writer/key); get_shared_state(key) returns {key, found, value} (or full dict if omitted).\n\nDurability & execution:\n- Every agent/tool/shell result is persisted; Python glue re-runs on resume—do all writes (files/git/HTTP) via shell(), tool(), or agent(), never plain Python. Use SDK now()/random() in prompts. Pass cached=False to shell()/tool() to re-run external checks on every resume.\n- `action=\"resume\"` reuses saved calls up to the first change (and unchanged foreach/parallel items), rerunning changed calls and everything after. Only proven-unstarted calls auto-retry; calls that may have written (raised tool, agent with tool calls) end indeterminate—check effects, then pass in `rerun`.\n- `action=\"start\"` returns `{run_id, job_id, status, title}` immediately (delivers full report on finish; waits inline if background jobs unavailable; reports with failed calls note it on line 1). `action=\"get\"` shows calls and `cost_usd`/`attempt_cost_usd`. Uncapped unless `max_cost_usd` is set (stops starting calls at limit, finishes running ones, ends interrupted—resume with higher `max_cost_usd`). Agents needing approval wait for user without failing.\n\nModels: default.\nAgents you can run with agent=: helper.",
         "parameters": {
           "type": "object",
           "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "start",
+                "get",
+                "cancel",
+                "resume",
+                "list",
+                "save"
+              ]
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "source": {
               "anyOf": [
                 {
@@ -21966,8 +21915,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Inline Python source."
+              ]
             },
             "path": {
               "anyOf": [
@@ -21977,8 +21925,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Workspace-relative path of a Python file."
+              ]
             },
             "name": {
               "anyOf": [
@@ -21988,8 +21935,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Name of a saved workflow; list_workflow_runs shows them and their args."
+              ]
             },
             "args": {
               "anyOf": [
@@ -22003,8 +21949,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "JSON object passed to main(args)."
+              ]
             },
             "title": {
               "anyOf": [
@@ -22014,12 +21959,17 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Three to six words shown on the run's card."
+              ]
             },
             "max_concurrent": {
-              "type": "integer",
-              "description": "How many agents run at once. Raise it for large fan-outs."
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "resource_profile": {
               "type": "string",
@@ -22027,8 +21977,7 @@
                 "small",
                 "standard",
                 "large"
-              ],
-              "description": "Worker size for the script itself."
+              ]
             },
             "max_cost_usd": {
               "anyOf": [
@@ -22038,35 +21987,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Stop the run when it has spent this much; resume it with a higher limit."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
               ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "get_workflow",
-        "description": "Return a run's status, cost, open questions, failed calls and nodes. nodes is \"active\" (default), \"failed\" or \"all\"; messages=True adds peer messages and shared state.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "The run's ID, as start_workflow returned it."
             },
             "nodes": {
               "type": "string",
@@ -22074,92 +21995,10 @@
                 "active",
                 "failed",
                 "all"
-              ],
-              "description": "Which calls to list: \"active\", \"failed\" or \"all\"."
+              ]
             },
             "messages": {
-              "type": "boolean",
-              "description": "When True, include full peer message history and shared state."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "cancel_workflow",
-        "description": "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "The run's ID, as start_workflow returned it."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "run_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "resume_workflow",
-        "description": "Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "The run's ID, as start_workflow returned it."
-            },
-            "source": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Inline Python source that replaces the run's script."
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Workspace-relative path of a Python file that replaces the run's script."
+              "type": "boolean"
             },
             "rerun": {
               "anyOf": [
@@ -22172,75 +22011,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "IDs of saved calls to run again, such as [\"n4\"]."
-            },
-            "max_cost_usd": {
-              "anyOf": [
-                {
-                  "type": "number"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "New cost limit in USD; must exceed what the run has spent when it stopped at its limit."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
               ]
-            }
-          },
-          "required": [
-            "run_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_workflow_runs",
-        "description": "List this conversation's recent runs and your saved workflows (name, description, args).",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "save_workflow",
-        "description": "Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.\nA saved file documents itself for list_workflow_runs with its module docstring's first line and an optional\nliteral `ARGS = {\"arg\": \"meaning\"}`.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "run_id": {
-              "type": "string",
-              "description": "The run's ID, as start_workflow returned it."
-            },
-            "name": {
-              "type": "string",
-              "description": "Name of the saved workflow (1 to 64 lowercase letters, digits, hyphens, or underscores, starting with a letter or digit)."
             },
             "description": {
               "anyOf": [
@@ -22250,8 +22021,7 @@
                 {
                   "type": "null"
                 }
-              ],
-              "description": "Optional one-line description added as the file's docstring when it has none."
+              ]
             },
             "mindroom_output_path": {
               "anyOf": [
@@ -22265,8 +22035,7 @@
             }
           },
           "required": [
-            "run_id",
-            "name"
+            "action"
           ]
         },
         "strict": false,
