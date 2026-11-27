@@ -111,13 +111,46 @@ class ExternalEventSourceSpec(BaseModel):
     source_type: Literal["external_event"] = "external_event"
     source_id: str
     kind: str
-    match: dict[str, str | bool | int] = Field(default_factory=dict)
+    match: dict[str, str | bool | int | list[str]] = Field(default_factory=dict)
+    binding: dict[str, str | bool | int] = Field(default_factory=dict)
+    source_origin: Literal["yaml", "registered"] = "yaml"
+    private_room_only: bool = False
+
+    @property
+    def is_registered(self) -> bool:
+        """Return whether this spec targets a registered EventSource rather than a YAML webhook source."""
+        return self.source_origin == "registered"
+
+    @model_validator(mode="after")
+    def _validate_spec(self) -> ExternalEventSourceSpec:
+        if self.binding and self.source_origin != "registered":
+            msg = "binding is only allowed when source_origin='registered'"
+            raise ValueError(msg)
+        return self
 
     @field_validator("source_id", "kind")
     @classmethod
     def validate_non_empty_fields(cls, value: str, info: ValidationInfo) -> str:
         """Require non-empty source_id and kind values."""
         return _strip_non_empty(value, field_name=str(info.field_name))
+
+    @field_validator("match")
+    @classmethod
+    def validate_match(
+        cls,
+        values: dict[str, str | bool | int | list[str]],
+    ) -> dict[str, str | bool | int | list[str]]:
+        """Validate list match filters are non-empty lists of non-empty strings."""
+        validated: dict[str, str | bool | int | list[str]] = {}
+        for key, value in values.items():
+            if isinstance(value, list):
+                if not value:
+                    msg = f"match[{key!r}] list must not be empty"
+                    raise ValueError(msg)
+                validated[key] = [_strip_non_empty(item, field_name=f"match[{key!r}] entry") for item in value]
+            else:
+                validated[key] = value
+        return validated
 
 
 class GitHubPRSourceSpec(BaseModel):
@@ -208,6 +241,7 @@ class TriggerTargetSpec(BaseModel):
     thread_id: str | None = None
     new_thread: bool = False
     thread_key: str | None = Field(default=None, max_length=256)
+    thread_key_from_event: bool = False
     reopen_on_fire: bool = False
     prompt: str = Field(min_length=1, max_length=4000)
 
@@ -231,6 +265,12 @@ class TriggerTargetSpec(BaseModel):
             raise ValueError(msg)
         if self.thread_key is not None and not self.new_thread:
             msg = "thread_key requires new_thread=True"
+            raise ValueError(msg)
+        if self.thread_key_from_event and not self.new_thread:
+            msg = "thread_key_from_event requires new_thread=True"
+            raise ValueError(msg)
+        if self.thread_key_from_event and self.thread_key is not None:
+            msg = "thread_key_from_event and thread_key are mutually exclusive"
             raise ValueError(msg)
         return self
 
@@ -305,11 +345,21 @@ class TriggerEvent(BaseModel):
     timestamp: float = Field(allow_inf_nan=False)
     room_id: str | None = None
     thread_id: str | None = None
+    thread_key: str | None = None
     actor: str | None = None
     title: str | None = None
     summary: str | None = None
     text: str | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("thread_key")
+    @classmethod
+    def validate_thread_key(cls, value: str | None) -> str | None:
+        """Normalize blank external thread keys to None."""
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
 
 
 class RoomCursor(BaseModel):

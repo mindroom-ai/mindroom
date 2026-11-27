@@ -23,12 +23,15 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, 
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agents import create_agent
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import TURN_INTENT_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.custom_tools.dynamic_tools import DynamicToolsToolkit
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import (
@@ -42,6 +45,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.tool_search import portable_tool_search_request, portable_tool_search_stream
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.path_confinement import open_directory_within_root
@@ -50,6 +54,7 @@ from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.build import build_provider
 from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.pipeline.wrapped import RequestProjection, WrappedProvider
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -69,6 +74,7 @@ from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -76,18 +82,20 @@ from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
-from tests.conftest import delete_runs, install_model_providers, seed_session
+from tests.conftest import bind_runtime_paths, delete_runs, install_model_providers, seed_session
 from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 from tests.tool_job_helpers import NewerMessageWaits
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider, StreamEvent
     from mindroom.tool_system.tool_function import ToolFunction
@@ -876,7 +884,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     model = _model(
         ("skill_manage", {**patch_step, "name": "older-lesson", "new_string": "0. Guess."}),
         ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
-        ("get_skill_instructions", {"skill_name": "older-lesson"}),
+        ("skill", {"action": "instructions", "name": "older-lesson"}),
         (
             "skill_manage",
             {**patch_step, "name": "older-lesson", "new_string": "1. Run the smoke test.\n2. Check logs."},
@@ -898,10 +906,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     assert progress.changes == {"deploy-checks": "created", "older-lesson": "updated"}
     assert (root / "older-lesson/SKILL.md").read_text().endswith("2. Check logs.\n")
     assert (root / "deploy-checks/SKILL.md").read_text().endswith("2. Retry.\n")
-    assert all(
-        tools == {"get_skill_instructions", "get_skill_reference", "get_skill_script", "skill_manage"}
-        for tools in model.offered_tools
-    )
+    assert all(tools == {"skill", "skill_manage"} for tools in model.offered_tools)
     # Provider adapters must leave tool selection on, or the reviewer can never call skill_manage.
     assert not any(model.provider_tools_blocked)
     evidence = model.requests[0][-1]
@@ -910,7 +915,7 @@ async def test_a_replayed_review_creates_views_and_patches_with_only_skill_tools
     assert "- older-lesson (learner): Use when deploying the web service" in evidence
     refused = json.loads(model.requests[1][-1])
     assert refused["success"] is False
-    assert "with get_skill_instructions before patching" in refused["error"]
+    assert 'with skill(action="instructions", ...) before patching' in refused["error"]
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
@@ -930,7 +935,7 @@ async def test_reviewer_patches_and_support_files_refuse_literal_credentials(
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     leaked_line = 'password: "Zq8vN3pL7wX2kR9mT4yB6c"'
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         (
             "skill_manage",
             {
@@ -1022,7 +1027,7 @@ def _gemini_reply(part: dict[str, object]) -> dict[str, object]:
     }
 
 
-_VIEW = json.dumps({"skill_name": "older-lesson"})
+_VIEW = json.dumps({"action": "instructions", "name": "older-lesson"})
 
 
 @dataclass(frozen=True)
@@ -1045,7 +1050,7 @@ _PROVIDER_WIRES = {
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "get_skill_instructions", "arguments": _VIEW},
+                            "function": {"name": "skill", "arguments": _VIEW},
                         },
                     ],
                 },
@@ -1063,7 +1068,7 @@ _PROVIDER_WIRES = {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": "get_skill_instructions",
+                    "name": "skill",
                     "arguments": _VIEW,
                     "status": "completed",
                 },
@@ -1084,7 +1089,7 @@ _PROVIDER_WIRES = {
         ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="test-key"),
         (
             _claude_reply(
-                {"type": "tool_use", "id": "toolu_1", "name": "get_skill_instructions", "input": json.loads(_VIEW)},
+                {"type": "tool_use", "id": "toolu_1", "name": "skill", "input": json.loads(_VIEW)},
                 "tool_use",
             ),
             _claude_reply({"type": "text", "text": "Nothing to save."}, "end_turn"),
@@ -1094,7 +1099,7 @@ _PROVIDER_WIRES = {
     "google": _ProviderWire(
         ModelConfig(provider="google", id="gemini-3.8-flash", api_key="test-key"),
         (
-            _gemini_reply({"functionCall": {"name": "get_skill_instructions", "args": json.loads(_VIEW)}}),
+            _gemini_reply({"functionCall": {"name": "skill", "args": json.loads(_VIEW)}}),
             _gemini_reply({"text": "Nothing to save."}),
         ),
         lambda request: request.get("toolConfig", {}).get("functionCallingConfig", {}).get("mode") == "NONE",
@@ -1115,12 +1120,12 @@ async def test_reviewer_refuses_protected_skills_and_stops_at_its_budget(
     _write_skill(root, "handwritten", HANDWRITTEN)
     model = _model(
         ("skill_manage", {"action": "patch", "name": "mindroom-docs", "old_string": "a", "new_string": "b"}),
-        ("get_skill_instructions", {"skill_name": "handwritten"}),
+        ("skill", {"action": "instructions", "name": "handwritten"}),
         (
             "skill_manage",
             {"action": "edit", "name": "handwritten", "content": LEARNED.replace("deploy-checks", "handwritten")},
         ),
-        *[("get_skill_instructions", {"skill_name": "handwritten"})] * 12,
+        *[("skill", {"action": "instructions", "name": "handwritten"})] * 12,
     )
     install_model_providers(monkeypatch, {"default": model})
     with patch("mindroom.skill_learning.reviewer.record_run_usage", AsyncMock()):
@@ -1170,7 +1175,7 @@ async def test_the_budget_counts_what_each_request_sends(tmp_path: Path, monkeyp
     _seed(config, paths, _run("r1", *[Message(role="user", content="x" * 3_600) for _ in range(8)]))
     root = _skills_root(config, paths)
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
-    view = ("get_skill_instructions", {"skill_name": "deploy-checks"})
+    view = ("skill", {"action": "instructions", "name": "deploy-checks"})
     patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
     model = _model(
         [view, view, view],
@@ -1361,7 +1366,7 @@ async def test_adopted_skill_in_a_differently_named_directory_can_be_patched(
     _seed(config, paths, _tool_turn("r1"))
     patch_step = {"action": "patch", "name": "Deploy Checklist", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "Deploy Checklist"}),
+        ("skill", {"action": "instructions", "name": "Deploy Checklist"}),
         ("skill_manage", {**patch_step, "new_string": "1. Run the smoke test.\n2. Check the logs."}),
     )
     progress = ReviewProgress()
@@ -1470,7 +1475,7 @@ async def test_skill_edits_sent_in_one_reply_both_land(tmp_path: Path, monkeypat
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     patch_step = {"action": "patch", "name": "deploy-checks"}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         [
             ("skill_manage", {**patch_step, "old_string": "1. Run the smoke test.", "new_string": "1. Run smoke."}),
             ("skill_manage", {**patch_step, "old_string": "the web service", "new_string": "the web app"}),
@@ -1712,16 +1717,219 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     assert (sent.prompt_hold_pin, forked.prompt_hold_pin) == (None, [])
     assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=(), prompt_hold_pin=[])
     assert shell_calls == deploy_calls == []
-    assert denied[-1] == (
-        "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "
-        "get_skill_reference, and get_skill_script run here."
-    )
+    assert denied[-1] == ("This tool is not available during a skill review; only skill_manage and skill run here.")
     # A call that would wait for a person is answered as unavailable instead of pausing the review.
     assert missing[-1] == MISSING_TOOL_ERROR_TEXT
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.request_breakdown is not None
     assert {row.kind for row in report.request_breakdown} == {"skill_learning"}
+
+
+@pytest.mark.asyncio
+async def test_forked_review_reuses_prefix_when_skill_manage_is_portable_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable-deferred skill_manage keeps the forked wire prefix byte-identical and routes via call_tool/tool_search."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    shell_calls: list[str] = []
+    deploy_calls: list[str] = []
+    inner = _model()
+    provider = WrappedProvider(
+        inner=inner,
+        stage=portable_tool_search_stream,
+        projection=RequestProjection(lambda _inner, request: portable_tool_search_request(request)),
+    )
+    capture = SkillReviewCapture()
+    deferred = DeferredTools(names=frozenset({"skill_manage", "shell", "deploy"}), portable=True)
+    settings = ModelRequest(messages=(), deferred_tools=deferred)
+    dynamic = adapt_toolkit(DynamicToolsToolkit(deferred_toolkits=lambda: ())).functions
+    tools = [*_agent_tools(config, paths, shell_calls, deploy_calls=deploy_calls), *dynamic]
+    await _answer(provider, capture, tools, settings=settings)
+
+    inner.script = [
+        ("tool_search", {"query": "shell"}),
+        ("tool_search", {"query": "skill_manage"}),
+        ("tool_search", {"query": ""}),
+        ("call_tool", {"name": "shell", "arguments": {"cmd": "id"}}),
+        ("call_tool", {"name": "deploy", "arguments": {"target": "prod"}}),
+        (
+            "call_tool",
+            {
+                "name": "skill_manage",
+                "arguments": {"action": "create", "name": "deploy-checks", "content": LEARNED},
+            },
+        ),
+    ]
+    replay_spy = AsyncMock(side_effect=AssertionError("_replay must not run for a portable-deferred fork"))
+    monkeypatch.setattr(reviewer_module, "_replay", replay_spy)
+    await _review(config, paths, captured=capture.latest)
+
+    replay_spy.assert_not_called()
+    (
+        primary_wire,
+        fork_wire,
+        after_shell_search,
+        after_skill_search,
+        after_empty_search,
+        after_denied_shell,
+        after_gated_deploy,
+        after_create,
+    ) = inner.received[:8]
+    # Prompt-cache hit: identical wire tool schemas (without deferred tools) and identical leading messages.
+    assert fork_wire.tools == primary_wire.tools
+    assert "skill_manage" not in {tool.name for tool in fork_wire.tools}
+    assert "call_tool" in {tool.name for tool in fork_wire.tools}
+    assert fork_wire.messages[: len(primary_wire.messages)] == primary_wire.messages
+    assert 'call_tool(name="skill_manage", arguments={...})' in str(fork_wire.messages[-1].content)
+
+    # tool_search filters by query over deferred runnable skill tools only (empty query lists them).
+    assert json.loads(str(after_shell_search.messages[-1].content))["matches"] == []
+    assert [match["name"] for match in json.loads(str(after_skill_search.messages[-1].content))["matches"]] == [
+        "skill_manage",
+    ]
+    assert [entry["name"] for entry in json.loads(str(after_empty_search.messages[-1].content))["functions"]] == [
+        "skill_manage",
+    ]
+
+    # Both ungated and gated non-skill deferred tools go straight to review_call_tool without probing answered tools.
+    assert "'shell' was not called" in str(after_denied_shell.messages[-1].content)
+    assert 'call_tool(name="skill_manage"' in str(after_denied_shell.messages[-1].content)
+    assert "'deploy' was not called" in str(after_gated_deploy.messages[-1].content)
+    assert 'call_tool(name="skill_manage"' in str(after_gated_deploy.messages[-1].content)
+
+    # Resolvable call_tool(name="skill_manage", ...) wrote the skill and projects back as call_tool on the wire.
+    assert json.loads(str(after_create.messages[-1].content))["success"] is True
+    assert after_create.messages[-1].tool_name == "call_tool"
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
+    assert shell_calls == deploy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_forked_review_reuses_prefix_when_skill_manage_is_native_deferred(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Native-deferred skill_manage keeps the forked request prefix and deferred_tools identical."""
+    config, paths = _learning_agent_with_a_skill(tmp_path)
+    shell_calls: list[str] = []
+    model = _model()
+    capture = SkillReviewCapture()
+    deferred = DeferredTools(names=frozenset({"skill_manage", "shell"}), portable=False)
+    settings = ModelRequest(messages=(), deferred_tools=deferred)
+    tools = _agent_tools(config, paths, shell_calls)
+    await _answer(model, capture, tools, settings=settings)
+
+    model.script = [
+        ("shell", {"cmd": "id"}),
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}),
+    ]
+    replay_spy = AsyncMock(side_effect=AssertionError("_replay must not run for a native-deferred fork"))
+    monkeypatch.setattr(reviewer_module, "_replay", replay_spy)
+    await _review(config, paths, captured=capture.latest)
+
+    replay_spy.assert_not_called()
+    primary_wire, fork_wire, after_denied = model.received[:3]
+    assert fork_wire.tools == primary_wire.tools
+    assert fork_wire.deferred_tools == primary_wire.deferred_tools == deferred
+    assert fork_wire.messages[: len(primary_wire.messages)] == primary_wire.messages
+    assert "may require tool search" in str(fork_wire.messages[-1].content)
+    assert after_denied.messages[-1].content == (
+        "This tool is not available during a skill review; only skill_manage and skill run here."
+    )
+    assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
+    assert shell_calls == []
+
+
+def test_auto_injected_skill_manage_deferral_rules(tmp_path: Path) -> None:
+    """Auto-injected skill_manage defers only when another deferred tool survives and search works; authored flags win."""
+
+    def build_agent(
+        *,
+        tools: list[object],
+        default_tools: list[object] | None = None,
+        skill_learning_enabled: bool = True,
+        native_tool_search: bool = False,
+        approval_rules: list[ApprovalRuleConfig] | None = None,
+        tool_function_filter: Callable[[ToolFunction], bool] | None = None,
+    ) -> AgentBuild:
+        config, paths = _learner(tmp_path)
+        config.defaults.tools = default_tools or []
+        config.agents["mind"].include_default_tools = default_tools is not None
+        config.agents["mind"].tools = tools  # type: ignore[assignment]
+        config.agents["mind"].skill_learning.enabled = skill_learning_enabled
+        if approval_rules:
+            config.tool_approval = ToolApprovalConfig(rules=approval_rules)
+        config = bind_runtime_paths(Config.validate_with_runtime(config.model_dump(mode="python"), paths), paths)
+        provider = _model()
+        if native_tool_search:
+            provider.capabilities = Capabilities(native_tool_search=True)
+        return create_agent(
+            "mind",
+            config,
+            paths,
+            None,
+            knowledge=None,
+            model=turn_model(config, paths, "mind"),
+            provider=provider,
+            plugins=config_plugins(config, paths),
+            tool_function_filter=tool_function_filter,
+        )
+
+    # 1. No other deferred tool -> auto-injected skill_manage stays inline and does not spawn dynamic_tools.
+    inline_only = build_agent(tools=["calculator"])
+    assert inline_only.request_template.deferred_tools.names == frozenset()
+    assert "skill_manage" in {fn.name for tk in inline_only.spec.toolkits for fn in tk.functions}
+    assert "tool_search" not in {fn.name for tk in inline_only.spec.toolkits for fn in tk.functions}
+
+    # 2. Another non-initial deferred tool survives -> auto-injected skill_manage auto-defers (portable & native).
+    portable_auto = build_agent(tools=[{"calculator": {"defer": True}}], native_tool_search=False)
+    assert portable_auto.request_template.deferred_tools.portable is True
+    assert "skill_manage" in portable_auto.request_template.deferred_tools.names
+    assert "tool_search" in {fn.name for tk in portable_auto.spec.toolkits for fn in tk.functions}
+
+    native_auto = build_agent(tools=[{"calculator": {"defer": True}}], native_tool_search=True)
+    assert native_auto.request_template.deferred_tools.portable is False
+    assert "skill_manage" in native_auto.request_template.deferred_tools.names
+
+    # 3. Only initial: true deferred tool -> stays inline.
+    initial_only = build_agent(tools=[{"calculator": {"defer": True, "initial": True}}])
+    assert "skill_manage" not in initial_only.request_template.deferred_tools.names
+    assert "tool_search" not in {fn.name for tk in initial_only.spec.toolkits for fn in tk.functions}
+
+    # 4. Explicitly authored bare / defer: false / inherited from defaults.tools -> stays inline.
+    authored_bare = build_agent(tools=["skill_manage", {"calculator": {"defer": True}}])
+    assert "skill_manage" not in authored_bare.request_template.deferred_tools.names
+    authored_default = build_agent(tools=[{"calculator": {"defer": True}}], default_tools=["skill_manage"])
+    assert "skill_manage" not in authored_default.request_template.deferred_tools.names
+
+    # 5. Explicitly authored defer: true on skill_manage alone -> activates tool search on its own.
+    explicit_defer = build_agent(tools=[{"skill_manage": {"defer": True}}], skill_learning_enabled=False)
+    assert explicit_defer.request_template.deferred_tools.portable is True
+    assert explicit_defer.request_template.deferred_tools.names == frozenset({"skill_manage"})
+    assert "tool_search" in {fn.name for tk in explicit_defer.spec.toolkits for fn in tk.functions}
+
+    # 6. Portable search blocked by filter or approval -> auto-injected skill_manage stays inline.
+    filtered_search = build_agent(
+        tools=[{"calculator": {"defer": True}}],
+        tool_function_filter=lambda fn: fn.name != "call_tool",
+    )
+    assert "skill_manage" not in filtered_search.request_template.deferred_tools.names
+    gated_search = build_agent(
+        tools=[{"calculator": {"defer": True}}],
+        approval_rules=[ApprovalRuleConfig(match="call_tool", action="require_approval")],
+    )
+    assert "skill_manage" not in gated_search.request_template.deferred_tools.names
+
+    # 7. When an eager tool shadows every function of the only deferred tool, skill_manage stays eager and
+    # dynamic_tools is not offered.
+    shadowed = build_agent(tools=["duckduckgo", {"googlesearch": {"defer": True}}], native_tool_search=False)
+    assert shadowed.request_template.deferred_tools.names == frozenset()
+    shadowed_fn_names = {fn.name for tk in shadowed.spec.toolkits for fn in tk.functions}
+    assert "skill_manage" in shadowed_fn_names
+    assert "tool_search" not in shadowed_fn_names
+    assert "call_tool" not in shadowed_fn_names
 
 
 @pytest.mark.asyncio
@@ -1800,6 +2008,8 @@ async def test_the_fork_resends_the_final_request_as_sent_so_the_provider_reads_
         "skill_manage needs approval",
         "skill_manage asks as its job",
         "skill_manage runs elsewhere",
+        "portable deferred skill_manage without call_tool",
+        "portable deferred skill_manage with gated call_tool",
         "conversation too long to fork",
         "no capture",
     ],
@@ -1813,6 +2023,7 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(
     config, paths = _learning_agent_with_a_skill(tmp_path)
     config.models["small"] = ModelConfig(provider="openai", id="gpt-6-luna")
     tools = _agent_tools(config, paths, [])
+    settings = EMPTY_REQUEST
     if reason == "other review model":
         config.agents["mind"].skill_learning.model = "small"
     elif reason == "no skill_manage":
@@ -1823,9 +2034,24 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(
         tools = [replace(tool, gate=ToolGate.JOB) if tool.name == "skill_manage" else tool for tool in tools]
     elif reason == "skill_manage runs elsewhere":
         tools = [replace(tool, gate=ToolGate.DELEGATION) if tool.name == "skill_manage" else tool for tool in tools]
+    elif reason == "portable deferred skill_manage without call_tool":
+        settings = ModelRequest(
+            messages=(),
+            deferred_tools=DeferredTools(names=frozenset({"skill_manage"}), portable=True),
+        )
+    elif reason == "portable deferred skill_manage with gated call_tool":
+        dynamic = adapt_toolkit(DynamicToolsToolkit(deferred_toolkits=lambda: ())).functions
+        tools = [
+            *tools,
+            *(replace(fn, gate=ToolGate.POLICY) if fn.name == "call_tool" else fn for fn in dynamic),
+        ]
+        settings = ModelRequest(
+            messages=(),
+            deferred_tools=DeferredTools(names=frozenset({"skill_manage"}), portable=True),
+        )
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
-    await _answer(primary, capture, tools)
+    await _answer(primary, capture, tools, settings=settings)
     assert capture.latest is not None
     captured = capture.latest
     if reason == "no final answer":
@@ -2115,7 +2341,7 @@ async def test_the_review_validates_skill_tool_arguments_like_the_agents_tools(
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
     patch_step = {"action": "patch", "name": "deploy-checks", "old_string": "1. Run the smoke test."}
     model = _model(
-        ("get_skill_instructions", {"skill_name": "deploy-checks"}),
+        ("skill", {"action": "instructions", "name": "deploy-checks"}),
         # Hermes' delete is not an action here, and a string "false" is no licence to replace every match.
         ("skill_manage", {"action": "delete", "name": "deploy-checks", "file_path": "references/notes.md"}),
         ("skill_manage", {**patch_step, "new_string": "1. Smoke.", "replace_all": "false"}),
@@ -2153,11 +2379,14 @@ async def test_the_review_reads_support_files_by_the_paths_it_lists(tmp_path: Pa
     library.write_skill_file(root, "deploy-checks", "references/notes.md", "Notes.", expected_digest=None, learner=True)
     catalog = load_skill_catalog(config, paths, "mind", root)
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    (listed,) = json.loads(await tools.get_skill_instructions("deploy-checks"))["support_files"]
+    (listed,) = json.loads(await tools.skill("instructions", "deploy-checks"))["support_files"]
     assert listed == "references/notes.md"
     for reference_path in (listed, "notes.md"):
-        loaded = json.loads(await tools.get_skill_reference("deploy-checks", reference_path))
+        loaded = json.loads(await tools.skill("reference", "deploy-checks", reference_path))
         assert loaded["content"] == "Notes."
+    assert not json.loads(await tools.skill("instructions", "deploy-checks", "notes.md"))["success"]
+    assert not json.loads(await tools.skill("reference", "deploy-checks"))["success"]
+    assert not json.loads(await tools.skill("instructions", "deploy-checks", mindroom_output_path="out.txt"))["success"]
 
 
 @pytest.mark.asyncio
@@ -2168,7 +2397,7 @@ async def test_a_refused_removal_keeps_the_reviews_read(tmp_path: Path) -> None:
     library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
     catalog = load_skill_catalog(config, paths, "mind", root)
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=ReviewProgress())
-    await tools.get_skill_instructions("deploy-checks")
+    await tools.skill("instructions", "deploy-checks")
     refused = json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="SKILL.md"))
     assert not refused["success"]
     patched = json.loads(
@@ -2231,7 +2460,7 @@ async def test_a_review_records_each_files_content_before_its_first_and_after_it
     catalog = load_skill_catalog(config, paths, "mind", root)
     progress = ReviewProgress()
     tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=progress)
-    await tools.get_skill_instructions("deploy-checks")
+    await tools.skill("instructions", "deploy-checks")
     for old, new in (("1. Run the smoke test.", "1. Run smoke."), ("1. Run smoke.", "1. Run smoke.\n2. Retry.")):
         assert json.loads(await tools.skill_manage("patch", "deploy-checks", old_string=old, new_string=new))["success"]
     for file_path in ("references/new.md", "references/temp.md"):
@@ -2240,7 +2469,7 @@ async def test_a_review_records_each_files_content_before_its_first_and_after_it
     assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/temp.md"))[
         "success"
     ]
-    await tools.get_skill_reference("deploy-checks", "references/old.md")
+    await tools.skill("reference", "deploy-checks", "references/old.md")
     assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/old.md"))[
         "success"
     ]
@@ -2327,3 +2556,24 @@ def test_notice_diffs_show_a_changed_final_newline_and_other_line_separators() -
         (1, 1, "@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text\n"),
         (2, 1, "@@ -1 +1,2 @@\n-a\vb\n+a\n+b\n"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_review_skill_tool_treats_blank_optional_path_as_unset_on_instructions(tmp_path: Path) -> None:
+    """SkillTools.skill ignores blank path on instructions while still rejecting blank path on reference/script."""
+    config, paths = _learner(tmp_path)
+    skills_root = _skills_root(config, paths)
+    _write_skill(skills_root, "demo-skill", "---\nname: demo-skill\ndescription: Demo\n---\n\nStep one.\n")
+    catalog = load_skill_catalog(config, paths, "mind", skills_root)
+    tools = SkillTools(skills_root, dict(catalog.entries), catalog.reserved_names)
+
+    for blank in ("", "   "):
+        loaded = json.loads(await tools.skill("instructions", "demo-skill", path=blank, mindroom_output_path=blank))
+        assert "error" not in loaded
+        assert "Step one." in loaded["content"]
+
+    for action in ("reference", "script"):
+        for blank in ("", "   "):
+            refused = json.loads(await tools.skill(action, "demo-skill", path=blank))
+            assert "error" in refused
+            assert "Name the support file" in refused["error"]

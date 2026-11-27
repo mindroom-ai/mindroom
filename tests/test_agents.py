@@ -4031,7 +4031,7 @@ def test_create_agent_loads_private_workspace_skills(
 
     assert agent.prompt.skills_block is not None
     assert "<name>private-skill</name>" in agent.prompt.skills_block
-    assert "get_skill_instructions" in _offered(agent)
+    assert "skill" in _offered(agent)
 
 
 def test_create_agent_private_root_requires_execution_identity(
@@ -4307,15 +4307,14 @@ def test_create_agent_hides_generated_functions_an_approval_rule_may_gate(tmp_pa
     config = _config_with_workspace_skill(tmp_path)
     config.tool_approval = ToolApprovalConfig(
         rules=[
-            ApprovalRuleConfig(match="get_skill_script", action="require_approval"),
+            ApprovalRuleConfig(match="skill", action="require_approval"),
             ApprovalRuleConfig(match="search_knowledge_base", action="require_approval"),
         ],
     )
 
     functions = _offered(_create_agent_for_test("general", config, knowledge=_knowledge("docs")))
 
-    assert "get_skill_instructions" in functions
-    assert "get_skill_script" not in functions
+    assert "skill" not in functions
     assert "search_knowledge_base" not in functions
 
 
@@ -4327,7 +4326,7 @@ def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(
 
     prompt = system_text(prompt_for_turn(agent))
 
-    for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
+    for advertised in ("<skills_system>", "skill(action=", "search_knowledge_base"):
         assert advertised not in prompt
 
 
@@ -4344,8 +4343,8 @@ async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_p
     agent = _create_agent_for_test("general", config, plugins=plugins)
 
     skill_result = await execute_tool_call(
-        _offered(agent)["get_skill_instructions"],
-        {"skill_name": "scripted"},
+        _offered(agent)["skill"],
+        {"action": "instructions", "name": "scripted"},
         ToolCallContext(run_id="run", session_id="session", user_id="@alice:localhost", call_id="call-1"),
         middleware=agent_tool_middleware(agent),
     )

@@ -879,21 +879,16 @@ def get_tool_by_name(
 
         # Imported on first tool construction so importing this module stays free
         # of schema-generation imports (#1436).
-        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
         from mindroom.tool_system.toolkits import (  # noqa: PLC0415
             configure_toolkit_functions,
             toolkit_function_names,
         )
 
-        output_file_policy = (
-            ToolOutputFilePolicy.from_runtime(
-                tool_output_workspace_root,
-                runtime_paths,
-                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-                tools_use_workdir=current_tool_workdir() is not None,
-            )
-            if tool_output_workspace_root is not None
-            else None
+        output_file_policy = ToolOutputFilePolicy.for_current_tools(
+            tool_output_workspace_root,
+            runtime_paths,
+            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
         )
         settings = resolve_tool_settings(
             tool_name,

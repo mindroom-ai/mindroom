@@ -884,7 +884,7 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
 
         assert time.monotonic() - started_at < 25
         assert manager.spawned[0].process.poll() is not None
-        assert manager.dispatched == [False, False]
+        assert manager.dispatched == [False]
         assert _started_processes(tmp_path)
         assert not any(_runs(pid) for pid in _started_processes(tmp_path))
     assert (tmp_path / "tried.log").read_text(encoding="utf-8") == "tried\n"

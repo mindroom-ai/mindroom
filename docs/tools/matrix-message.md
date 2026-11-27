@@ -122,7 +122,7 @@ Each agent, room, and requester may make 12 calls per 30 seconds, and each attac
 ## Attachments
 
 Each `attachments` entry is an [attachment ID](../attachments.md#attachment-ids) (`att_*`) or a local file path, and files are sent in the listed order.
-Local paths are registered as new attachments and follow the same [path rules and limits as `register_attachment`](../attachments.md#registering-local-files).
+Local paths are registered as new attachments and follow the same [path rules and limits as `attachment(action="register", ...)`](../attachments.md#registering-local-files).
 Use `./att_filename` for a local file whose name starts with `att_`.
 Every reference is checked before anything is sent.
 

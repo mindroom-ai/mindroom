@@ -79,7 +79,7 @@ def validate_subscription_against_source(
     source: ExternalEventSourceConfig,
     *,
     kind: str,
-    match: Mapping[str, str | bool | int],
+    match: Mapping[str, str | bool | int | list[str]],
 ) -> None:
     """Validate that a rule's event kind and structured match filters fit source allowlists."""
     stripped_kind = kind.strip()
@@ -120,8 +120,10 @@ def check_external_event_source_access(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Recheck shared external event source existence, subscriber allowlist, and event/repo grants."""
-    source = config.external_trigger_policy.event_sources.get(source_spec.source_id)
-    if source is None:
+    if (
+        source_spec.is_registered
+        or (source := config.external_trigger_policy.event_sources.get(source_spec.source_id)) is None
+    ):
         return "source_removed"
     if not is_source_subscriber_allowed(source, owner_user_id, config, runtime_paths):
         return "source_subscriber_revoked"
@@ -358,18 +360,9 @@ def fan_out_external_event(
     if isinstance(source, GitHubEventSourceConfig) and event.kind == "ping" and "ping" not in source.allowed_events:
         return 0
     current_time = time.time() if now is None else now
-    rules = store.list_triggers(
-        include_disabled=False,
-        source_type="external_event",
-        source_id=source_id,
-    )
-
     matched_count = 0
-    for rule in rules:
-        if rule.expires_at is not None and rule.expires_at <= current_time:
-            continue
-        if not isinstance(rule.source, ExternalEventSourceSpec):
-            continue
+    for rule in store.list_active_external_rules(source_id, current_time, registered=False):
+        assert isinstance(rule.source, ExternalEventSourceSpec)
         if not is_source_subscriber_allowed(source, rule.owner_user_id, config, runtime_paths):
             continue
         if not matches_external_event(rule.source, event):

@@ -30,6 +30,7 @@ from mindroom.shell.execution import (
     run_command,
     shell_request_budget_seconds,
 )
+from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
@@ -45,6 +46,7 @@ from mindroom.shell.supervisor import (
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.toolkits import toolkit_function
 from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_shell_async import _get_toolkit, _make_runtime_paths
@@ -1473,6 +1475,123 @@ def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
         120.0,
     )
     assert timeout_seconds == 150.0
+
+
+@pytest.mark.asyncio
+async def test_kill_namespace_gracefully_flushes_sigterm_trap_and_preserves_other_namespace(tmp_path: Path) -> None:
+    """kill_namespace sends SIGTERM first so cleanup traps flush before the turn-ended trailer."""
+    registry: dict[str, ProcessRecord] = {}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
+
+    async with _running_server(registry) as socket_path:
+        start = partial(
+            run_command_via_supervisor,
+            socket_path,
+            env=_MINIMAL_ENV,
+            cwd=str(workspace),
+            tail=10,
+            on_timeout="background",
+            background_log=policy,
+        )
+        child_script = (
+            'trap "sleep 0.15; echo child-trap-cleanup-done; exit 0" TERM; echo child-ready; sleep 30 & wait $!'
+        )
+        trapped = await start(
+            namespace="shell-scope:graceful",
+            argv=["bash", "-c", f"bash -c '{child_script}' & wait"],
+            timeout=0.35,
+        )
+        other = await start(namespace="shell-scope:keep", argv=["bash", "-c", "sleep 30"], timeout=0.2)
+        assert trapped.handle is not None
+        assert other.handle is not None
+        assert "child-ready" in trapped.message
+        trapped_pid, trapped_log = registry[trapped.handle].pid, Path(registry[trapped.handle]._log_path or "")
+        other_pid = registry[other.handle].pid
+
+        try:
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:graceful")
+            assert trapped.handle not in registry
+            assert other.handle in registry
+            await _assert_pid_dead(trapped_pid)
+            log_text = trapped_log.read_text(encoding="utf-8")
+            assert "child-trap-cleanup-done" in log_text
+            assert "[MindRoom: stopped when turn ended]" in log_text
+            os.kill(other_pid, 0)
+        finally:
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:keep")
+            await _assert_pid_dead(other_pid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"",
+        b"{not-json\n",
+        b"\xff\xfe\n",
+        b'{"message": 123, "handle": null, "output_file_handled": false}\n',
+        b"x" * (shell_supervisor._REQUEST_LIMIT_BYTES + 64) + b"\n",
+    ],
+    ids=["eof", "invalid-json", "invalid-utf8", "invalid-fields", "oversized-line"],
+)
+async def test_post_send_supervisor_transport_error_preserves_output_file(tmp_path: Path, reply: bytes) -> None:
+    """Post-send transport/framing errors preserve mindroom_output_path; pre-connect failures do not claim it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "out.txt"
+    runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-fake-"))
+    socket_path = str(runtime_dir / "s.sock")
+
+    async def fake_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()
+        target.write_text("written-by-supervisor", encoding="utf-8")
+        if reply:
+            writer.write(reply)
+            with contextlib.suppress(OSError):
+                await writer.drain()
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
+
+    server = await asyncio.start_unix_server(fake_handler, path=socket_path)
+    try:
+        with shell_supervisor.bind_shell_dispatch_context(socket_path=socket_path, process_environ=_MINIMAL_ENV):
+            tool = get_tool_by_name(
+                "shell",
+                _make_runtime_paths(tmp_path),
+                runs_in_worker=False,
+                worker_target=None,
+                tool_init_overrides={"base_dir": str(workspace)},
+                tool_output_workspace_root=workspace,
+                tools=builtin_tool_registry(),
+            )
+        fn = toolkit_function(tool, "run_shell_command")
+        assert fn is not None
+        result = await fn.entrypoint(["echo", "hi"], mindroom_output_path="out.txt")
+        assert isinstance(result, ToolOutcome)
+        assert result.is_error is True
+        assert result.counts_as_tool_failure is True
+        assert result.content.startswith("Error:")
+        assert target.read_text(encoding="utf-8") == "written-by-supervisor"
+    finally:
+        server.close()
+        await server.wait_closed()
+        shutil.rmtree(runtime_dir, ignore_errors=True)
+
+    unavailable = await run_command_via_supervisor(
+        str(tmp_path / "missing.sock"),
+        namespace="shell",
+        argv=["echo", "hi"],
+        env=_MINIMAL_ENV,
+        cwd=str(workspace),
+        tail=10,
+        timeout=5,
+        output_destination=ShellOutputDestination(workspace_root=str(workspace), path="out.txt", max_bytes=1024),
+    )
+    assert unavailable.execution_error is True
+    assert unavailable.output_file_handled is False
 
 
 def test_shell_run_result_failed_and_supervisor_flags_round_trip() -> None:

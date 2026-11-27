@@ -746,7 +746,7 @@ async def test_a_compressed_download_served_as_octet_stream_is_never_viewed_as_t
 
     result = await _download(tool, context)
     with tool_runtime_context(context):
-        viewed = await AttachmentTools().get_attachment(str(result["attachment_id"]), view=True)
+        viewed = await AttachmentTools().attachment("get", attachment_id=str(result["attachment_id"]), view=True)
 
     assert result["attachment"]["mime_type"] == "application/octet-stream"
     assert isinstance(viewed, str)

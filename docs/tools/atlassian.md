@@ -323,7 +323,7 @@ To give an agent read access only, set [`write: false`](#limit-what-an-agent-can
 `confluence_list_attachments` returns attachment IDs such as `att123456`; when more results exist, it returns `has_more: true` with a `next_cursor` to pass back unchanged.
 
 `confluence_download_attachment` stores the file in MindRoom's [attachment storage](../attachments.md) for the current room and thread and returns a context attachment ID such as `att_0123456789abcdef`.
-The ID is usable in the same turn, for example with `get_attachment(attachment_id)` to inspect the file, `get_attachment(attachment_id, mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
+The ID is usable in the same turn, for example with `attachment(action="get", attachment_id=...)` to inspect the file, `attachment(action="get", attachment_id=..., mindroom_output_path=...)` to save it to the workspace, or `matrix_message` to send it.
 In a later turn, download the attachment again.
 
 Downloads are limited to 64 MiB, the limit for [registered files](../attachments.md), which cannot be raised.

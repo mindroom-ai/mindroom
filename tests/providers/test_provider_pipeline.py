@@ -917,7 +917,7 @@ async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
         Message(
             role="assistant",
             tool_calls=[
-                {"id": "call_1", "type": "function", "function": {"name": "get_attachment", "arguments": "{}"}},
+                {"id": "call_1", "type": "function", "function": {"name": "attachment", "arguments": "{}"}},
             ],
         ),
         Message(role="tool", tool_call_id="call_1", content=receipt),
@@ -1143,7 +1143,7 @@ async def test_a_named_viewed_image_removes_every_image_and_marks_the_receipts()
         Message(
             role="assistant",
             tool_calls=[
-                {"id": "call_1", "type": "function", "function": {"name": "get_attachment", "arguments": "{}"}},
+                {"id": "call_1", "type": "function", "function": {"name": "attachment", "arguments": "{}"}},
             ],
         ),
         Message(role="tool", tool_call_id="call_1", content=receipt),
@@ -1218,7 +1218,7 @@ async def test_answered_audio_drops_after_an_assistant_message_and_stays_byte_st
     assert (second.audio, second.images, second.files) == (None, [_image("att_photo")], [_REPORT])
     assert isinstance(second.content, str)
     assert second.content.startswith(f"Voice transcript\n\n{ANSWERED_AUDIO_MARKER}\nNot sent: audio (att_clip).\n")
-    assert "get_attachment(attachment_id, view=True)" in second.content
+    assert 'attachment(action="get", attachment_id=..., view=True)' in second.content
     assert FALLBACK_MARKER not in second.content
     assert (third.audio, third.content, third.images, third.files) == (
         second.audio,

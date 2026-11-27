@@ -369,7 +369,7 @@ For worker-routed `shell` calls with a resolved workspace, MindRoom sets `HOME`,
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
 As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
-For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
+For example, after `attachment(action="get", attachment_id="att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
 
@@ -488,7 +488,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
 | `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `trafilatura_extract(action="batch")` call at least 210 seconds | `120` |
-| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
+| `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `attachment(action="get", ..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |

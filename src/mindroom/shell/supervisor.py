@@ -39,7 +39,8 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
@@ -51,16 +52,16 @@ from mindroom.shell.execution import (
     ProcessRecord,
     ShellRunResult,
     check_command,
+    close_background_records,
     discard_background_record,
     kill_all_records,
     kill_command,
-    kill_namespace_records,
     run_command,
 )
 from mindroom.shell.output_capture import ShellOutputDestination
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator, Mapping
 
 logger = get_logger(__name__)
 
@@ -79,6 +80,32 @@ _FINISHED_STATUS_RE = re.compile(r"^Status: FINISHED \(exit code (-?\d+)(?:,|\))
 
 class ShellSupervisorStartupError(RuntimeError):
     """The shell supervisor process failed to start or become ready."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellDispatchContext:
+    """Request-local supervisor socket and process environment for direct shell dispatch."""
+
+    socket_path: str
+    process_environ: Mapping[str, str] | None
+
+
+_SHELL_DISPATCH_CONTEXT: ContextVar[_ShellDispatchContext | None] = ContextVar("shell_dispatch_context", default=None)
+
+
+def current_shell_dispatch_context() -> _ShellDispatchContext | None:
+    """Return the active request-local shell dispatch context, if any."""
+    return _SHELL_DISPATCH_CONTEXT.get()
+
+
+@contextmanager
+def bind_shell_dispatch_context(*, socket_path: str, process_environ: Mapping[str, str] | None) -> Iterator[None]:
+    """Bind a request-local supervisor socket and process environment for direct shell dispatch."""
+    token = _SHELL_DISPATCH_CONTEXT.set(_ShellDispatchContext(socket_path=socket_path, process_environ=process_environ))
+    try:
+        yield
+    finally:
+        _SHELL_DISPATCH_CONTEXT.reset(token)
 
 
 def background_script_supervision_supported() -> bool:
@@ -272,7 +299,10 @@ async def _handle_connection(
                 ),
             )
         elif op == "kill_namespace":
-            killed = kill_namespace_records(registry, namespace=str(payload["namespace"]))
+            namespace = str(payload["namespace"])
+            matching = {h: registry.pop(h) for h, r in list(registry.items()) if r.namespace == namespace}
+            killed = len(matching)
+            await close_background_records(matching)
             result = ShellRunResult(message=f"Killed {killed}.")
         else:
             result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.", execution_error=True)
@@ -372,6 +402,7 @@ async def run_command_via_supervisor(
         reader, writer = await asyncio.open_unix_connection(socket_path, limit=_REQUEST_LIMIT_BYTES)
     except OSError as exc:
         return ShellRunResult(message=f"Error: Shell supervisor is unavailable: {exc}", execution_error=True)
+    post_send_output_handled = output_destination is not None
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout + _RUN_RESPONSE_GRACE_SECONDS
     try:
@@ -386,14 +417,22 @@ async def run_command_via_supervisor(
                 break
             on_progress(text)
     except TimeoutError:
-        return ShellRunResult(message="Error: Shell supervisor did not respond in time.", execution_error=True)
-    except OSError as exc:
-        return ShellRunResult(message=f"Error: Shell supervisor request failed: {exc}", execution_error=True)
+        return ShellRunResult(
+            message="Error: Shell supervisor did not respond in time.",
+            output_file_handled=post_send_output_handled,
+            execution_error=True,
+        )
+    except (OSError, ValueError) as exc:
+        return ShellRunResult(
+            message=f"Error: Shell supervisor request failed: {exc}",
+            output_file_handled=post_send_output_handled,
+            execution_error=True,
+        )
     finally:
         writer.close()
         with suppress(OSError):
             await writer.wait_closed()
-    return _parse_supervisor_response(line)
+    return _parse_supervisor_response(line, output_file_handled_on_error=post_send_output_handled)
 
 
 def check_command_via_supervisor(socket_path: str, *, namespace: str, handle: str) -> str:
@@ -447,12 +486,12 @@ def _recv_line(conn: socket.socket) -> bytes:
     return bytes(buffer)
 
 
-def _parse_supervisor_response(line: bytes) -> ShellRunResult:
+def _parse_supervisor_response(line: bytes, *, output_file_handled_on_error: bool = False) -> ShellRunResult:
+    def error(msg: str) -> ShellRunResult:
+        return ShellRunResult(message=msg, output_file_handled=output_file_handled_on_error, execution_error=True)
+
     if not line.strip():
-        return ShellRunResult(
-            message="Error: Shell supervisor closed the connection unexpectedly.",
-            execution_error=True,
-        )
+        return error("Error: Shell supervisor closed the connection unexpectedly.")
     try:
         payload = json.loads(line)
         message, handle, output_file_handled = payload["message"], payload["handle"], payload["output_file_handled"]
@@ -460,8 +499,8 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         return_code = payload.get("return_code")
         timed_out = payload.get("timed_out", False)
         background_rejected = payload.get("background_rejected", False)
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
-        return ShellRunResult(message=f"Error: Invalid shell supervisor response: {exc}", execution_error=True)
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, AttributeError) as exc:
+        return error(f"Error: Invalid shell supervisor response: {exc}")
     if (
         not isinstance(message, str)
         or (handle is not None and not isinstance(handle, str))
@@ -471,10 +510,7 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         or not isinstance(timed_out, bool)
         or not isinstance(background_rejected, bool)
     ):
-        return ShellRunResult(
-            message="Error: Invalid shell supervisor response: invalid result fields.",
-            execution_error=True,
-        )
+        return error("Error: Invalid shell supervisor response: invalid result fields.")
     return ShellRunResult(
         message=message,
         handle=handle,

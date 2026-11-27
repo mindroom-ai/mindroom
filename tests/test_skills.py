@@ -550,7 +550,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
-    assert "error" in _call(skills, "get_skill_script", "linked", "hello.sh")
+    assert "error" in _call(skills, "skill", "script", "linked", "hello.sh")
 
 
 @pytest.mark.parametrize("layout", ["linked_skills_dir", "linked_skill_file", "fifo_skill_file", "huge_skill_file"])
@@ -769,22 +769,21 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
     )
     assert skills is not None
     tools = {function.name: function for function in adapt_toolkit(skills).functions}
-    assert set(tools) == {"get_skill_instructions", "get_skill_reference", "get_skill_script"}
+    assert set(tools) == {"skill"}
 
-    for tool in tools.values():
-        assert "mindroom_output_path" in tool.parameters["properties"]
+    skill_tool = tools["skill"]
+    assert "mindroom_output_path" in skill_tool.parameters["properties"]
 
-    instructions_tool = tools["get_skill_instructions"]
-    inline_result = json.loads(instructions_tool.entrypoint("demo"))
+    inline_result = json.loads(skill_tool.entrypoint("instructions", "demo"))
     assert inline_result["skill_name"] == "demo"
 
-    redirected = instructions_tool.entrypoint("demo", mindroom_output_path="out/instructions.json")
+    redirected = skill_tool.entrypoint("instructions", "demo", mindroom_output_path="out/instructions.json")
     receipt = redirected["mindroom_tool_output"]
     assert receipt["status"] == "saved_to_file"
     assert (workspace_root / "out" / "instructions.json").exists()
 
-    reference_tool = tools["get_skill_reference"]
-    redirected_reference = reference_tool.entrypoint(
+    redirected_reference = skill_tool.entrypoint(
+        "reference",
         "demo",
         "guide.md",
         mindroom_output_path="out/reference.txt",
@@ -805,7 +804,7 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
         roots=[tmp_path / "skills"],
     )
     assert skills is not None
-    assert _call(skills, "get_skill_instructions", "demo")["skill_name"] == "demo"
+    assert _call(skills, "skill", "instructions", "demo")["skill_name"] == "demo"
 
 
 def test_skill_root_loads_are_cached_until_a_skill_file_changes(tmp_path: Path) -> None:
@@ -848,7 +847,7 @@ def test_operator_skill_support_files_refresh_the_cached_skill(tmp_path: Path) -
         )
         # The prompt names no support file, so adding one leaves the system prompt as it was.
         assert with_script.prompt_block() == before.prompt_block()
-        assert _call(with_script, "get_skill_script", "alpha", "check.sh")["content"] == "echo ok\n"
+        assert _call(with_script, "skill", "script", "alpha", "check.sh")["content"] == "echo ok\n"
 
         (skill_dir / "references" / "guide.md").unlink()
         without_reference = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
@@ -1262,7 +1261,7 @@ def test_a_workspace_whose_skills_directory_is_one_skill_records_no_usage(tmp_pa
     _write_skill(workspace_skills.parent, "skills", "Whole-directory skill")
     skills = _load_workspace_only(tmp_path, storage)
     assert skills is not None
-    assert "Body" in str(_call(skills, "get_skill_instructions", "skills")["instructions"])
+    assert "Body" in str(_call(skills, "skill", "instructions", "skills")["instructions"])
     assert not (workspace_skills / ".usage.json").exists()
     assert not (workspace_skills.parent / ".usage.json").exists()
 
@@ -1282,8 +1281,29 @@ async def test_workspace_skill_loads_on_the_event_loop_record_usage_in_a_thread(
         record(skill_path)
 
     with patch.object(skills_module, "record_skill_use", spy):
-        _call(skills, "get_skill_instructions", "local")
+        _call(skills, "skill", "instructions", "local")
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     assert writers
     assert threading.main_thread() not in writers
     assert "last_used_at" in json.loads((workspace_skills / ".usage.json").read_text(encoding="utf-8"))["local"]
+
+
+def test_skill_tool_treats_blank_path_as_unset_on_instructions_and_rejects_on_files(tmp_path: Path) -> None:
+    """Empty/whitespace path is ignored for instructions, while blank path is rejected for reference and script."""
+    storage, workspace_skills = _workspace_skills(tmp_path)
+    skill_dir = _write_skill(workspace_skills, "local", "Workspace skill").parent
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "guide.md").write_text("Guide text.", encoding="utf-8")
+    skills = _load_workspace_only(tmp_path, storage)
+    assert skills is not None
+
+    for blank in ("", "   "):
+        inst = _call(skills, "skill", "instructions", "local", blank)
+        assert "error" not in inst
+        assert "Body" in str(inst["instructions"])
+
+    for action in ("reference", "script"):
+        for blank in ("", "   "):
+            err = _call(skills, "skill", action, "local", blank)
+            assert "error" in err
+            assert "path is required" in str(err["error"])

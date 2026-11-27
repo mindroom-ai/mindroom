@@ -2254,7 +2254,7 @@ async def test_build_call_tools_offers_every_function_of_the_build_in_offer_orde
     async_only = _toolkit(_function(async_add, name="async_add"), name="async_tools")
     generated = _toolkit(
         _function(lambda: "knowledge", _EMPTY_SCHEMA, name="search_knowledge_base"),
-        _function(lambda: "skill", _EMPTY_SCHEMA, name="get_skill_instructions"),
+        _function(lambda: "skill", _EMPTY_SCHEMA, name="skill"),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
@@ -2277,7 +2277,7 @@ async def test_build_call_tools_offers_every_function_of_the_build_in_offer_orde
         authorize_operation=_authorized_call_operation,
     )
 
-    assert _tool_names(tooling.tools) == ["async_add", "search_knowledge_base", "get_skill_instructions"]
+    assert _tool_names(tooling.tools) == ["async_add", "search_knowledge_base", "skill"]
     assert await tooling.tools[0]({"a": 1, "b": 2}) == "3"
 
 

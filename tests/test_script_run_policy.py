@@ -87,7 +87,7 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
     )
     context = replace(
         context,
-        tool_function_filter=lambda function: function.name in {"matrix_message", "get_attachment", "calculate"},
+        tool_function_filter=lambda function: function.name in {"matrix_message", "attachment", "calculate"},
     )
 
     grants = resolve_script_launch_grants(context)
@@ -95,7 +95,7 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
     assert grants == (
         ScriptToolGrant("matrix_message", "matrix_message"),
         ScriptToolGrant("calculator", "calculate"),
-        ScriptToolGrant("attachments", "get_attachment"),
+        ScriptToolGrant("attachments", "attachment"),
     )
     assert all(grant.toolkit_name != "workflow" for grant in grants)
 
@@ -178,11 +178,11 @@ def test_script_filters_see_an_implied_tools_function_under_the_authored_toolkit
     )
     context = replace(
         context,
-        tool_function_filter=lambda function: (function.toolkit, function.name) == ("matrix_message", "get_attachment"),
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("matrix_message", "attachment"),
     )
 
-    assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "get_attachment"),)
-    assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "get_attachment")) is not None
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "attachment"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "attachment")) is not None
 
 
 @pytest.mark.parametrize(

@@ -78,8 +78,8 @@ async def test_attachment_image_views_share_preparation(tmp_path: Path, case: st
     context = _tool_context(tmp_path)
     tools = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(context):
-        attachment_id = json.loads(await tools.register_attachment("image.png"))["attachment_id"]
-        result = await tools.get_attachment(attachment_id, view=True)
+        attachment_id = json.loads(await tools.attachment("register", path="image.png"))["attachment_id"]
+        result = await tools.attachment("get", attachment_id=attachment_id, view=True)
 
     receipt = json.loads(result.content if isinstance(result, ToolValue) else result)
     assert receipt["attachment_id"] == attachment_id
@@ -125,7 +125,7 @@ async def test_get_attachment_view_denies_wrong_room_even_when_listed(tmp_path: 
     assert record
     context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
     with tool_runtime_context(context):
-        result = await AttachmentTools().get_attachment(record.attachment_id, view=True)
+        result = await AttachmentTools().attachment("get", attachment_id=record.attachment_id, view=True)
     assert isinstance(result, str)
     assert json.loads(result)["status"] == "error"
 
@@ -140,7 +140,7 @@ async def test_viewed_path_handle_can_be_reopened(tmp_path: Path) -> None:
     with tool_runtime_context(context):
         first = await tools.view_file(path="image.png")
         path.unlink()
-        reopened = await tools.get_attachment(json.loads(first.content)["attachment_id"], view=True)
+        reopened = await tools.attachment("get", attachment_id=json.loads(first.content)["attachment_id"], view=True)
     assert isinstance(reopened, ToolValue)
     assert reopened.images
     assert reopened.images[0].content == image_bytes()
@@ -158,7 +158,7 @@ async def test_viewed_image_can_be_saved_and_explicitly_shared(tmp_path: Path) -
     ):
         viewed = await tools.view_file(path="image.png")
         handle = json.loads(viewed.content)["attachment_id"]
-        saved = json.loads(await tools.get_attachment(attachment_id=handle, mindroom_output_path="copy.png"))
+        saved = json.loads(await tools.attachment("get", attachment_id=handle, mindroom_output_path="copy.png"))
         assert saved["status"] == "ok"
         assert (tmp_path / "copy.png").read_bytes() == image_bytes()
         send.assert_not_awaited()
@@ -188,8 +188,8 @@ async def test_a_route_that_omits_images_gets_a_ready_view_and_a_retained_artifa
         if entrypoint == "view_file":
             viewed = await tools.view_file(path="image.png")
         else:
-            attachment_id = json.loads(await tools.register_attachment("image.png"))["attachment_id"]
-            viewed = await tools.get_attachment(attachment_id, view=True)
+            attachment_id = json.loads(await tools.attachment("register", path="image.png"))["attachment_id"]
+            viewed = await tools.attachment("get", attachment_id=attachment_id, view=True)
     assert isinstance(viewed, ToolValue)
     receipt = json.loads(viewed.content)
     assert receipt["view_status"] == "ready"
