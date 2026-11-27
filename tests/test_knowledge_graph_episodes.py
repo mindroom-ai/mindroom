@@ -106,7 +106,7 @@ def _render(
     )
 
 
-def _tool(name: str, result: str, **args: object) -> ToolExecution:
+def _tool(name: str, result: str, /, **args: object) -> ToolExecution:
     return ToolExecution(tool_call_id=f"call-{name}", tool_name=name, tool_args=args, result=result)
 
 
@@ -427,6 +427,33 @@ def test_claude_agent_prose_exclusion_only_drops_send_and_legacy_claude_send() -
     assert is_evidence(_tool("claude_agent_write", "Interrupt sent to Claude session `s1`.", action="interrupt"))
     assert is_evidence(_tool("claude_agent_write", "Closed Claude session `s1`.", action="end"))
     assert is_evidence(_tool("claude_agent_read", "Claude session `s1` is active."))
+
+
+def test_knowledge_graph_evidence_keeps_unrelated_paths_and_urls_but_drops_wrapper_calls() -> None:
+    """Bare `knowledge_graph` in URLs/file paths stays evidence while wrapper invocations are dropped."""
+    assert is_evidence(_tool("read_url", "Project docs...", url="https://example.com/projects/knowledge_graph"))
+    assert is_evidence(_tool("read_file", "class KnowledgeGraphTools...", path="src/mindroom/tools/knowledge_graph.py"))
+    assert not is_evidence(
+        _tool(
+            "call_tool",
+            "Alice leads Atlas",
+            name="knowledge_graph",
+            arguments={"action": "search", "query": "Atlas"},
+        ),
+    )
+    assert not is_evidence(
+        _tool(
+            "bash",
+            "Alice leads Atlas",
+            command='mindroom-agent tools call knowledge_graph --json \'{"action": "search", "query": "Atlas"}\'',
+        ),
+    )
+    assert not is_evidence(
+        _tool("run_script", "Alice leads Atlas", code='call_tool("knowledge_graph", {"action": "search"})'),
+    )
+    assert not is_evidence(
+        _tool("run_script", "Alice leads Atlas", code="call_tool('knowledge_graph', {'action': 'search'})"),
+    )
 
 
 class _Index:

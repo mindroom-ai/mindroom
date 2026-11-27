@@ -146,6 +146,7 @@ _NO_OUTPUT_REDIRECT_TOOLKITS = frozenset(
         "sleep",
         "stop_reply",
         "temporary_secrets",
+        "thread_model",
         "thread_move",
         "thread_resolution",
         "thread_snooze",

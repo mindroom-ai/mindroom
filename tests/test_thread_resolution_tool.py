@@ -84,6 +84,7 @@ async def test_thread_resolution_requires_runtime_context() -> None:
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_resolution"
+    assert payload["action"] == "resolve"
     assert "context" in payload["message"]
 
 
@@ -96,6 +97,7 @@ async def test_thread_resolution_requires_active_thread(tmp_path: Path) -> None:
         payload = json.loads(await ThreadResolutionTools().thread_resolution("resolve"))
 
     assert payload["status"] == "error"
+    assert payload["action"] == "resolve"
     assert "active thread" in payload["message"]
 
 
@@ -221,6 +223,7 @@ async def test_thread_resolution_rejects_unresolved_explicit_target(
         payload = json.loads(await tool.thread_resolution(action, thread_id=target_id))
 
     assert payload["status"] == "error"
+    assert payload["action"] == action
     assert payload["thread_id"] == target_id
     assert "canonical thread root" in payload["message"]
     mock_set.assert_not_awaited()
@@ -247,6 +250,7 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
         payload = json.loads(await tool.thread_resolution(action, thread_id="$other-root:localhost"))
 
     assert payload["status"] == "error"
+    assert payload["action"] == action
     assert payload["thread_id"] == "$other-root:localhost"
     assert "canonical thread root" in payload["message"]
     mock_set.assert_not_awaited()
@@ -457,4 +461,5 @@ async def test_thread_resolution_rejects_unsupported_action(tmp_path: Path) -> N
 
     assert payload["status"] == "error"
     assert payload["tool"] == "thread_resolution"
+    assert "action" not in payload
     assert "Unsupported thread_resolution action" in payload["message"]

@@ -400,29 +400,34 @@ _RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 
 # LEGACY_COMPAT: Retired individual functions of consolidated toolkits.
 # Legacy format: scheduler, searxng, memory, todo, Wave 2 native toolkits (calculator, duckduckgo, googlesearch,
-#   serper, youtube), Wave 3b native toolkits (gmail, google_calendar, github, google_drive, google_sheets,
-#   homeassistant), Wave 4 native toolkits (exa, trafilatura, brightdata, oxylabs, browserbase, spider), Wave 5 native
-#   toolkits (file_generation, visualization, unsplash), Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift,
-#   neo4j, yfinance, openbb, financial_datasets_api, openweather, docker, e2b, daytona), Wave 7 comms toolkits (email,
-#   twilio, discord, telegram, whatsapp, webex, zoom, x), Wave 8 native toolkits (linear, notion, todoist, clickup,
-#   trello, bitbucket, cal_com, shopify, spotify, reddit, google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits
-#   (outlook_mail, outlook_calendar, microsoft_teams, microsoft_files, microsoft_sharepoint, microsoft_onenote,
-#   microsoft_todo, microsoft_meetings, microsoft_people), skills, attachments, workflow, thread_tags, Google Docs /
-#   Google Tasks (google_docs, google_tasks, including prefixed secondary Google Workspace plugin copies for all Google
-#   Workspace toolkits), and runtime/session/thread toolkits (script, terminal, claude_agent, thread_model, usage_stats)
-#   previously exposed individual per-operation function names that could appear in tool_approval.rules[].match globs or
+#   serper including retired second-generation serper_search/scrape_webpage, youtube), Wave 3b native toolkits (gmail,
+#   google_calendar, github, google_drive, google_sheets, homeassistant), Wave 4 native toolkits (exa, trafilatura,
+#   brightdata, oxylabs, browserbase, spider), Wave 5 native toolkits (file_generation, visualization, unsplash),
+#   Wave 6 native toolkits (csv, duckdb, sql, postgres, redshift, neo4j, yfinance, openbb, financial_datasets_api,
+#   openweather, docker, e2b, daytona), Wave 7 comms toolkits (email, twilio, discord, telegram, whatsapp, webex, zoom,
+#   x), Wave 8 native toolkits (linear, notion, todoist, clickup, trello, bitbucket, cal_com, shopify, spotify, reddit,
+#   google_maps, brandfetch, mem0, zep), Microsoft 365 toolkits (outlook_mail, outlook_calendar, microsoft_teams,
+#   microsoft_files, microsoft_sharepoint, microsoft_onenote, microsoft_todo, microsoft_meetings, microsoft_people),
+#   skills, attachments, workflow, thread_tags, Google Docs / Google Tasks (google_docs, google_tasks, including prefixed
+#   secondary Google Workspace plugin copies for all Google Workspace toolkits), hackernews, google_bigquery, and
+#   runtime/session/thread toolkits (script, terminal, claude_agent, thread_model including retired second-generation
+#   thread_model_read/thread_model_write, thread_snooze, thread_resolution, usage_stats) previously exposed individual
+#   per-operation or split read/write function names that could appear in tool_approval.rules[].match globs or
 #   include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.610 (Waves 3b, 5-8: v2026.11.611-v2026.11.625; skills/attachments/M365: v2026.11.657;
 #   workflow/thread_tags: v2026.11.658; google_docs/google_tasks & runtime/session/thread CRUD: v2026.11.659;
-#   Wave 2/4: v2026.11.663); replacement: unreleased; consolidated into action-dispatched and risk-scoped functions.
+#   Wave 2/4: v2026.11.663; 7-toolkit collapse incl. thread_snooze, thread_resolution, hackernews, google_bigquery, and
+#   second-generation thread_model/knowledge_graph/serper splits: unreleased); replacement: unreleased; consolidated into
+#   action-dispatched and risk-scoped functions.
 # Handling: When the config enables one of these toolkits (or a prefixed Google Workspace clone, or unconditionally
 #   for generated skills), allow configs with an explicit exact rule deciding the replacement function, and otherwise
 #   reject tool_approval.rules when a retired strict-wildcard toolkit function (skills, attachments, Microsoft 365,
-#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, usage_stats) is decided by a wildcard
-#   approval script or any retired function's effective decision differs from the replacement's effective decision
-#   (regardless of other toolkits); also reject include_tools or exclude_tools naming a retired function on a
-#   consolidated toolkit entry (both authored overrides and stored dashboard settings), directing operators to the
-#   replacement function alongside per-action `enable_*` settings (where available) or `tool_approval.rules` so
+#   workflow, thread_tags, Wave 2/4, script, terminal, claude_agent, thread_model, thread_snooze, thread_resolution,
+#   hackernews, google_bigquery, usage_stats) is decided by a wildcard approval script or any retired function's
+#   effective decision differs from the replacement's effective decision (regardless of other toolkits); also reject
+#   include_tools or exclude_tools naming a retired function on a consolidated toolkit entry (both authored overrides and
+#   stored dashboard settings), directing operators to the replacement function alongside per-action toggle settings
+#   (`enable_*` or google_bigquery's `list_tables`/`describe_table`, where available) or `tool_approval.rules` so
 #   permissions are not broadened.
 # Coverage:
 #   tests/test_tool_approval_grants.py::test_retired_consolidated_approval_rules_fail_closed,
@@ -1161,14 +1166,16 @@ RETIRED_CONSOLIDATED_FUNCTIONS: dict[str, dict[str, str]] = {
     },
     # LEGACY_COMPAT: Retired individual functions of MindRoom-native identity, access, and graph toolkits.
     # Legacy format: tool_approval.rules[].match (exact, glob, or wildcard script) or include_tools/exclude_tools
-    #   naming any of the 26 retired functions across shared_directories, contacts, knowledge_graph, agent_manager,
-    #   and email_invite (including the renamed single-verb reads shared_directories_read, contacts_read, and
-    #   email_invite_read; agent_settings remains the kept zero-arg read).
-    # Last legacy release: v2026.11.662; replacement: unreleased; consolidated into action-dispatched read/write
-    #   functions with ToolMetadata.action_scoped_grants.
+    #   naming any of the 28 retired functions across shared_directories, contacts, knowledge_graph (including retired
+    #   second-generation knowledge_graph_read and knowledge_graph_write), agent_manager, and email_invite (including
+    #   the renamed single-verb reads shared_directories_read, contacts_read, and email_invite_read; agent_settings
+    #   remains the kept zero-arg read).
+    # Last legacy release: v2026.11.662 (knowledge_graph_read/knowledge_graph_write shipped v2026.11.665-v2026.11.668);
+    #   replacement: unreleased; consolidated into action-dispatched functions (unified `knowledge_graph` and read/write
+    #   splits for the others) with ToolMetadata.action_scoped_grants.
     # Handling: Reject conflicting tool_approval.rules (including wildcard scripts without an explicit rule for the
     #   replacement) when the toolkit is enabled (including via personal_agents templates) and reject retired names
-    #   in include_tools/exclude_tools at config load.
+    #   in include_tools/exclude_tools (both authored overrides and stored dashboard settings) at config load.
     # Coverage: tests/test_tool_approval_grants.py::test_identity_access_graph_action_scoped_grants_and_fail_closed_migration,
     #   tests/test_tool_approval_grants.py::test_template_only_personal_agents_fail_closed_for_retired_approval_rules,
     #   tests/test_tool_approval_grants.py::test_retired_identity_access_graph_include_exclude_overrides_fail_config_load.
@@ -1733,12 +1740,40 @@ def _retired_consolidated_filter_checker(
     return _check
 
 
+def _retired_toggle_filter_checker(
+    toolkit_name: str,
+    *,
+    toggle_label: str = "`enable_*` settings",
+) -> Callable[[Mapping[str, object]], tuple[str, str] | None]:
+    """Build a setting checker rejecting retired consolidated function filters for a toggleable toolkit."""
+    renames = RETIRED_CONSOLIDATED_FUNCTIONS[toolkit_name]
+
+    def _check(settings: Mapping[str, object]) -> tuple[str, str] | None:
+        return _retired_function_filter(
+            settings,
+            renames,
+            guidance_for=lambda _key, _old, new: (
+                f"`{new}` is now a consolidated function with an `action` parameter; migrate to `{new}` and "
+                f"disable unwanted actions via `{toolkit_name}`'s {toggle_label} (or `tool_approval.rules` "
+                f"matching `{new}`) so permissions are not broadened"
+            ),
+        )
+
+    return _check
+
+
 _RETIRED_TOOL_SETTING_CHECKERS: dict[str, Callable[[Mapping[str, object]], tuple[str, str] | None]] = {
     "filesystem": _retired_file_setting,
     "triggers": _retired_trigger_setting,
     "attachments": _retired_attachments_setting,
     "atlassian": _retired_atlassian_setting,
     "slack": _retired_slack_setting,
+    "serper": _retired_toggle_filter_checker("serper"),
+    "hackernews": _retired_toggle_filter_checker("hackernews"),
+    "google_bigquery": _retired_toggle_filter_checker(
+        "google_bigquery",
+        toggle_label="`list_tables`/`describe_table` settings",
+    ),
     **{
         name: _retired_consolidated_filter_checker(name)
         for name in (

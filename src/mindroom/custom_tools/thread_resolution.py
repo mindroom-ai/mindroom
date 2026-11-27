@@ -45,14 +45,18 @@ class ThreadResolutionTools(Toolkit):
         return custom_tool_payload("thread_resolution", status, **kwargs)
 
     @classmethod
-    async def _thread_context(cls, thread_id: str | None) -> tuple[ToolRuntimeContext, str] | str:
-        if isinstance(context := tool_context_or_error(cls._payload, "Thread resolution"), str):
+    async def _thread_context(
+        cls,
+        action: _ResolutionAction,
+        thread_id: str | None,
+    ) -> tuple[ToolRuntimeContext, str] | str:
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread resolution", action=action), str):
             return context
         root_id, error = await resolve_current_room_thread_root(context, thread_id, allow_standalone_root=True)
         if error is not None:
             if thread_id is None:
-                return cls._payload("error", message=error)
-            return cls._payload("error", thread_id=thread_id, message=error)
+                return cls._payload("error", action=action, message=error)
+            return cls._payload("error", action=action, thread_id=thread_id, message=error)
         assert root_id is not None
         return context, root_id
 
@@ -92,8 +96,8 @@ class ThreadResolutionTools(Toolkit):
         if (
             error := validate_action_params("thread_resolution", action, _ALLOWED_PARAMS, {"thread_id": thread_id})
         ) is not None:
-            return self._payload("error", message=error)
-        resolved = await self._thread_context(thread_id)
+            return self._payload("error", **({"action": action} if action in _ALLOWED_PARAMS else {}), message=error)
+        resolved = await self._thread_context(action, thread_id)
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved

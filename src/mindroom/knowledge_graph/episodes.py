@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -53,6 +54,7 @@ _RETIRED_GRAPH_FUNCTIONS = (
 )
 # The knowledge_graph tool's functions; their results came from the graph, so they are never evidence for it.
 _GRAPH_FUNCTIONS = ("knowledge_graph", *_RETIRED_GRAPH_FUNCTIONS)
+_CALL_TOOL_GRAPH_RE = re.compile(r"""\bcall_tool\s*\(\s*(?:name\s*=\s*)?\\?['"]knowledge_graph\\?['"]""")
 # Agno's reasoning functions return the model's own thoughts, and subagents, workflow participants, and Claude Code answer
 # in another model's prose; a subagent's own tool results come in through its own session. A background job's collected
 # result no longer says which tool produced it, so it could be either.
@@ -82,14 +84,26 @@ def is_evidence(execution: ToolExecution) -> bool:
     """Return whether a tool call observed something, rather than returning the graph or a model's prose."""
     if execution.tool_name in (*_GRAPH_FUNCTIONS, *_PROSE_FUNCTIONS):
         return False
+    if execution.tool_name == "call_tool" and (execution.tool_args or {}).get("name") in (
+        *_GRAPH_FUNCTIONS,
+        KNOWLEDGE_SEARCH_TOOL_NAME,
+    ):
+        return False
     if execution.tool_name == "claude_agent_write" and (execution.tool_args or {}).get("action") == "send":
         return False
     if execution.tool_name == KNOWLEDGE_SEARCH_TOOL_NAME:
         return bool(_observed(execution))
-    # A shell or `mindroom-agent` call can look the graph up too, directly or through the knowledge search, and returns
-    # its facts as the command's output; the whole arguments are searched, since the rendered ones are clipped.
+    # A shell, script, or `mindroom-agent` call can look the graph up too, directly or through the knowledge search,
+    # and returns its facts as the command's output; the whole arguments are searched, since the rendered ones are
+    # clipped. Match bare `knowledge_graph` only on wrapper invocations so unrelated paths/URLs remain evidence.
     arguments = json.dumps(execution.tool_args or {}, default=str)
-    return not any(name in arguments for name in (*_GRAPH_FUNCTIONS, KNOWLEDGE_SEARCH_TOOL_NAME))
+    if any(name in arguments for name in (*_RETIRED_GRAPH_FUNCTIONS, KNOWLEDGE_SEARCH_TOOL_NAME)):
+        return False
+    return not (
+        "knowledge_graph.knowledge_graph" in arguments
+        or ("mindroom-agent" in arguments and "knowledge_graph" in arguments)
+        or _CALL_TOOL_GRAPH_RE.search(arguments) is not None
+    )
 
 
 def _observed(execution: ToolExecution) -> str:

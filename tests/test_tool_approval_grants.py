@@ -3898,6 +3898,30 @@ def test_runtime_crud_action_scoped_grants_and_fail_closed_migration(tmp_path: P
         with pytest.raises(ConfigRuntimeValidationError, match=expected_pattern):
             Config.validate_with_runtime(bad, runtime_paths)
 
+    # Retired filters on toggleable toolkits point to their actual toggle names and tool_approval.rules.
+    for toolkit_name, overrides, replacement, expected_toggle in (
+        ("serper", {"include_tools": ["scrape_webpage"]}, "serper", "`enable_*` settings"),
+        ("hackernews", {"include_tools": ["get_user_details"]}, "hackernews", "`enable_*` settings"),
+        (
+            "google_bigquery",
+            {"include_tools": ["describe_table"]},
+            "google_bigquery_inspect",
+            "`list_tables`/`describe_table` settings",
+        ),
+    ):
+        bad = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {
+                "a": {"display_name": "A", "tools": [{toolkit_name: overrides}], "include_default_tools": False},
+            },
+        }
+        with pytest.raises(ConfigRuntimeValidationError, match=replacement) as exc_info:
+            Config.validate_with_runtime(bad, runtime_paths)
+        message = str(exc_info.value)
+        assert expected_toggle in message
+        assert "tool_approval.rules" in message
+        assert "no per-action allowlist filter" not in message
+
     # Kept name `terminal_read` in terminal include_tools still loads cleanly.
     valid_terminal = Config.validate_with_runtime(
         {
