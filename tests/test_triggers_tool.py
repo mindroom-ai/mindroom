@@ -687,7 +687,7 @@ def test_triggers_registration_alias_and_deferral_policy(tmp_path: Path) -> None
     assert meta.requires_room_context is True
     assert meta.function_names == ("triggers",)
     assert set(meta.approval_aliases) == {"triggers"}
-    assert meta.approval_aliases["triggers"].judged_as == "start_script"
+    assert meta.approval_aliases["triggers"].judged_as == "script_write"
     assert "GitHub PRs" in meta.description
 
     runtime_paths = _runtime_paths(tmp_path)

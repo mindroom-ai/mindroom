@@ -1512,7 +1512,8 @@ def test_thread_model_switch_may_stop_the_run_but_does_not_stop_every_call() -> 
 
     assert (function.stop_after_call, function.may_stop_run, function.controls_run) == (False, True, True)
     assert function.parameters["properties"]["action"]["enum"] == ["switch", "reset"]
-    assert {"type": "string"} in function.parameters["properties"]["model_name"]["anyOf"]
+    assert function.parameters["properties"]["model_name"]["type"] == "string"
+    assert "anyOf" not in function.parameters["properties"]["model_name"]
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
     assert function.parameters["required"] == ["action"]
 
