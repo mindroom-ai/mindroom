@@ -35,11 +35,13 @@ from mindroom.reactive_triggers.models import (
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
+    ScriptCheckCheckpoint,
     ScriptCheckSourceSpec,
     ThreadTagSourceSpec,
     TriggerEvent,
 )
-from mindroom.reactive_triggers.script_check import ScriptCheckPoller, ScriptCheckTickRunner
+from mindroom.reactive_triggers.script_check import serving_entity_for_checkpoint
+from mindroom.reactive_triggers.script_check_poller import ScriptCheckPoller, ScriptCheckTickRunner
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.reactive_triggers.triage import evaluate_triage
 from mindroom.requester_identity import (
@@ -724,28 +726,73 @@ class ReactiveTriggerService:
             if bot.running and client is not None and isinstance(client.rooms, Mapping) and room_id in client.rooms:
                 yield bot, client
 
+    def _joined_bot(self, room_id: str, agent_name: str) -> AgentBot | None:
+        bot = self.bots().get(agent_name)
+        if (
+            bot is not None
+            and bot.running
+            and bot.client is not None
+            and isinstance(bot.client.rooms, Mapping)
+            and room_id in bot.client.rooms
+        ):
+            return bot
+        return None
+
     def _pick_bot_for_room(self, room_id: str, *, preferred_agent: str | None = None) -> AgentBot | None:
         """Pick a running bot joined to room_id, preferring preferred_agent when available."""
-        bots = self.bots()
         if preferred_agent is not None:
-            preferred = bots.get(preferred_agent)
-            if (
-                preferred is not None
-                and preferred.running
-                and preferred.client is not None
-                and isinstance(preferred.client.rooms, Mapping)
-                and room_id in preferred.client.rooms
-            ):
+            preferred = self._joined_bot(room_id, preferred_agent)
+            if preferred is not None:
                 return preferred
         joined = next(self._joined_bots(room_id), None)
         return joined[0] if joined is not None else None
 
-    def _pick_bot_for_source(self, rule: ReactiveTriggerRecord) -> AgentBot | None:
+    def _script_check_serving_entity(
+        self,
+        rule: ReactiveTriggerRecord,
+        source: ScriptCheckSourceSpec,
+        *,
+        checkpoint: ScriptCheckCheckpoint | None = None,
+    ) -> str:
+        resolved_cp = (
+            checkpoint
+            if checkpoint is not None
+            else (None if self._store is None else self._store.get_script_check_checkpoint(rule.trigger_id))
+        )
+        return serving_entity_for_checkpoint(resolved_cp, source.agent, self.config_provider())
+
+    async def _load_script_check_serving_entity(
+        self,
+        store: ReactiveTriggerStore,
+        rule: ReactiveTriggerRecord,
+        config: Config,
+    ) -> str | None:
+        if not isinstance(rule.source, ScriptCheckSourceSpec):
+            return None
+        checkpoint = await asyncio.to_thread(store.get_script_check_checkpoint, rule.trigger_id)
+        return serving_entity_for_checkpoint(checkpoint, rule.source.agent, config)
+
+    def _pick_bot_for_source(
+        self,
+        rule: ReactiveTriggerRecord,
+        *,
+        script_check_serving_entity: str | None = None,
+    ) -> AgentBot | None:
         """Pick a running bot joined to the rule's watched source room, when the rule watches a Matrix room."""
         source = rule.source
         if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
             return self._pick_bot_for_room(source.room_id, preferred_agent=rule.target.agent)
         if isinstance(source, ScriptCheckSourceSpec):
+            serving_entity = (
+                script_check_serving_entity
+                if script_check_serving_entity is not None
+                else self._script_check_serving_entity(rule, source)
+            )
+            if (
+                serving_entity != source.agent
+                and (serving_bot := self._joined_bot(source.room_id, serving_entity)) is not None
+            ):
+                return serving_bot
             return self._pick_bot_for_room(source.room_id, preferred_agent=source.agent)
         return None
 
@@ -1181,14 +1228,16 @@ class ReactiveTriggerService:
                 await self._run_store_update_safe(store.mark_skipped, firing.id, "disabled_or_expired")
                 return
 
+            dispatch_config = self.config_provider()
+            sc_serving_entity = await self._load_script_check_serving_entity(store, rule, dispatch_config)
             result = await dispatch_reactive_trigger(
                 rule=rule,
                 firing=firing,
                 triage_reason=triage_reason,
                 store=store,
                 target_bot=self.bots().get(rule.target.agent),
-                source_bot=self._pick_bot_for_source(rule),
-                config=self.config_provider(),
+                source_bot=self._pick_bot_for_source(rule, script_check_serving_entity=sc_serving_entity),
+                config=dispatch_config,
                 runtime_paths=self.runtime_paths,
                 memberships=self.memberships,
             )
@@ -1287,14 +1336,16 @@ class ReactiveTriggerService:
                     await self._run_store_update_safe(store.mark_skipped, firing.id, guard_status)
                 return False
 
+        sc_serving_entity = await self._load_script_check_serving_entity(store, rule, config)
         source_rejection = await check_reactive_source_access(
             rule=rule,
             event=firing.event,
-            source_bot=self._pick_bot_for_source(rule),
+            source_bot=self._pick_bot_for_source(rule, script_check_serving_entity=sc_serving_entity),
             config=config,
             runtime_paths=self.runtime_paths,
             memberships=self.memberships,
             known_room_states=room_states,
+            script_check_serving_entity=sc_serving_entity,
         )
         if source_rejection is not None:
             await self._apply_pending_rejection(

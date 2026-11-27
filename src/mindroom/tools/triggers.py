@@ -72,7 +72,13 @@ def _judge_triggers_script_check(arguments: Mapping[str, object]) -> list[dict[s
     icon_color="text-emerald-500",
     docs_url="https://docs.mindroom.chat/external-triggers/",
     function_names=("triggers",),
-    approval_aliases={"triggers": ApprovalAlias(judged_as="start_script", judge=_judge_triggers_script_check)},
+    approval_aliases={
+        "triggers": ApprovalAlias(
+            judged_as="start_script",
+            judge=_judge_triggers_script_check,
+            allow_non_resumable_passthrough=True,
+        ),
+    },
 )
 def triggers_tools() -> type[TriggersTools]:
     """Return unified trigger management tools."""

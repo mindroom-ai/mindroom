@@ -46,7 +46,17 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.external_triggers.store import ExternalTriggerTarget
-    from mindroom.reactive_triggers.models import TriggerTargetSpec
+    from mindroom.reactive_triggers.models import ScriptCheckCheckpoint, TriggerTargetSpec
+
+__all__ = [
+    "ScriptCheckSummary",
+    "TriggerRow",
+    "UpdateRoomTriggerRequest",
+    "delete_room_trigger",
+    "list_room_triggers",
+    "router",
+    "update_room_trigger",
+]
 
 router = APIRouter(prefix="/api/rooms/{room_id}", tags=["room-triggers"])
 
@@ -61,6 +71,18 @@ class _MatchedTrigger:
     record: TriggerRecord
     relation: _TriggerRelation
     target_room_id: str
+
+
+@dataclass(frozen=True)
+class ScriptCheckSummary:
+    """Allowlisted script_check metadata for a room trigger row; health fields are owner-only."""
+
+    executing_agent: str
+    poll_interval_seconds: int
+    source_digest: str
+    last_run_at: int | None = None
+    consecutive_errors: int | None = None
+    last_error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +106,7 @@ class TriggerRow:
     last_fired_at: int | None
     owner_user_id: str
     can_manage: bool
+    script_check: ScriptCheckSummary | None = None
 
 
 class UpdateRoomTriggerRequest(BaseModel):
@@ -99,10 +122,11 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
     """Return triggers targeting or watching ``room_id`` with cross-room watch redaction."""
     config, runtime_paths = _require_trigger_runtime(request)
 
-    def _load() -> list[_MatchedTrigger]:
+    def _load() -> tuple[list[_MatchedTrigger], dict[str, ScriptCheckCheckpoint]]:
+        reactive_store = ReactiveTriggerStore(runtime_paths)
         records: list[TriggerRecord] = [
             *ExternalTriggerStore(runtime_paths).list_records(),
-            *ReactiveTriggerStore(runtime_paths).list_triggers(include_disabled=True),
+            *reactive_store.list_triggers(include_disabled=True),
         ]
         items = [item for rec in records if (item := _match_trigger_to_room(rec, room_id, runtime_paths))]
         items.sort(
@@ -112,9 +136,15 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
                 item.record.trigger_id,
             ),
         )
-        return items
+        checkpoints: dict[str, ScriptCheckCheckpoint] = {}
+        for item in items:
+            if isinstance(item.record, ReactiveTriggerRecord) and isinstance(item.record.source, ScriptCheckSourceSpec):
+                checkpoint = reactive_store.get_script_check_checkpoint(item.record.trigger_id)
+                if checkpoint is not None:
+                    checkpoints[item.record.trigger_id] = checkpoint
+        return items, checkpoints
 
-    matched = await _run_store(_load)
+    matched, checkpoints = await _run_store(_load)
     owner_ids = equivalent_requester_ids(member.user_id, config, runtime_paths)
     watch_targets = list(
         dict.fromkeys(
@@ -130,6 +160,7 @@ async def list_room_triggers(request: Request, member: _Member, room_id: str) ->
                 item,
                 can_manage=item.record.owner_user_id in owner_ids,
                 joined_target_rooms=joined_targets,
+                checkpoint=checkpoints.get(item.record.trigger_id),
             )
             for item in matched
         ],
@@ -164,8 +195,8 @@ async def update_room_trigger(
             kind, message = failure
             raise HTTPException(409 if kind == "placement" else 403, message)
 
-    updated = await _run_store(
-        lambda: set_trigger_enabled_sync(
+    def _update() -> tuple[TriggerRecord, ScriptCheckCheckpoint | None]:
+        result = set_trigger_enabled_sync(
             runtime_paths,
             config,
             trigger_id,
@@ -173,14 +204,22 @@ async def update_room_trigger(
             actor_user_id=member.user_id,
             authorize_reactive=partial(_require_owner, member.user_id, config, runtime_paths),
             refreshed_tag_present=refreshed_tag_present,
-        ),
-    )
+        )
+        cp = (
+            ReactiveTriggerStore(runtime_paths).get_script_check_checkpoint(result.trigger_id)
+            if isinstance(result, ReactiveTriggerRecord) and isinstance(result.source, ScriptCheckSourceSpec)
+            else None
+        )
+        return result, cp
+
+    updated, checkpoint = await _run_store(_update)
     if body.enabled and isinstance(updated, ReactiveTriggerRecord):
         notify_reactive_event_loop(request.app, trigger_id=trigger_id)
     return _build_trigger_row(
         _MatchedTrigger(updated, matched.relation, matched.target_room_id),
         can_manage=True,
         joined_target_rooms=set(),
+        checkpoint=checkpoint,
     )
 
 
@@ -228,7 +267,7 @@ def _match_trigger_to_room(record: TriggerRecord, room_id: str, runtime_paths: R
         return _MatchedTrigger(record, "target", resolved_target)
     if (
         isinstance(record, ReactiveTriggerRecord)
-        and isinstance(record.source, (RoomMessageSourceSpec, ThreadTagSourceSpec))
+        and isinstance(record.source, (RoomMessageSourceSpec, ThreadTagSourceSpec, ScriptCheckSourceSpec))
         and resolve_room_id(record.source.room_id, runtime_paths) == room_id
     ):
         return _MatchedTrigger(record, "watch", resolved_target)
@@ -263,13 +302,20 @@ def _thread_mode(target: ExternalTriggerTarget | TriggerTargetSpec) -> _TriggerT
     return "room"
 
 
-def _build_trigger_row(matched: _MatchedTrigger, *, can_manage: bool, joined_target_rooms: set[str]) -> TriggerRow:
+def _build_trigger_row(
+    matched: _MatchedTrigger,
+    *,
+    can_manage: bool,
+    joined_target_rooms: set[str],
+    checkpoint: ScriptCheckCheckpoint | None = None,
+) -> TriggerRow:
     record = matched.record
     redacted = matched.relation == "watch" and not can_manage and matched.target_room_id not in joined_target_rooms
     target = record.target
     thread_mode = _thread_mode(target)
     target_thread_id = target.thread_id if thread_mode == "thread" else None
 
+    script_check: ScriptCheckSummary | None = None
     if isinstance(record, ExternalTriggerRecord):
         kind: _TriggerKind = "webhook"
         prompt: str | None = None
@@ -281,6 +327,19 @@ def _build_trigger_row(matched: _MatchedTrigger, *, can_manage: bool, joined_tar
         disabled_reason = record.disabled_reason
         once = record.once
         expires_at = None if record.expires_at is None else int(record.expires_at * 1000)
+        if isinstance(record.source, ScriptCheckSourceSpec) and not redacted:
+            script_check = ScriptCheckSummary(
+                executing_agent=record.source.agent,
+                poll_interval_seconds=record.source.poll_interval_seconds,
+                source_digest=record.source.source_digest,
+                last_run_at=(
+                    int(checkpoint.last_run_at * 1000)
+                    if can_manage and checkpoint is not None and checkpoint.last_run_at is not None
+                    else None
+                ),
+                consecutive_errors=checkpoint.consecutive_errors if can_manage and checkpoint is not None else None,
+                last_error_code=checkpoint.last_error_code if can_manage and checkpoint is not None else None,
+            )
 
     return TriggerRow(
         trigger_id=record.trigger_id,
@@ -300,4 +359,5 @@ def _build_trigger_row(matched: _MatchedTrigger, *, can_manage: bool, joined_tar
         last_fired_at=None if record.last_fired_at is None else int(record.last_fired_at * 1000),
         owner_user_id=record.owner_user_id,
         can_manage=can_manage,
+        script_check=script_check,
     )

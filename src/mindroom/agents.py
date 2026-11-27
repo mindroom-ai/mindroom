@@ -84,7 +84,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFi
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_sync_tool_entrypoint
 from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.toolkits import (
@@ -932,72 +932,86 @@ def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, 
     )
 
 
+async def _non_resumable_alias_refusal_message(
+    function_name: str,
+    call_args: dict[str, Any],
+    *,
+    config: Config,
+    alias: ApprovalAlias,
+) -> str | None:
+    """Return a refusal message if a non-resumable opt-in alias call requires approval, or None to proceed."""
+    context = get_tool_runtime_context()
+    if context is not None:
+        try:
+            requires_approval, _ = await evaluate_tool_approval(
+                context.current_config,
+                context.runtime_paths,
+                function_name,
+                call_args,
+                context.agent_name,
+                alias,
+            )
+        except ToolApprovalScriptError as exc:
+            return (
+                f"{function_name} call refused because approval evaluation failed in this non-resumable context: {exc}"
+            )
+    elif tool_may_require_approval(config, function_name):
+        requires_approval = True
+    else:
+        try:
+            judged = await asyncio.to_thread(alias.judge, call_args)
+        except Exception:
+            requires_approval = True
+        else:
+            requires_approval = not (
+                isinstance(judged, Sequence) and not isinstance(judged, str | Buffer) and len(judged) == 0
+            )
+    if not requires_approval:
+        return None
+    return (
+        f"{function_name} call requires approval under {alias.judged_as!r} rules "
+        "and cannot run in this non-resumable context."
+    )
+
+
 def _wrap_non_resumable_alias_entrypoint(
     function: ToolFunction,
     *,
     config: Config,
     alias: ApprovalAlias,
 ) -> ToolFunction:
-    """Guard an alias-gated function on a non-resumable surface, refusing only calls needing approval."""
+    """Guard an opt-in alias-gated function on a non-resumable surface, refusing only calls needing approval."""
     original = function.entrypoint
+
+    def _refuse(message: str) -> ToolOutcome:
+        return ToolOutcome(
+            content=custom_tool_payload(function.name, "error", message=message),
+            is_error=True,
+            refused_by="approval",
+        )
 
     @functools.wraps(original)
     async def guarded(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         if args:
             try:
-                bound = inspect.signature(original).bind_partial(*args, **kwargs)
+                call_args = dict(inspect.signature(original).bind_partial(*args, **kwargs).arguments)
             except TypeError:
-                return custom_tool_payload(
-                    function.name,
-                    "error",
-                    message=(
-                        f"{function.name} call requires approval under {alias.judged_as!r} rules "
-                        "and cannot run in this non-resumable context."
-                    ),
+                return _refuse(
+                    f"{function.name} call requires approval under {alias.judged_as!r} rules "
+                    "and cannot run in this non-resumable context.",
                 )
-            call_args = dict(bound.arguments)
         else:
             call_args = dict(kwargs)
 
-        context = get_tool_runtime_context()
-        if context is not None:
-            try:
-                requires_approval, _ = await evaluate_tool_approval(
-                    config,
-                    context.runtime_paths,
-                    function.name,
-                    call_args,
-                    context.agent_name,
-                    alias,
-                )
-            except ToolApprovalScriptError as exc:
-                return custom_tool_payload(
-                    function.name,
-                    "error",
-                    message=(
-                        f"{function.name} call refused because approval evaluation failed "
-                        f"in this non-resumable context: {exc}"
-                    ),
-                )
-        else:
-            try:
-                judged = await asyncio.to_thread(alias.judge, call_args)
-            except Exception:
-                requires_approval = True
-            else:
-                requires_approval = not (
-                    isinstance(judged, Sequence) and not isinstance(judged, str | Buffer) and len(judged) == 0
-                )
-
-        if requires_approval:
-            return custom_tool_payload(
+        if (
+            refusal := await _non_resumable_alias_refusal_message(
                 function.name,
-                "error",
-                message=(
-                    f"{function.name} call requires approval under {alias.judged_as!r} rules "
-                    "and cannot run in this non-resumable context."
-                ),
+                call_args,
+                config=config,
+                alias=alias,
             )
+        ) is not None:
+            return _refuse(refusal)
         if inspect.iscoroutinefunction(original) or inspect.isasyncgenfunction(original):
             result = original(*args, **kwargs)
             return await result if inspect.isawaitable(result) else result
@@ -1019,13 +1033,13 @@ def apply_tool_approval_capability(
     """Apply the approval rules to the functions of ``adapted``, the toolkit ``toolkit`` was adapted to.
 
     A caller that cannot resume a paused run (``resumable`` False) hides functions whose own rules or native
-    confirmation may ask, while keeping functions gated solely by an approval alias wrapped so only calls that
-    trigger the alias's approval rules are refused. Otherwise each function an approval rule gates pauses the run
-    for its approval, or, with ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call
-    can become one. Without ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns
-    the policy gate and the exact child wait; with it they are ordinary calls whose subagents run as jobs. ``tools``
-    is the registry the toolkit was built from, whose approval aliases let another function's rules gate its functions
-    too.
+    confirmation may ask, as well as alias-gated functions unless their approval alias explicitly opts into
+    non-resumable passthrough (wrapping those so only calls triggering approval rules are refused). Otherwise each
+    function an approval rule gates pauses the run for its approval, or, with ``approvals_as_jobs``, asks for it as
+    the first phase of its call's job when the call can become one. Without ``approvals_as_jobs`` the delegation
+    functions pause for their native driver, which owns the policy gate and the exact child wait; with it they are
+    ordinary calls whose subagents run as jobs. ``tools`` is the registry the toolkit was built from, whose approval
+    aliases let another function's rules gate its functions too.
     """
 
     def offered_non_resumable(function: ToolFunction, *, own_may_gate: bool, may_gate: bool) -> ToolFunction | None:
@@ -1034,7 +1048,9 @@ def apply_tool_approval_capability(
         if not may_gate:
             return function
         alias = toolkit_approval_alias(config, tools, registered_tool_name, function.name)
-        return None if alias is None else _wrap_non_resumable_alias_entrypoint(function, config=config, alias=alias)
+        if alias is None or not alias.allow_non_resumable_passthrough:
+            return None
+        return _wrap_non_resumable_alias_entrypoint(function, config=config, alias=alias)
 
     def offered(function: ToolFunction) -> ToolFunction | None:
         policy_names = approval_policy_names(config, tools, registered_tool_name, function.name)

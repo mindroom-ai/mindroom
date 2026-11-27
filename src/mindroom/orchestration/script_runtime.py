@@ -25,7 +25,7 @@ from mindroom.delegation.lifecycle import accessed_entities, bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.origins import configured_public_url
-from mindroom.reactive_triggers.script_check import agent_supports_script_check
+from mindroom.reactive_triggers.script_check import agent_supports_script_check, serving_entity_for_identity
 from mindroom.response_activity import ActiveScriptRunInfo
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
@@ -222,7 +222,7 @@ class _LiveScriptRuntimeResolver:
             return None
         current_config = bot.config if config is None else config
         entities = {run.agent_name}
-        if run.entry == "workflow":
+        if _uses_serving_transport(run):
             # A run acts through the bot that serves it, which must still be in the run's room, and its requester
             # must still reach the run's agent as well as that bot's: an agent's bot is no grant for another agent.
             joined = bot_in_room(bot, run.room_id)
@@ -245,7 +245,7 @@ class _LiveScriptRuntimeResolver:
     def serving_bot(self, run: _OwnedRun, config: Config | None = None) -> AgentBot | None:
         """Return the running bot that answers for *run*, None while it or the bot of the run's agent is not running."""
         bot = self.bot_provider(run.agent_name)
-        if bot is not None and bot.running and run.entry == "workflow":
+        if bot is not None and bot.running and _uses_serving_transport(run):
             bot = self.bot_provider(_serving_entity(run, config or bot.config))
         return bot if bot is not None and bot.running else None
 
@@ -1281,17 +1281,18 @@ def build_script_runtime(
     )
 
 
+def _uses_serving_transport(run: _OwnedRun) -> bool:
+    return run.entry == "workflow" or (isinstance(run, ScriptRunRecord) and run.script_check_rule_uid is not None)
+
+
 def _serving_entity(run: _OwnedRun, config: Config) -> str:
-    """Return whose bot and whose access answer for a workflow *run* or attempt.
+    """Return whose bot and whose access answer for a workflow or script_check *run* or attempt.
 
     A member of a configured team that started it in that team is reached through the team, and an agent that another
     agent ran as its child through that agent: the run saved that bot as its transport, so the same bot rebuilds its
     context.
     """
-    recipient = _run_execution_identity(run).recipient
-    team = config.teams.get(recipient)
-    through = recipient in config.agents if team is None else run.agent_name in team.agents
-    return recipient if through else run.agent_name
+    return serving_entity_for_identity(_run_execution_identity(run), run.agent_name, config)
 
 
 def _run_execution_identity(run: _OwnedRun) -> ToolExecutionIdentity:

@@ -4,22 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
+from mindroom.delegation.lifecycle import accessed_entities
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers.models import ReactiveTriggerRecord, ScriptCheckCheckpoint, ScriptCheckSourceSpec
 from mindroom.reactive_triggers.script_check import (
-    ScriptCheckTickOutcome,
-    ScriptCheckTickRunner,
     check_script_check_source_access,
     is_owner_joined_in_state,
+    serving_entity_for_identity,
 )
+from mindroom.reactive_triggers.script_check_poller import ScriptCheckTickOutcome, ScriptCheckTickRunner
 from mindroom.script_runs.manager import (
     ScriptRunManager,
     ScriptRunManagerError,
@@ -28,7 +31,7 @@ from mindroom.script_runs.manager import (
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
 from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED, OWNER_CANCELLATION, RUNTIME_SHUTDOWN
 from mindroom.script_runs.store import ScriptRunNotFoundError, ScriptRunStoreError
-from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
     import nio
@@ -42,7 +45,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_LAUNCH_OVERHEAD_SECONDS = 60.0
 _RECONCILE_POLL_SECONDS = 0.25
 _EXIT_GRACE_SECONDS = 2.0
 _EXIT_GRACE_POLL_SECONDS = 0.05
@@ -81,8 +83,10 @@ class _CheckState:
         if not self._is_active():
             raise RuntimeError("state mutations are not allowed during module load; mutate state inside check().")
 
-    def get(self, key, default=None):
-        return default if key not in self._data else json.loads(json.dumps(self._data[key], allow_nan=False))
+    def _copy(self, value): return json.loads(json.dumps(value, allow_nan=False))
+    def __contains__(self, key): return key in self._data
+    def __getitem__(self, key): return self._copy(self._data[key])
+    def get(self, key, default=None): return default if key not in self._data else self._copy(self._data[key])
 
     def set(self, key, value):
         self._require_active()
@@ -115,11 +119,9 @@ class _CheckState:
             self._data.clear()
             self.changed = True
 
-    def keys(self):
-        return list(self._data.keys())
-
-    def snapshot(self):
-        return json.loads(json.dumps(self._data, allow_nan=False))
+    def keys(self): return list(self._data.keys())
+    def items(self): return [(k, self._copy(v)) for k, v in self._data.items()]
+    def snapshot(self): return self._copy(self._data)
 
 def _main():
     transport = ScriptGatewayTransport(timeout_seconds=10.0)
@@ -195,47 +197,53 @@ async def _prune_terminal(manager: ScriptRunManager, final: ScriptRunRecord | No
 
 
 async def _retire_and_prune(manager: ScriptRunManager, run_id: str, *, reason: str) -> ScriptRunRecord | None:
-    try:
-        await manager.revoke(run_id, reason=reason)
-        final = await manager.reconcile_durable(run_id=run_id)
-    except (ScriptRunManagerError, ScriptRunNotFoundError, ScriptRunStoreError):
-        return None
-    await _prune_terminal(manager, final)
-    return final
+    async def _run() -> ScriptRunRecord | None:
+        try:
+            await manager.revoke(run_id, reason=reason)
+            final = await manager.reconcile_durable(run_id=run_id)
+        except (ScriptRunManagerError, ScriptRunNotFoundError, ScriptRunStoreError):
+            return None
+        await _prune_terminal(manager, final)
+        return final
+
+    with contextlib.suppress(TimeoutError):
+        return await asyncio.wait_for(_run(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
+    return None
 
 
 async def _wait_for_exit_grace(manager: ScriptRunManager, run_id: str) -> ScriptRunRecord | None:
-    loop = asyncio.get_running_loop()
-    grace_deadline = loop.time() + _EXIT_GRACE_SECONDS
+    grace_deadline = time.monotonic() + _EXIT_GRACE_SECONDS
     final: ScriptRunRecord | None = None
-    while final is None or final.state not in TERMINAL_SCRIPT_RUN_STATES:
-        with contextlib.suppress(ScriptRunManagerError):
-            final = await manager.reconcile_durable(run_id=run_id)
+    while (remaining := grace_deadline - time.monotonic()) > 0:
+        with contextlib.suppress(ScriptRunManagerError, TimeoutError):
+            final = await asyncio.wait_for(manager.reconcile_durable(run_id=run_id), timeout=remaining)
         if final is not None and final.state in TERMINAL_SCRIPT_RUN_STATES:
+            await _prune_terminal(manager, final)
+            return final
+        if (remaining := grace_deadline - time.monotonic()) <= 0:
             break
-        if loop.time() >= grace_deadline:
-            return await _retire_and_prune(manager, run_id, reason=MAX_RUNTIME_EXCEEDED)
-        await asyncio.sleep(min(_EXIT_GRACE_POLL_SECONDS, max(0.0, grace_deadline - loop.time())))
-    await _prune_terminal(manager, final)
-    return final
+        await asyncio.sleep(min(_EXIT_GRACE_POLL_SECONDS, remaining))
+    return await _retire_and_prune(manager, run_id, reason=MAX_RUNTIME_EXCEEDED)
 
 
 async def _wait_for_tick(
     manager: ScriptRunManager,
     run_id: str,
     slot: ScriptCheckTickSlot,
-    timeout_seconds: float,
+    *,
+    deadline: float,
 ) -> tuple[ScriptRunRecord | None, bool]:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
     final: ScriptRunRecord | None = None
-    while not slot.done.is_set() and (remaining := deadline - loop.time()) > 0:
+    while not slot.done.is_set() and (remaining := deadline - time.monotonic()) > 0:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(slot.done.wait(), timeout=min(_RECONCILE_POLL_SECONDS, remaining))
         if slot.done.is_set():
             break
-        with contextlib.suppress(ScriptRunManagerError):
-            reconciled = await manager.reconcile_durable(run_id=run_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        with contextlib.suppress(ScriptRunManagerError, TimeoutError):
+            reconciled = await asyncio.wait_for(manager.reconcile_durable(run_id=run_id), timeout=remaining)
             if reconciled.state in TERMINAL_SCRIPT_RUN_STATES:
                 final = reconciled
                 break
@@ -285,14 +293,12 @@ class _ScriptCheckRunner:
     manager_provider: Callable[[], ScriptRunManager | None]
     broker: ScriptToolBroker
 
-    def _rebuild_context(
-        self,
+    @staticmethod
+    def _parse_identity(
         rule: ReactiveTriggerRecord,
         source_spec: ScriptCheckSourceSpec,
         checkpoint: ScriptCheckCheckpoint,
-        bot: AgentBot,
-        run_id: str,
-    ) -> ToolRuntimeContext | ScriptCheckTickOutcome:
+    ) -> ToolExecutionIdentity | ScriptCheckTickOutcome:
         try:
             identity = parse_tool_execution_identity_payload(
                 checkpoint.identity_json,
@@ -309,6 +315,17 @@ class _ScriptCheckRunner:
             or identity.session_id is None
         ):
             return ScriptCheckTickOutcome(status="unauthorized", error_code="identity_mismatch")
+        return identity
+
+    @staticmethod
+    def _rebuild_context(
+        rule: ReactiveTriggerRecord,
+        identity: ToolExecutionIdentity,
+        serving_bot: AgentBot,
+        run_id: str,
+    ) -> ToolRuntimeContext | ScriptCheckTickOutcome:
+        assert identity.room_id is not None
+        assert identity.session_id is not None
         target = MessageTarget(
             room_id=identity.room_id,
             source_thread_id=identity.thread_id,
@@ -316,7 +333,7 @@ class _ScriptCheckRunner:
             reply_to_event_id=None,
             session_id=identity.session_id,
         )
-        context = bot.tool_runtime_support.build_context(
+        context = serving_bot.tool_runtime_support.build_context(
             target,
             user_id=identity.requester_id,
             agent_name=identity.agent_name,
@@ -332,14 +349,15 @@ class _ScriptCheckRunner:
         self,
         rule: ReactiveTriggerRecord,
         source_spec: ScriptCheckSourceSpec,
-        bot: AgentBot,
+        serving_entity: str,
+        serving_bot: AgentBot,
         config: Config,
     ) -> ScriptCheckTickOutcome | None:
-        observed_room = _observed_room_for_bot(bot, source_spec.room_id)
+        observed_room = _observed_room_for_bot(serving_bot, source_spec.room_id)
         room_state = (
             None
-            if observed_room is None or bot.client is None
-            else await read_room_state(bot.client, source_spec.room_id)
+            if observed_room is None or serving_bot.client is None
+            else await read_room_state(serving_bot.client, source_spec.room_id)
         )
         if room_state is None:
             return ScriptCheckTickOutcome(status="deferred", error_code="source_room_state_unreadable")
@@ -350,16 +368,20 @@ class _ScriptCheckRunner:
             runtime_paths=self.runtime_paths,
         ):
             return ScriptCheckTickOutcome(status="unauthorized", error_code="source_room_not_joined")
+        entities = sorted(accessed_entities(config, serving_entity, source_spec.agent))
         try:
-            allowed = is_sender_allowed_for_agent_reply_in_room(
-                rule.owner_user_id,
-                source_spec.agent,
-                config,
-                source_spec.room_id,
-                self.runtime_paths,
-                self.memberships,
-                require_resolved_membership=True,
-                observed_room=observed_room,
+            allowed = all(
+                is_sender_allowed_for_agent_reply_in_room(
+                    rule.owner_user_id,
+                    entity,
+                    config,
+                    source_spec.room_id,
+                    self.runtime_paths,
+                    self.memberships,
+                    require_resolved_membership=True,
+                    observed_room=observed_room,
+                )
+                for entity in entities
             )
         except ReplyMembershipPendingError:
             return ScriptCheckTickOutcome(status="deferred", error_code="runtime_unavailable")
@@ -375,6 +397,9 @@ class _ScriptCheckRunner:
         if not isinstance(rule.source, ScriptCheckSourceSpec):
             return ScriptCheckTickOutcome(status="error", error_code="invalid_source_spec")
         source_spec = rule.source
+        parsed = self._parse_identity(rule, source_spec, checkpoint)
+        if isinstance(parsed, ScriptCheckTickOutcome):
+            return parsed
         unauth_err = check_script_check_source_access(
             owner_user_id=rule.owner_user_id,
             source_spec=source_spec,
@@ -384,13 +409,59 @@ class _ScriptCheckRunner:
         )
         if unauth_err is not None:
             return ScriptCheckTickOutcome(status="unauthorized", error_code=unauth_err)
-        manager, bot = self.manager_provider(), self.bots().get(source_spec.agent)
-        if manager is None or bot is None or not bot.running or bot.client is None:
+        serving_entity = serving_entity_for_identity(parsed, source_spec.agent, config)
+        bots = self.bots()
+        manager, agent_bot, serving_bot = self.manager_provider(), bots.get(source_spec.agent), bots.get(serving_entity)
+        if (
+            manager is None
+            or not (agent_bot and agent_bot.running)
+            or not (serving_bot and serving_bot.running and serving_bot.client)
+        ):
             return ScriptCheckTickOutcome(status="deferred", error_code="runtime_unavailable")
-        if room_err := await self._check_live_room_authorization(rule, source_spec, bot, config):
+        if room_err := await self._check_live_room_authorization(
+            rule,
+            source_spec,
+            serving_entity,
+            serving_bot,
+            config,
+        ):
             return room_err
-        rebuilt = self._rebuild_context(rule, source_spec, checkpoint, bot, run_id)
+        rebuilt = self._rebuild_context(rule, parsed, serving_bot, run_id)
         return rebuilt if isinstance(rebuilt, ScriptCheckTickOutcome) else (manager, rebuilt, source_spec)
+
+    async def _launch_tick(
+        self,
+        manager: ScriptRunManager,
+        context: ToolRuntimeContext,
+        rule: ReactiveTriggerRecord,
+        run_id: str,
+        *,
+        timeout_seconds: int,
+        deadline: float,
+    ) -> ScriptCheckTickOutcome | None:
+        if (remaining := deadline - time.monotonic()) <= 0.0:
+            return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="launch_timeout")
+        try:
+            await asyncio.wait_for(
+                manager.run(
+                    context,
+                    source=_SCRIPT_CHECK_BOOTSTRAP_SOURCE,
+                    run_id=run_id,
+                    script_check_rule_uid=rule.rule_uid,
+                    max_runtime_seconds=max(1, min(timeout_seconds, math.ceil(remaining))),
+                ),
+                timeout=remaining,
+            )
+        except ScriptRuntimeNotReadyError:
+            return ScriptCheckTickOutcome(status="deferred", run_id=run_id, error_code="runtime_unavailable")
+        except TimeoutError:
+            await _retire_and_prune(manager, run_id, reason=MAX_RUNTIME_EXCEEDED)
+            return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="launch_timeout")
+        except ScriptRunManagerError as exc:
+            logger.warning("script_check launch failed", trigger_id=rule.trigger_id, run_id=run_id, error=str(exc))
+            await _retire_and_prune(manager, run_id, reason=OWNER_CANCELLATION)
+            return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="launch_failed")
+        return None
 
     async def __call__(
         self,
@@ -400,11 +471,18 @@ class _ScriptCheckRunner:
         _now: float,
     ) -> ScriptCheckTickOutcome:
         run_id = f"script-{uuid.uuid4().hex}"
-        prepared = await self._prepare(rule, checkpoint, config, run_id)
+        timeout_seconds = config.external_trigger_policy.script_check_timeout_seconds
+        deadline = time.monotonic() + float(timeout_seconds)
+        try:
+            prepared = await asyncio.wait_for(
+                self._prepare(rule, checkpoint, config, run_id),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+        except TimeoutError:
+            return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="timeout")
         if isinstance(prepared, ScriptCheckTickOutcome):
             return prepared
         manager, context, source_spec = prepared
-        timeout_seconds = config.external_trigger_policy.script_check_timeout_seconds
         with self.broker.check_tick(
             run_id,
             source=checkpoint.source_utf8,
@@ -412,38 +490,21 @@ class _ScriptCheckRunner:
             initial_state=dict(checkpoint.state),
         ) as slot:
             try:
-                try:
-                    await asyncio.wait_for(
-                        manager.run(
-                            context,
-                            source=_SCRIPT_CHECK_BOOTSTRAP_SOURCE,
-                            run_id=run_id,
-                            script_check_rule_uid=rule.rule_uid,
-                            max_runtime_seconds=timeout_seconds,
-                        ),
-                        timeout=timeout_seconds + _LAUNCH_OVERHEAD_SECONDS,
+                if (
+                    launch_err := await self._launch_tick(
+                        manager,
+                        context,
+                        rule,
+                        run_id,
+                        timeout_seconds=timeout_seconds,
+                        deadline=deadline,
                     )
-                except ScriptRuntimeNotReadyError:
-                    return ScriptCheckTickOutcome(status="deferred", run_id=run_id, error_code="runtime_unavailable")
-                except TimeoutError:
-                    await _retire_and_prune(manager, run_id, reason=MAX_RUNTIME_EXCEEDED)
-                    return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="launch_timeout")
-                except ScriptRunManagerError as exc:
-                    logger.warning(
-                        "script_check launch failed",
-                        trigger_id=rule.trigger_id,
-                        run_id=run_id,
-                        error=str(exc),
-                    )
-                    await _retire_and_prune(manager, run_id, reason=OWNER_CANCELLATION)
-                    return ScriptCheckTickOutcome(status="error", run_id=run_id, error_code="launch_failed")
-                final, timed_out = await _wait_for_tick(manager, run_id, slot, float(timeout_seconds))
+                ) is not None:
+                    return launch_err
+                final, timed_out = await _wait_for_tick(manager, run_id, slot, deadline=deadline)
             except asyncio.CancelledError:
                 with contextlib.suppress(Exception):
-                    await asyncio.wait_for(
-                        _retire_and_prune(manager, run_id, reason=RUNTIME_SHUTDOWN),
-                        timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS,
-                    )
+                    await _retire_and_prune(manager, run_id, reason=RUNTIME_SHUTDOWN)
                 raise
         return _evaluate_outcome(run_id, slot, final, timed_out=timed_out)
 
