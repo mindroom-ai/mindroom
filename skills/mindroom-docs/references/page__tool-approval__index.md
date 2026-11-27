@@ -6,7 +6,7 @@
 </video>
 
 Use the top-level `tool_approval` block to make chosen tool calls wait for a person to approve them in the Matrix conversation.
-This example gates Slack posting and reactions, plus shell calls selected by a review script:
+This example gates Slack sending and message management, plus shell calls selected by a review script:
 
 ```yaml
 tool_approval:

@@ -1081,14 +1081,14 @@ def _retired_function_filter(
     settings: Mapping[str, object],
     renames: Mapping[str, str],
     *,
-    guidance_for: Callable[[str, str], str],
+    guidance_for: Callable[[str, str, str], str],
 ) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
         value = settings.get(key)
         names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
         for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (new := renames.get(name.strip())):
-                return f"{key}: {name.strip()}", guidance_for(key, new)
+            if isinstance(name, str) and (new := renames.get(old := name.strip())):
+                return f"{key}: {old}", guidance_for(key, old, new)
     return None
 
 
@@ -1098,7 +1098,7 @@ def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | No
         retired := _retired_function_filter(
             settings,
             _RETIRED_FILE_FUNCTIONS,
-            guidance_for=lambda key, new: f"use `filesystem: {{{key}: [{new}]}}`",
+            guidance_for=lambda key, _old, new: f"use `filesystem: {{{key}: [{new}]}}`",
         )
     ) is not None:
         return retired
@@ -1110,7 +1110,7 @@ def _retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] 
     return _retired_function_filter(
         settings,
         _RETIRED_TRIGGER_FUNCTIONS,
-        guidance_for=lambda _key, new: (
+        guidance_for=lambda _key, _old, new: (
             f"`{new}` is now a single unified function with an `action` parameter; "
             "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
         ),
@@ -1122,7 +1122,7 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     return _retired_function_filter(
         settings,
         RETIRED_CONSOLIDATED_FUNCTIONS["attachments"],
-        guidance_for=lambda _key, new: (
+        guidance_for=lambda _key, _old, new: (
             f"`{new}` is now a single unified function with an `action` parameter (alongside standalone `view_file`); "
             f"remove the per-function filter and use `tool_approval.rules` matching `{new}` if per-action gating "
             "(such as restricting `register` or `inline_image`) is needed"
@@ -1130,10 +1130,16 @@ def _retired_attachments_setting(settings: Mapping[str, object]) -> tuple[str, s
     )
 
 
-def _retired_consolidated_filter_guidance(tool_name: str, key: str, new: str) -> str:
+def _retired_consolidated_filter_guidance(tool_name: str, key: str, old: str, new: str) -> str:
+    effect = (
+        f"adding `{new}` to `include_tools` broadens to all sibling actions in `{new}`"
+        if key == "include_tools"
+        else f"adding `{new}` to `exclude_tools` removes all sibling actions in `{new}`"
+    )
     return (
-        f"use `{tool_name}: {{{key}: [{new}]}}` "
-        f"(or `tool_approval.rules` matching `{new}` if per-action gating is needed)"
+        f"replace `{old}` with `{new}` in `{tool_name}.{key}` while preserving any other entries in the list "
+        f"(note that `{new}` covers all actions in that consolidated group, so {effect}; "
+        f"for per-action gating, use a `tool_approval.rules` approval `script` matching `{new}`)"
     )
 
 
@@ -1143,7 +1149,7 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
         retired := _retired_function_filter(
             settings,
             _RETIRED_SLACK_FUNCTIONS,
-            guidance_for=lambda _key, _new: (
+            guidance_for=lambda _key, _old, _new: (
                 '`slack_watch` has been retired in favor of `triggers(action="subscribe_event", source_id="slack", ...)`; '
                 "remove `slack_watch` from the `slack` tool filter and configure `triggers` instead"
             ),
@@ -1153,7 +1159,7 @@ def _retired_slack_setting(settings: Mapping[str, object]) -> tuple[str, str] | 
     return _retired_function_filter(
         settings,
         RETIRED_CONSOLIDATED_FUNCTIONS["slack"],
-        guidance_for=lambda key, new: _retired_consolidated_filter_guidance("slack", key, new),
+        guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance("slack", key, old, new),
     )
 
 
@@ -1162,7 +1168,7 @@ def _retired_atlassian_setting(settings: Mapping[str, object]) -> tuple[str, str
     return _retired_function_filter(
         settings,
         RETIRED_CONSOLIDATED_FUNCTIONS["atlassian"],
-        guidance_for=lambda key, new: _retired_consolidated_filter_guidance("atlassian", key, new),
+        guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance("atlassian", key, old, new),
     )
 
 
@@ -1192,7 +1198,7 @@ def retired_tool_override(
             retired := _retired_function_filter(
                 overrides,
                 retired_functions,
-                guidance_for=lambda key, new: _retired_consolidated_filter_guidance(tool_name, key, new),
+                guidance_for=lambda key, old, new: _retired_consolidated_filter_guidance(tool_name, key, old, new),
             )
         )
         is not None

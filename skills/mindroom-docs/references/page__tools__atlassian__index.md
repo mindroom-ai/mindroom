@@ -291,7 +291,7 @@ tool_approval:
       action: require_approval
 ```
 
-For additional connections, add explicit rules for their prefixed function names (for example, `partner_jira_write` and `partner_confluence_write`) rather than wildcards, because config validation requires exact function names when gating consolidated Atlassian tools.
+For additional connections, exact prefixed function names (for example, `partner_jira_write` and `partner_confluence_write`) are recommended: broad patterns that decide the old and new names identically (such as `jira_*`) still work, whereas patterns like `*jira_write` that match only the new name fail closed during config validation.
 Timed approval grants for these consolidated functions are scoped per `action` (for example, approving `jira_write(action="comment")` does not auto-approve `jira_write(action="transition")`).
 Under a stricter `tool_approval.default: require_approval`, add `auto_approve` rules for exact read function names (`jira_read` and `confluence_read`, plus prefixed names such as `partner_jira_read` and `partner_confluence_read` for additional connections) instead.
 To give an agent read access only, set [`write: false`](#limit-what-an-agent-can-do) on its tool entry, or register a connection with `write=False` so that it never requests write scopes.

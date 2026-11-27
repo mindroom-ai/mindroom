@@ -3706,3 +3706,46 @@ def test_retired_atlassian_and_slack_include_exclude_overrides_fail_config_load(
             Config.validate_with_runtime(data, runtime_paths)
         return
     Config.validate_with_runtime(data, runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "old", "new", "expected_effect"),
+    [
+        (
+            {"exclude_tools": ["slack_post", "slack_delete"]},
+            "slack_post",
+            "slack_send",
+            "removes all sibling actions in `slack_send`",
+        ),
+        (
+            {"include_tools": ["slack_react"]},
+            "slack_react",
+            "slack_manage",
+            "broadens to all sibling actions in `slack_manage`",
+        ),
+    ],
+)
+def test_retired_consolidated_filter_guidance_preserves_other_entries_and_names_approval_scripts(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    old: str,
+    new: str,
+    expected_effect: str,
+) -> None:
+    """Filter migration guidance never recommends dropping sibling entries and points per-action gating to scripts."""
+    from mindroom.config.main import ConfigRuntimeValidationError  # noqa: PLC0415
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    data: dict[str, object] = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "defaults": {"tools": []},
+        "agents": {"a": {"display_name": "A", "tools": [{"slack": overrides}], "include_default_tools": False}},
+    }
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(data, runtime_paths)
+    message = str(exc_info.value)
+    assert f"replace `{old}` with `{new}`" in message
+    assert "preserving any other entries" in message
+    assert expected_effect in message
+    assert f"approval `script` matching `{new}`" in message
+    assert f"[{new}]" not in message
