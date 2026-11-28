@@ -1744,7 +1744,10 @@ async def test_kill_group_policy_adopted_nohup_natural_exit_contract(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop_mode", ["foreground_timeout", "adopted_signal", "adopted_timeout"])
+@pytest.mark.parametrize(
+    "stop_mode",
+    ["foreground_timeout", "foreground_signal", "inline_run_or_background_signal", "adopted_signal", "adopted_timeout"],
+)
 async def test_kill_group_false_stops_nohup_on_signal_or_timeout(
     registry: ProcessRegistry,
     tmp_path: Path,
@@ -1753,6 +1756,7 @@ async def test_kill_group_false_stops_nohup_on_signal_or_timeout(
     """Even with kill_group_after_exit=False, signal kills and timeouts stop detached nohup children."""
     pid_file = tmp_path / f"stop-{stop_mode}.pid"
     cmd = f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; sleep 30"
+    signal_cmd = f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; kill -TERM $$"
     nohup_pid: int | None = None
     try:
         if stop_mode == "foreground_timeout":
@@ -1765,6 +1769,30 @@ async def test_kill_group_false_stops_nohup_on_signal_or_timeout(
                 kill_group_after_exit=False,
             )
             assert result.timed_out is True
+            nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        elif stop_mode == "foreground_signal":
+            result = await run_foreground(
+                argv=["bash", "-c", signal_cmd],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=5.0,
+                kill_group_after_exit=False,
+            )
+            assert result.return_code == -signal.SIGTERM
+            nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        elif stop_mode == "inline_run_or_background_signal":
+            result = await registry.run_or_background(
+                namespace="test",
+                argv=["bash", "-c", signal_cmd],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=5.0,
+                kill_group_after_exit=False,
+            )
+            assert result.handle is None
+            assert result.return_code == -signal.SIGTERM
             nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
         elif stop_mode == "adopted_signal":
             result = await registry.run_or_background(

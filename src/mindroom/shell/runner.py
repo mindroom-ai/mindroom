@@ -198,7 +198,7 @@ class ActiveCommand:
                 await self.managed.wait_exit(timeout_seconds=timeout, on_poll=on_poll)
             except TimeoutError:
                 return True
-            if self.kill_group_after_exit:
+            if self.kill_group_after_exit or (self.managed.returncode is not None and self.managed.returncode < 0):
                 try:
                     if self.output_capture is not None and not self.output_capture.closed:
                         # Group cleanup can create EOF by killing a writer; decide completeness first.
