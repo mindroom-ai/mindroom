@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
+from mindroom.ai_run_metadata import ReplyAiRunProgress
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.event_journal.replies import (
     AppliedTransition,
@@ -94,10 +95,19 @@ class SpanHandle:
     compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
     # The active model payload this span's writes carry until settled run metadata replaces it.
     reply_model: dict[str, str] | None = None
+    # Live provisional, status-less io.mindroom.ai_run progress for this span's writes.
+    ai_run_progress: ReplyAiRunProgress = field(default_factory=ReplyAiRunProgress, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Know from the start whether the claimed reply already shows an event."""
         self.note_reply(self.reply)
+        if self.reply_model is not None:
+            self.ai_run_progress.set_model(self.reply_model)
+
+    def set_reply_model(self, model: Mapping[str, str] | None) -> None:
+        """Record the active model payload on this span and its provisional progress."""
+        self.reply_model = dict(model) if model is not None else None
+        self.ai_run_progress.set_model(self.reply_model)
 
     @property
     def exited(self) -> bool:

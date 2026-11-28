@@ -63,7 +63,7 @@ from mindroom.response_turn import (
 from mindroom.run_storage import bind_turn_session, scope_run_storage
 from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.leader import LeaderRun
+from mindroom.teams.leader import LeaderRun, team_usage_progress_hook
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
     build_team_spec,
@@ -86,6 +86,7 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
+    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.request_messages import TurnMessages
@@ -100,7 +101,7 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
-    from mindroom.teams.runtime import TeamRunEvent
+    from mindroom.teams.runtime import TeamRunEvent, TeamUsageHook
     from mindroom.teams.spec import TeamMode
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -251,6 +252,7 @@ def _leader_run(
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
     wait_for_connectivity: bool = False,
+    on_usage_updated: TeamUsageHook | None = None,
 ) -> LeaderRun:
     """Return how the leader of one prepared turn runs; a fold lands in the scope only when this request replays it."""
     history = prepared.prepared_history
@@ -276,6 +278,7 @@ def _leader_run(
             history.native_history,
         ),
         model_name=prepared.runtime_model_name,
+        on_usage_updated=on_usage_updated,
     )
 
 
@@ -429,6 +432,7 @@ class _TeamTurn:
         continuation_state: TurnContinuationRunState,
         *,
         on_model_resolved: Callable[[str], None] | None = None,
+        live_ai_run: ReplyAiRunProgress | None = None,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
         members = self.members_for_attempt(continuation_state)
@@ -478,6 +482,13 @@ class _TeamTurn:
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
+        if live_ai_run is not None:
+            live_ai_run.set_prepared_context(
+                config,
+                prepared.runtime_model_name,
+                prepared.prepared_history,
+                prior_usage=tuple(run.prior_usage.values()),
+            )
         run.run_metadata = prepared.run_metadata
         run.turn_input = TurnInput(context=prepared.turn.context)
         presentation = TeamStreamPresentation.new(
@@ -507,6 +518,16 @@ class _TeamTurn:
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
         storage = bind_turn_session(run, replays=self.replays)
+        on_usage_updated = (
+            team_usage_progress_hook(
+                live_ai_run,
+                config=config,
+                model_name=prepared.runtime_model_name,
+                prepared_history=prepared.prepared_history,
+            )
+            if live_ai_run is not None
+            else None
+        )
         leader = _leader_run(
             built,
             prepared,
@@ -517,6 +538,7 @@ class _TeamTurn:
             turn_recorder=run.record,
             wait_for_connectivity=not self.ctx.outside_matrix
             and (self.ctx.execution_identity is None or self.ctx.execution_identity.channel == "matrix"),
+            on_usage_updated=on_usage_updated,
         )
         request_context = self.request_log_context(
             prompt=continuation_state.active_prompt,
@@ -556,12 +578,14 @@ class _TeamTurn:
         continuation_state: TurnContinuationRunState,
         *,
         on_model_resolved: Callable[[str], None] | None = None,
+        live_ai_run: ReplyAiRunProgress | None = None,
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(
             run,
             continuation_state,
             on_model_resolved=on_model_resolved,
+            live_ai_run=live_ai_run,
         )
         prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
@@ -861,7 +885,7 @@ async def team_response_stream(
 
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=partial(turn.run_attempt, on_model_resolved=sinks.on_model_resolved),
+        run_attempt=partial(turn.run_attempt, on_model_resolved=sinks.on_model_resolved, live_ai_run=sinks.live_ai_run),
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=unexpected_error_text,

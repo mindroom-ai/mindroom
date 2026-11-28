@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.spec import RunContext
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.resume import resume_inputs
+from mindroom.llm.usage import team_run_usage
 from mindroom.run_storage import persist_into
 from mindroom.teams.runtime import continue_team, run_team
 from mindroom.tool_jobs.consumption import acknowledge_saved_run
@@ -19,13 +21,15 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.agent_loop.model_loop import LoopHooks
-    from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+    from mindroom.ai_run_metadata import ReplyAiRunProgress
+    from mindroom.config.main import Config
+    from mindroom.history.types import HistoryScope, PreparedHistoryState, ResolvedReplayPlan
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest
-    from mindroom.llm.runs import TeamRunRecord
+    from mindroom.llm.runs import RunRecord, TeamRunRecord
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.teams.members import BuiltTeam
-    from mindroom.teams.runtime import TeamDecisions, TeamRunEvent
+    from mindroom.teams.runtime import TeamDecisions, TeamRunEvent, TeamUsageHook
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,7 @@ class LeaderRun:
     request_template: ModelRequest
     model_name: str
     compaction_requests: set[HistoryScope] = field(default_factory=set)
+    on_usage_updated: TeamUsageHook | None = None
 
     def start(
         self,
@@ -69,6 +74,7 @@ class LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage, on_saved=acknowledge_saved_run),
             request_template=self.request_template,
+            on_usage_updated=self.on_usage_updated,
         )
 
     def resume(
@@ -100,7 +106,40 @@ class LeaderRun:
             hooks=self.hooks,
             persist=persist_into(records, self.storage, on_saved=acknowledge_saved_run),
             request_template=self.request_template,
+            on_usage_updated=self.on_usage_updated,
         )
 
 
-__all__ = ["LeaderRun"]
+def team_usage_progress_hook(
+    live_ai_run: ReplyAiRunProgress,
+    *,
+    config: Config,
+    model_name: str,
+    prepared_history: PreparedHistoryState | None,
+    prior_member_runs: Sequence[RunRecord] = (),
+) -> TeamUsageHook:
+    """Aggregate live leader + member usage/tools into ``live_ai_run`` while keeping leader-only model and context."""
+    prior_by_id = {member.run_id: member for member in prior_member_runs}
+
+    def _note_team_usage(
+        leader_record: TeamRunRecord,
+        leader_messages: Sequence[Message],
+        live_members: Sequence[RunRecord],
+    ) -> None:
+        merged_members = {**prior_by_id, **{member.run_id: member for member in live_members}}
+        members = tuple(merged_members.values())
+        live_ai_run.update_from_run(
+            config,
+            model_name=model_name,
+            record=leader_record,
+            messages=leader_messages,
+            prior_usage=tuple(prior_usage_by_run(leader_record.metadata).values()),
+            prepared_history=prepared_history,
+            metrics_override=team_run_usage(leader_record.metrics, (member.metrics for member in members)),
+            tool_count_override=len(leader_record.tools or ()) + sum(len(member.tools or ()) for member in members),
+        )
+
+    return _note_team_usage
+
+
+__all__ = ["LeaderRun", "team_usage_progress_hook"]

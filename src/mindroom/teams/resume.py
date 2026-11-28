@@ -29,12 +29,12 @@ from mindroom.history.replay import configured_replay_plan
 from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
 from mindroom.hooks import render_system_enrichment_block
 from mindroom.llm.provider import ModelRequest, RequestOverrides
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.response_turn import CompletedApprovalRun, pause_without_approval_error, paused_attempt_from_response
 from mindroom.run_storage import scope_run_storage
 from mindroom.teams.attempt import TeamAttempt
-from mindroom.teams.leader import LeaderRun
+from mindroom.teams.leader import LeaderRun, team_usage_progress_hook
 from mindroom.teams.members import (
     build_team_spec,
     materialized_team_label,
@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
+    from mindroom.ai_run_metadata import ReplyAiRunProgress
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -71,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
-    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent
+    from mindroom.teams.runtime import TeamCallKey, TeamRunEvent, TeamUsageHook
     from mindroom.teams.spec import TeamMode, TeamSpec
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -291,6 +292,38 @@ async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
             await member.ensure_built()
 
 
+def _seed_team_resume_ai_run(
+    live_ai_run: ReplyAiRunProgress | None,
+    *,
+    config: Config,
+    model_name: str,
+    persisted: TeamRunRecord,
+    storage: RunStorage,
+    run_id: str,
+    subagent_cost: SubagentCost,
+) -> TeamUsageHook | None:
+    """Seed live provisional metadata from a paused team run and return its resumed usage hook."""
+    if live_ai_run is None:
+        return None
+    stored_member_runs = tuple(
+        row for row in storage.session.runs if isinstance(row, RunRecord) and row.parent_run_id == run_id
+    )
+    live_ai_run.seed_from_paused(
+        config,
+        model_name=model_name,
+        persisted=persisted,
+        subagent_cost=subagent_cost,
+        member_runs=stored_member_runs,
+    )
+    return team_usage_progress_hook(
+        live_ai_run,
+        config=config,
+        model_name=model_name,
+        prepared_history=None,
+        prior_member_runs=stored_member_runs,
+    )
+
+
 @owned_tool_execution(
     enabled=lambda *, config, runtime_paths, **_kwargs: background_tool_jobs_enabled(config, runtime_paths),
 )
@@ -317,6 +350,7 @@ async def continue_paused_team_run(
     progress: ProgressPublisher | None,
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
+    live_ai_run: ReplyAiRunProgress | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
@@ -426,6 +460,8 @@ async def continue_paused_team_run(
             prepared_history=None,
         )
         plan = configured_replay_plan(history_settings=built.history_settings, estimated_tokens=0)
+        # The resumed turn goes on from what its subagents had cost before the pause, and its reply reports it.
+        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
         leader = LeaderRun(
             built=built,
             storage=storage,
@@ -451,6 +487,15 @@ async def continue_paused_team_run(
                 native,
             ),
             model_name=model_name,
+            on_usage_updated=_seed_team_resume_ai_run(
+                live_ai_run,
+                config=config,
+                model_name=model_name,
+                persisted=persisted,
+                storage=storage,
+                run_id=run_id,
+                subagent_cost=subagent_cost,
+            ),
         )
         resume = TeamResume(
             leader=leader,
@@ -470,8 +515,6 @@ async def continue_paused_team_run(
             approval_calls=driver_calls,
         )
         events = with_resumed_turn_log_context(events, entity_name=entity_name)
-        # The resumed turn goes on from what its subagents had cost before the pause, and its reply reports it.
-        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
         with helper_usage_context(scope), receiving_subagent_cost(subagent_cost):
             await publish_team_presentation(progress, presentation)
             async with closing_async_stream(events):

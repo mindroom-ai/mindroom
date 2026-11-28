@@ -117,6 +117,7 @@ type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunctio
 type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[bool | None]]
+type TurnProgressHook = Callable[[LoopState], None]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
 
 
@@ -148,6 +149,9 @@ class LoopHooks:
     - ``on_resume_entry``: awaited in order by a resume with the live messages and the decided calls' results after
       they are appended, before the loop continues; a resumed batch that stops the run runs none. Its hooks return as
       ``after_tool_batch`` hooks do.
+    - ``on_usage_updated``: called synchronously whenever the run's live usage, answering model, or recorded tool
+      calls change — after a completed turn is accepted, after a tool batch is recorded, and after a cut-off request's
+      usage is kept. Errors raised by this telemetry hook are logged and ignored so they never disrupt a run.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -160,6 +164,7 @@ class LoopHooks:
     tool_middleware: tuple[ToolMiddleware, ...] = ()
     after_tool_batch: tuple[AfterToolBatchHook, ...] = ()
     on_resume_entry: tuple[AfterToolBatchHook, ...] = ()
+    on_usage_updated: TurnProgressHook | None = None
     on_loop_end: LoopEndHook | None = None
 
 
@@ -237,7 +242,14 @@ async def run_model_loop(
         progress.last_request = request
         tracker = StreamTracker(identity)
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, state.record, tracker)
+        events = _stream_turn(
+            model,
+            request,
+            messages,
+            state.record,
+            tracker,
+            on_unaccepted=(None if hooks.on_usage_updated is None else lambda: _notify_usage_updated(hooks, state)),
+        )
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -249,6 +261,7 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, tracker)
+        _notify_usage_updated(hooks, state)
         await _after_turn(hooks, state, request, message)
         if not message.tool_calls:
             break
@@ -297,6 +310,16 @@ async def _before_request(
         if isinstance(await hook(state), EndRun):
             return False
     return True
+
+
+def _notify_usage_updated(hooks: LoopHooks, state: LoopState) -> None:
+    """Invoke ``hooks.on_usage_updated`` defensively so telemetry errors never disrupt a run."""
+    if hooks.on_usage_updated is None:
+        return
+    try:
+        hooks.on_usage_updated(state)
+    except Exception:
+        logger.warning("usage_progress_hook_failed", entity=_entity(state.record), exc_info=True)
 
 
 async def _after_turn(hooks: LoopHooks, state: LoopState, request: ModelRequest, message: Message) -> None:
@@ -356,6 +379,7 @@ async def _run_tool_batch(
             failing_tools=state.record.failing_tools,
         )
     _record_batch(state.record, batch)
+    _notify_usage_updated(hooks, state)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
     for call in batch.calls:
@@ -540,6 +564,8 @@ async def _stream_turn(
     messages: list[Message],
     record: AnyRunRecord,
     tracker: StreamTracker,
+    *,
+    on_unaccepted: Callable[[], None] | None = None,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
@@ -573,6 +599,8 @@ async def _stream_turn(
     finally:
         if not handed_off:
             _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
+            if on_unaccepted is not None:
+                on_unaccepted()
 
 
 def _keep_unaccepted(
@@ -715,5 +743,6 @@ __all__ = [
     "RequestDecision",
     "RewriteToolCalls",
     "SendRequest",
+    "TurnProgressHook",
     "run_model_loop",
 ]

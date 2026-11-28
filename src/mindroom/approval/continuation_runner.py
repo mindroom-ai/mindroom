@@ -461,14 +461,14 @@ class ApprovalContinuationRunner:
         runtime_model_name: str | None,
         handle: SpanHandle,
     ) -> dict[str, Any]:
-        """Build pause write metadata carrying stream status and provisional active model."""
+        """Build pause write metadata carrying stream status and provisional active run progress."""
         extra_content: dict[str, Any] = {STREAM_STATUS_KEY: stream_status}
         if runtime_model_name is not None:
             model = model_payload(self.deps.runtime.config, runtime_model_name)
             handle.reply_model = model
-            extra_content.update(streaming_ai_run_content(model))
-        elif handle.reply_model is not None:
-            extra_content.update(streaming_ai_run_content(handle.reply_model))
+            if not handle.ai_run_progress.has_metrics():
+                handle.ai_run_progress.set_model(model)
+        extra_content.update(handle.ai_run_progress.content(fallback_model=handle.reply_model))
         return extra_content
 
     async def _show_pause(
@@ -867,7 +867,7 @@ class ApprovalContinuationRunner:
             model = model_payload(self.deps.runtime.config, claimed.runtime_model_name)
             provisional_ai_run = streaming_ai_run_content(model)
             if (handle := current_span()) is not None:
-                handle.reply_model = model
+                handle.set_reply_model(model)
         # Streaming requesters watch the resumed work in the reply it continues, unless the turn is quiet.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
@@ -1361,6 +1361,9 @@ class ApprovalContinuationRunner:
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
                             quiet=request.quiet,
+                            live_ai_run=(
+                                span_handle.ai_run_progress if (span_handle := current_span()) is not None else None
+                            ),
                         )
                 else:
                     result = await self._approval_execution.continue_run(
