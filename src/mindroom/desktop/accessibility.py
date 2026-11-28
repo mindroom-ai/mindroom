@@ -62,6 +62,18 @@ _STATE_STABILIZATION_MATCHES = 3
 _VALUE_VERIFICATION_ATTEMPTS = 4
 _LAUNCH_ATTEMPTS = 100
 _FOCUS_BEFORE_SET_ROLES = frozenset({"AXComboBox", "AXSearchField", "AXTextField"})
+_CHROMIUM_APP_IDS = frozenset(
+    {
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "org.chromium.Chromium",
+        "company.thebrowser.Browser",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+    },
+)
 _VISIBLE_ROW_CONTAINER_ROLES = frozenset({"AXOutline", "AXTable"})
 _CONTAINER_ROLES = frozenset(
     {
@@ -801,7 +813,7 @@ class MacAccessibilityBackend:
             raise AccessibilityError(msg)
         return application, window_element, window, macos_skylight.ax_window_id(window_element)
 
-    def _ensure_app_ax_enabled(self, application: _RunningApplication) -> None:
+    def _ensure_app_ax_enabled(self, application: _RunningApplication, app_id: str) -> None:
         """Enable occluded AX trees once per (pid, launch_date) for Chromium/Electron apps."""
         pid = int(application.processIdentifier())
         launch_date_getter = getattr(application, "launchDate", None)
@@ -809,10 +821,24 @@ class MacAccessibilityBackend:
         if pid in self._ax_enabled_pids and self._ax_enabled_pids[pid] == launch_date:
             return
         app_element = self._services.AXUIElementCreateApplication(pid)
-        self._services.AXUIElementSetAttributeValue(app_element, "AXManualAccessibility", True)
-        if len(self._ax_enabled_pids) >= 256:
-            self._ax_enabled_pids.pop(next(iter(self._ax_enabled_pids)))
-        self._ax_enabled_pids[pid] = launch_date
+        success = self._services.kAXErrorSuccess
+        unsupported = getattr(self._services, "kAXErrorAttributeUnsupported", -25205)
+        error = self._services.AXUIElementSetAttributeValue(app_element, "AXManualAccessibility", True)
+        should_cache = error == success
+        if error == unsupported:
+            if app_id in _CHROMIUM_APP_IDS or app_id.startswith("com.electron."):
+                fallback_error = self._services.AXUIElementSetAttributeValue(
+                    app_element,
+                    "AXEnhancedUserInterface",
+                    True,
+                )
+                should_cache = fallback_error in {success, unsupported}
+            else:
+                should_cache = True
+        if should_cache:
+            if len(self._ax_enabled_pids) >= 256:
+                self._ax_enabled_pids.pop(next(iter(self._ax_enabled_pids)))
+            self._ax_enabled_pids[pid] = launch_date
 
     def _collect_app_state(
         self,
@@ -827,7 +853,7 @@ class MacAccessibilityBackend:
             expected_pid=expected_pid,
             expected_window=expected_window,
         )
-        self._ensure_app_ax_enabled(application)
+        self._ensure_app_ax_enabled(application, app_id)
         elements, references, identities, truncated = self._flatten_tree(window_element)
         state = AccessibilityState(
             state_id=state_id,

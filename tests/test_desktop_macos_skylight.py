@@ -93,15 +93,13 @@ def test_ax_window_id_and_event_field_helpers(monkeypatch: pytest.MonkeyPatch) -
     assert macos_skylight.ax_window_id("ax-win") is None
 
 
-@pytest.mark.parametrize("record_offset", [24, 32, 16])
-def test_post_to_pid_attaches_auth_message_only_when_requested_and_probes_offsets(
+def test_post_to_pid_attaches_auth_message_only_at_offset_24(
     monkeypatch: pytest.MonkeyPatch,
-    record_offset: int,
 ) -> None:
-    """Keyboard posts probe embedded SLSEventRecord* at (24, 32, 16) via metaclass selector; mouse posts skip auth."""
+    """Keyboard posts read SLSEventRecord* only at offset 24 via metaclass check; null skips without OOB reads."""
     event_buf = (ctypes.c_uint8 * 64)()
     fake_record_addr = 0xDEAD_BEEF
-    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + record_offset).value = fake_record_addr
+    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + 24).value = fake_record_addr
 
     calls: list[tuple[str, object]] = []
     responds_result = [True]
@@ -136,7 +134,7 @@ def test_post_to_pid_attaches_auth_message_only_when_requested_and_probes_offset
     assert macos_skylight.post_to_pid(42, "mouse-ev", attach_auth_message=False) is True
     assert calls == [("post", (42, ctypes.addressof(event_buf)))]
 
-    # Keyboard path: attaches auth message via metaclass check + probed record offset.
+    # Keyboard path: attaches auth message via metaclass check + offset 24.
     calls.clear()
     assert macos_skylight.post_to_pid(42, "key-ev", attach_auth_message=True) is True
     assert calls == [
@@ -146,8 +144,17 @@ def test_post_to_pid_attaches_auth_message_only_when_requested_and_probes_offset
         ("post", (42, ctypes.addressof(event_buf))),
     ]
 
+    # Null at offset 24 skips auth cleanly without reading offsets 16 or 32.
+    calls.clear()
+    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + 16).value = 0x1111_1111
+    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + 24).value = 0
+    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + 32).value = 0x3333_3333
+    assert macos_skylight.post_to_pid(42, "key-ev", attach_auth_message=True) is True
+    assert calls == [("responds", (0x2010, 0x3000)), ("post", (42, ctypes.addressof(event_buf)))]
+
     # macOS 14 fallback: selector absent on metaclass -> skips auth attachment and still posts.
     calls.clear()
+    ctypes.c_void_p.from_address(ctypes.addressof(event_buf) + 24).value = fake_record_addr
     responds_result[0] = False
     assert macos_skylight.post_to_pid(42, "key-ev", attach_auth_message=True) is True
     assert calls == [("responds", (0x2010, 0x3000)), ("post", (42, ctypes.addressof(event_buf)))]

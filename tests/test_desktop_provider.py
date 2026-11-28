@@ -372,6 +372,10 @@ def test_macos_type_text_routes_apps_to_background_and_primary_screen_to_hid(
         hid_typed.append(text)
 
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
     monkeypatch.setattr("mindroom.desktop.macos_input.type_text_background", type_bg)
     monkeypatch.setattr("mindroom.desktop.provider._type_macos_unicode", type_unicode)
 
@@ -573,6 +577,10 @@ def test_secondary_macos_click_routes_background_and_primary_screen_hid(monkeypa
     hid_emitted: list[object] = []
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr(
         "mindroom.desktop.macos_input.click_background",
         lambda pid, x, y, **kwargs: bg_emitted.append((pid, x, y, kwargs["count"], kwargs["window_id"])),
     )
@@ -684,9 +692,16 @@ def test_macos_background_pointer_input_succeeds_when_occluded_and_stops_when_wi
     assert state.pid_posted
     assert all(pid == 42 for pid, _ in state.pid_posted)
 
-    # Disappearing window before first event sends nothing and raises definite AccessibilityError.
+    # Unresolvable window before posting refuses with DesktopProviderError and posts nothing.
     state.pid_posted.clear()
     state.checks, state.drop_after = 0, 1
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        act()
+    assert state.pid_posted == []
+
+    # Disappearing window right before first event sends nothing and raises definite AccessibilityError.
+    state.pid_posted.clear()
+    state.checks, state.drop_after = 0, 2
     with pytest.raises(AccessibilityError, match="nothing was sent") as caught:
         act()
     assert type(caught.value) is AccessibilityError
@@ -695,7 +710,7 @@ def test_macos_background_pointer_input_succeeds_when_occluded_and_stops_when_wi
     # Disappearing mid-drag raises AccessibilityActionOutcomeUnknownError and releases LeftMouseUp.
     if action == "drag":
         state.pid_posted.clear()
-        state.checks, state.drop_after = 0, 4
+        state.checks, state.drop_after = 0, 5
         with pytest.raises(AccessibilityActionOutcomeUnknownError, match="outcome may be partial"):
             act()
         assert state.pid_posted[-1][1]["kind"] == quartz.kCGEventLeftMouseUp
@@ -709,6 +724,10 @@ def test_macos_keypress_routes_app_to_background_and_primary_screen_to_pyautogui
     bg_keys: list[tuple[int, int | None, tuple[str, ...]]] = []
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
     monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
+    monkeypatch.setattr(
         "mindroom.desktop.macos_input.keypress_background",
         lambda pid, wid, keys: bg_keys.append((pid, wid, tuple(keys))),
     )
@@ -721,6 +740,50 @@ def test_macos_keypress_routes_app_to_background_and_primary_screen_to_pyautogui
     accessibility.window_id = None
     provider.keypress(app_id="primary-screen", state_id="state-1", keys=["enter"])
     assert pyautogui.calls == [("press", "enter")]
+
+
+def test_macos_background_input_resolves_missing_window_id_and_refuses_unresolvable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When AX supplies window_id=None, provider resolves CGWindowID once, stamps it, and refuses if missing."""
+    provider, _, accessibility = _provider()
+    accessibility.window_id = None
+    quartz = _install_occluded_background_quartz(monkeypatch, accessibility.window)
+    state = quartz.state
+    activations: list[tuple[int, int]] = []
+    stamped: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.macos_skylight.activate_without_raise",
+        lambda pid, wid: activations.append((pid, wid)) or True,
+    )
+    monkeypatch.setattr(
+        "mindroom.desktop.macos_input.macos_skylight.set_integer_field",
+        lambda _event, field, value: stamped.append((field, value)) or True,
+    )
+    quartz.CGEventCreateKeyboardEvent = lambda _source, keycode, down: {"keycode": keycode, "down": down}
+    quartz.CGEventKeyboardSetUnicodeString = lambda event, _length, text: event.update(text=text)
+
+    provider.click(app_id="com.example.Editor", state_id="state-1", x=500, y=500, button="left")
+    assert activations == [(42, 3)]
+    assert {(51, 3), (91, 3), (92, 3)} <= set(stamped)
+
+    activations.clear()
+    provider.type_text(app_id="com.example.Editor", state_id="state-1", text="hi")
+    provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["command", "a"])
+    assert activations == [(42, 3), (42, 3)]
+
+    # Unresolvable window refuses pointer and keyboard actions with DesktopProviderError before posting.
+    state.pid_posted.clear()
+    activations.clear()
+    state.checks, state.drop_after = 0, 1
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.click(app_id="com.example.Editor", state_id="state-1", x=500, y=500, button="left")
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.type_text(app_id="com.example.Editor", state_id="state-1", text="hi")
+    with pytest.raises(DesktopProviderError, match="one exact"):
+        provider.keypress(app_id="com.example.Editor", state_id="state-1", keys=["enter"])
+    assert state.pid_posted == []
+    assert activations == []
 
 
 def test_drag_releases_when_motion_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -793,6 +856,10 @@ def test_untargeted_macos_typing_stops_once_the_allowed_app_loses_keyboard_focus
     )
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
     monkeypatch.setattr("mindroom.desktop.macos_input.time.sleep", lambda _delay: None)
     monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.activate_without_raise", lambda *_args: True)
     monkeypatch.setattr("mindroom.desktop.macos_input.macos_skylight.post_to_pid", lambda *_args, **_kw: False)
@@ -969,6 +1036,10 @@ def test_macos_drag_does_not_call_duplicate_prepare_fallback(monkeypatch: pytest
     """Drag on macOS validates once up front and once in before_press via background delivery."""
     provider, _, accessibility = _provider()
     monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "mindroom.desktop.provider._macos_window_id",
+        lambda _pid, _region, *, expected_window_id=None: 3 if expected_window_id is None else expected_window_id,
+    )
     drag_calls: list[object] = []
 
     def fake_drag_bg(

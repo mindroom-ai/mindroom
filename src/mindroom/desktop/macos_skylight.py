@@ -19,7 +19,7 @@ _CF = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
 _OBJC = "/usr/lib/libobjc.A.dylib"
 
 _HW_CAPTURE_OPTIONS = (1 << 11) | (1 << 8)  # IGNORE_GLOBAL_CLIP_SHAPE | BEST_RESOLUTION
-_EVENT_RECORD_OFFSETS = (24, 32, 16)
+_EVENT_RECORD_OFFSET = 24
 _FOCUS_RECORD_SIZE = 0xF8
 _MAX_UINT32 = 0xFFFFFFFF
 
@@ -118,10 +118,7 @@ def _attach_auth_message(pid: int, event_ptr: int) -> None:
     meta = obj_get_cls(cls) if cls and obj_get_cls else cls
     if not (cls and sel and meta and responds(meta, sel)):
         return
-    record_ptr = next(
-        (int(v) for off in _EVENT_RECORD_OFFSETS if (v := c_void_p.from_address(event_ptr + off).value)),
-        0,
-    )
+    record_ptr = c_void_p.from_address(event_ptr + _EVENT_RECORD_OFFSET).value
     if record_ptr and (msg := msg_send(cls, sel, c_void_p(record_ptr), c_int(pid), c_uint32(0))):
         set_auth(c_void_p(event_ptr), c_void_p(msg))
 

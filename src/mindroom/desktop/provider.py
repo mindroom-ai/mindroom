@@ -473,7 +473,11 @@ class PyAutoGuiDesktopProvider:
             target = self._accessibility.prepare_typing(app_id, state_id, element_index)
         if sys.platform == "darwin":
             if isinstance(target, KeyboardTarget) and target.process_id is not None:
-                macos_input.type_text_background(target.process_id, target.window_id, text, before_chunk=target)
+                if target.window is None:
+                    msg = "macOS could not bind the accessibility target to one exact application window."
+                    raise DesktopProviderError(msg)
+                resolved_window_id = _resolve_macos_window_id(target.process_id, target.window, target.window_id)
+                macos_input.type_text_background(target.process_id, resolved_window_id, text, before_chunk=target)
             else:
                 _type_macos_unicode(text, before_chunk=target)
         else:
@@ -522,7 +526,11 @@ class PyAutoGuiDesktopProvider:
         target = self._accessibility.prepare_keyboard(app_id, state_id, allow_window_fallback=allow_window_fallback)
         target()
         if sys.platform == "darwin" and isinstance(target, KeyboardTarget) and target.process_id is not None:
-            macos_input.keypress_background(target.process_id, target.window_id, normalized)
+            if target.window is None:
+                msg = "macOS could not bind the accessibility target to one exact application window."
+                raise DesktopProviderError(msg)
+            resolved_window_id = _resolve_macos_window_id(target.process_id, target.window, target.window_id)
+            macos_input.keypress_background(target.process_id, resolved_window_id, normalized)
         elif len(normalized) == 1:
             self._pyautogui.press(normalized[0])
         else:
@@ -539,12 +547,21 @@ class PyAutoGuiDesktopProvider:
         )
         if sys.platform == "darwin":
             if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
                 macos_input.move_background(
                     target.process_id,
                     *point,
-                    window_id=target.window_id,
+                    window_id=resolved_window_id,
                     window_rect=target.state.window,
-                    check=self._background_pointer_check(target.process_id, target.state.window, target.window_id),
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
                 )
             else:
                 macos_input.move(*point)
@@ -608,14 +625,23 @@ class PyAutoGuiDesktopProvider:
                 )
 
             if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
                 macos_input.drag_background(
                     target.process_id,
                     start,
                     end,
                     duration=duration_ms / 1000,
-                    window_id=target.window_id,
+                    window_id=resolved_window_id,
                     window_rect=target.state.window,
-                    check=self._background_pointer_check(target.process_id, target.state.window, target.window_id),
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
                     before_press=before_press,
                 )
             else:
@@ -659,8 +685,8 @@ class PyAutoGuiDesktopProvider:
     def _background_pointer_check(
         self,
         process_id: int,
+        window_id: int,
         window_rect: DesktopRect,
-        window_id: int | None,
     ) -> Callable[[tuple[int, int]], None]:
         """Verify the background target window still exists with the same PID/window_id/bounds, ignoring occlusion."""
         posted = False
@@ -682,15 +708,24 @@ class PyAutoGuiDesktopProvider:
     def _click_input(self, x: int, y: int, *, button: str, count: int, target: AccessibilityCapture) -> None:
         if sys.platform == "darwin":
             if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
                 macos_input.click_background(
                     target.process_id,
                     x,
                     y,
                     button=button,
                     count=count,
-                    window_id=target.window_id,
+                    window_id=resolved_window_id,
                     window_rect=target.state.window,
-                    check=self._background_pointer_check(target.process_id, target.state.window, target.window_id),
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
                 )
             else:
                 macos_input.click(x, y, button=button, count=count)
@@ -712,15 +747,16 @@ class PyAutoGuiDesktopProvider:
     ) -> None:
         if sys.platform == "darwin":
             if process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(process_id, window_rect, window_id)
                 macos_input.scroll_background(
                     process_id,
                     x,
                     y,
                     clicks=clicks,
                     horizontal=direction in {"left", "right"},
-                    window_id=window_id,
+                    window_id=resolved_window_id,
                     window_rect=window_rect,
-                    check=self._background_pointer_check(process_id, window_rect, window_id),
+                    check=self._background_pointer_check(process_id, resolved_window_id, window_rect),
                 )
             else:
                 macos_input.scroll(x, y, clicks=clicks, horizontal=direction in {"left", "right"})
@@ -786,6 +822,11 @@ def _capture_macos_window(process_id: int, region: DesktopRect, window_id: int |
         msg = "The application window changed during capture; request fresh app state."
         raise DesktopProviderError(msg)
     return _pillow_image_from_macos_capture(cg_image)
+
+
+def _resolve_macos_window_id(process_id: int, region: DesktopRect, window_id: int | None) -> int:
+    """Resolve and validate the exact Core Graphics window ID once before posting background input."""
+    return _macos_window_id(process_id, region, expected_window_id=window_id)
 
 
 def _macos_window_id(

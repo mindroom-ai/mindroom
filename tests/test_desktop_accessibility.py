@@ -69,10 +69,12 @@ class FakeRunningApplication:
         *,
         active: bool = True,
         hidden: bool = False,
+        bundle_id: str = "com.example.Editor",
         bundle_url: object | None = "file:///Applications/Editor.app",
         launch_date: object = 1.0,
     ) -> None:
         self.pid = pid
+        self.bundle_id = bundle_id
         self.active = active
         self.hidden = hidden
         self.bundle_url = bundle_url
@@ -83,7 +85,7 @@ class FakeRunningApplication:
         self.activate_returns = True
 
     def bundleIdentifier(self) -> str:
-        return "com.example.Editor"
+        return self.bundle_id
 
     def localizedName(self) -> str:
         return "Editor"
@@ -635,19 +637,38 @@ def test_mac_launch_timeout_and_open_error_have_unknown_outcome(monkeypatch: pyt
 
 
 def test_mac_chromium_ax_enablement_caches_by_pid_and_launch_date(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AXManualAccessibility caches per (pid, launchDate) and never enables AXEnhancedUserInterface."""
+    """Native apps skip AXEnhancedUserInterface; Chromium/Electron fall back; transient errors retry."""
     backend, services, workspace = _fake_mac_backend()
+    backend._allowed_app_ids = frozenset({"com.example.Editor", "com.google.Chrome", "com.electron.Demo"})
     monkeypatch.setattr("mindroom.desktop.accessibility.time.sleep", lambda _seconds: None)
-    services.app_attribute_errors["AXManualAccessibility"] = -25205  # kAXErrorAttributeUnsupported
 
+    # (a) Native app returning kAXErrorAttributeUnsupported caches without enabling AXEnhancedUserInterface.
+    services.app_attribute_errors["AXManualAccessibility"] = -25205
     backend.get_app_state("com.example.Editor")
     backend.get_app_state("com.example.Editor")
     assert services.app_attribute_calls == [(("app", 42), "AXManualAccessibility", True)]
 
-    # Same PID reused with a newer launchDate -> cache misses and AX enablement runs again.
+    # (b) Chromium/Electron apps returning kAXErrorAttributeUnsupported fall back to AXEnhancedUserInterface.
+    for app_id, pid in (("com.google.Chrome", 50), ("com.electron.Demo", 51)):
+        services.app_attribute_calls.clear()
+        workspace.applications = [FakeRunningApplication(bundle_id=app_id, pid=pid, launch_date=1.0)]
+        backend.get_app_state(app_id)
+        backend.get_app_state(app_id)
+        assert services.app_attribute_calls == [
+            (("app", pid), "AXManualAccessibility", True),
+            (("app", pid), "AXEnhancedUserInterface", True),
+        ]
+
+    # (c) Transient error (e.g. kAXErrorCannotComplete) is NOT cached and retries on next call.
+    services.app_attribute_calls.clear()
+    services.app_attribute_errors["AXManualAccessibility"] = -25204
+    workspace.applications = [FakeRunningApplication(pid=42, launch_date=2.0)]
+    backend.get_app_state("com.example.Editor")
+    assert backend._ax_enabled_pids.get(42) != 2.0
+    assert services.app_attribute_calls
     services.app_attribute_calls.clear()
     services.app_attribute_errors.clear()
-    workspace.applications = [FakeRunningApplication(pid=42, launch_date=2.0)]
+    backend.get_app_state("com.example.Editor")
     backend.get_app_state("com.example.Editor")
     assert services.app_attribute_calls == [(("app", 42), "AXManualAccessibility", True)]
 
