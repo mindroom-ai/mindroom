@@ -60,7 +60,7 @@ async def test_send_uses_current_conversation_without_dispatching_body_mentions(
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
         ) as send,
     ):
-        result = json.loads(await MatrixMessageTools().matrix_message(message="Update from @general"))
+        result = json.loads(await MatrixMessageTools().matrix_message(action="send", message="Update from @general"))
     assert result["thread_id"] == "$current"
     content = send.await_args.args[2]
     assert content["m.relates_to"]["event_id"] == "$current"
@@ -79,6 +79,7 @@ async def test_explicit_recipient_is_only_dispatched_agent(context: ToolRuntimeC
     ):
         result = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 recipient="general",
                 message="Compare @code with @blocked without asking them.",
             ),
@@ -103,7 +104,12 @@ async def test_new_thread_returns_usable_conversation_handle(context: ToolRuntim
         ) as send,
     ):
         result = json.loads(
-            await MatrixMessageTools().matrix_message(recipient="general", message="Investigate", new_thread=True),
+            await MatrixMessageTools().matrix_message(
+                action="send",
+                recipient="general",
+                message="Investigate",
+                new_thread=True,
+            ),
         )
     assert result["thread_id"] == "$new-root"
     assert result["event_id"] == "$new-root"
@@ -121,7 +127,9 @@ async def test_unavailable_recipient_fails_before_sending(context: ToolRuntimeCo
             new_callable=AsyncMock,
         ) as send,
     ):
-        result = json.loads(await MatrixMessageTools().matrix_message(recipient=recipient, message="Do work"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", recipient=recipient, message="Do work"),
+        )
     assert result["status"] == "error"
     assert recipient in result["message"]
     send.assert_not_awaited()
@@ -164,6 +172,7 @@ async def test_recipient_attachments_keep_order_and_arrive_before_dispatch(
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                action="send",
                 recipient="general",
                 message="Compare both files",
                 attachments=["first.txt", "att_second"],
@@ -187,6 +196,7 @@ async def test_missing_attachment_prevents_message_dispatch(context: ToolRuntime
     ):
         result = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 recipient="general",
                 message="Read this",
                 attachments=["att_missing"],
@@ -204,7 +214,9 @@ async def test_recipient_uses_current_authorization_config(context: ToolRuntimeC
     current.agents["general"].access.users = []
     runtime = replace(context, config_provider=lambda: current)
     with tool_runtime_context(runtime):
-        result = json.loads(await MatrixMessageTools().matrix_message(recipient="general", message="Do work"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", recipient="general", message="Do work"),
+        )
     assert result["status"] == "error"
 
 
@@ -218,7 +230,9 @@ async def test_room_mode_recipient_uses_room_conversation(context: ToolRuntimeCo
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$sent")),
         ) as send,
     ):
-        result = json.loads(await MatrixMessageTools().matrix_message(recipient="code", message="Do work"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", recipient="code", message="Do work"),
+        )
     assert result["status"] == "ok"
     assert result["thread_id"] is None
     assert "m.relates_to" not in send.await_args.args[2]
@@ -228,11 +242,11 @@ async def test_room_mode_recipient_uses_room_conversation(context: ToolRuntimeCo
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"new_thread": True, "thread_id": "$existing"},
+        {"action": "send", "new_thread": True, "thread_id": "$existing"},
         {"new_thread": True, "action": "read"},
         {"recipient": "general", "action": "read"},
-        {"recipient": "code", "new_thread": True},
-        {"recipient": "code", "thread_id": "$existing"},
+        {"action": "send", "recipient": "code", "new_thread": True},
+        {"action": "send", "recipient": "code", "thread_id": "$existing"},
     ],
 )
 async def test_conflicting_message_options_do_not_send(
@@ -275,6 +289,7 @@ async def test_explicit_room_timeline_keeps_all_deliveries_outside_threads(
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                action="send",
                 message="Update",
                 recipient=recipient,
                 thread_id="room",
@@ -318,6 +333,7 @@ async def test_recipient_partial_delivery_keeps_handle_and_does_not_retry(
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                action="send",
                 recipient="general",
                 message="Review files",
                 new_thread=True,
@@ -346,6 +362,7 @@ async def test_attachment_id_like_filename_can_be_sent_with_dot_slash(
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                action="send",
                 attachments=["./att_report"],
             ),
         )
@@ -372,6 +389,7 @@ async def test_room_recipient_receives_trusted_attachment_references(
     ):
         result = json.loads(
             await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                action="send",
                 recipient="code",
                 message="Read the report",
                 attachments=["report.txt"],
@@ -395,7 +413,9 @@ async def test_self_message_without_human_requester_does_not_report_false_dispat
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$text")),
         ) as send,
     ):
-        result = json.loads(await MatrixMessageTools().matrix_message(recipient="general", message="Continue"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", recipient="general", message="Continue"),
+        )
     assert result["status"] == "error"
     assert "human requester" in result["message"]
     send.assert_not_awaited()
@@ -422,6 +442,7 @@ async def test_room_recipient_rejects_ephemeral_media_before_delivery(context: T
     ):
         result = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 recipient="code",
                 message="Inspect this",
                 attachments=[media.attachment_id],

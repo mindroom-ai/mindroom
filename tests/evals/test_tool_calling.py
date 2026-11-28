@@ -403,6 +403,12 @@ _FAILURE_SCENARIOS: dict[str, tuple[str, list[_Step], bool, dict[str, int]]] = {
         False,
         {},
     ),
+    "view_rejects_missing_action": (
+        "view_image_and_notify",
+        [[_VIEW, _call("matrix_message", message="Done.")]],
+        False,
+        {"missing_required_param": 1},
+    ),
 }
 
 

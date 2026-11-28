@@ -95,7 +95,9 @@ async def test_encrypted_retry_after_client_restart_keeps_one_event(  # noqa: PL
             target=MessageTarget.resolve(room_id=ROOM, thread_id=None, reply_to_event_id=None),
         )
         with tool_runtime_context(runtime):
-            first = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="encrypted"))
+            first = json.loads(
+                await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="encrypted"),
+            )
         assert first["status"] == "error"
         acknowledge = True
         assert len(sent) == 1
@@ -113,7 +115,11 @@ async def test_encrypted_retry_after_client_restart_keeps_one_event(  # noqa: PL
         assert client.olm.account.identity_keys == identity_keys
         with tool_runtime_context(replace(runtime, client=client, room=client.rooms[ROOM])):
             retry = json.loads(
-                await MatrixMessageTools().matrix_message(message="changed", idempotency_key="encrypted"),
+                await MatrixMessageTools().matrix_message(
+                    action="send",
+                    message="changed",
+                    idempotency_key="encrypted",
+                ),
             )
         assert retry["status"] == "ok"
         assert retry["event_id"] == "$sent"

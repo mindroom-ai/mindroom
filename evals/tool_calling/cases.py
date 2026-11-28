@@ -199,7 +199,7 @@ def _v_view(_ws: Path, c: Sequence[CallTrace]) -> bool:
         c,
         "matrix_message",
         lambda a: (
-            a.get("action", "send") == "send"
+            a.get("action") == "send"
             and _str(a.get("message"))
             and not a.get("new_thread")
             and a.get("room_id") in (None, "!room:localhost")

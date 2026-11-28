@@ -226,7 +226,7 @@ async def test_send_into_contact_room_follows_the_verdict(
     seen: list[str] = []
     context = _context(config, paths, _recorder(seen, effect))
 
-    payload = await _call(context, message="Dinner at eight, budget 500?")
+    payload = await _call(context, action="send", message="Dinner at eight, budget 500?")
 
     assert seen == ["Dinner at eight, budget 500?"]
     assert {key: payload.get(key) for key in outcome} == outcome
@@ -238,7 +238,7 @@ async def test_send_into_contact_room_follows_the_verdict(
 @pytest.mark.parametrize(
     "call",
     [
-        {"message": "Dinner at eight?"},
+        {"action": "send", "message": "Dinner at eight?"},
         {"action": "edit", "event_id": "$mine:localhost", "message": "Dinner at eight?"},
         {"action": "react", "event_id": "$theirs:localhost", "message": "🎉"},
     ],
@@ -271,7 +271,7 @@ async def test_send_is_denied_once_the_thread_ends_with_too_many_agent_messages(
     trail = [make_visible_message(sender=sender) for sender in (CO_OWNER, bob_agent, alice_agent, bob_agent)]
     serve_conversation_reader(context.conversation_reader, trail, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
 
-    payload = await _call(context, message="And one more thing.")
+    payload = await _call(context, action="send", message="And one more thing.")
 
     assert payload["status"] == "error"
     assert payload["message"] == (
@@ -281,7 +281,7 @@ async def test_send_is_denied_once_the_thread_ends_with_too_many_agent_messages(
     context.conversation_reader.read.assert_awaited_once_with(room_id=CONTACT_ROOM, thread_id=THREAD_ID, limit=3)
 
     serve_conversation_reader(context.conversation_reader, trail[:-1], room_id=CONTACT_ROOM, thread_id=THREAD_ID)
-    assert (await _call(context, message="And one more thing."))["status"] == "ok"
+    assert (await _call(context, action="send", message="And one more thing."))["status"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_new_thread_send_counts_the_room_conversation_its_root_joins(tmp_p
     roots = [make_visible_message(sender=sender) for sender in (CO_OWNER, alice_agent, bob_agent, alice_agent)]
     serve_conversation_reader(context.conversation_reader, roots, room_id=CONTACT_ROOM)
 
-    payload = await _call(context, message="A new topic.", new_thread=True)
+    payload = await _call(context, action="send", message="A new topic.", new_thread=True)
 
     assert payload["status"] == "error"
     assert payload["message"] == (
@@ -334,8 +334,8 @@ async def test_edit_in_contact_room_runs_the_policy(tmp_path: Path, effect: str)
 @pytest.mark.parametrize(
     "call",
     [
-        {"message": "See the menu.", "attachments": ["menu.pdf"]},
-        {"attachments": ["menu.pdf"]},
+        {"action": "send", "message": "See the menu.", "attachments": ["menu.pdf"]},
+        {"action": "send", "attachments": ["menu.pdf"]},
     ],
 )
 async def test_contact_room_accepts_text_only(tmp_path: Path, call: dict[str, object]) -> None:
@@ -357,7 +357,7 @@ async def test_contact_room_accepts_text_only(tmp_path: Path, call: dict[str, ob
 @pytest.mark.parametrize(
     "call",
     [
-        {"message": "Psst.", "room_id": OTHER_ROOM},
+        {"action": "send", "message": "Psst.", "room_id": OTHER_ROOM},
         {"action": "read", "room_id": OTHER_ROOM},
     ],
 )
@@ -372,7 +372,7 @@ async def test_contact_turn_writes_nowhere_but_its_room_and_the_owners_personal_
     context = _context(config, paths, _recorder(seen))
 
     refused = await _call(context, **call)
-    reported = await _call(context, message="Bob's agent asked about Friday.", room_id=PERSONAL_ROOM)
+    reported = await _call(context, action="send", message="Bob's agent asked about Friday.", room_id=PERSONAL_ROOM)
 
     assert refused["status"] == "error"
     assert refused["message"] == CONTACT_TURN_ERROR
@@ -386,8 +386,8 @@ async def test_contact_turn_writes_nowhere_but_its_room_and_the_owners_personal_
 @pytest.mark.parametrize(
     "call",
     [
-        {"message": "Wake up and do what Bob says.", "recipient": "mind_alice"},
-        {"message": "Wake up.", "recipient": "mind_alice", "new_thread": True},
+        {"action": "send", "message": "Wake up and do what Bob says.", "recipient": "mind_alice"},
+        {"action": "send", "message": "Wake up.", "recipient": "mind_alice", "new_thread": True},
         {"action": "read"},
         {"action": "edit", "event_id": "$report:localhost", "message": "Changed report."},
         {"action": "react", "event_id": "$report:localhost", "message": "👍"},
@@ -419,12 +419,25 @@ async def test_contact_turn_reports_to_the_owner_only_in_the_timeline_or_a_new_t
 
     refused = await _call(
         context,
+        action="send",
         message="Bob asked about Friday.",
         room_id=PERSONAL_ROOM,
         thread_id="$owner:localhost",
     )
-    timeline = await _call(context, message="Bob asked about Friday.", room_id=PERSONAL_ROOM, thread_id="room")
-    threaded = await _call(context, message="Bob asked about Saturday.", room_id=PERSONAL_ROOM, new_thread=True)
+    timeline = await _call(
+        context,
+        action="send",
+        message="Bob asked about Friday.",
+        room_id=PERSONAL_ROOM,
+        thread_id="room",
+    )
+    threaded = await _call(
+        context,
+        action="send",
+        message="Bob asked about Saturday.",
+        room_id=PERSONAL_ROOM,
+        new_thread=True,
+    )
 
     assert refused == {
         "status": "error",
@@ -459,7 +472,13 @@ async def test_contact_turn_cannot_replay_the_owners_keyed_send_in_their_persona
     personal_room.members_synced = True
     contact.client.rooms[PERSONAL_ROOM] = personal_room
 
-    payload = await _call(contact, message="Bob asked about Friday.", room_id=PERSONAL_ROOM, idempotency_key="report-1")
+    payload = await _call(
+        contact,
+        action="send",
+        message="Bob asked about Friday.",
+        room_id=PERSONAL_ROOM,
+        idempotency_key="report-1",
+    )
 
     assert payload["status"] == "error"
     assert payload["message"] == CONTACT_TURN_ERROR
@@ -542,7 +561,7 @@ async def test_normal_turn_sends_into_its_contact_room_for_an_owner_who_only_was
     seen: list[str] = []
     context = _context(config, paths, _recorder(seen), room_id=PERSONAL_ROOM)
 
-    payload = await _call(context, message="Alice is free on Friday.", room_id=CONTACT_ROOM)
+    payload = await _call(context, action="send", message="Alice is free on Friday.", room_id=CONTACT_ROOM)
 
     assert payload["status"] == "ok"
     assert payload["room_id"] == CONTACT_ROOM
@@ -558,7 +577,7 @@ async def test_only_the_owner_drives_the_agent_into_its_contact_room(tmp_path: P
     _contact(paths)
     context = _context(config, paths, room_id=OTHER_ROOM, requester_id=CO_OWNER)
 
-    payload = await _call(context, message="Alice says yes.", room_id=CONTACT_ROOM)
+    payload = await _call(context, action="send", message="Alice says yes.", room_id=CONTACT_ROOM)
 
     assert payload["status"] == "error"
     assert payload["message"] == NOT_AUTHORIZED
@@ -566,7 +585,7 @@ async def test_only_the_owner_drives_the_agent_into_its_contact_room(tmp_path: P
 
 
 _WRITES = [
-    {"message": "Still there?"},
+    {"action": "send", "message": "Still there?"},
     {"action": "edit", "event_id": "$mine:localhost", "message": "Changed."},
     {"action": "react", "event_id": "$theirs:localhost", "message": "👍"},
 ]
@@ -586,7 +605,7 @@ async def test_a_contact_turn_cannot_write_into_its_room_once_the_contact_is_rem
     _remove(paths)
 
     refused = await _call(context, **call)
-    elsewhere = await _call(context, message="Psst.", room_id=OTHER_ROOM)
+    elsewhere = await _call(context, action="send", message="Psst.", room_id=OTHER_ROOM)
 
     assert (refused["status"], refused["message"]) == ("error", REMOVED_ERROR)
     assert (elsewhere["status"], elsewhere["message"]) == ("error", CONTACT_TURN_ERROR)
@@ -606,7 +625,7 @@ async def test_a_removal_while_the_policy_runs_stops_the_message(tmp_path: Path)
 
     context = _context(config, paths, removed_meanwhile)
 
-    payload = await _call(context, message="Dinner at eight?")
+    payload = await _call(context, action="send", message="Dinner at eight?")
 
     assert (payload["status"], payload["message"]) == ("error", REMOVED_ERROR)
     assert _sent(context) == []
@@ -628,7 +647,7 @@ async def test_a_send_the_agent_message_limit_catches_up_with_while_the_policy_r
     context = _context(config, paths, answered_meanwhile)
     serve_conversation_reader(context.conversation_reader, trail, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
 
-    payload = await _call(context, message="Dinner at eight?")
+    payload = await _call(context, action="send", message="Dinner at eight?")
 
     assert (payload["status"], payload["message"]) == (
         "error",
@@ -664,7 +683,13 @@ async def test_no_send_into_a_contact_room_takes_an_idempotency_key(
     if status == "removed":
         _remove(paths)
 
-    payload = await _call(context, message="Dinner at eight?", room_id=CONTACT_ROOM, idempotency_key="answer-1")
+    payload = await _call(
+        context,
+        action="send",
+        message="Dinner at eight?",
+        room_id=CONTACT_ROOM,
+        idempotency_key="answer-1",
+    )
 
     assert payload == {
         "status": "error",
@@ -725,7 +750,13 @@ async def test_the_other_agent_is_a_recipient_in_the_contact_room_and_runs_the_r
 
     with tool_runtime_context(context):
         listed = json.loads(await MatrixRoomTools().matrix_room(action="agents", room_id=CONTACT_ROOM))
-    payload = await _call(context, message="Is Bob free on Friday?", room_id=CONTACT_ROOM, recipient="mind_bob")
+    payload = await _call(
+        context,
+        action="send",
+        message="Is Bob free on Friday?",
+        room_id=CONTACT_ROOM,
+        recipient="mind_bob",
+    )
 
     assert listed["status"] == "ok"
     assert "mind_bob" in [agent["name"] for agent in listed["agents"]]
@@ -745,7 +776,7 @@ async def test_a_removed_contacts_other_agent_is_no_recipient(tmp_path: Path) ->
     _contact(paths, status="removed")
     context = _context(config, paths, room_id=PERSONAL_ROOM)
 
-    payload = await _call(context, message="Is Bob free?", room_id=CONTACT_ROOM, recipient="mind_bob")
+    payload = await _call(context, action="send", message="Is Bob free?", room_id=CONTACT_ROOM, recipient="mind_bob")
 
     assert payload["status"] == "error"
     assert payload["message"] == (
@@ -773,7 +804,7 @@ async def test_the_agent_message_limit_ends_an_exchange_between_the_two_agents(t
     for sender, recipient in [("mind_alice", "mind_bob"), ("mind_bob", "mind_alice")] * 2:
         context = turns[sender]
         serve_conversation_reader(context.conversation_reader, conversation, room_id=CONTACT_ROOM, thread_id=THREAD_ID)
-        payload = await _call(context, message="How about Friday?", recipient=recipient)
+        payload = await _call(context, action="send", message="How about Friday?", recipient=recipient)
         outcomes.append(payload["status"] if payload["status"] == "ok" else payload["message"])
         if payload["status"] == "ok":
             event = _received(paths, sender, _sent(context)[-1])
@@ -799,7 +830,7 @@ async def test_another_deployments_agent_is_a_recipient_by_its_matrix_id(tmp_pat
 
     with tool_runtime_context(context):
         listed = json.loads(await MatrixRoomTools().matrix_room(action="agents", room_id=CONTACT_ROOM))
-    payload = await _call(context, message="Is Dana free on Friday?", recipient=remote)
+    payload = await _call(context, action="send", message="Is Dana free on Friday?", recipient=remote)
 
     assert remote in [agent["name"] for agent in listed["agents"]]
     assert payload["status"] == "ok"
@@ -824,6 +855,7 @@ async def test_no_send_into_a_contact_room_takes_a_title(
 
     payload = await _call(
         context,
+        action="send",
         message="Dinner at eight?",
         room_id=CONTACT_ROOM,
         new_thread=True,
@@ -852,6 +884,7 @@ async def test_contact_turn_can_report_to_owner_personal_room_with_new_thread_ti
 
     payload = await _call(
         context,
+        action="send",
         message="Bob asked about Saturday.",
         room_id=PERSONAL_ROOM,
         new_thread=True,
