@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.main import Config
 from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.atlassian import atlassian_oauth_provider
@@ -16,12 +15,8 @@ from mindroom.oauth.providers import OAuthProvider
 from mindroom.oauth.spotify import spotify_oauth_provider
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.registry import ToolRegistry
 
@@ -141,12 +136,3 @@ def oauth_provider_registry(plugins: ConfigPlugins, *, skip_broken_plugins: bool
     registry = _provider_registry((*_builtin_oauth_providers(), *mcp_providers, *plugin_providers), plugins.tools)
     logger.debug("Loaded OAuth providers", providers=sorted(registry))
     return registry
-
-
-def snapshot_oauth_providers(snapshot: ApiSnapshot) -> Mapping[str, OAuthProvider]:
-    """Return the OAuth providers of one API config snapshot."""
-    config = snapshot.runtime_config
-    if config is None:
-        # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
-        config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
-    return config_plugins(config, snapshot.runtime_paths).oauth_providers

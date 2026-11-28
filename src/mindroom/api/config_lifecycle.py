@@ -27,13 +27,15 @@ from mindroom.event_journal.opening import pending_event_journal_restart
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from fastapi.requests import HTTPConnection
 
     from mindroom import constants
+    from mindroom.oauth.providers import OAuthProvider
 
 logger = get_logger(__name__)
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
@@ -64,6 +66,15 @@ class ApiSnapshot:
     load_error: Exception | None = None
     source_fingerprint: str | None = None
     uses_includes: bool = False
+
+
+def snapshot_oauth_providers(snapshot: ApiSnapshot) -> Mapping[str, OAuthProvider]:
+    """Return the OAuth providers of one API config snapshot."""
+    config = snapshot.runtime_config
+    if config is None:
+        # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
+        config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
+    return config_plugins(config, snapshot.runtime_paths).oauth_providers
 
 
 @dataclass

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle, oauth
 from mindroom.api.auth import dashboard_link, is_administrator, require_connections_user
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.api.connection_agents import (
     CONNECTIONS_HEADERS,
     ConnectionUserContext,
@@ -30,7 +31,6 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
-from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.plugins import config_plugins

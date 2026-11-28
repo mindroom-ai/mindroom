@@ -77,7 +77,7 @@ repos:
         files: ^(pyproject\.toml|src/mindroom/tools/.*\.py)$
 
       - id: tach-check
-        name: Enforce narrow Tach boundaries
+        name: Enforce full Tach boundaries and acyclicity
         entry: bash -c 'env -u VIRTUAL_ENV uv run tach check'
         language: system
         pass_filenames: false

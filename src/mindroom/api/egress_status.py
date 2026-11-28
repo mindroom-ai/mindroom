@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from mindroom.api import config_lifecycle, oauth
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.api.connection_agents import CONNECTIONS_HEADERS, build_connection_agent_target
 from mindroom.config.egress_broker import (
     RESERVED_PLACEHOLDER_NAMES,
@@ -44,7 +45,6 @@ from mindroom.egress_broker.user_services import (
     services_for_agent,
 )
 from mindroom.logging_config import get_logger
-from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.workers.backend import WorkerBackendError

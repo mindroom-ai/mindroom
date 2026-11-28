@@ -25,6 +25,7 @@ from mindroom.api.auth import (
     verify_user,
 )
 from mindroom.api.auth_user import AuthSource, AuthUser
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.api.credentials_oauth_flows import (
     consume_pending_oauth_request,
     issue_pending_oauth_state,
@@ -77,7 +78,6 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.discovery import client_id_metadata_document
 from mindroom.oauth.google import with_google_account_picker
 from mindroom.oauth.providers import OAuthUserFacingError, oauth_consent_group_provider
-from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.reset import (
     BrowserOAuthResetIntent,
     OAuthResetTargetError,

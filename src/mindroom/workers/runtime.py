@@ -137,9 +137,9 @@ def serialized_dedicated_worker_validation_snapshot(
     runtime_config: Config,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot for one applied config in the primary runtime."""
-    # Deferred: the plugin loader and catalog pull the runtime tool registry, which this module must not import.
-    from mindroom.tool_system.catalog import serialize_tool_validation_snapshot  # noqa: PLC0415
+    # Keep the plugin loader and its tool registry out of this module at import time.
     from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
+    from mindroom.tool_system.settings import serialize_tool_validation_snapshot  # noqa: PLC0415
 
     return serialize_tool_validation_snapshot(config_plugins(runtime_config, runtime_paths).tools.validation_snapshot)
 

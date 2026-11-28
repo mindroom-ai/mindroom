@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException, Request
 
 from mindroom.api import config_lifecycle
+from mindroom.api.config_lifecycle import snapshot_oauth_providers
 from mindroom.credentials.policy import (
     OAUTH_CREDENTIAL_FIELDS,
     RUNTIME_BOOTSTRAPPED_CLIENT_CONFIG_KEY,
@@ -21,7 +22,6 @@ from mindroom.credentials.policy import (
     is_oauth_token_service,
     looks_like_oauth_credentials,
 )
-from mindroom.oauth.registry import snapshot_oauth_providers
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

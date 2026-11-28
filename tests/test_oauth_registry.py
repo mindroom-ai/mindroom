@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.api.config_lifecycle import ApiSnapshot
+from mindroom.api.config_lifecycle import ApiSnapshot, snapshot_oauth_providers
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.oauth import registry as oauth_registry
@@ -130,7 +130,7 @@ def test_snapshot_providers_are_the_snapshot_config_s_providers(tmp_path: Path) 
         runtime_config=runtime_config,
     )
 
-    providers = oauth_registry.snapshot_oauth_providers(snapshot)
+    providers = snapshot_oauth_providers(snapshot)
 
     assert providers is config_plugins(runtime_config, runtime_paths).oauth_providers
 
@@ -144,6 +144,6 @@ def test_a_snapshot_before_the_first_config_load_has_the_built_in_providers(tmp_
         runtime_config=None,
     )
 
-    providers = oauth_registry.snapshot_oauth_providers(snapshot)
+    providers = snapshot_oauth_providers(snapshot)
 
     assert set(providers) == {provider.id for provider in oauth_registry._builtin_oauth_providers()}
