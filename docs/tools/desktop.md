@@ -298,7 +298,7 @@ Locally, the bridge keeps command arguments and outcomes, including shell comman
 ## Applications
 
 On macOS, `get_app_state` returns the app's accessibility tree with roles, names, values, bounds, and available actions, plus a screenshot of the app window.
-The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
+The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step by default.
 Taking a screenshot on macOS brings the selected app to the front.
 
 `desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).

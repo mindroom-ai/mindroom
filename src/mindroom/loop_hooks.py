@@ -194,7 +194,8 @@ def _loop_hooks(
     ``job_definitions``' managed calls joins their definitions first, so the participation decision and the
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
-    it, before its first request as a reader; mid-turn compaction last sizes the request that is sent, rewrites the
+    it, before its first request as a reader; in-turn tool-image pruning next batch-prunes older seen tool images
+    unless the route enforces strict thinking prefixes; mid-turn compaction last sizes the request that is sent, rewrites the
     live messages, keeping the receipt, and folds into the scope only when the run replays it; the checkpoint then
     saves the run as that request finds it, and again before each tool batch runs. Queued-message notices
     follow every tool batch and a resume's entry when ``queued_notices`` is on, and a ``steering`` run ends at such a
@@ -207,7 +208,7 @@ def _loop_hooks(
     if participation is not None:
         before_request.append(participation_hook(participation, model))
     before_request.append(approval_receipt_hook)
-    before_request.append(prune_in_turn_tool_images_hook)
+    before_request.append(prune_in_turn_tool_images_hook(model))
     before_request.append(
         mid_turn_compaction_hook(
             config=turn.config,
@@ -259,10 +260,17 @@ def _loop_hooks(
     )
 
 
-async def prune_in_turn_tool_images_hook(state: LoopState) -> SendRequest:
-    """Batch-prune older seen in-turn tool images before compaction sizing and checkpointing."""
-    prune_in_turn_tool_images(state.messages)
-    return SendRequest()
+def prune_in_turn_tool_images_hook(model: ModelProvider) -> BeforeRequestHook:
+    """Return a pre-request hook that batch-prunes older seen in-turn tool images unless thinking prefixes are strict."""
+
+    async def prune(state: LoopState) -> SendRequest:
+        strict_thinking_prefix = model.capabilities.strict_thinking_prefix
+        if strict_thinking_prefix is not None and strict_thinking_prefix(state.request()):
+            return SendRequest()
+        prune_in_turn_tool_images(state.messages)
+        return SendRequest()
+
+    return prune
 
 
 _PAUSED_TOOL_CALL_RESULT = "Not run: a newer message arrived while you worked, so this turn ended before this call ran."

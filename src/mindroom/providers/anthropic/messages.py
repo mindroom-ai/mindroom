@@ -425,6 +425,21 @@ class ClaudeProvider:
             owner["thinking"] = thinking
         return params
 
+    def has_strict_thinking_prefix(self, request: ModelRequest) -> bool:
+        """Return whether rewriting earlier in-turn messages would invalidate active signed thinking blocks."""
+        sent_model_id = _sent_model_id(self.identity.id, self.settings)
+        if not checks_thinking_prefix(sent_model_id, self.route):
+            return False
+        params = self._with_thinking_binding(self._authored_params(request), request)
+        thinking = _thinking_owner(params).get("thinking")
+        return not (
+            isinstance(thinking, dict)
+            and (
+                thinking.get("type") == "disabled"
+                or thinking.get("block_binding") == {"prefix_mismatch_behavior": "drop_block"}
+            )
+        )
+
     def _replays_earlier_thinking(self, params: dict[str, Any]) -> bool:
         """Return whether earlier turns' thinking replays: always, unless the API checks it and nothing binds it.
 
@@ -1042,7 +1057,13 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     if capabilities.provider_default_sampling:
         _warn_dropped_sampling(route, model_config.id, settings)
-    return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
+    provider = ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
+    if not checks_thinking_prefix(_sent_model_id(model_config.id, settings), route):
+        return provider
+    return replace(
+        provider,
+        capabilities=replace(provider.capabilities, strict_thinking_prefix=provider.has_strict_thinking_prefix),
+    )
 
 
 def _warn_dropped_sampling(route: ClaudeRouteKind, model_id: str, settings: ClaudeSettings) -> None:

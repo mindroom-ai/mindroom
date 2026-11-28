@@ -262,3 +262,21 @@ async def test_loop_hooks_prunes_before_compaction_and_checkpoint_without_mutati
         f"shot-{i}" for i in range(1, 11)
     ]
     assert [img.id for m in model.requests[11].messages for img in m.images or ()] == ["shot-10", "shot-11"]
+
+
+def test_oversized_seen_images_never_prune_to_zero_when_no_unseen_image_follows() -> None:
+    """After an observation='none' step, pruning still keeps the single newest seen image instead of dropping to 0."""
+    oversized = _IN_TURN_TRANSIENT_IMAGE_TRIGGER_BYTES + 1024
+    single: list[Message] = [Message(role="user", content="start")]
+    _step(single, 1, [_transient(1, size=oversized)])
+    single.append(Message(role="assistant", content="clicked with observation=none"))
+    assert prune_in_turn_tool_images(single) is False
+    assert _image_ids(single) == ["shot-1"]
+
+    two_large: list[Message] = [Message(role="user", content="start")]
+    half_plus = (_IN_TURN_TRANSIENT_IMAGE_TRIGGER_BYTES // 2) + 1024
+    _step(two_large, 1, [_transient(1, size=half_plus)])
+    _step(two_large, 2, [_transient(2, size=half_plus)])
+    two_large.append(Message(role="assistant", content="clicked with observation=none"))
+    assert prune_in_turn_tool_images(two_large) is True
+    assert _image_ids(two_large) == ["shot-2"]

@@ -132,7 +132,7 @@ def _select_images_to_drop(
         return set()
     dropped: set[tuple[int, int]] = set()
     for message_index, image_index, size, seen in entries:
-        if total_count <= target_count and total_bytes <= target_bytes:
+        if (total_count <= target_count and total_bytes <= target_bytes) or total_count <= 1:
             break
         if not seen:
             continue

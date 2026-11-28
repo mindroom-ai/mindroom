@@ -3935,7 +3935,7 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 2000,
-              "description": "Optional milliseconds (0-2000) to wait after a control action before capturing the follow-up observation (rejected when observation=none)."
+              "description": "Optional milliseconds (0-2000) to wait after a control action before capturing the follow-up observation (positive values are rejected when observation=none; 0 is omitted)."
             }
           },
           "required": [

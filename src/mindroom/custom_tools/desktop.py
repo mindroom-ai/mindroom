@@ -186,7 +186,7 @@ _DESKTOP_CONTROL_PARAMETERS: dict[str, object] = {
             "maximum": MAX_SETTLE_MS,
             "description": (
                 "Optional milliseconds (0-2000) to wait after a control action before capturing "
-                "the follow-up observation (rejected when observation=none)."
+                "the follow-up observation (positive values are rejected when observation=none; 0 is omitted)."
             ),
         },
     },
