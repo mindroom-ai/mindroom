@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.integrations import SLACK_INTEGRATION
+from mindroom.integrations import _SLACK_INTEGRATION
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers import dispatch as reactive_dispatch
@@ -252,10 +252,10 @@ class Harness:
         )
 
     def bind_integration(self) -> tuple[FastAPI, SlackEventSource]:
-        """Bind `SLACK_INTEGRATION` to a fresh FastAPI app and wire its source/emitter onto this harness."""
+        """Bind `_SLACK_INTEGRATION` to a fresh FastAPI app and wire its source/emitter onto this harness."""
         app_api = FastAPI()
         ensure_app_state(app_api)
-        SLACK_INTEGRATION.bind(
+        _SLACK_INTEGRATION.bind(
             app_api,
             cast("dict[str, AgentBot]", self.bots),
             self.memberships,

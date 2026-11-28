@@ -45,7 +45,7 @@ from mindroom.event_sources import (
     EventSourceRegistry,
     ValidatedSubscription,
 )
-from mindroom.integrations import SLACK_INTEGRATION
+from mindroom.integrations import _SLACK_INTEGRATION
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
 from mindroom.matrix.state import MatrixState
@@ -985,7 +985,7 @@ async def test_plugin_http_event_source_emitter_ownership_and_fail_closed(
         # Integration binding forwards explicit reactive_triggers and defaults to None when omitted.
         seen_triggers: list[object] = []
         custom_integration = replace(
-            SLACK_INTEGRATION,
+            _SLACK_INTEGRATION,
             name="probe_integration",
             bind=lambda _app, _bots, _memberships, rt: seen_triggers.append(rt),
             unbind=lambda _app: None,

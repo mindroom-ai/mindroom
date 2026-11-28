@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class Integration:
+class _Integration:
     """The hooks one built-in integration plugs into core with."""
 
     name: str
@@ -40,7 +40,7 @@ def _slack_events_router() -> APIRouter:
     return router
 
 
-SLACK_INTEGRATION = Integration(
+_SLACK_INTEGRATION = _Integration(
     name="slack",
     router=_slack_events_router,
     bind=bind_slack,
@@ -49,8 +49,8 @@ SLACK_INTEGRATION = Integration(
 )
 
 
-def _integrations() -> tuple[Integration, ...]:
-    return (SLACK_INTEGRATION,)
+def _integrations() -> tuple[_Integration, ...]:
+    return (_SLACK_INTEGRATION,)
 
 
 def integration_routers() -> list[APIRouter]:

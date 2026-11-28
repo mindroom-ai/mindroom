@@ -10,8 +10,8 @@ from fastapi import FastAPI
 from mindroom import integrations
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.integrations import (
-    SLACK_INTEGRATION,
-    Integration,
+    _SLACK_INTEGRATION,
+    _Integration,
     bind_integrations,
     reply_mirror_for,
     unbind_integrations,
@@ -22,8 +22,8 @@ def test_bind_and_unbind_run_in_registry_order_and_return_the_bound_runtimes(mon
     """Shutdown drains the runtime each bound integration returns and skips an idle one."""
     bound: list[str] = []
     runtime = object()
-    owner = replace(SLACK_INTEGRATION, name="owner", bind=lambda *_: bound.append("owner"), unbind=lambda _: runtime)
-    idle = replace(SLACK_INTEGRATION, name="idle", bind=lambda *_: bound.append("idle"), unbind=lambda _: None)
+    owner = replace(_SLACK_INTEGRATION, name="owner", bind=lambda *_: bound.append("owner"), unbind=lambda _: runtime)
+    idle = replace(_SLACK_INTEGRATION, name="idle", bind=lambda *_: bound.append("idle"), unbind=lambda _: None)
     monkeypatch.setattr(integrations, "_integrations", lambda: (owner, idle))
 
     bind_integrations(FastAPI(), {}, AgentReplyMembershipIndex())
@@ -39,12 +39,12 @@ async def test_reply_mirror_is_the_first_integration_that_takes_the_reply(monkey
     async def mirror() -> None:
         asked.append("mirrored")
 
-    def integration(name: str, *, takes: bool) -> Integration:
+    def integration(name: str, *, takes: bool) -> _Integration:
         def reply_mirror(*_: object) -> object:
             asked.append(name)
             return mirror() if takes else None
 
-        return replace(SLACK_INTEGRATION, name=name, reply_mirror=reply_mirror)
+        return replace(_SLACK_INTEGRATION, name=name, reply_mirror=reply_mirror)
 
     registered = (
         integration("declines", takes=False),
