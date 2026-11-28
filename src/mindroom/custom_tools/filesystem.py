@@ -21,7 +21,7 @@ import unicodedata
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass, replace
 from glob import has_magic
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from weakref import WeakValueDictionary
 
@@ -597,8 +597,11 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
     base_resolved = base_dir.resolve()
     path_map: dict[str, list[Path]] = {}
     for candidate in paths:
+        resolved = candidate.resolve()
         try:
-            token = str(candidate.resolve().relative_to(base_resolved))
+            rel = resolved.relative_to(base_resolved)
+            # "." would let patterns like "build/*" match the directory itself instead of its entries.
+            token = str(resolved) if rel == Path() else str(rel)
         except ValueError:
             token = str(candidate)
         path_map.setdefault(token, []).append(candidate)
@@ -705,18 +708,107 @@ def _list_directory(target: Path, limit: int) -> str:
     return result
 
 
-def _find_files_in(
+def _format_find_results(matched: Iterable[Path], base_dir: Path, pattern: str, limit: int) -> str:
+    """Format matched file paths with limit enforcement and truncation notice."""
+    matches = [format_path_for_output(candidate, base_dir) for candidate in itertools.islice(matched, limit + 1)]
+    if not matches:
+        return f"No files matching '{pattern}' found."
+    if len(matches) > limit:
+        return "\n".join(matches[:limit]) + f"\n\n[Results limited to {limit}. Narrow the pattern to see more.]"
+    return "\n".join(matches)
+
+
+def _split_ripgrep_find_pattern(search_path: Path, pattern: str) -> tuple[Path, tuple[str, ...]] | None:
+    """Split a glob pattern into ``(effective_root, magic_parts)`` when ripgrep can handle it."""
+    if not search_path.is_dir() or not pattern or "\x00" in pattern or pattern.endswith(("/", os.sep)):
+        return None
+    parts = Path(pattern).parts
+    if not parts or ".." in parts:
+        return None
+    first_magic = next((i for i, part in enumerate(parts) if has_magic(part)), len(parts))
+    if first_magic == len(parts):
+        return None
+    return search_path.joinpath(*parts[:first_magic]), parts[first_magic:]
+
+
+def _run_ripgrep_files(rg_binary: str, root: Path, rest: tuple[str, ...]) -> bytes | str | None:
+    """Run ``rg --files --null`` in ``root``; return raw stdout, an error string, or ``None`` to fall back."""
+    args = [rg_binary, "--no-config", "--no-ignore-dot", "--no-ignore-global", "--files", "--null"]
+    if not any(part == "**" for part in rest):
+        args.extend(["--max-depth", str(len(rest))])
+    try:
+        result = subprocess.run(args, cwd=root, check=False, capture_output=True, timeout=_GREP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return f"Error: find_files timed out after {_GREP_TIMEOUT_SECONDS:g} seconds."
+    except OSError:
+        return None
+    if result.returncode == 1:
+        return b""
+    return result.stdout if result.returncode in (0, 2) else None
+
+
+def _match_ripgrep_files(stdout: bytes, effective_root: Path, sub_pattern: str, pattern: str) -> list[Path] | str:
+    """Filter NUL-delimited relative paths from ripgrep with ``PurePath.full_match``."""
+    matched: list[Path] = []
+    sub_glob = PurePath(sub_pattern)
+    for raw_entry in stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        rel_path = PurePath(os.fsdecode(raw_entry))
+        if not rel_path.parts or rel_path.is_absolute() or ".." in rel_path.parts:
+            continue
+        try:
+            is_match = rel_path.full_match(sub_glob)
+        except (NotImplementedError, ValueError) as e:
+            return f"Error: Invalid glob pattern '{pattern}': {e}"
+        if is_match:
+            matched.append(effective_root / rel_path)
+    matched.sort()
+    return matched
+
+
+def _find_files_ripgrep(
     search_path: Path,
     base_dir: Path,
     pattern: str,
     limit: int,
-    restrict_to_base_dir: bool = True,
-) -> str:
-    """Glob for files, filter gitignored, and format results."""
-    glob_error = _validate_glob_pattern(pattern)
-    if glob_error:
-        return glob_error
+    restrict_to_base_dir: bool,
+) -> str | None:
+    """Walk candidate files with ripgrep and filter with ``PurePath.full_match``; return ``None`` to fall back."""
+    rg_binary = shutil.which("rg")
+    split = None if rg_binary is None else _split_ripgrep_find_pattern(search_path, pattern)
+    if rg_binary is None or split is None:
+        return None
+    effective_root, rest = split
+    filter_root = base_dir if restrict_to_base_dir else search_path
+    no_matches = f"No files matching '{pattern}' found."
 
+    if (
+        not effective_root.exists()
+        or not effective_root.is_dir()
+        or not is_within_base_dir(effective_root, filter_root)
+        or (not (effective_root / ".git").exists() and _gitignored_paths([effective_root], effective_root))
+    ):
+        return no_matches
+
+    raw = _run_ripgrep_files(rg_binary, effective_root, rest)
+    if raw is None or isinstance(raw, str):
+        return raw
+    if not is_within_base_dir(effective_root, filter_root):
+        return no_matches
+
+    matched = _match_ripgrep_files(raw, effective_root, "/".join(rest), pattern)
+    return matched if isinstance(matched, str) else _format_find_results(matched, base_dir, pattern, limit)
+
+
+def _find_files_python(
+    search_path: Path,
+    base_dir: Path,
+    pattern: str,
+    limit: int,
+    restrict_to_base_dir: bool,
+) -> str:
+    """Glob for files in Python, filter hidden and gitignored entries, and format results."""
     try:
         candidates = [p for p in sorted(search_path.glob(pattern)) if p.is_file()]
     except (NotImplementedError, ValueError) as e:
@@ -727,23 +819,22 @@ def _find_files_in(
     parts = Path(pattern).parts
     named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
     filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
-    matches: list[str] = []
-    for candidate in filtered:
-        matches.append(format_path_for_output(candidate, base_dir))
-        if len(matches) > limit:
-            break
+    return _format_find_results(filtered, base_dir, pattern, limit)
 
-    if not matches:
-        return f"No files matching '{pattern}' found."
 
-    was_limited = len(matches) > limit
-    if was_limited:
-        matches = matches[:limit]
-
-    result = "\n".join(matches)
-    if was_limited:
-        result += f"\n\n[Results limited to {limit}. Narrow the pattern to see more.]"
-    return result
+def _find_files_in(
+    search_path: Path,
+    base_dir: Path,
+    pattern: str,
+    limit: int,
+    restrict_to_base_dir: bool = True,
+) -> str:
+    """Find files via ripgrep when eligible, falling back to Python ``Path.glob``."""
+    if glob_error := _validate_glob_pattern(pattern):
+        return glob_error
+    if (rg_result := _find_files_ripgrep(search_path, base_dir, pattern, limit, restrict_to_base_dir)) is not None:
+        return rg_result
+    return _find_files_python(search_path, base_dir, pattern, limit, restrict_to_base_dir)
 
 
 def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
