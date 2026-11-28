@@ -56,7 +56,7 @@ from mindroom.desktop.protocol import (
     DesktopResponse,
     EncryptedDesktopMedia,
 )
-from mindroom.desktop.provider import DesktopProviderError
+from mindroom.desktop.provider import DesktopProviderError, ScreenCapture
 from mindroom.desktop.reply_fitting import _WIDEST_METRICS
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.matrix.olm_to_device import OlmToDeviceError, PinnedMatrixDevice
@@ -1521,7 +1521,8 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
             "handles": [],
         },
         "control_lease_expires_at_ms": 20_000,
-        "observation_modes": ["tree", "screenshot", "both"],
+        "observation_modes": ["tree", "screenshot", "both", "none"],
+        "max_settle_ms": 2000,
         "durable_commands": True,
     }
 
@@ -3572,4 +3573,242 @@ async def test_kill_shell_by_request_id_dismisses_pending_approval_in_parallel_b
     assert "cancelled before approval" in (run_resp.error or "")
     assert transport.await_count == 2
     await shell.close()
+    bridge.close()
+
+
+async def _send(
+    bridge: DesktopBridge,
+    action: str,
+    seq: int,
+    *,
+    session_id: str | None = None,
+    expires_at_ms: int | None = None,
+    **params: object,
+) -> None:
+    cmd = _command(action, request_id=f"{action}-{seq}", sequence=seq, parameters=params)
+    if session_id is not None:
+        cmd = replace(cmd, session_id=session_id)
+    if expires_at_ms is not None:
+        cmd = replace(cmd, expires_at_ms=expires_at_ms)
+    await bridge.on_to_device_event(_event(cmd))
+    await _execute(bridge)
+    await bridge.deliver_pending()
+
+
+@pytest.mark.asyncio
+async def test_chained_observation_none_and_settle_ms_sequence(transport: AsyncMock) -> None:
+    """Chained control actions reuse S1 with 0 intermediate captures, then settle before the final capture."""
+    timeline: list[tuple[str, object]] = []
+
+    class _TimelineProvider(FakeProvider):
+        def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
+            timeline.append(("get_app_state", app_id))
+            return super().get_app_state(app_id, include_elements=include_elements)
+
+        def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
+            timeline.append(("screenshot", state_id))
+            return super().screenshot(app_id=app_id, state_id=state_id)
+
+        def click(self, **kwargs: object) -> None:
+            timeline.append(("click", kwargs["state_id"]))
+            super().click(**kwargs)  # type: ignore[arg-type]
+
+        def type_text(self, **kwargs: object) -> None:
+            timeline.append(("type_text", kwargs["state_id"]))
+            super().type_text(**kwargs)  # type: ignore[arg-type]
+
+        def keypress(self, **kwargs: object) -> None:
+            timeline.append(("keypress", kwargs["state_id"]))
+            super().keypress(**kwargs)  # type: ignore[arg-type]
+
+    async def fake_sleep(seconds: float) -> None:
+        timeline.append(("sleep", seconds))
+
+    bridge = DesktopBridge(
+        object(),
+        _TimelineProvider(),
+        _policy(allow_control=True),
+        clock=lambda: NOW_SECONDS,
+        sleep=fake_sleep,
+    )
+    await _send(bridge, "screenshot", 1, app=APP_ID, observation="screenshot")
+    s1 = _response(transport).result["state"]["state_id"]
+    assert _response(transport).screenshot is not None
+
+    await _send(bridge, "click", 2, app=APP_ID, state_id=s1, x=100, y=200, observation="none")
+    click_resp = _response(transport)
+    assert (click_resp.ok, click_resp.screenshot, click_resp.result["action_completed"]) == (True, None, True)
+    assert click_resp.result["observation"] == {"mode": "none"}
+    assert "state" not in click_resp.result
+
+    await _send(bridge, "type_text", 3, app=APP_ID, state_id=s1, text="hello", observation="none")
+    assert (_response(transport).ok, _response(transport).screenshot) == (True, None)
+
+    await _send(bridge, "keypress", 4, app=APP_ID, state_id=s1, keys=["enter"], observation="screenshot", settle_ms=500)
+    key_resp = _response(transport)
+    assert key_resp.ok is True
+    assert key_resp.screenshot is not None
+    s2 = key_resp.result["state"]["state_id"]
+    assert s2 != s1
+    assert timeline == [
+        ("get_app_state", APP_ID),
+        ("screenshot", s1),
+        ("click", s1),
+        ("type_text", s1),
+        ("keypress", s1),
+        ("sleep", 0.5),
+        ("get_app_state", APP_ID),
+        ("screenshot", s2),
+    ]
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_none_and_settle_ms_validation_and_stale_or_cross_scope_fail_closed(
+    transport: AsyncMock,
+    selected_root: Path,
+) -> None:
+    """Invalid options, short TTL, stale S1, and cross-scope S1 fail before any input or sleep."""
+    monotonic, slept = [100.0], []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    provider = FakeProvider()
+    bridge = DesktopBridge(
+        object(),
+        provider,
+        replace(_policy(allow_control=True), allowed_file_roots=(selected_root,)),
+        filesystem=DesktopFilesystem((selected_root,)),
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: monotonic[0],
+        sleep=fake_sleep,
+    )
+    bridge.grant_local_control(600)
+    bad_cases = (
+        ("list_folders", {"settle_ms": 100}, "Unexpected desktop parameters: settle_ms."),
+        ("screenshot", {"app": APP_ID, "observation": "none"}, "requires a screenshot observation"),
+        ("get_app_state", {"app": APP_ID, "observation": "none"}, "get_app_state action requires an observation"),
+        (
+            "click",
+            {"app": APP_ID, "state_id": "s", "x": 1, "y": 1, "observation": "none", "settle_ms": 100},
+            "cannot be positive",
+        ),
+    )
+    for seq, (action, params, expected) in enumerate(bad_cases, start=1):
+        await _send(bridge, action, seq, **params)
+        assert _response(transport).ok is False
+        assert expected in (_response(transport).error or "")
+
+    await _send(
+        bridge,
+        "click",
+        10,
+        expires_at_ms=round(NOW_SECONDS * 1000) + 1000,
+        app=APP_ID,
+        state_id="s",
+        x=1,
+        y=1,
+        settle_ms=1500,
+    )
+    assert "exceeds the remaining command lifetime" in (_response(transport).error or "")
+    assert (provider.calls, slept) == ([], [])
+
+    await _send(bridge, "get_app_state", 11, app=APP_ID, observation="tree")
+    s1 = _response(transport).result["state"]["state_id"]
+    await _send(bridge, "click", 12, session_id="other-session", app=APP_ID, state_id=s1, x=1, y=1, observation="none")
+    assert "scope does not match" in (_response(transport).error or "")
+
+    monotonic[0] += 300.0
+    calls_before = len(provider.calls)
+    await _send(bridge, "click", 13, app=APP_ID, state_id=s1, x=1, y=1, observation="none")
+    assert (_response(transport).ok, provider.calls[calls_before:]) == (False, [])
+    assert "missing or expired" in (_response(transport).error or "")
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_settle_ms_sleep_revocation_and_expiry_return_completed_receipts(transport: AsyncMock) -> None:
+    """Scope revocation or command expiry during settle_ms sleep yields a completed partial receipt, not an error."""
+    now, on_sleep = [NOW_SECONDS], []
+
+    async def fake_sleep(_seconds: float) -> None:
+        if on_sleep:
+            on_sleep.pop(0)()
+
+    provider = FakeProvider(running_apps=[DesktopApp(OTHER_APP_ID, "Terminal", True)])
+    bridge = DesktopBridge(object(), provider, _policy(allow_control=True), clock=lambda: now[0], sleep=fake_sleep)
+    bridge.grant_local_control(computer=True)
+    await _send(bridge, "get_app_state", 1, app=OTHER_APP_ID, observation="tree")
+    s1 = _response(transport).result["state"]["state_id"]
+
+    calls_before = len(provider.calls)
+    on_sleep.append(bridge.revoke_local_control)
+    await _send(bridge, "click", 2, app=OTHER_APP_ID, state_id=s1, x=10, y=10, settle_ms=200)
+    rev_resp = _response(transport)
+    assert (rev_resp.ok, rev_resp.result["action_completed"], "warning" in rev_resp.result, rev_resp.screenshot) == (
+        True,
+        True,
+        True,
+        None,
+    )
+    assert [name for name, _ in provider.calls[calls_before:]] == ["click"]
+
+    bridge.grant_local_control(computer=True)
+    calls_before = len(provider.calls)
+    on_sleep.append(lambda: now.__setitem__(0, NOW_SECONDS + 100.0))
+    await _send(bridge, "click", 3, app=OTHER_APP_ID, state_id=s1, x=10, y=10, settle_ms=200)
+    exp_resp = _response(transport)
+    assert (
+        exp_resp.ok,
+        exp_resp.result["action_completed"],
+        exp_resp.result["follow_up_state"],
+        exp_resp.screenshot,
+    ) == (True, True, "expired", None)
+    assert [name for name, _ in provider.calls[calls_before:]] == ["click"]
+    bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_app_with_observation_none_invalidates_prior_state_id(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """launch_app(observation='none') skips capture while backend launch still invalidates prior state_id."""
+    from tests.test_desktop_accessibility import _install_fake_appkit  # noqa: PLC0415
+
+    backend, _, _ = _fake_mac_backend()
+    _install_fake_appkit(monkeypatch)
+
+    class _BackendBackedProvider(FakeProvider):
+        def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
+            self.calls.append(("get_app_state", app_id))
+            return backend.get_app_state(app_id, include_elements=include_elements)
+
+        def launch_app(self, app_id: str) -> None:
+            self.calls.append(("launch_app", app_id))
+            backend.launch_app(app_id)
+
+        def click(self, **kwargs: object) -> None:
+            backend.prepare_fallback(
+                str(kwargs["app_id"]),
+                str(kwargs["state_id"]),
+                allow_window_fallback=bool(kwargs.get("allow_window_fallback", False)),
+            )
+            super().click(**kwargs)  # type: ignore[arg-type]
+
+    provider = _BackendBackedProvider()
+    bridge = DesktopBridge(object(), provider, _policy(allow_control=True), clock=lambda: NOW_SECONDS)
+    await _send(bridge, "screenshot", 1, app=APP_ID, observation="screenshot")
+    s1 = _response(transport).result["state"]["state_id"]
+
+    await _send(bridge, "launch_app", 2, app=APP_ID, observation="none")
+    launch_resp = _response(transport)
+    assert (launch_resp.ok, launch_resp.screenshot, launch_resp.result["observation"]) == (True, None, {"mode": "none"})
+    assert "state" not in launch_resp.result
+
+    await _send(bridge, "click", 3, app=APP_ID, state_id=s1, x=50, y=50, observation="none")
+    assert _response(transport).ok is False
+    assert "request get_app_state" in (_response(transport).error or "")
+    assert [name for name, _ in provider.calls] == ["get_app_state", "screenshot", "launch_app"]
     bridge.close()

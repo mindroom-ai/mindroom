@@ -61,7 +61,9 @@ class Capabilities:
     prompt, without which an update keeps no prefix. ``sticky_replay_recovery`` returns a copy of a failed request
     without provider-encrypted replay state when a sticky-upstream failure calls for resending it that way, else None;
     the answer to that retry records the route's ``replay_reset_scope``, from which the route's replay and its size
-    read where encrypted state starts over (``native_compaction.native_replay``). ``prompt_cache_ttl_seconds`` is the
+    read where encrypted state starts over (``native_compaction.native_replay``). ``strict_thinking_prefix`` tells
+    whether rewriting earlier in-turn messages on a request would invalidate active signed thinking blocks (for
+    example on prefix-checked Claude routes without ``drop_block``). ``prompt_cache_ttl_seconds`` is the
     conservative warm prompt-cache lifetime in seconds for prefix reuse, or None when caching is disabled or
     unsupported by the route.
     """
@@ -73,6 +75,7 @@ class Capabilities:
     native_compaction: bool = False
     provider_default_sampling: bool = False
     system_updates: Callable[[ModelRequest], bool] | None = None
+    strict_thinking_prefix: Callable[[ModelRequest], bool] | None = None
     sticky_replay_recovery: Callable[[ModelRequest, ProviderError], ModelRequest | None] | None = None
     replay_reset_scope: str | None = None
     prompt_cache_ttl_seconds: float | None = STANDARD_PROMPT_CACHE_TTL_SECONDS

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import anthropic
@@ -17,6 +19,7 @@ from google.oauth2.credentials import Credentials
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import describe_reply_error
@@ -29,8 +32,8 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, File
-from mindroom.llm.messages import Message, MessageMeta, ModelProvenance
+from mindroom.llm.media import Audio, File, Image
+from mindroom.llm.messages import PRUNED_MEDIA_FOLLOW_UP_TEXT, Message, MessageMeta, ModelProvenance
 from mindroom.llm.provider import (
     ModelRequest,
     ReasoningDelta,
@@ -44,6 +47,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.loop_hooks import _prune_in_turn_tool_images_hook
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
@@ -53,7 +57,12 @@ from mindroom.providers.anthropic.wire import (
     supports_prefill,
     supports_structured_outputs,
 )
+from mindroom.providers.pipeline import fallback as fallback_stage
 from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
+from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.tool_system.tool_function import ToolValue
+from tests.agent_loop.helpers import run_loop, spec, toolkit
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
     ROUTE_CONFIGS,
@@ -2359,3 +2368,241 @@ async def test_a_raw_system_override_goes_as_authored_without_a_system_message(
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs=settings)
     await claude_turn(provider, ModelRequest(messages=[Message(role="user", content="Hello")]))
     assert wire.body()["system"] == authored_system
+
+
+def test_strict_thinking_prefix_capability_matches_route_and_request_binding(tmp_path: Path) -> None:
+    """Prefix-checked Claude routes report strict_thinking_prefix iff thinking is active without drop_block."""
+    wire = Wire(sse_reply([{"type": "text", "text": "ok"}]))
+    req = ModelRequest(messages=_user())
+    omit_req = ModelRequest(messages=_user(), overrides=RequestOverrides(omit_thinking_setting=True))
+
+    bedrock = route_provider("bedrock_claude", tmp_path, wire, id="anthropic.claude-sonnet-5-5")
+    assert bedrock.capabilities.strict_thinking_prefix is not None
+    assert bedrock.capabilities.strict_thinking_prefix(req) is True
+
+    bedrock_disabled = route_provider(
+        "bedrock_claude",
+        tmp_path,
+        wire,
+        id="anthropic.claude-sonnet-5-5",
+        extra_kwargs={"thinking": {"type": "disabled"}},
+    )
+    assert bedrock_disabled.capabilities.strict_thinking_prefix is not None
+    assert bedrock_disabled.capabilities.strict_thinking_prefix(req) is False
+
+    bedrock_unchecked = route_provider("bedrock_claude", tmp_path, wire, id="anthropic.claude-mythos-5-1")
+    assert bedrock_unchecked.capabilities.strict_thinking_prefix is None
+
+    direct = route_provider("anthropic", tmp_path, wire, id="claude-sonnet-5-5")
+    assert direct.capabilities.strict_thinking_prefix is not None
+    assert direct.capabilities.strict_thinking_prefix(req) is False
+    assert direct.capabilities.strict_thinking_prefix(omit_req) is True
+
+    direct_manual = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        id="claude-sonnet-5-5",
+        extra_kwargs={"thinking": {"type": "enabled", "budget_tokens": 2048}},
+    )
+    assert direct_manual.capabilities.strict_thinking_prefix is not None
+    assert direct_manual.capabilities.strict_thinking_prefix(req) is True
+
+    direct_error_binding = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        id="claude-sonnet-5-5",
+        extra_kwargs={"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "error"}}},
+    )
+    assert direct_error_binding.capabilities.strict_thinking_prefix is not None
+    assert direct_error_binding.capabilities.strict_thinking_prefix(req) is True
+
+    vertex = route_provider("vertexai_claude", tmp_path, wire, id="claude-sonnet-5-5")
+    assert vertex.capabilities.strict_thinking_prefix is not None
+    assert vertex.capabilities.strict_thinking_prefix(req) is False
+    assert vertex.capabilities.strict_thinking_prefix(omit_req) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "model_id", "pruned"),
+    [
+        pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", False, id="bedrock-strict-preserves-prefix"),
+        pytest.param("anthropic", "claude-sonnet-5-5", True, id="anthropic-drop-block-prunes"),
+    ],
+)
+async def test_in_turn_tool_image_pruning_respects_claude_thinking_prefix_binding(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    *,
+    pruned: bool,
+) -> None:
+    """Crossing 11 screenshots keeps the exact wire prefix on Bedrock and still prunes with Anthropic drop_block."""
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC",
+    )
+    replies = [
+        *(
+            sse_reply(
+                [
+                    {"type": "thinking", "thinking": f"step {i}", "signature": f"sig-{i}"},
+                    {"type": "tool_use", "id": f"toolu_{i:02d}", "name": "snap", "input": {}},
+                ],
+                stop_reason="tool_use",
+            )
+            for i in range(1, 12)
+        ),
+        sse_reply([{"type": "text", "text": "Done."}]),
+    ]
+    wire = Wire(*replies)
+    provider = route_provider(route, tmp_path, wire, id=model_id)
+    counter = 0
+
+    def snap() -> ToolValue:
+        """Capture one screenshot."""
+        nonlocal counter
+        counter += 1
+        return ToolValue(
+            content=f"shot {counter}",
+            images=[Image(id=f"shot-{counter}", content=png, mime_type="image/png")],
+        )
+
+    messages = _user("Capture 11 shots.")
+    await run_loop(
+        spec(provider, toolkit(snap)),
+        messages,
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(provider),)),
+        request_template=EMPTY_REQUEST,
+    )
+
+    body_10, body_11 = wire.body(10), wire.body(11)
+    images_11 = [
+        block
+        for message in body_11["messages"]
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "image"
+    ]
+    sigs_11 = [
+        block["signature"]
+        for message in body_11["messages"]
+        if message["role"] == "assistant"
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
+    assert sigs_11 == [f"sig-{i}" for i in range(1, 12)]
+    if pruned:
+        assert body_11["thinking"]["block_binding"] == _DROP_STALE
+        assert len(images_11) == 2
+        assert PRUNED_MEDIA_FOLLOW_UP_TEXT in json.dumps(body_11["messages"])
+    else:
+        assert "block_binding" not in (body_11.get("thinking") or {})
+        assert len(images_11) == 11
+
+        sent = len(body_10["messages"])
+        assert json.dumps(_without_cache_control(body_10["messages"])) == json.dumps(
+            _without_cache_control(body_11["messages"][:sent]),
+        )
+        assert PRUNED_MEDIA_FOLLOW_UP_TEXT not in json.dumps(body_11["messages"])
+
+
+def _without_cache_control(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            **msg,
+            "content": [
+                {k: v for k, v in block.items() if k != "cache_control"} if isinstance(block, dict) else block
+                for block in msg["content"]
+            ],
+        }
+        for msg in msgs
+    ]
+
+
+@pytest.mark.asyncio
+async def test_in_turn_tool_image_pruning_preserves_prefix_after_failover_to_bedrock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failing over mid-turn from a non-strict primary to strict Bedrock preserves all images and signed thinking."""
+    monkeypatch.setattr(fallback_stage, "_COOLDOWN_UNTIL", {})
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC",
+    )
+
+    def _tool_reply(step: int) -> httpx.Response:
+        return sse_reply(
+            [
+                {"type": "thinking", "thinking": f"step {step}", "signature": f"sig-{step}"},
+                {"type": "tool_use", "id": f"toolu_{step:02d}", "name": "snap", "input": {}},
+            ],
+            stop_reason="tool_use",
+        )
+
+    overloaded = httpx.Response(
+        529,
+        json={"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+    )
+    primary_wire = Wire(_tool_reply(1), overloaded)
+    bedrock_wire = Wire(*(_tool_reply(i) for i in range(2, 12)), sse_reply([{"type": "text", "text": "Done."}]))
+
+    primary = route_provider("anthropic", tmp_path, primary_wire, id="claude-sonnet-5-5")
+    bedrock = route_provider("bedrock_claude", tmp_path, bedrock_wire, id="anthropic.claude-sonnet-5-5")
+    provider = WrappedProvider(
+        primary,
+        partial(
+            fallback_stream,
+            model_name="primary",
+            chain=(ChainModel("bedrock", None, lambda: bedrock, "bedrock"),),
+            cooldown_key="primary",
+        ),
+    )
+    assert provider.capabilities.strict_thinking_prefix is not None
+    assert provider.capabilities.strict_thinking_prefix(ModelRequest(messages=_user())) is False
+
+    counter = 0
+
+    def snap() -> ToolValue:
+        """Capture one screenshot."""
+        nonlocal counter
+        counter += 1
+        return ToolValue(
+            content=f"shot {counter}",
+            images=[Image(id=f"shot-{counter}", content=png, mime_type="image/png")],
+        )
+
+    messages = _user("Capture 11 shots across failover.")
+    await run_loop(
+        spec(provider, toolkit(snap)),
+        messages,
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(provider),)),
+        request_template=EMPTY_REQUEST,
+    )
+
+    assert len(primary_wire.requests) == 2
+    assert len(bedrock_wire.requests) == 11
+    assert any(not msg.from_history and msg.meta.fallback_model == "bedrock" for msg in messages)
+
+    body_10, body_11 = bedrock_wire.body(9), bedrock_wire.body(10)
+    images_11 = [
+        block
+        for message in body_11["messages"]
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "image"
+    ]
+    sigs_11 = [
+        block["signature"]
+        for message in body_11["messages"]
+        if message["role"] == "assistant"
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
+    assert "block_binding" not in (body_11.get("thinking") or {})
+    assert len(images_11) == 11
+    assert sigs_11 == [f"sig-{i}" for i in range(1, 12)]
+    sent = len(body_10["messages"])
+    assert json.dumps(_without_cache_control(body_10["messages"])) == json.dumps(
+        _without_cache_control(body_11["messages"][:sent]),
+    )
+    assert PRUNED_MEDIA_FOLLOW_UP_TEXT not in json.dumps(body_11["messages"])

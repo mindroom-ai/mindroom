@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, PRUNED_MEDIA_FOLLOW_UP_TEXT, Message
 from mindroom.providers.claude_code.bridge import tool_names
 from mindroom.providers.claude_code.prompt import (
     Answer,
@@ -455,3 +455,23 @@ def test_an_idle_session_continues_with_the_new_user_messages() -> None:
 )
 def test_an_idle_session_rebuilds_when_the_request_does_not_follow_its_answer(tail: list[Message]) -> None:
     assert plan_continuation(answer_of("It is LILAC-HERON.", []), tail, _PROVIDER) is None
+
+
+def test_a_parked_turn_continues_only_for_an_unannotated_media_follow_up() -> None:
+    answered = Message(role="assistant", tool_calls=[tool_call("lookup", "t1", key="a")])
+    result = Message(role="tool", content="ok", tool_call_id="t1", tool_name="lookup")
+
+    unannotated = Message(role="user", content=MEDIA_FOLLOW_UP_TEXT, images=[Image(content=PNG, format="png")])
+    resumed = plan_continuation(_parked("t1"), [answered, result, unannotated], _PROVIDER)
+    assert resumed is not None
+    assert [block["type"] for block in resumed[0]["t1"]["content"]] == ["text", "image"]
+
+    annotated = Message(
+        role="user",
+        content=f"{MEDIA_FOLLOW_UP_TEXT}\n\n[Unsupported audio omitted. Their content was not inspected.]",
+        images=[Image(content=PNG, format="png")],
+    )
+    assert plan_continuation(_parked("t1"), [answered, result, annotated], _PROVIDER) is None
+
+    pruned = Message(role="user", content=PRUNED_MEDIA_FOLLOW_UP_TEXT)
+    assert plan_continuation(_parked("t1"), [answered, result, pruned], _PROVIDER) is None

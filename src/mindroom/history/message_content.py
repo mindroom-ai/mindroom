@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX
-from mindroom.llm.messages import stable_serialize
+from mindroom.llm.messages import PRUNED_MEDIA_FOLLOW_UP_TEXT, is_media_follow_up, stable_serialize
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,6 +17,19 @@ if TYPE_CHECKING:
 
 _MAX_HISTORY_VIEWED_IMAGES = 4
 _MAX_HISTORY_VIEWED_IMAGE_BYTES = 10 * 1024 * 1024
+
+_IN_TURN_TRANSIENT_IMAGE_TRIGGER_COUNT = 10
+_IN_TURN_TRANSIENT_IMAGE_TRIGGER_BYTES = 4 * 1024 * 1024
+_IN_TURN_TRANSIENT_IMAGE_TARGET_COUNT = 2
+_IN_TURN_TRANSIENT_IMAGE_TARGET_BYTES = 1 * 1024 * 1024
+
+_IN_TURN_VIEWED_IMAGE_TRIGGER_COUNT = 12
+_IN_TURN_VIEWED_IMAGE_TRIGGER_BYTES = 15 * 1024 * 1024
+
+_VIEWED_IMAGE_REOPEN_HINT = (
+    "Reopen the original workspace path with view_file, or an authorized attachment ID "
+    'with attachment(action="get", attachment_id=..., view=True).'
+)
 
 
 def message_media_entries(message: Message) -> tuple[tuple[str, Sequence[Image | Audio | Video | File] | None], ...]:
@@ -88,10 +101,107 @@ def _content_with_viewed_image_omission(message: Message, omitted: int) -> str:
     notice = (
         f"[{omitted} historical viewed {noun} omitted from replay to keep history within the "
         f"{_MAX_HISTORY_VIEWED_IMAGES}-image, {_MAX_HISTORY_VIEWED_IMAGE_BYTES // (1024 * 1024)} MiB limit. "
-        'Reopen the original workspace path with view_file, or an authorized attachment ID with attachment(action="get", attachment_id=..., view=True).]'
+        f"{_VIEWED_IMAGE_REOPEN_HINT}]"
     )
     content = render_message_content(message)
     return f"{content}\n\n{notice}" if content else notice
+
+
+def _in_turn_viewed_omission_notice(omitted: int) -> str:
+    """Return the notice appended when in-turn pruning drops ``omitted`` viewed images."""
+    noun = "image" if omitted == 1 else "images"
+    return (
+        f"[{omitted} earlier viewed {noun} omitted to keep context within the "
+        f"{_MAX_HISTORY_VIEWED_IMAGES}-image, {_MAX_HISTORY_VIEWED_IMAGE_BYTES // (1024 * 1024)} MiB limit. "
+        f"{_VIEWED_IMAGE_REOPEN_HINT}]"
+    )
+
+
+def _select_images_to_drop(
+    entries: Sequence[tuple[int, int, int, bool]],
+    *,
+    trigger_count: int,
+    trigger_bytes: int,
+    target_count: int,
+    target_bytes: int,
+) -> set[tuple[int, int]]:
+    """Return ``(message, image)`` indexes of oldest seen entries to drop when totals exceed the trigger."""
+    total_count = len(entries)
+    total_bytes = sum(size for _, _, size, _ in entries)
+    if total_count <= trigger_count and total_bytes <= trigger_bytes:
+        return set()
+    dropped: set[tuple[int, int]] = set()
+    for message_index, image_index, size, seen in entries:
+        if (total_count <= target_count and total_bytes <= target_bytes) or total_count <= 1:
+            break
+        if not seen:
+            continue
+        dropped.add((message_index, image_index))
+        total_count -= 1
+        total_bytes -= size
+    return dropped
+
+
+def _prune_follow_up_message(message: Message, message_index: int, dropped: set[tuple[int, int]]) -> Message:
+    """Return a copy of ``message`` with ``dropped`` images removed and its omission text updated."""
+    kept: list[Image] = []
+    dropped_transient = 0
+    dropped_viewed = 0
+    for image_index, image in enumerate(message.images or ()):
+        if (message_index, image_index) in dropped:
+            if _is_viewed_image(image):
+                dropped_viewed += 1
+            else:
+                dropped_transient += 1
+        else:
+            kept.append(image)
+    has_remaining_media = bool(kept or message.audio or message.videos or message.files)
+    notes: list[str] = []
+    if has_remaining_media and dropped_transient:
+        noun = "image" if dropped_transient == 1 else "images"
+        notes.append(f"[{dropped_transient} earlier tool {noun} omitted to keep context bounded.]")
+    if dropped_viewed:
+        notes.append(_in_turn_viewed_omission_notice(dropped_viewed))
+    existing = message.content if isinstance(message.content, str) else ""
+    base = existing if has_remaining_media else PRUNED_MEDIA_FOLLOW_UP_TEXT
+    return replace(message, images=kept or None, content="\n\n".join((base, *notes)))
+
+
+def prune_in_turn_tool_images(messages: list[Message]) -> bool:
+    """Batch-prune older seen in-turn tool images in place using two-tier hysteresis.
+
+    Only non-history media follow-up messages with images are eligible. Images after the latest assistant message
+    count toward totals so oversized batches still trigger pruning of older seen images, but are never dropped.
+    Replaces pruned slots with ``dataclasses.replace`` copies, preserving ids, timestamps, and ordinals.
+    """
+    last_assistant = max((index for index, message in enumerate(messages) if message.role == "assistant"), default=-1)
+    transient: list[tuple[int, int, int, bool]] = []
+    viewed: list[tuple[int, int, int, bool]] = []
+    for message_index, message in enumerate(messages):
+        if message.from_history or not is_media_follow_up(message) or not message.images:
+            continue
+        seen = message_index < last_assistant
+        for image_index, image in enumerate(message.images):
+            size = len(image.content) if image.content else 0
+            (viewed if _is_viewed_image(image) else transient).append((message_index, image_index, size, seen))
+    dropped = _select_images_to_drop(
+        transient,
+        trigger_count=_IN_TURN_TRANSIENT_IMAGE_TRIGGER_COUNT,
+        trigger_bytes=_IN_TURN_TRANSIENT_IMAGE_TRIGGER_BYTES,
+        target_count=_IN_TURN_TRANSIENT_IMAGE_TARGET_COUNT,
+        target_bytes=_IN_TURN_TRANSIENT_IMAGE_TARGET_BYTES,
+    ) | _select_images_to_drop(
+        viewed,
+        trigger_count=_IN_TURN_VIEWED_IMAGE_TRIGGER_COUNT,
+        trigger_bytes=_IN_TURN_VIEWED_IMAGE_TRIGGER_BYTES,
+        target_count=_MAX_HISTORY_VIEWED_IMAGES,
+        target_bytes=_MAX_HISTORY_VIEWED_IMAGE_BYTES,
+    )
+    if not dropped:
+        return False
+    for message_index in sorted({index for index, _ in dropped}):
+        messages[message_index] = _prune_follow_up_message(messages[message_index], message_index, dropped)
+    return True
 
 
 def render_message_content(message: Message) -> str:

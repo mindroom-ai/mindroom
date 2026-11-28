@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from mindroom.desktop.protocol import (
+    DESKTOP_APP_CONTROL_ACTIONS,
     DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE,
     DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
     DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
@@ -15,6 +16,7 @@ from mindroom.desktop.protocol import (
     DESKTOP_SETUP_OFFER_EVENT_TYPE,
     DESKTOP_SETUP_REQUEST_EVENT_TYPE,
     MAX_COMMAND_TTL_MS,
+    MAX_SETTLE_MS,
     MAX_SHELL_OUTPUT_BYTES,
     SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
@@ -30,7 +32,9 @@ from mindroom.desktop.protocol import (
     DesktopSetupOffer,
     DesktopSetupRequest,
     EncryptedDesktopMedia,
+    desktop_observation_mode,
     desktop_pairing_verification,
+    desktop_settle_ms,
 )
 
 
@@ -417,3 +421,40 @@ def test_olm_pairing_confirm_and_status_responses_round_trip_and_validate() -> N
         ):
             with pytest.raises(DesktopProtocolError):
                 cls.from_content(bad)
+
+
+def test_observation_mode_and_settle_ms_validation() -> None:
+    """observation='none' and settle_ms are restricted to app control actions with bounded values."""
+    assert "click" in DESKTOP_APP_CONTROL_ACTIONS
+    assert "browser_control" not in DESKTOP_APP_CONTROL_ACTIONS
+    assert desktop_observation_mode("click", "none") == "none"
+    assert desktop_observation_mode("launch_app", "none") == "none"
+
+    for action, value, pattern in (
+        ("click", "invalid", "none, tree, screenshot, or both"),
+        ("screenshot", "none", "screenshot action requires a screenshot"),
+        ("get_app_state", "none", "get_app_state action requires an observation"),
+        ("status", "none", "requires an application action"),
+        ("list_folders", "none", "requires an application action"),
+        ("browser_control", "none", "requires an application action"),
+    ):
+        with pytest.raises(DesktopProtocolError, match=pattern):
+            desktop_observation_mode(action, value)
+
+    assert desktop_settle_ms("screenshot", None, supplied=False) == 0
+    assert desktop_settle_ms("click", 0, supplied=True, mode="none") == 0
+    assert desktop_settle_ms("click", MAX_SETTLE_MS, supplied=True, mode="screenshot") == MAX_SETTLE_MS
+
+    for action, value, supplied, mode, pattern in (
+        ("click", None, True, "both", "integer from 0 to 2000"),
+        ("click", True, True, "both", "integer from 0 to 2000"),
+        ("click", -1, True, "both", "integer from 0 to 2000"),
+        ("click", MAX_SETTLE_MS + 1, True, "both", "integer from 0 to 2000"),
+        ("screenshot", 0, True, "screenshot", "requires an application control action"),
+        ("get_app_state", 500, True, "both", "requires an application control action"),
+        ("list_folders", 100, True, "both", "requires an application control action"),
+        ("browser_control", 100, True, "both", "requires an application control action"),
+        ("click", 500, True, "none", "cannot be positive when observation is none"),
+    ):
+        with pytest.raises(DesktopProtocolError, match=pattern):
+            desktop_settle_ms(action, value, supplied=supplied, mode=mode)

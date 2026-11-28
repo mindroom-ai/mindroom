@@ -31,6 +31,7 @@ DESKTOP_SHELL_PROTOCOL_VERSION = 2
 _PAIRING_V1_VERSION = 1
 _MIN_PAIRING_NONCE_CHARS = 16
 MAX_COMMAND_TTL_MS = 120_000
+MAX_SETTLE_MS = 2_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
 SHELL_OUTPUT_MIME_TYPE = "text/plain"
@@ -87,11 +88,10 @@ DESKTOP_CONTROL_ACTIONS = frozenset(
     },
 )
 DESKTOP_BROWSER_ACTIONS = frozenset({"browser_observe", "browser_control"})
+DESKTOP_APP_CONTROL_ACTIONS = DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS
 DESKTOP_FILE_ACTIONS = frozenset({"list_folders", "list_directory", "read_file"})
 DESKTOP_SHELL_ACTIONS = frozenset({"run_shell", "check_shell", "kill_shell"})
-DESKTOP_APP_ACTIONS = frozenset(
-    {"get_app_state", "screenshot", *(DESKTOP_CONTROL_ACTIONS - DESKTOP_BROWSER_ACTIONS)},
-)
+DESKTOP_APP_ACTIONS = frozenset({"get_app_state", "screenshot", *DESKTOP_APP_CONTROL_ACTIONS})
 _DESKTOP_ACTIONS = frozenset(
     {
         "status",
@@ -105,7 +105,7 @@ _DESKTOP_ACTIONS = frozenset(
 )
 
 
-type DesktopObservationMode = Literal["tree", "screenshot", "both"]
+type DesktopObservationMode = Literal["none", "tree", "screenshot", "both"]
 type DesktopMediaKind = Literal["screenshot", "output_attachment"]
 
 _MEDIA_MIME_TYPES: dict[DesktopMediaKind, frozenset[str]] = {
@@ -120,15 +120,44 @@ MEDIA_MAX_BYTES: dict[DesktopMediaKind, int] = {
 
 def desktop_observation_mode(action: str, value: object = "both") -> DesktopObservationMode:
     """Validate explicit native observation choices before any local operation."""
-    if not isinstance(value, str) or value not in {"tree", "screenshot", "both"}:
-        msg = "Desktop observation must be tree, screenshot, or both."
+    if not isinstance(value, str) or value not in {"none", "tree", "screenshot", "both"}:
+        msg = "Desktop observation must be none, tree, screenshot, or both."
         raise DesktopProtocolError(msg)
     if value != "both" and action not in DESKTOP_APP_ACTIONS:
         msg = "Desktop observation selection requires an application action."
         raise DesktopProtocolError(msg)
-    if action == "screenshot" and value == "tree":
+    if action == "screenshot" and value in {"none", "tree"}:
         msg = "The screenshot action requires a screenshot observation."
         raise DesktopProtocolError(msg)
+    if value == "none" and action not in DESKTOP_APP_CONTROL_ACTIONS:
+        msg = "The get_app_state action requires an observation."
+        raise DesktopProtocolError(msg)
+    return value
+
+
+def desktop_settle_ms(
+    action: str,
+    value: object = None,
+    *,
+    supplied: bool = False,
+    mode: DesktopObservationMode = "both",
+) -> int:
+    """Validate optional post-action settle delay before follow-up observation."""
+    if value is None:
+        if supplied:
+            msg = f"Desktop settle_ms must be an integer from 0 to {MAX_SETTLE_MS}."
+            raise DesktopProtocolError(msg)
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SETTLE_MS:
+        msg = f"Desktop settle_ms must be an integer from 0 to {MAX_SETTLE_MS}."
+        raise DesktopProtocolError(msg)
+    if supplied or value > 0:
+        if action not in DESKTOP_APP_CONTROL_ACTIONS:
+            msg = "Desktop settle_ms requires an application control action."
+            raise DesktopProtocolError(msg)
+        if value > 0 and mode == "none":
+            msg = "Desktop settle_ms cannot be positive when observation is none."
+            raise DesktopProtocolError(msg)
     return value
 
 
@@ -755,6 +784,7 @@ def _pairing_status_fields(raw: object, label: str) -> tuple[str, str, bool, str
 
 __all__ = [
     "DESKTOP_APP_ACTIONS",
+    "DESKTOP_APP_CONTROL_ACTIONS",
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
@@ -775,6 +805,7 @@ __all__ = [
     "MAX_COMMAND_TTL_MS",
     "MAX_INLINE_RESPONSE_BYTES",
     "MAX_SCREENSHOT_BYTES",
+    "MAX_SETTLE_MS",
     "MAX_SHELL_OUTPUT_BYTES",
     "MEDIA_MAX_BYTES",
     "SHELL_OUTPUT_MIME_TYPE",
@@ -796,5 +827,6 @@ __all__ = [
     "EncryptedDesktopMedia",
     "desktop_observation_mode",
     "desktop_pairing_verification",
+    "desktop_settle_ms",
     "event_content",
 ]

@@ -1421,6 +1421,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.approval.receipt",
     "mindroom.delegation.lifecycle",
+    "mindroom.history.message_content",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native_compaction_hook",
     "mindroom.history.run_checkpoint",
@@ -9204,6 +9205,7 @@ visibility = [
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.request_messages",
     "mindroom.history.summary_input",
+    "mindroom.loop_hooks",
     "mindroom.participation_hook",
 ]
 

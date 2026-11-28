@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
-from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, stable_serialize, system_text, tool_result_view
 from mindroom.providers.anthropic.wire import image_block
 from mindroom.providers.claude_code.tool_naming import called_name
 
@@ -188,7 +188,11 @@ def plan_continuation(answer: Answer, tail: Sequence[Message], provider: str) ->
         blocks = _merged([block for message in rest for block in _text_and_image_blocks(message, provider)])
         return ({}, blocks) if blocks and all(message.role == "user" for message in rest) else None
     # The media of a batch are pooled, so only those of a batch of one call are known to be that call's.
-    media = rest[-1] if len(call_ids) == 1 and rest and is_media_follow_up(rest[-1]) else None
+    media = (
+        rest[-1]
+        if len(call_ids) == 1 and rest and rest[-1].role == "user" and rest[-1].content == MEDIA_FOLLOW_UP_TEXT
+        else None
+    )
     results = [message for message in rest if message is not media]
     answered_ids = [str(message.tool_call_id) for message in results if message.role == "tool"]
     if len(results) != len(call_ids) or sorted(answered_ids) != sorted(call_ids):

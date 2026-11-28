@@ -294,7 +294,7 @@ Locally, the bridge keeps command arguments and outcomes, including shell comman
 ## Applications
 
 On macOS, `get_app_state` returns the app's accessibility tree with roles, names, values, bounds, and available actions, plus a screenshot of the app window.
-The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
+The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step by default.
 On macOS, app screenshots and actions run in the background without bringing the selected app to the front or moving the physical cursor, including when the window is covered by other windows or on another Space.
 
 `desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
@@ -309,7 +309,7 @@ With `return_attachment=true`, `screenshot` also returns an `att_*` handle that 
 - `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
   App-switching, quit, launch, and address-bar shortcuts are rejected because they could reach apps outside the allowlist.
 
-Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; `action="screenshot"` defaults to `observation="screenshot"` and other app actions default to `both`.
+Pass `observation="tree"` to skip the screenshot when semantic state is enough, `observation="screenshot"` to omit the element list, or `observation="none"` on intermediate `desktop_control` actions (reusing `state_id`) to skip follow-up capture altogether; `action="screenshot"` defaults to `observation="screenshot"` and other app actions default to `both`. On `desktop_control` actions that capture a follow-up observation, optional `settle_ms` (`0`–`2000`) waits after input before taking the fresh observation.
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
