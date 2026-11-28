@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Protocol
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.approval.tool_approval import tool_may_require_approval
@@ -54,7 +55,21 @@ __all__ = [
     "subagent_sandbox_worker_key",
     "validate_sandbox_child",
     "validate_sandbox_execution",
+    "validate_sandbox_target",
 ]
+
+
+class _SandboxTarget(Protocol):
+    @property
+    def agent_name(self) -> str: ...
+    @property
+    def sandbox(self) -> WorkerSandboxConfig | None: ...
+    @property
+    def resource_profile(self) -> ScriptResourceProfileName | None: ...
+    @property
+    def agent_mode(self) -> AgentMode: ...
+    @property
+    def persona(self) -> SubagentPersona | None: ...
 
 
 class SandboxedSubagentUnavailableError(RuntimeError):
@@ -333,6 +348,35 @@ def validate_sandbox_child(
         agent_mode=child.agent_mode,
         persona=child.persona,
         delegation_depth=child.depth,
+    )
+
+
+def validate_sandbox_target(
+    *,
+    caller_name: str,
+    target: _SandboxTarget,
+    previous_child: DelegationChild | None,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    delegation_depth: int,
+) -> str | None:
+    """Validate sandbox constraints for a fresh or follow-up delegation target; returns a refusal message or None."""
+    if previous_child is not None:
+        return validate_sandbox_child(previous_child, config, runtime_paths, caller_name=caller_name)
+    if target.sandbox is None:
+        return None
+    return validate_sandbox_execution(
+        caller_name=caller_name,
+        child_name=target.agent_name,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=replace(owner, agent_name=target.agent_name),
+        sandbox=target.sandbox,
+        resource_profile=target.resource_profile,
+        agent_mode=target.agent_mode,
+        persona=target.persona,
+        delegation_depth=delegation_depth + 1,
     )
 
 

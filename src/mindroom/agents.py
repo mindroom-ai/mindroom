@@ -1857,18 +1857,12 @@ def _render_sandbox_system_role(
     has_persona: bool,
 ) -> str:
     """Build an allowlisted system role for a sandboxed subagent (no ambient agent/Matrix/workspace leaks)."""
-    if worker_sandbox.mount_dir is None:
-        mount_line = "Workspace: isolated scratch directory only (no agent workspace files are mounted)."
-    elif worker_sandbox.mount_read_only:
-        mount_line = f"Workspace: mounted subdirectory `{worker_sandbox.mount_dir}` (read-only)."
-    else:
-        mount_line = f"Workspace: mounted subdirectory `{worker_sandbox.mount_dir}` (read-write)."
     tools_line = (
         f"Active tools: {', '.join(worker_routed_tool_names)}." if worker_routed_tool_names else "Active tools: none."
     )
     lines = [
         *([] if has_persona else ["You are a sandboxed subagent running in an isolated Kubernetes worker."]),
-        mount_line,
+        worker_sandbox.workspace_description(),
         tools_line,
         "Confinement: tools are restricted to this sandbox workspace. No credentials, memory, knowledge bases, "
         "skills, shared directories, or workspace files outside the mounted directory are available.",
@@ -1918,11 +1912,6 @@ def _create_sandbox_agent(
         narrowed_tools,
         lambda: caller_toolkit_names(agent_name, config, plugins.tools, delegation_depth=delegation_depth),
         tool_function_filter,
-    )
-    output_file_policy = ToolOutputFilePolicy.for_current_tools(
-        agent_runtime.workspace.root,
-        runtime_paths,
-        auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
     )
     tool_assembly = _assemble_agent_toolkits(
         agent_tools,
@@ -1986,7 +1975,7 @@ def _create_sandbox_agent(
         minimal_instructions=(),
         interactive_prompt="",
         skills=(),
-        output_file_policy=output_file_policy,
+        output_file_policy=None,
         worker_sandbox=worker_sandbox,
     )
     logger.info(

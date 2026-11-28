@@ -35,8 +35,7 @@ from mindroom.delegation.targets import DelegationTarget, lookup_follow_up_targe
 from mindroom.delegation.workers import (
     schedule_subagent_worker_retirement,
     subagent_sandbox_worker_key,
-    validate_sandbox_child,
-    validate_sandbox_execution,
+    validate_sandbox_target,
 )
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.runs import RunStatus
@@ -222,25 +221,14 @@ def _validate_workflow_sandbox_turn(
     ):
         msg = "Workflow agent worker placement no longer matches its previous turn."
         raise AgentNodeError(msg)
-    refusal = (
-        validate_sandbox_child(previous, config, runtime_paths, caller_name=caller)
-        if previous is not None
-        else (
-            validate_sandbox_execution(
-                caller_name=caller,
-                child_name=target.agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=replace(owner, agent_name=target.agent_name),
-                sandbox=target.sandbox,
-                resource_profile=target.resource_profile,
-                agent_mode=target.agent_mode,
-                persona=target.persona,
-                delegation_depth=depth + 1,
-            )
-            if target.sandbox is not None
-            else None
-        )
+    refusal = validate_sandbox_target(
+        caller_name=caller,
+        target=target,
+        previous_child=previous,
+        owner=owner,
+        config=config,
+        runtime_paths=runtime_paths,
+        delegation_depth=depth,
     )
     if refusal is not None:
         raise AgentNodeError(refusal)

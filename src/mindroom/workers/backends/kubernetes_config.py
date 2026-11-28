@@ -52,9 +52,6 @@ from mindroom.workers.models import (
     SCRIPT_RESOURCE_PROFILE_NAMES,
     WORKER_SSH_PORT,
 )
-from mindroom.workers.sandbox_mounts import (  # noqa: F401 - Re-exported for kubernetes backend modules.
-    sandbox_mount_dir_runtime_class_refusal,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

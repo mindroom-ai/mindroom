@@ -69,6 +69,7 @@ from mindroom.workers.models import (
     WorkerStatus,
 )
 from mindroom.workers.progress import WorkerStartReporter, WorkerWarmupProgress
+from mindroom.workers.sandbox_mounts import sandbox_mount_dir_runtime_class_refusal
 from mindroom.workers.worker_retirement import (
     open_worker_state_root,
     read_worker_identity,
@@ -81,7 +82,6 @@ from .kubernetes_config import (
     KubernetesWorkerBackendConfig,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
-    sandbox_mount_dir_runtime_class_refusal,
 )
 
 if TYPE_CHECKING:
@@ -390,7 +390,7 @@ class KubernetesWorkerBackend:
         auth_secret_applied = False
         try:
             if existing is None and ephemeral_pod:
-                self._admit_ephemeral_worker(worker_key)
+                self._admit_ephemeral_worker(spec)
                 admitted_ephemeral = True
             if existing is None and pinned_worker_kind(worker_key) is not None:
                 self._prepare_pinned_state(worker_key, state_subpath, launch, sandbox=spec.sandbox)
@@ -616,11 +616,15 @@ class KubernetesWorkerBackend:
             return key
         return None
 
-    def _admit_ephemeral_worker(self, worker_key: str) -> None:
+    def _admit_ephemeral_worker(self, spec: WorkerSpec) -> None:
         """Reserve one combined ephemeral sandbox/named-worker slot against ``named_workers_max``."""
+        worker_key = spec.worker_key
+        is_sandboxed = spec.sandbox is not None
+        worker_label = "sandboxed worker" if is_sandboxed else "named worker"
         with self._ephemeral_admission_lock:
             if self.named_workers_max < 1:
-                msg = "Ephemeral sandboxed workers are disabled on this deployment (named_workers_max is 0)."
+                disabled_label = "Ephemeral sandboxed workers" if is_sandboxed else "Named workers"
+                msg = f"{disabled_label} are disabled on this deployment (named_workers_max is 0)."
                 raise WorkerBackendError(msg)
             with _named_worker_admission_read() as timeout:
                 deployments = self._resources.list_deployments(request_timeout=timeout)
@@ -632,7 +636,7 @@ class KubernetesWorkerBackend:
             counted = live | self._starting_ephemeral_workers
             if worker_key not in counted and len(counted) >= self.named_workers_max:
                 msg = (
-                    f"Cannot start sandboxed worker: this deployment already has its limit of "
+                    f"Cannot start {worker_label}: this deployment already has its limit of "
                     f"{self.named_workers_max} ephemeral named/sandbox workers. Try again later."
                 )
                 raise WorkerBackendError(msg)

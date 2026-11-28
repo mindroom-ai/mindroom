@@ -362,20 +362,15 @@ def deserialize_sandbox_config(raw: str | None) -> WorkerSandboxConfig | None:
     if raw is None:
         return None
     try:
-        data = json.loads(raw)
+        stored = WorkerSandboxConfig.from_stored_dict(json.loads(raw))
     except (TypeError, ValueError) as exc:
         msg = f"Persisted worker sandbox specification is invalid: {exc}"
         raise NamedWorkerError(msg) from exc
-    if (
-        not isinstance(data, dict)
-        or set(data) != {"mount_dir", "mount_read_only"}
-        or not isinstance(data["mount_read_only"], bool)
-    ):
+    if stored is None:
         msg = "Persisted worker sandbox specification is corrupted."
         raise NamedWorkerError(msg)
-    mount_dir, mount_read_only = data["mount_dir"], data["mount_read_only"]
-    parsed, _ = parse_named_worker_sandbox(True, mount_dir, mount_read_only, runtime_paths=None)
-    if parsed is None or parsed.mount_dir != mount_dir:
+    parsed, _ = parse_named_worker_sandbox(True, stored.mount_dir, stored.mount_read_only, runtime_paths=None)
+    if parsed is None or parsed.mount_dir != stored.mount_dir:
         msg = "Persisted worker sandbox specification is invalid."
         raise NamedWorkerError(msg)
     return parsed
@@ -483,12 +478,11 @@ def named_worker_call(
     config: Config | None,
     runtime_paths: RuntimePaths,
     turn_id: str | None = None,
-    owner_id: str | None = None,
 ) -> NamedWorkerCall | None:
     """Return the named worker a call's arguments ask for, or None for an ordinary shell call.
 
-    The arguments are as the model sent them, so their types are checked here. ``owner_id`` (or ``turn_id``)
-    names the fleet that owns the worker; an explicit ``named_worker_owner(...)`` takes precedence over ``turn_id``.
+    The arguments are as the model sent them, so their types are checked here. An explicit
+    ``named_worker_owner(...)`` binding takes precedence over ``turn_id`` as the owning fleet.
     """
     if sandbox is not None and not isinstance(sandbox, bool):
         msg = "sandbox must be a boolean."
@@ -520,8 +514,7 @@ def named_worker_call(
         mount_read_only,
         runtime_paths=runtime_paths,
     )
-    effective_owner_id = owner_id if owner_id is not None else (current_named_worker_owner() or turn_id)
-    fleet = _owned_fleet(effective_owner_id)
+    fleet = _owned_fleet(current_named_worker_owner() or turn_id)
     if fleet is None:
         msg = (
             "A named worker belongs to a reply in a conversation, and this call runs outside one, "

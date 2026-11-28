@@ -117,7 +117,7 @@ class _RunState:
     charged_at: float | None = None
     # Whether this run's wait for an attempt was logged as refused, so the tries that follow say nothing.
     refused: bool = False
-    # Run-scoped worker resources (e.g. sandboxed workflow.spawn pods) released on terminal end_run or close().
+    # Run-scoped worker resources (e.g. sandboxed workflow.spawn/shell pods) released when an attempt ends or closes.
     worker_resources: ExecutionResources | None = None
     worker_cleanup_tokens: dict[str, object] = field(default_factory=dict)
 
@@ -234,7 +234,7 @@ class WorkflowEngine:
         callback: Callable[[], Coroutine[Any, Any, None]],
     ) -> None:
         """Retain one idempotent per-run worker cleanup callback, or run it now if the run already ended."""
-        if self.closed or self.run_ended(run_id):
+        if self.closed or self.is_stopping(run_id) or self.store.get_run(run_id).state not in SERVED_RUN_STATES:
             create_background_task(callback(), name="workflow_worker_cleanup")
             return
         state = self._state(run_id)
@@ -790,7 +790,7 @@ class WorkflowEngine:
             async with cond:
                 current = self.store.get_run(run.run_id)
                 if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
-                    release_resources = current.state in TERMINAL_RUN_STATES
+                    release_resources = current.state not in SERVED_RUN_STATES
                     return current
                 ended = state in TERMINAL_RUN_STATES
                 current = await self._stop_and_reconcile(run, ended=ended)
@@ -824,7 +824,7 @@ class WorkflowEngine:
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
                 ended_run = await asyncio.shield(end)
-                release_resources = ended_run.state in TERMINAL_RUN_STATES
+                release_resources = ended_run.state not in SERVED_RUN_STATES
                 if (run_state := self._runs.get(run.run_id)) is not None:
                     run_state.charged_at, run_state.refused = None, False
                 cond.notify_all()

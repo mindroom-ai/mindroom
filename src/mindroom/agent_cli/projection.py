@@ -32,8 +32,10 @@ def _encoded_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode())
 
 
-def project_cli_result(result: object, policy: ToolOutputFilePolicy, tool_name: str) -> object:
+def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool_name: str) -> object:
     """Save large text through the normal output policy without changing execution status."""
+    if policy is None:
+        return result
     # ToolExecution already separated media. Don't save an existing receipt as another output file.
     threshold = min(policy.auto_save_threshold_bytes, _INLINE_BUDGET)
     if isinstance(result, str) and _encoded_size(result) > _INLINE_BUDGET:
@@ -61,7 +63,7 @@ def register_cli_media(
     response: ToolValue,
     *,
     context: ToolRuntimeContext,
-    policy: ToolOutputFilePolicy,
+    policy: ToolOutputFilePolicy | None,
     call_id: str,
 ) -> list[dict[str, object]]:
     """Retain scoped local references while leaving the call's media objects intact."""
@@ -75,7 +77,7 @@ def register_cli_media(
         content = item.content
         filename = item.filename if isinstance(item, File) else None
         path = Path(filepath) if filepath else None
-        if path is None and isinstance(content, bytes):
+        if path is None and isinstance(content, bytes) and policy is not None:
             relative = f"mindroom_tool_outputs/media-{uuid4().hex}"
             saved = write_bytes_to_output_path(policy, relative, content)
             if not isinstance(saved, str):

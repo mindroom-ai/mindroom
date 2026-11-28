@@ -57,7 +57,7 @@ class AgentSurface:
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
     skills: tuple[Skill, ...] = ()
-    output_file_policy: ToolOutputFilePolicy
+    output_file_policy: ToolOutputFilePolicy | None
     worker_sandbox: WorkerSandboxConfig | None = None
 
 

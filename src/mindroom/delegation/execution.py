@@ -52,7 +52,7 @@ from mindroom.delegation.state import (
 )
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
-from mindroom.delegation.workers import validate_sandbox_child, validate_sandbox_execution
+from mindroom.delegation.workers import validate_sandbox_target
 from mindroom.failure_text import failure_text
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
@@ -1021,26 +1021,14 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         model=target.model,
     )
     if not isinstance(authorization, str):
-        sandbox_source = retained or target.previous_child
-        sandbox_refusal = (
-            validate_sandbox_child(sandbox_source, authorization, runtime_paths, caller_name=caller)
-            if sandbox_source is not None
-            else (
-                validate_sandbox_execution(
-                    caller_name=caller,
-                    child_name=target.agent_name,
-                    config=authorization,
-                    runtime_paths=runtime_paths,
-                    execution_identity=replace(caller_identity, agent_name=target.agent_name),
-                    sandbox=target.sandbox,
-                    resource_profile=target.resource_profile,
-                    agent_mode=target.agent_mode,
-                    persona=target.persona,
-                    delegation_depth=delegation_depth + 1,
-                )
-                if target.sandbox is not None
-                else None
-            )
+        sandbox_refusal = validate_sandbox_target(
+            caller_name=caller,
+            target=target,
+            previous_child=retained or target.previous_child,
+            owner=caller_identity,
+            config=authorization,
+            runtime_paths=runtime_paths,
+            delegation_depth=delegation_depth,
         )
         if sandbox_refusal is not None:
             authorization = sandbox_refusal

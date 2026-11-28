@@ -68,7 +68,6 @@ def _build_cli_authorizer(
     expected_target: ResolvedWorkerTarget,
     *,
     reload_ends_run: bool,
-    sandbox_only: bool,
 ) -> Callable[[LiveTurnTools, ToolKey | str, dict[str, object]], Awaitable[None]]:
     bindings: dict[tuple[int, ToolKey], PreparedAgentToolBinding] = {}
 
@@ -93,9 +92,6 @@ def _build_cli_authorizer(
             bindings[(id(current), binding.key)] = binding
         # Again after the bind's awaits, so the same check in the call below, which runs first, never refuses.
         check_authority(binding.key)
-        if sandbox_only and current.runtime_context.resolve_worker_target().placement != expected_target.placement:
-            msg = "Sandboxed minimal subagent placement changed during execution"
-            raise RuntimeError(msg)
         await authorize_prepared_tool_call(binding, expected_worker_target=expected_target)
 
     return authorize
@@ -107,7 +103,7 @@ def bind_response_owner(
     lifetime: CliTurnLifetime,
     response_context: ResponseTurnContext,
     context_documents: Mapping[str, str],
-    output_file_policy: ToolOutputFilePolicy,
+    output_file_policy: ToolOutputFilePolicy | None,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     reload_ends_run: bool,
@@ -131,10 +127,13 @@ def bind_response_owner(
     ):
         # Check that Bash can reach MindRoom before any grant exists.
         raise RuntimeError(" ".join(problems))
+    expected_target = runtime.resolve_worker_target()
+    if sandbox_only and (expected_target.placement is None or expected_target.placement.sandbox is None):
+        msg = "Sandboxed minimal subagent requires an active sandbox placement"
+        raise RuntimeError(msg)
     authorize = _build_cli_authorizer(
-        runtime.resolve_worker_target(),
+        expected_target,
         reload_ends_run=reload_ends_run,
-        sandbox_only=sandbox_only,
     )
 
     new_owner = LiveTurnTools(

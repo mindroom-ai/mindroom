@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 
 # Skill management keeps its own output handling; dynamic tool search returns inline.
 _DIRECT_OUTPUT_TOOLKITS = frozenset({"skill_manage", "dynamic_tools"})
+
+
+class _SandboxToolKwargs(TypedDict, total=False):
+    sandbox: bool
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
@@ -165,8 +169,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
                 agent_state_root=agent_runtime.state_root,
                 tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
                 workspace_in_worker=workspace_in_worker,
-                sandbox=sandboxed,
                 worker_target=agent_runtime.execution.worker_target,
+                **(_SandboxToolKwargs(sandbox=True) if sandboxed else _SandboxToolKwargs()),
             )
 
     if tool_name not in _DIRECT_OUTPUT_TOOLKITS:

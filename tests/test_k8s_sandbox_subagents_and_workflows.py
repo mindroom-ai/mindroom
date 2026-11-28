@@ -59,6 +59,7 @@ from mindroom.tool_system.sandbox_proxy import (
     _worker_route_with_sandbox,
     worker_stand_ins,
 )
+from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -866,6 +867,7 @@ def test_sandbox_create_agent_uses_allowlist_prompt_and_strips_ambient_context(t
     prompt_text = system_text(prompt_for_turn(build))
     assert "mounted subdirectory `repo` (read-only)" in prompt_text
     assert "No credentials, memory, knowledge bases" in prompt_text
+    assert build.surface.output_file_policy is None
     for leaked in (
         "TOP_SECRET_AGENT_ROLE",
         "TOP_SECRET_AGENT_INSTRUCTION",
@@ -880,17 +882,12 @@ def test_sandbox_create_agent_uses_allowlist_prompt_and_strips_ambient_context(t
         assert leaked not in prompt_text
 
 
-def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforces_protocol_14(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Runner with sandbox=True enforces file_access='workspace', empty shared roots, unprefixed auto-save, and protocol 14."""
+def _write_sandbox_runner_fixture(tmp_path: Path) -> tuple[str, Path, Path, Path]:
     storage = tmp_path / "storage"
     config_path = tmp_path / "config.yaml"
     shared_dir = tmp_path / "outside_shared"
     shared_dir.mkdir(parents=True, exist_ok=True)
     (shared_dir / "secret.txt").write_text("OUTSIDE_SHARED_SECRET", encoding="utf-8")
-
     config_path.write_text(
         "models:\n"
         "  default:\n"
@@ -909,14 +906,12 @@ def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforce
         "  model: default\n",
         encoding="utf-8",
     )
-    normal_key = "v1:default:user_agent:@alice:example.org:code"
-    worker_key = subagent_worker_key(normal_key, "b" * 32)
+    worker_key = subagent_worker_key("v1:default:user_agent:@alice:example.org:code", "b" * 32)
     ws_root = storage / "agents" / "code" / "workspace"
     repo_dir = ws_root / "repo"
     repo_dir.mkdir(parents=True, exist_ok=True)
     (ws_root / "parent_secret.txt").write_text("PARENT_WORKSPACE_SECRET", encoding="utf-8")
     (repo_dir / "inside.txt").write_text("INSIDE_REPO_OK", encoding="utf-8")
-
     worker_root = worker_root_path(storage, worker_key)
     worker_root.mkdir(parents=True, exist_ok=True)
     startup_env = {
@@ -936,18 +931,27 @@ def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforce
         runner_paths,
         sandbox_mount={"path": str(repo_dir), "ino": os.lstat(repo_dir).st_ino},
     )
+    return worker_key, repo_dir, shared_dir, manifest_path
+
+
+def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforces_protocol_14(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner with sandbox=True enforces file_access='workspace', empty shared roots, unprefixed auto-save, and protocol 14."""
+    worker_key, repo_dir, shared_dir, manifest_path = _write_sandbox_runner_fixture(tmp_path)
 
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _RUNNER_TOKEN)
     monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
     monkeypatch.delenv("MINDROOM_WORKER_COMPUTER_ENABLED", raising=False)
+    monkeypatch.setattr(sandbox_runner_app.state, "sandbox_runner_context", None, raising=False)
 
-    identity = serialize_tool_execution_identity(_identity("code"))
     base_payload = {
         "protocol": WORKER_PROTOCOL_VERSION,
         "worker_key": worker_key,
         "worker_scope": "user_agent",
         "routing_agent_name": "code",
-        "execution_identity": identity,
+        "execution_identity": serialize_tool_execution_identity(_identity("code")),
         "private_agent_names": [],
         "base_dir": str(repo_dir),
         "tool_name": "filesystem",
@@ -955,62 +959,49 @@ def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforce
         "sandbox": True,
     }
     headers = {"x-mindroom-sandbox-token": _RUNNER_TOKEN}
-    with TestClient(sandbox_runner_app) as client:
-        # Protocol 13 is refused by protocol 14 runner.
-        stale = client.post(
-            "/api/sandbox-runner/execute",
-            headers=headers,
-            json={**base_payload, "protocol": 13, "kwargs": {"path": "inside.txt"}},
-        )
-        assert stale.status_code == 200
-        assert stale.json()["ok"] is False
-        assert "protocol 13" in stale.json()["error"]
+    try:
+        with TestClient(sandbox_runner_app) as client:
 
-        # Inside mount_dir succeeds.
-        ok = client.post(
-            "/api/sandbox-runner/execute",
-            headers=headers,
-            json={**base_payload, "kwargs": {"path": "inside.txt"}},
-        )
-        assert ok.status_code == 200
-        assert ok.json()["ok"] is True
-        assert "INSIDE_REPO_OK" in str(ok.json()["result"])
+            def execute(**overrides: object) -> dict[str, object]:
+                response = client.post(
+                    "/api/sandbox-runner/execute",
+                    headers=headers,
+                    json={**base_payload, **overrides},
+                )
+                assert response.status_code == 200
+                return response.json()
 
-        # Parent workspace and host paths outside mount_dir are REFUSED despite file_access: unrestricted.
-        for escape_path in ("../parent_secret.txt", str(shared_dir / "secret.txt")):
-            blocked = client.post(
-                "/api/sandbox-runner/execute",
-                headers=headers,
-                json={**base_payload, "kwargs": {"path": escape_path}},
-            )
-            assert blocked.status_code == 200
-            result_text = str(blocked.json().get("result") or blocked.json().get("error") or "")
-            assert "PARENT_WORKSPACE_SECRET" not in result_text
-            assert "OUTSIDE_SHARED_SECRET" not in result_text
-            assert "Error" in result_text or blocked.json()["ok"] is False
+            # Protocol 13 is refused by protocol 14 runner.
+            stale = execute(protocol=13, kwargs={"path": "inside.txt"})
+            assert stale["ok"] is False
+            assert "protocol 13" in str(stale["error"])
 
-        # Auto-save inside writable mount_dir returns path relative to mount_dir (unprefixed) readable by filesystem!
-        shell_big = client.post(
-            "/api/sandbox-runner/execute",
-            headers=headers,
-            json={
-                **base_payload,
-                "tool_name": "shell",
-                "function_name": "run_shell_command",
-                "kwargs": {"args": "python3 -c 'print(\"X\" * 120)'"},
-            },
-        )
-        assert shell_big.status_code == 200
-        saved_meta = shell_big.json()["result"]["mindroom_tool_output"]
-        assert saved_meta["status"] == "saved_to_file"
-        assert not saved_meta["path"].startswith("repo/")
-        read_saved = client.post(
-            "/api/sandbox-runner/execute",
-            headers=headers,
-            json={**base_payload, "kwargs": {"path": saved_meta["path"]}},
-        )
-        assert read_saved.json()["ok"] is True
-        assert "XXXX" in str(read_saved.json()["result"])
+            # Inside mount_dir succeeds.
+            ok = execute(kwargs={"path": "inside.txt"})
+            assert ok["ok"] is True
+            assert "INSIDE_REPO_OK" in str(ok["result"])
+
+            # Parent workspace and host paths outside mount_dir are REFUSED despite file_access: unrestricted.
+            for escape_path in ("../parent_secret.txt", str(shared_dir / "secret.txt")):
+                blocked = execute(kwargs={"path": escape_path})
+                result_text = str(blocked.get("result") or blocked.get("error") or "")
+                assert "PARENT_WORKSPACE_SECRET" not in result_text
+                assert "OUTSIDE_SHARED_SECRET" not in result_text
+                assert "Error" in result_text or blocked["ok"] is False
+
+            # Auto-save inside writable mount_dir returns path relative to mount_dir (unprefixed) readable by filesystem!
+            saved_meta = execute(
+                tool_name="shell",
+                function_name="run_shell_command",
+                kwargs={"args": "python3 -c 'print(\"X\" * 120)'"},
+            )["result"]["mindroom_tool_output"]  # type: ignore[index]
+            assert saved_meta["status"] == "saved_to_file"
+            assert not saved_meta["path"].startswith("repo/")
+            read_saved = execute(kwargs={"path": saved_meta["path"]})
+            assert read_saved["ok"] is True
+            assert "XXXX" in str(read_saved["result"])
+    finally:
+        sandbox_runner_app.state.sandbox_runner_context = None
 
 
 @pytest.mark.asyncio
@@ -1034,6 +1025,7 @@ async def test_minimal_sandbox_mints_zero_cli_token_and_omits_mindroom_agent(tmp
         worker_sandbox=sandbox,
     )
 
+    assert build.surface.output_file_policy is None
     presented = presented_build(build)
     assert list(presented.spec.functions) == ["bash"]
     assert "mindroom-agent" not in (presented.spec.functions["bash"].description or "")
@@ -1108,6 +1100,17 @@ async def test_minimal_sandbox_mints_zero_cli_token_and_omits_mindroom_agent(tmp
             with pytest.raises(RuntimeError, match="Minimal Bash has no CLI environment"):
                 await ordinary._invoke_shell(MagicMock(), {"args": "echo hi"}, window="w1")
 
+            drifted = DedicatedWorkerPlacement(
+                "d" * 32,
+                None,
+                WorkerSandboxConfig(mount_dir="repo", mount_read_only=True),
+            )
+            with (
+                dedicated_worker_placement(identity.session_id, drifted),
+                pytest.raises(PermissionError, match="Current authorization no longer permits"),
+            ):
+                await lifetime.owner._authorize(lifetime.owner, ToolKey("shell", "run_shell_command"), {})
+
 
 # ---------------------------------------------------------------------------
 # 4. K8s combined ephemeral pod cap & shorter idle expiry
@@ -1135,9 +1138,9 @@ def test_kubernetes_combined_ephemeral_sandbox_pod_cap_and_shorter_idle_expiry(t
 
     backend.ensure_worker(named1, now=10.0)
     backend.ensure_worker(sb_spec1, now=10.0)
-    with pytest.raises(WorkerBackendError, match="limit of 2 ephemeral"):
+    with pytest.raises(WorkerBackendError, match=r"Cannot start sandboxed worker.*limit of 2 ephemeral"):
         backend.ensure_worker(sb_spec2, now=10.0)
-    with pytest.raises(WorkerBackendError, match="limit of 2 ephemeral"):
+    with pytest.raises(WorkerBackendError, match=r"Cannot start named worker.*limit of 2 ephemeral"):
         backend.ensure_worker(_named_spec("2"), now=10.0)
     backend.ensure_worker(plain_sub, now=10.0)
 

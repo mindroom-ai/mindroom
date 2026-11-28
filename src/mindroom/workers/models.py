@@ -70,6 +70,41 @@ class WorkerSandboxConfig:
     mount_dir: str | None = None
     mount_read_only: bool = False
 
+    def workspace_description(self) -> str:
+        """Return one prompt line describing the workspace mounted in this sandbox."""
+        if self.mount_dir is None:
+            return "Workspace: isolated scratch directory only (no agent workspace files are mounted)."
+        mode = "read-only" if self.mount_read_only else "read-write"
+        return f"Workspace: mounted subdirectory `{self.mount_dir}` ({mode})."
+
+    @classmethod
+    def from_stored_dict(
+        cls,
+        data: object,
+        *,
+        allow_instance: bool = False,
+    ) -> WorkerSandboxConfig | None:
+        """Validate and decode a stored sandbox dict (or None); raise ValueError on corruption."""
+        if data is None:
+            return None
+        if allow_instance and isinstance(data, cls):
+            return data
+        if not isinstance(data, dict) or set(data) != {"mount_dir", "mount_read_only"}:
+            msg = "Invalid stored worker sandbox specification."
+            raise ValueError(msg)
+        mount_dir, mount_read_only = data["mount_dir"], data["mount_read_only"]
+        if type(mount_read_only) is not bool:
+            msg = "Invalid stored worker sandbox specification."
+            raise ValueError(msg)
+        if mount_dir is None:
+            if mount_read_only:
+                msg = "Invalid stored worker sandbox specification."
+                raise ValueError(msg)
+        elif not isinstance(mount_dir, str) or not mount_dir or "\x00" in mount_dir:
+            msg = "Invalid stored worker sandbox specification."
+            raise ValueError(msg)
+        return cls(mount_dir=mount_dir, mount_read_only=mount_read_only)
+
 
 @dataclass(frozen=True, slots=True)
 class WorkerSpec:

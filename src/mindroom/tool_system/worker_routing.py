@@ -269,21 +269,14 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
 # Coverage: tests/test_worker_target_storage.py::test_a_legacy_two_key_placement_loads_without_sandbox
 _LEGACY_STORED_PLACEMENT_KEYS = frozenset({"subagent_id", "resource_profile"})
 _STORED_PLACEMENT_KEYS = _LEGACY_STORED_PLACEMENT_KEYS | {"sandbox"}
-_STORED_SANDBOX_KEYS = frozenset({"mount_dir", "mount_read_only"})
 
 
 def _is_stored_sandbox(sandbox: object) -> bool:
-    if sandbox is None:
-        return True
-    if not isinstance(sandbox, dict) or set(sandbox) != _STORED_SANDBOX_KEYS:
+    try:
+        WorkerSandboxConfig.from_stored_dict(sandbox)
+    except ValueError:
         return False
-    fields = cast("dict[str, object]", sandbox)
-    mount_dir, read_only = fields["mount_dir"], fields["mount_read_only"]
-    if type(read_only) is not bool:
-        return False
-    if mount_dir is None:
-        return not read_only
-    return isinstance(mount_dir, str) and bool(mount_dir) and "\x00" not in mount_dir
+    return True
 
 
 def _is_stored_placement(placement: object) -> bool:
@@ -301,12 +294,10 @@ def _is_stored_placement(placement: object) -> bool:
 
 
 def _load_stored_placement(fields: dict[str, object]) -> DedicatedWorkerPlacement:
-    raw_sandbox = fields.get("sandbox")
-    sandbox = WorkerSandboxConfig(**cast("dict[str, Any]", raw_sandbox)) if isinstance(raw_sandbox, dict) else None
     return DedicatedWorkerPlacement(
         subagent_id=cast("str", fields["subagent_id"]),
         resource_profile=cast("Any", fields["resource_profile"]),
-        sandbox=sandbox,
+        sandbox=WorkerSandboxConfig.from_stored_dict(fields.get("sandbox")),
     )
 
 

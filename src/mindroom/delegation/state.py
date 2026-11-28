@@ -241,34 +241,16 @@ class DelegationChild:
         fields: dict[str, Any] = dict(data)
         persona = fields.pop("persona")
         raw_sandbox = fields.pop("worker_sandbox", None)
-        worker_sandbox = _sandbox_from_dict(raw_sandbox)
+        try:
+            worker_sandbox = WorkerSandboxConfig.from_stored_dict(raw_sandbox, allow_instance=True)
+        except ValueError as exc:
+            msg = "Invalid worker sandbox snapshot"
+            raise TypeError(msg) from exc
         return cls(
             **fields,
             persona=None if persona is None else SubagentPersona.from_dict(persona),
             worker_sandbox=worker_sandbox,
         )
-
-
-def _sandbox_from_dict(data: object) -> WorkerSandboxConfig | None:
-    if data is None:
-        return None
-    if isinstance(data, WorkerSandboxConfig):
-        return data
-    if not isinstance(data, dict) or set(data) != {"mount_dir", "mount_read_only"}:
-        msg = "Invalid worker sandbox snapshot"
-        raise TypeError(msg)
-    mount_dir, mount_read_only = data["mount_dir"], data["mount_read_only"]
-    if type(mount_read_only) is not bool:
-        msg = "Invalid worker sandbox snapshot"
-        raise TypeError(msg)
-    if mount_dir is None:
-        if mount_read_only:
-            msg = "Invalid worker sandbox snapshot"
-            raise TypeError(msg)
-    elif not isinstance(mount_dir, str) or not mount_dir or "\x00" in mount_dir:
-        msg = "Invalid worker sandbox snapshot"
-        raise TypeError(msg)
-    return WorkerSandboxConfig(mount_dir=mount_dir, mount_read_only=mount_read_only)
 
 
 _MAX_CALLER_TOOL_CALL_ID_CHARACTERS = 256

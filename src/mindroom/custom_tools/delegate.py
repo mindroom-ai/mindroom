@@ -24,8 +24,7 @@ from mindroom.delegation.workers import (
     dedicated_worker_refusal,
     resource_profiles_available,
     sandbox_workers_available,
-    validate_sandbox_child,
-    validate_sandbox_execution,
+    validate_sandbox_target,
 )
 from mindroom.tool_jobs.runtime import ManagedJobToolkit, get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
@@ -399,25 +398,14 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         if isinstance(config, str):
             return config
         owner = self._caller_identity()
-        sandbox_refusal = (
-            validate_sandbox_child(target.previous_child, config, self._runtime_paths, caller_name=self._agent_name)
-            if target.previous_child is not None
-            else (
-                validate_sandbox_execution(
-                    caller_name=self._agent_name,
-                    child_name=target.agent_name,
-                    config=config,
-                    runtime_paths=self._runtime_paths,
-                    execution_identity=replace(owner, agent_name=target.agent_name),
-                    sandbox=target.sandbox,
-                    resource_profile=target.resource_profile,
-                    agent_mode=target.agent_mode,
-                    persona=target.persona,
-                    delegation_depth=self._delegation_depth + 1,
-                )
-                if target.sandbox is not None
-                else None
-            )
+        sandbox_refusal = validate_sandbox_target(
+            caller_name=self._agent_name,
+            target=target,
+            previous_child=target.previous_child,
+            owner=owner,
+            config=config,
+            runtime_paths=self._runtime_paths,
+            delegation_depth=self._delegation_depth,
         )
         if sandbox_refusal is not None:
             return sandbox_refusal

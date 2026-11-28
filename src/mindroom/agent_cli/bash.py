@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -18,6 +17,20 @@ if TYPE_CHECKING:
 
 
 __all__ = ["minimal_bash_toolkit"]
+
+
+def _bash_description(*, sandboxed: bool = False) -> str:
+    cli_clause = "" if sandboxed else ", and cannot make\nnew ``mindroom-agent`` CLI calls after handoff"
+    return (
+        "Run a Bash command and return its output.\n"
+        "By default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds\n"
+        "(with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and\n"
+        f"wait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends{cli_clause}. "
+        "Start servers or work meant to outlive the turn detached with\n"
+        "``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,\n"
+        "such as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every\n"
+        "call is a model turn."
+    )
 
 
 def minimal_bash_toolkit(
@@ -38,14 +51,6 @@ def minimal_bash_toolkit(
         tail: int = 100,
     ) -> str | ToolValue:
         """Run a Bash command and return its output.
-
-        By default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds
-        (with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and
-        wait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends, and cannot make
-        new ``mindroom-agent`` CLI calls after handoff. Start servers or work meant to outlive the turn detached with
-        ``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,
-        such as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every
-        call is a model turn.
 
         Args:
             command: The Bash command to run.
@@ -69,8 +74,9 @@ def minimal_bash_toolkit(
         return await execute(ToolKey("shell", SHELL_FUNCTION), arguments, call_id)
 
     function = adapt_callable(bash)
-    description = function.description
-    if sandboxed and description is not None:
-        description = re.sub(r", and cannot make\s+new ``mindroom-agent`` CLI calls after handoff", "", description)
-    function = replace(function, description=description, parameters=closed_parameters(bash, function.parameters))
+    function = replace(
+        function,
+        description=_bash_description(sandboxed=sandboxed),
+        parameters=closed_parameters(bash, function.parameters),
+    )
     return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

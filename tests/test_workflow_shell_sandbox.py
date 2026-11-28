@@ -486,3 +486,32 @@ async def test_named_worker_owner_takes_precedence_over_ambient_turn_id(
                 assert call is not None
                 assert call._fleet.owner_id == "workflow:explicit-owner"
                 assert call.locked_sandbox(target.worker_key) == locked
+
+
+@pytest.mark.asyncio
+async def test_interrupted_workflow_run_replay_releases_worker_pods_and_evicts_run_state(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ending an interrupted attempt back to STARTING (replay) releases worker pods and drops _RunState immediately."""
+    with _k8s_shell_harness(stack, monkeypatch) as (backend, _requests, _workspace):
+        assert await stack.result("@0", "tool", _shell_call("step1", worker="box", sandbox=True)) == {
+            "output": "ran:step1@box",
+            "exit_code": 0,
+        }
+        assert len(backend.specs) == 1
+        worker_key = backend.specs[0].worker_key
+        assert stack.run_id in stack.engine._runs
+
+        run = stack.store.get_run(stack.run_id)
+        ended = await stack.engine.end_run(
+            run,
+            WorkflowRunState.STARTING,
+            None,
+            finished_at=None,
+            previous_source_digest=run.source_digest,
+        )
+        assert ended.state is WorkflowRunState.STARTING
+        await _wait_retired(backend, {worker_key})
+        assert not named_module._fleets
+        assert stack.run_id not in stack.engine._runs

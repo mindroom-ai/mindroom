@@ -83,14 +83,14 @@ def minimal_context_documents(build: AgentBuild) -> dict[str, str]:
     return documents
 
 
-def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
+def _skill_document(skill: Skill, policy: ToolOutputFilePolicy | None) -> str:
     """Name a skill and the directory its files live in, then give its instructions.
 
     A skill in the workspace is named relative to it, where Bash starts, because a worker mounts the workspace at
     another path than the primary's.
     """
     directory = skill.source_path
-    if not policy.tools_use_workdir and directory.is_relative_to(policy.workspace_root):
+    if policy is not None and not policy.tools_use_workdir and directory.is_relative_to(policy.workspace_root):
         directory = directory.relative_to(policy.workspace_root)
     return f"{skill.name}\nDirectory: {directory.as_posix()}\n\n{skill.instructions}"
 
@@ -98,15 +98,9 @@ def _skill_document(skill: Skill, policy: ToolOutputFilePolicy) -> str:
 def _minimal_sandbox_note(build: AgentBuild) -> str:
     sandbox = build.surface.worker_sandbox
     assert sandbox is not None
-    if sandbox.mount_dir is None:
-        mount_line = "Workspace: isolated scratch directory only (no agent workspace files are mounted)."
-    elif sandbox.mount_read_only:
-        mount_line = f"Workspace: mounted subdirectory `{sandbox.mount_dir}` (read-only)."
-    else:
-        mount_line = f"Workspace: mounted subdirectory `{sandbox.mount_dir}` (read-write)."
     return (
         "Bash is your only tool and runs inside an isolated Kubernetes sandbox.\n"
-        f"{mount_line}\n"
+        f"{sandbox.workspace_description()}\n"
         "No credentials, memory, knowledge bases, skills, shared directories, workspace outside the mounted "
         "directory, or external CLI exist in this sandbox."
     )

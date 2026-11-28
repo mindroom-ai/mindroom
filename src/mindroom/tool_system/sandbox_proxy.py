@@ -74,7 +74,6 @@ from mindroom.workers.models import (
 from mindroom.workers.named import (
     NamedWorkerCall,
     NamedWorkerError,
-    current_named_worker_owner,
     ensure_named_worker,
     named_worker_call,
     sandbox_mount_relative_path,
@@ -1294,7 +1293,6 @@ def _named_worker_call(
         return None
     worker_target = stand_ins.worker_target
     context = get_tool_runtime_context()
-    owner_id = current_named_worker_owner() or (context.turn_id if context is not None else None)
     return named_worker_call(
         arguments.get("worker"),
         arguments.get("resource_profile"),
@@ -1304,7 +1302,7 @@ def _named_worker_call(
         agent_name=worker_target.routing_agent_name if worker_target is not None else None,
         config=stand_ins.runtime_config,
         runtime_paths=stand_ins.runtime_paths,
-        owner_id=owner_id,
+        turn_id=context.turn_id if context is not None else None,
     )
 
 
