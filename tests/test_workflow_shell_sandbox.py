@@ -289,7 +289,24 @@ async def test_restart_resume_persisted_worker_lock_order_independence_and_tampe
         }
         assert backend2.specs[-1].sandbox == WorkerSandboxConfig(mount_dir="repo", mount_read_only=True)
 
-        # Tamper & missing-lock guards all fail closed before dispatch with zero extra pods.
+        # Parallel foreach-style calls to the same named worker remain order-independent and enforce the lock.
+        par_ok = await asyncio.gather(
+            stack.result("/0:a@0", "tool", _shell_call("par-a", worker="box")),
+            stack.result(
+                "/0:b@0",
+                "tool",
+                _shell_call("par-b", worker="box", sandbox=True, mount_dir="repo", mount_read_only=True),
+            ),
+        )
+        assert par_ok == [
+            {"output": "ran:par-a@box", "exit_code": 0},
+            {"output": "ran:par-b@box", "exit_code": 0},
+        ]
+        assert all(
+            spec.sandbox == WorkerSandboxConfig(mount_dir="repo", mount_read_only=True) for spec in backend2.specs
+        )
+
+        # Persisted lock corruption & owner_scope tamper guards all fail closed before dispatch with zero extra pods.
         before = len(backend2.specs)
         for idx, sql in enumerate(
             [
@@ -304,12 +321,9 @@ async def test_restart_resume_persisted_worker_lock_order_independence_and_tampe
                     (lock.owner_scope, stack.run_id),
                 ),
                 (
-                    "UPDATE workflow_run_workers SET sandbox_json = NULL WHERE run_id = ? AND worker_name = 'box'",
-                    (stack.run_id,),
-                ),
-                (
-                    "DELETE FROM workflow_run_workers WHERE run_id = ? AND worker_name = 'box'",
-                    (stack.run_id,),
+                    "UPDATE workflow_run_workers SET sandbox_json = ?, resource_profile = 'huge' "
+                    "WHERE run_id = ? AND worker_name = 'box'",
+                    (lock.sandbox_json, stack.run_id),
                 ),
             ],
             start=3,
@@ -321,14 +335,7 @@ async def test_restart_resume_persisted_worker_lock_order_independence_and_tampe
             assert exc_info.value.kind == "failed"
         assert len(backend2.specs) == before
 
-        # Re-insert lock and verify store.prune() cascades deletion via ON DELETE CASCADE.
-        with stack.store.write_transaction() as conn:
-            conn.execute(
-                "INSERT INTO workflow_run_workers "
-                "(run_id, worker_name, owner_scope, resource_profile, sandbox_json, created_at) "
-                "VALUES (?, 'box', ?, 'small', ?, ?)",
-                (stack.run_id, lock.owner_scope, lock.sandbox_json, lock.created_at),
-            )
+        # Verify store.prune() cascades deletion of workflow_run_workers via ON DELETE CASCADE.
         await stack.engine.end_run(stack.store.get_run(stack.run_id), WorkflowRunState.COMPLETED, None)
         assert stack.store.prune("2999-01-01T00:00:00Z") == 1
         assert stack.store.get_run_worker(stack.run_id, "box") is None
@@ -489,11 +496,11 @@ async def test_named_worker_owner_takes_precedence_over_ambient_turn_id(
 
 
 @pytest.mark.asyncio
-async def test_interrupted_workflow_run_replay_releases_worker_pods_and_evicts_run_state(
+async def test_interrupted_workflow_run_replay_preserves_pods_until_terminal_settlement(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ending an interrupted attempt back to STARTING (replay) releases worker pods and drops _RunState immediately."""
+    """Replay to STARTING preserves worker pods and _RunState; terminal INTERRUPTED releases pods and evicts _RunState."""
     with _k8s_shell_harness(stack, monkeypatch) as (backend, _requests, _workspace):
         assert await stack.result("@0", "tool", _shell_call("step1", worker="box", sandbox=True)) == {
             "output": "ran:step1@box",
@@ -503,15 +510,23 @@ async def test_interrupted_workflow_run_replay_releases_worker_pods_and_evicts_r
         worker_key = backend.specs[0].worker_key
         assert stack.run_id in stack.engine._runs
 
+        # Attempt replay (STARTING) must keep run-scoped worker resources alive.
         run = stack.store.get_run(stack.run_id)
-        ended = await stack.engine.end_run(
+        replayed = await stack.engine.end_run(
             run,
             WorkflowRunState.STARTING,
             None,
             finished_at=None,
             previous_source_digest=run.source_digest,
         )
-        assert ended.state is WorkflowRunState.STARTING
+        assert replayed.state is WorkflowRunState.STARTING
+        assert worker_key not in backend.retired
+        assert named_module._fleets
+        assert stack.run_id in stack.engine._runs
+
+        # Terminal INTERRUPTED settlement releases worker pods, clears fleets, and evicts _RunState.
+        ended = await stack.engine.end_run(replayed, WorkflowRunState.INTERRUPTED, "interrupted")
+        assert ended.state is WorkflowRunState.INTERRUPTED
         await _wait_retired(backend, {worker_key})
         assert not named_module._fleets
         assert stack.run_id not in stack.engine._runs

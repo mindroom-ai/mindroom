@@ -394,7 +394,6 @@ def _has_shell_worker_options(arguments: Mapping[str, object]) -> bool:
 
 def _verify_locked_worker(
     existing: WorkflowRunWorker,
-    prior_args: list[dict[str, object]],
     *,
     worker_name: str,
     owner_scope: str,
@@ -409,18 +408,6 @@ def _verify_locked_worker(
     if existing.owner_scope != owner_scope:
         msg = f"Worker '{worker_name}' belongs to a different owner scope in this run."
         raise NamedWorkerError(msg)
-    for prev in prior_args:
-        prev_sandbox, prev_specified = parse_named_worker_sandbox(
-            prev.get("sandbox"),
-            prev.get("mount_dir"),
-            prev.get("mount_read_only"),
-            runtime_paths=None,
-        )
-        if prev.get("resource_profile") not in (None, existing.resource_profile) or (
-            prev_specified and prev_sandbox != locked_sandbox
-        ):
-            msg = f"Worker '{worker_name}' has an inconsistent persisted specification in this run."
-            raise NamedWorkerError(msg)
     if profile not in (None, existing.resource_profile):
         size = f"resource_profile {existing.resource_profile}" if existing.resource_profile else "no resource_profile"
         msg = (
@@ -478,26 +465,20 @@ def _prepare_shell_worker(
             f"workflow-call:{node.run_id}:{node.key}:{node.generation}",
         )
 
-    persisted, prior = engine.store.admit_run_worker(
+    persisted = engine.store.admit_run_worker(
         run.run_id,
         worker_name,
         run.epoch,
         owner_scope=owner_scope,
         resource_profile=profile,
         sandbox_json=serialize_sandbox_config(sandbox_config),
-        exclude_key=node.key,
-        exclude_generation=node.generation,
         commit=commit,
     )
     if persisted is None:
-        if prior:
-            msg = f"Worker '{worker_name}' has prior admitted calls in this run without a persisted worker lock."
-            raise NamedWorkerError(msg)
         locked_profile, locked_sandbox = profile, sandbox_config
     else:
         locked_profile, locked_sandbox = _verify_locked_worker(
             persisted,
-            prior,
             worker_name=worker_name,
             owner_scope=owner_scope,
             profile=profile,

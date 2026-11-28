@@ -19,7 +19,7 @@ from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_tu
 from mindroom.delegation.personas import list_profiles, render_profile_listing
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
-from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.targets import minimal_mode_refusal, resolve_follow_up_target, resolve_fresh_target
 from mindroom.delegation.workers import (
     dedicated_worker_refusal,
     resource_profiles_available,
@@ -30,7 +30,11 @@ from mindroom.tool_jobs.runtime import ManagedJobToolkit, get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import current_budget_monitor, current_execution_identity
+from mindroom.tool_system.runtime_context import (
+    current_budget_monitor,
+    current_execution_identity,
+    get_tool_runtime_context,
+)
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
@@ -99,6 +103,9 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         )
         self._resource_profiles = self._dedicated_workers and resource_profiles_available(runtime_paths)
         self._sandbox_workers = sandbox_workers_available(agent_name, config, runtime_paths)
+        self._minimal_sandbox = (
+            self._sandbox_workers and execution_identity is not None and execution_identity.channel == "matrix"
+        )
 
         super().__init__(
             name="delegate",
@@ -106,12 +113,15 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             tools=[self.run_subagent, self.continue_subagent],
         )
 
+    def _offers_minimal(self) -> bool:
+        return bool(self._minimal_targets or self._minimal_sandbox)
+
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Describe ``run_subagent`` with this caller's targets, offering no option the caller cannot use."""
         if function.name != RUN_SUBAGENT:
             return function
         hidden = {
-            *(() if self._minimal_targets or self._sandbox_workers else ("minimal",)),
+            *(() if self._offers_minimal() else ("minimal",)),
             *(() if self._authoring else ("system_prompt", "tools", "skills", "knowledge", "profile")),
             *(() if self._dedicated_workers else ("dedicated_worker",)),
             *(() if self._resource_profiles else ("resource_profile",)),
@@ -200,9 +210,10 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         if not self._dedicated_workers:
             return ""
         profiles = " Set resource_profile (small/standard/large) to size it." if self._resource_profiles else ""
+        minimal_sandbox = " (or Bash-only with minimal=true)" if self._offers_minimal() else ""
         sandbox = (
             " Set sandbox=true (or mount_dir with optional mount_read_only=true on a self-copy) to isolate the child "
-            "with only shell/filesystem (or Bash-only with minimal=true), no credentials, memory, skills, knowledge, "
+            f"with only shell/filesystem{minimal_sandbox}, no credentials, memory, skills, knowledge, "
             "or workspace outside mount_dir."
             if self._sandbox_workers
             else ""
@@ -398,6 +409,14 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         if isinstance(config, str):
             return config
         owner = self._caller_identity()
+        effective_mode = target.previous_child.agent_mode if target.previous_child is not None else target.agent_mode
+        minimal_refusal = minimal_mode_refusal(
+            effective_mode,
+            execution_identity=owner,
+            runtime_context=get_tool_runtime_context(),
+        )
+        if minimal_refusal is not None:
+            return minimal_refusal
         sandbox_refusal = validate_sandbox_target(
             caller_name=self._agent_name,
             target=target,

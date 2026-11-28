@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.llm.runs import ToolExecution
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
 
@@ -69,6 +70,20 @@ class FollowUpLookup:
     unavailable: bool = False
 
 
+def minimal_mode_refusal(
+    agent_mode: AgentMode,
+    *,
+    execution_identity: ToolExecutionIdentity | None,
+    runtime_context: ToolRuntimeContext | None,
+) -> str | None:
+    """Refuse minimal-mode subagents outside an active Matrix tool runtime context."""
+    if agent_mode != "minimal":
+        return None
+    if runtime_context is None or (execution_identity is not None and execution_identity.channel != "matrix"):
+        return "Cannot delegate: minimal mode requires an active Matrix conversation context; omit minimal=true."
+    return None
+
+
 async def resolve_delegation_target(
     tool: ToolExecution,
     retained: DelegationChild | None,
@@ -85,8 +100,9 @@ async def resolve_delegation_target(
     its tool context carries, caps the copies it authors.
     """
     args = tool.tool_args or {}
+    context = get_tool_runtime_context()
     if tool.tool_name == CONTINUE_SUBAGENT:
-        return await resolve_follow_up_target(
+        resolved = await resolve_follow_up_target(
             args,
             retained=retained,
             owner=caller_identity,
@@ -94,26 +110,30 @@ async def resolve_delegation_target(
             runtime_paths=runtime_paths,
             depth=depth,
         )
+    else:
 
-    def caller_workspace_root() -> Path:
-        return resolve_agent_runtime(
-            caller_identity.agent_name,
-            config,
-            runtime_paths,
-            execution_identity=caller_identity,
-        ).workspace.root
+        def caller_workspace_root() -> Path:
+            return resolve_agent_runtime(
+                caller_identity.agent_name,
+                config,
+                runtime_paths,
+                execution_identity=caller_identity,
+            ).workspace.root
 
-    context = get_tool_runtime_context()
-    return resolve_fresh_target(
-        args,
-        retained=retained,
-        caller_name=caller_identity.agent_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        depth=depth,
-        workspace_root=caller_workspace_root,
-        cap=context.persona if context is not None else None,
-    )
+        resolved = resolve_fresh_target(
+            args,
+            retained=retained,
+            caller_name=caller_identity.agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            depth=depth,
+            workspace_root=caller_workspace_root,
+            cap=context.persona if context is not None else None,
+        )
+    if isinstance(resolved, str) or retained is not None:
+        return resolved
+    effective_mode = resolved.previous_child.agent_mode if resolved.previous_child is not None else resolved.agent_mode
+    return minimal_mode_refusal(effective_mode, execution_identity=caller_identity, runtime_context=context) or resolved
 
 
 async def lookup_follow_up_target(

@@ -234,7 +234,7 @@ def _validate_workflow_sandbox_turn(
         raise AgentNodeError(refusal)
 
 
-def _retain_spawn_sandbox_cleanup(
+async def _retain_spawn_sandbox_cleanup(
     engine: WorkflowEngine,
     run_id: str,
     node: WorkflowNode,
@@ -254,7 +254,7 @@ def _retain_spawn_sandbox_cleanup(
     ) -> None:
         schedule_subagent_worker_retirement(paths, key)
 
-    engine.retain_worker_cleanup(run_id, worker_key, _retire_spawn_worker)
+    await engine.retain_worker_cleanup(run_id, worker_key, _retire_spawn_worker)
 
 
 def _prepare_turn_spec(
@@ -491,7 +491,7 @@ async def launch_child(
         except JobAccessError as exc:
             raise AgentNodeError(str(exc)) from exc
     await job_runtime.release_wait(job_id, claim)
-    _retain_spawn_sandbox_cleanup(engine, run.run_id, node, child, context)
+    await _retain_spawn_sandbox_cleanup(engine, run.run_id, node, child, context)
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:

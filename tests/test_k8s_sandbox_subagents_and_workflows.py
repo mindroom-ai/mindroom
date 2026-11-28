@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -19,6 +20,7 @@ from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.agent_loop.spec import RunContext
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig
@@ -34,7 +36,7 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn, reserve_child_turn, start_child_turn
 from mindroom.delegation.state import DelegationChild
-from mindroom.delegation.targets import DelegationTarget, resolve_fresh_target
+from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target, resolve_fresh_target
 from mindroom.delegation.workers import (
     SandboxedSubagentUnavailableError,
     child_placement,
@@ -44,14 +46,19 @@ from mindroom.delegation.workers import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import system_text
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    DetachedRequesterContext,
+    detached_requester_context,
+    detached_tool_scope,
+    tool_runtime_context,
+)
 from mindroom.tool_system.sandbox_proxy import (
     _build_execute_request,
     _ensure_route_worker,
@@ -86,8 +93,8 @@ from mindroom.workflow_runs.peers import NodeRef, send
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.access_schema_support import with_responder_access
 from tests.conftest import bind_runtime_paths
-from tests.delegation_helpers import _delegate_runtime_context
-from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.test_kubernetes_worker_backend import _named_backend, _named_spec
 from tests.test_kubernetes_worker_backend import _spec as _k8s_spec
 from tests.workflow_helpers import NodeFailed, workflow_stack
@@ -969,7 +976,7 @@ def test_sandbox_runner_confines_filesystem_tool_autosave_unprefixed_and_enforce
                     json={**base_payload, **overrides},
                 )
                 assert response.status_code == 200
-                return response.json()
+                return json.loads([line for line in response.text.splitlines() if line.strip()][-1])
 
             # Protocol 13 is refused by protocol 14 runner.
             stale = execute(protocol=13, kwargs={"path": "inside.txt"})
@@ -1409,3 +1416,212 @@ async def test_workflow_engine_close_retires_spawn_sandbox_pod_surviving_gc(
         assert retired == []
         await stack.close()
         assert retired == [expected_key]
+
+
+@pytest.mark.asyncio
+async def test_non_matrix_and_detached_delegate_hides_and_refuses_minimal_while_allowing_standard_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-Matrix/detached DelegateTools hides minimal, refuses minimal=True before creating a child, and allows standard sandbox."""
+    paths = _paths(tmp_path, _K8S_ENV)
+    cfg = _config(paths)
+    ws = agent_workspace_root_path(paths.storage_root, "leader")
+    (ws / "subagents").mkdir(parents=True, exist_ok=True)
+    (ws / "subagents" / "min_only.md").write_text(
+        "---\ndescription: minimal sandbox profile\nmode: minimal\ntools: [shell]\n---\nRun bash.\n",
+    )
+
+    def offered_fn(identity: ToolExecutionIdentity | None) -> object:
+        toolkit = DelegateTools("leader", paths, cfg, ws, identity, delegation_depth=0)
+        return next(fn for fn in adapt_toolkit(toolkit, key="delegate").functions if fn.name == "run_subagent")
+
+    # Matrix caller with K8s sandbox workers still sees minimal + sandbox options.
+    matrix_fn = offered_fn(_identity("leader"))
+    assert {"minimal", "sandbox", "mount_dir", "mount_read_only"} <= set(matrix_fn.parameters["properties"])  # type: ignore[attr-defined]
+    assert "minimal=true" in (matrix_fn.description or "")  # type: ignore[attr-defined]
+
+    # Non-Matrix (OpenAI-compat) and identity-less DelegateTools hide minimal, while still advertising sandbox.
+    openai_identity = replace(
+        _identity("leader"),
+        channel="openai_compat",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+    )
+    for caller_identity in (openai_identity, None):
+        fn = offered_fn(caller_identity)
+        assert "minimal" not in fn.parameters["properties"]  # type: ignore[attr-defined]
+        assert "minimal=true" not in (fn.description or "")  # type: ignore[attr-defined]
+        assert {"sandbox", "mount_dir", "mount_read_only"} <= set(fn.parameters["properties"])  # type: ignore[attr-defined]
+
+    # Detached / OpenAI-compat execution refuses minimal=True and mode:minimal profiles BEFORE creating any child.
+    helper_model = ScriptedModel([answer("standard sandbox ok")])
+    ScriptedAgents({"leader": ScriptedModel([]), "helper": helper_model}).install(monkeypatch)
+    detached_tools = DelegateTools("leader", paths, cfg, ws, openai_identity, delegation_depth=0)
+    sessions_dir = paths.storage_root / "subagent_sessions"
+
+    authority = DetachedRequesterContext(
+        requester_id="@alice:example.org",
+        config=cfg,
+        runtime_paths=paths,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        config_provider=lambda: cfg,
+        budget_monitor=None,
+    )
+    with detached_requester_context(authority), detached_tool_scope(openai_identity):
+        refused_explicit = await detached_tools.run_subagent(
+            task="Try minimal",
+            agent_name="helper",
+            sandbox=True,
+            minimal=True,
+        )
+        assert "Cannot delegate: minimal mode requires an active Matrix conversation context" in refused_explicit
+
+        refused_profile = await detached_tools.run_subagent(
+            task="Try minimal profile",
+            sandbox=True,
+            profile="min_only",
+        )
+        assert "Cannot delegate: minimal mode requires an active Matrix conversation context" in refused_profile
+
+        native_refused = await resolve_delegation_target(
+            ToolExecution(
+                tool_call_id="c1",
+                tool_name="run_subagent",
+                tool_args={"task": "Try minimal", "agent_name": "helper", "sandbox": True, "minimal": True},
+            ),
+            retained=None,
+            caller_identity=openai_identity,
+            config=cfg,
+            runtime_paths=paths,
+            depth=0,
+        )
+        assert isinstance(native_refused, str)
+        assert "minimal mode requires an active Matrix conversation context" in native_refused
+
+        # Zero child sessions or model turns were created by any minimal refusal.
+        assert not sessions_dir.exists() or list(sessions_dir.glob("*.json")) == []
+        assert helper_model.requests == []
+
+        # Standard (minimal=False) sandbox=True subagent STILL works cleanly on OpenAI-compat!
+        ok_result = await detached_tools.run_subagent(
+            task="Run standard sandbox",
+            agent_name="helper",
+            sandbox=True,
+        )
+        assert "standard sandbox ok" in ok_result
+        assert len(helper_model.requests) == 1
+
+    # Even a Matrix-channel identity running in detached_tool_scope (get_tool_runtime_context() is None) is refused.
+    matrix_identity = _identity("leader")
+    with detached_tool_scope(matrix_identity):
+        refused_detached_matrix = await resolve_delegation_target(
+            ToolExecution(
+                tool_call_id="c2",
+                tool_name="run_subagent",
+                tool_args={"task": "Try minimal detached", "agent_name": "helper", "sandbox": True, "minimal": True},
+            ),
+            retained=None,
+            caller_identity=matrix_identity,
+            config=cfg,
+            runtime_paths=paths,
+            depth=0,
+        )
+        assert isinstance(refused_detached_matrix, str)
+        assert "minimal mode requires an active Matrix conversation context" in refused_detached_matrix
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "settlement",
+    [
+        WorkflowRunState.COMPLETED,
+        WorkflowRunState.FAILED,
+        WorkflowRunState.CANCELLED,
+        WorkflowRunState.INTERRUPTED,
+        "close",
+    ],
+    ids=["completed", "failed", "cancelled", "interrupted", "engine-close"],
+)
+async def test_workflow_spawn_replay_to_starting_preserves_live_sandbox_pod_until_terminal_or_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settlement: WorkflowRunState | str,
+) -> None:
+    """Replaying an attempt to STARTING while a spawn() job is live preserves its sandbox pod until terminal settlement or close."""
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
+    retired: list[str] = []
+    monkeypatch.setattr(
+        agent_nodes,
+        "schedule_subagent_worker_retirement",
+        lambda _paths, worker_key: retired.append(worker_key),
+    )
+
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=()) as stack:
+        _enable_sandbox_on_stack(stack)
+        await stack.open_jobs()
+        stack.script_agents(monkeypatch)
+        await stack.start()
+
+        started = asyncio.Event()
+        gate = asyncio.Event()
+
+        async def _hold_turn() -> None:
+            started.set()
+            await gate.wait()
+
+        stack.child_script([Await(_hold_turn), *answer("survived replay")])
+        await stack.result("@0", "session", {"name": "sb", "sandbox": True}, meta={"name": "sb"})
+        await stack.submit("@1", "turn", {"session": "@0", "turn": 1, "message": "Long turn"}, meta={"name": "sb"})
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        child = delegation_child(stack.node_job("@1"))
+        expected_key = subagent_sandbox_worker_key(child, stack.context.config, stack.context.runtime_paths)
+        assert expected_key is not None
+        assert stack.node_job("@1").status == "running"
+
+        # Replay attempt to STARTING while the spawn() job is still live: sandbox pod MUST NOT retire!
+        run = stack.engine.store.get_run(stack.run_id)
+        replayed = await stack.engine.end_run(
+            run,
+            WorkflowRunState.STARTING,
+            None,
+            finished_at=None,
+            previous_source_digest=run.source_digest,
+        )
+        assert replayed.state is WorkflowRunState.STARTING
+        assert retired == []
+        assert stack.run_id in stack.engine._runs
+        assert stack.node_job("@1").status == "running"
+
+        if settlement == "close":
+            await stack.close()
+            assert retired == [expected_key]
+            assert stack.run_id not in stack.engine._runs
+            return
+
+        if settlement is WorkflowRunState.COMPLETED:
+            # Relaunch next attempt, let the surviving spawn() job finish, then settle COMPLETED.
+            launched = await stack.engine.launch(stack.run_id, stack.context)
+            assert launched.state is WorkflowRunState.RUNNING
+            gate.set()
+            assert (
+                await stack.result(
+                    "@1",
+                    "turn",
+                    {"session": "@0", "turn": 1, "message": "Long turn"},
+                    meta={"name": "sb"},
+                )
+                == "survived replay"
+            )
+            assert retired == []
+            await stack.engine.end_run(stack.engine.store.get_run(stack.run_id), WorkflowRunState.COMPLETED, None)
+        else:
+            assert isinstance(settlement, WorkflowRunState)
+            await stack.engine.end_run(stack.engine.store.get_run(stack.run_id), settlement, f"ended:{settlement}")
+
+        assert retired == [expected_key]
+        assert stack.run_id not in stack.engine._runs
+        await stack.close()
