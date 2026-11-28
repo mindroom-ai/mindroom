@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import bisect
 import difflib
+import fnmatch
 import itertools
 import json
 import os
@@ -21,7 +22,7 @@ import unicodedata
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass, replace
 from glob import has_magic
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from weakref import WeakValueDictionary
 
@@ -589,7 +590,7 @@ def _is_git_repo(base_dir: Path) -> bool:
     return any((parent / ".git").exists() for parent in (current, *current.parents))
 
 
-def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
+def _gitignored_paths(paths: list[Path], base_dir: Path, *, no_index: bool = False) -> set[Path]:
     """Return the subset of paths ignored by git using a single batched call."""
     if not paths or not _is_git_repo(base_dir):
         return set()
@@ -597,16 +598,20 @@ def _gitignored_paths(paths: list[Path], base_dir: Path) -> set[Path]:
     base_resolved = base_dir.resolve()
     path_map: dict[str, list[Path]] = {}
     for candidate in paths:
+        resolved = candidate.resolve()
         try:
-            token = str(candidate.resolve().relative_to(base_resolved))
+            rel = resolved.relative_to(base_resolved)
+            # "." would let patterns like "build/*" match the directory itself instead of its entries.
+            token = str(resolved) if rel == Path() else str(rel)
         except ValueError:
             token = str(candidate)
         path_map.setdefault(token, []).append(candidate)
 
     payload = "\0".join(path_map.keys()) + "\0"
+    args = ["check-ignore", "--stdin", "-z", *(["--no-index"] if no_index else [])]
     try:
         result = subprocess.run(
-            hardened_git_command(["check-ignore", "--stdin", "-z"]),
+            hardened_git_command(args),
             check=False,
             cwd=str(base_dir),
             env=hardened_git_env(),
@@ -705,6 +710,129 @@ def _list_directory(target: Path, limit: int) -> str:
     return result
 
 
+def _format_find_results(matched: Iterable[Path], base_dir: Path, pattern: str, limit: int) -> str:
+    """Format matched file paths with limit enforcement and truncation notice."""
+    matches = [format_path_for_output(candidate, base_dir) for candidate in itertools.islice(matched, limit + 1)]
+    if not matches:
+        return f"No files matching '{pattern}' found."
+    if len(matches) > limit:
+        return "\n".join(matches[:limit]) + f"\n\n[Results limited to {limit}. Narrow the pattern to see more.]"
+    return "\n".join(matches)
+
+
+def _split_ripgrep_find_pattern(search_path: Path, pattern: str) -> tuple[Path, tuple[str, ...]] | None:
+    """Split ``literal/**/<rest>`` into ``(effective_root, rest)``, or ``None`` for Python glob."""
+    if not search_path.is_dir() or not pattern or "\x00" in pattern or pattern.endswith(("/", os.sep)):
+        return None
+    parts = Path(pattern).parts
+    if not parts or ".." in parts:
+        return None
+    first_magic = next((i for i, part in enumerate(parts) if has_magic(part)), len(parts))
+    rest = parts[first_magic:]
+    return (search_path.joinpath(*parts[:first_magic]), rest) if rest and rest[0] == "**" else None
+
+
+def _run_ripgrep_files(rg_binary: str, root: Path) -> bytes | str | None:
+    """Run ``rg --files --null`` in ``root``; return raw stdout, a timeout error, or ``None`` to fall back."""
+    args = [str(Path(rg_binary).resolve()), "--no-config", "--no-ignore-dot", "--no-ignore-global", "--files", "--null"]
+    try:
+        proc = subprocess.run(args, cwd=root, check=False, capture_output=True, timeout=_GREP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return f"Error: find_files timed out after {_GREP_TIMEOUT_SECONDS:g} seconds."
+    except OSError:
+        return None
+    return b"" if proc.returncode == 1 else (proc.stdout if proc.returncode in (0, 2) else None)
+
+
+def _parts_match(parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    """Match path components against glob components, with ``**`` matching zero or more components."""
+    p_idx = g_idx = 0
+    star_g = star_p = -1
+    while p_idx < len(parts):
+        if g_idx < len(pattern_parts) and pattern_parts[g_idx] == "**":
+            star_g, star_p = g_idx, p_idx
+            g_idx += 1
+        elif g_idx < len(pattern_parts) and fnmatch.fnmatch(parts[p_idx], pattern_parts[g_idx]):
+            p_idx += 1
+            g_idx += 1
+        elif star_g != -1:
+            star_p += 1
+            p_idx, g_idx = star_p, star_g + 1
+        else:
+            return False
+    return g_idx == len(pattern_parts)
+
+
+def _match_ripgrep_files(stdout: bytes, effective_root: Path, rest: tuple[str, ...]) -> list[Path]:
+    """Filter NUL-delimited relative paths from ripgrep component-by-component."""
+    matched: list[Path] = []
+    for raw_entry in stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        rel_path = PurePath(os.fsdecode(raw_entry))
+        # startswith(".") excludes dotfiles, dot-directories (e.g. !.env.example), and "..".
+        if not rel_path.parts or rel_path.is_absolute() or any(part.startswith(".") for part in rel_path.parts):
+            continue
+        if _parts_match(rel_path.parts, rest):
+            matched.append(effective_root / rel_path)
+    matched.sort()
+    return matched
+
+
+def _find_files_ripgrep(
+    search_path: Path,
+    base_dir: Path,
+    filter_root: Path,
+    pattern: str,
+    limit: int,
+) -> str | None:
+    """Walk ``literal/**/<rest>`` matches with ripgrep, or return ``None`` to fall back to Python.
+
+    Uses ripgrep's ``grep``-aligned traversal: skips symlinks during descent and applies ``.gitignore``
+    rules without consulting the git index.
+    """
+    rg_binary = shutil.which("rg")
+    split = None if rg_binary is None else _split_ripgrep_find_pattern(search_path, pattern)
+    if rg_binary is None or split is None:
+        return None
+    effective_root, rest = split
+    no_matches = f"No files matching '{pattern}' found."
+    if (
+        not effective_root.is_dir()
+        or not is_within_base_dir(effective_root, filter_root)
+        or (
+            not (effective_root / ".git").exists()
+            and _gitignored_paths([effective_root], effective_root, no_index=True)
+        )
+    ):
+        return no_matches
+    raw = _run_ripgrep_files(rg_binary, effective_root)
+    if raw is None or isinstance(raw, str):
+        return raw
+    if not is_within_base_dir(effective_root, filter_root):
+        return no_matches
+    return _format_find_results(_match_ripgrep_files(raw, effective_root, rest), base_dir, pattern, limit)
+
+
+def _find_files_python(
+    search_path: Path,
+    base_dir: Path,
+    filter_root: Path,
+    pattern: str,
+    limit: int,
+) -> str:
+    """Glob for files in Python, filter hidden and gitignored entries, and format results."""
+    try:
+        candidates = [p for p in sorted(set(search_path.glob(pattern))) if p.is_file()]
+    except (NotImplementedError, ValueError) as e:
+        return f"Error: Invalid glob pattern '{pattern}': {e}"
+    # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.
+    parts = Path(pattern).parts
+    named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
+    filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
+    return _format_find_results(filtered, base_dir, pattern, limit)
+
+
 def _find_files_in(
     search_path: Path,
     base_dir: Path,
@@ -712,38 +840,13 @@ def _find_files_in(
     limit: int,
     restrict_to_base_dir: bool = True,
 ) -> str:
-    """Glob for files, filter gitignored, and format results."""
-    glob_error = _validate_glob_pattern(pattern)
-    if glob_error:
+    """Find files via ripgrep for ``literal/**/<rest>`` globs, falling back to Python ``Path.glob``."""
+    if glob_error := _validate_glob_pattern(pattern):
         return glob_error
-
-    try:
-        candidates = [p for p in sorted(search_path.glob(pattern)) if p.is_file()]
-    except (NotImplementedError, ValueError) as e:
-        return f"Error: Invalid glob pattern '{pattern}': {e}"
-
     filter_root = base_dir if restrict_to_base_dir else search_path
-    # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.
-    parts = Path(pattern).parts
-    named = parts[: next((index for index, part in enumerate(parts) if has_magic(part)), len(parts))]
-    filtered = _filter_hidden_and_ignored(candidates, filter_root, search_path.joinpath(*named))
-    matches: list[str] = []
-    for candidate in filtered:
-        matches.append(format_path_for_output(candidate, base_dir))
-        if len(matches) > limit:
-            break
-
-    if not matches:
-        return f"No files matching '{pattern}' found."
-
-    was_limited = len(matches) > limit
-    if was_limited:
-        matches = matches[:limit]
-
-    result = "\n".join(matches)
-    if was_limited:
-        result += f"\n\n[Results limited to {limit}. Narrow the pattern to see more.]"
-    return result
+    if (rg_result := _find_files_ripgrep(search_path, base_dir, filter_root, pattern, limit)) is not None:
+        return rg_result
+    return _find_files_python(search_path, base_dir, filter_root, pattern, limit)
 
 
 def _read_resolved(base_dir: Path, resolved: Path, path: str) -> bytes | str:
