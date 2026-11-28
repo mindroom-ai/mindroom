@@ -32,7 +32,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.custom_tools import delegate as delegate_toolkit
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import recovery as delegation_recovery
@@ -67,7 +66,13 @@ from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect, spec, toolkit
 from tests.agent_tool_helpers import offered_function
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    default_delegation_executor,
+    respond,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.scripted_agent_helpers import registered_toolkit
@@ -331,6 +336,7 @@ async def test_parent_cancellation_before_job_admission_starts_no_child(
         knowledge=None,
         model=turn_model(config, paths, "leader"),
         plugins=config_plugins(config, paths),
+        delegation_executor=default_delegation_executor(),
     )
     assert build.tool_jobs is not None
     arguments = {"task": "Research", "agent_name": "code"}
@@ -1017,8 +1023,7 @@ async def _drive_background_child(
     register_background_runtime(paths, runtime)
     agents = ScriptedAgents({} if child_model is None else {"code": child_model})
     agents.install(monkeypatch)
-    monkeypatch.setattr(delegate_toolkit, "run_delegated_child_response", run_child)
-    leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents)
+    leader = DelegatingLeader(config, paths, _BACKGROUND_PARENT, agents, run_child=run_child)
     try:
         with (
             tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_BACKGROUND_PARENT)),

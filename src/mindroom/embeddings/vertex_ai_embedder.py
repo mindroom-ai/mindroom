@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from google.genai.types import EmbedContentResponse
 
     from mindroom.embeddings.base import EmbeddingPurpose
-    from mindroom.embeddings.embedder_health import EmbedderHealthRecorder
+    from mindroom.embeddings.health_state import EmbedderHealthRecorder
     from mindroom.llm.errors import ProviderError
 
 _PROVIDER = "vertex_ai"

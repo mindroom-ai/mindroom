@@ -1,18 +1,17 @@
-"""Slack's entry in the integration registry."""
+"""Slack's hooks for the integration registry: binding its events to the live bots, unbinding, and mirroring replies."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.config.slack import drop_slack_room, validate_slack_agents
+from mindroom.api.app_state import app_state
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.integrations import Integration
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Mapping
 
-    from fastapi import APIRouter, FastAPI
+    from fastapi import FastAPI
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -34,15 +33,7 @@ def bound_slack_runtime(api_app: FastAPI) -> SlackRuntime | None:
 
 
 def _runtimes(api_app: FastAPI) -> dict[str, object]:
-    from mindroom.api import config_lifecycle  # noqa: PLC0415
-
-    return config_lifecycle.app_state(api_app).integration_runtimes
-
-
-def _events_router() -> APIRouter:
-    from mindroom.api.slack_events import router  # noqa: PLC0415
-
-    return router
+    return app_state(api_app).integration_runtimes
 
 
 def _unregister_slack_event_source(runtime: SlackRuntime | None) -> None:
@@ -52,7 +43,7 @@ def _unregister_slack_event_source(runtime: SlackRuntime | None) -> None:
     runtime.reactive_triggers.event_sources.unregister(emitter.source_id, emitter.token)
 
 
-def _bind(
+def bind_slack(
     api_app: FastAPI,
     bots: Mapping[str, AgentBot],
     agent_reply_memberships: AgentReplyMembershipIndex,
@@ -102,19 +93,20 @@ def _bind(
     )
 
 
-def _unbind(api_app: FastAPI) -> object | None:
+def unbind_slack(api_app: FastAPI) -> object | None:
     """Refuse Slack events, unregister SlackEventSource, and return the runtime that owns running deliveries."""
     runtime = cast("SlackRuntime | None", _runtimes(api_app).pop(_NAME, None))
     _unregister_slack_event_source(runtime)
     return runtime
 
 
-def _mirror_reply(
+def mirror_slack_reply(
     envelope: MessageEnvelope,
     response_text: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> Coroutine[Any, Any, None] | None:
+    """Return the coroutine that mirrors a final reply of a Slack project turn to its Slack thread, else None."""
     from mindroom.slack.api import slack_http_client  # noqa: PLC0415
     from mindroom.slack.reply_mirror import is_slack_project_turn, mirror_reply_to_slack  # noqa: PLC0415
 
@@ -128,15 +120,3 @@ def _mirror_reply(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         client_factory=slack_http_client,
     )
-
-
-SLACK_INTEGRATION = Integration(
-    name=_NAME,
-    router=_events_router,
-    bind=_bind,
-    unbind=_unbind,
-    reply_mirror=_mirror_reply,
-    validate_config=validate_slack_agents,
-    # A created agent has no rooms, so it keeps the creator's Slack channels to read but never answers mentions.
-    adapt_created_agent_tools=drop_slack_room,
-)

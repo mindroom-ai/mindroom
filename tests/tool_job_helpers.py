@@ -12,13 +12,13 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+from mindroom import ai
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import resume_agent, run_agent
 from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
-from mindroom.ai import run_delegated_child_response
 from mindroom.ai_runtime import queued_notice_after_tool_batch
 from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
@@ -77,7 +77,7 @@ from mindroom.tool_system.toolkits import adapt_toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
 from tests.conftest import FakeApprovalTransport, bind_runtime_paths, test_runtime_paths
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, default_delegation_executor
 from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import entity_ids
 from tests.turn_model_helpers import turn_model
@@ -1064,6 +1064,7 @@ class DelegatingLeader:
     identity: ToolExecutionIdentity
     agents: ScriptedAgents
     depth: int = 0
+    run_child: ChildResponseRunner | None = None
     store: ConversationStore = field(init=False)
     session: ConversationSession = field(init=False)
     build: AgentBuild | None = field(default=None, init=False)
@@ -1080,12 +1081,19 @@ class DelegatingLeader:
         return self.agents.models["leader"]
 
     @owned_tool_execution(enabled=always_owned)
-    async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
+    async def turn(
+        self,
+        *turns: Sequence[ScriptStep],
+        run_child: ChildResponseRunner | None = None,
+        run_id: str = "parent-run",
+    ) -> RunRecord:
         """Run the leader on ``turns`` until it completes or pauses on its delegations.
 
         The turn owns its tool execution as a reply does: its managed calls become jobs whose results the leader's saved
         run acknowledges.
         """
+        executor = default_delegation_executor()
+        executor = replace(executor, run_child=run_child or self.run_child or executor.run_child)
         set_consumption_storage(lambda: self.store)
         self.agents.models["leader"] = ScriptedModel(list(turns))
         self.build = build = create_agent(
@@ -1099,6 +1107,7 @@ class DelegatingLeader:
             knowledge=None,
             model=turn_model(self.config, self.paths, "leader"),
             plugins=config_plugins(self.config, self.paths),
+            delegation_executor=executor,
         )
         hooks = agent_loop_hooks(
             build,
@@ -1151,8 +1160,9 @@ class DelegatingLeader:
     async def reply(
         self,
         *turns: Sequence[ScriptStep],
-        run_child: ChildResponseRunner = run_delegated_child_response,
+        run_child: ChildResponseRunner | None = None,
         run_id: str = "parent-run",
     ) -> RunRecord:
         """Run one leader reply; the native driver runs the delegations it pauses on with ``run_child``."""
-        return await self.drive(await self.turn(*turns, run_id=run_id), run_child)
+        runner = run_child or self.run_child or ai.run_delegated_child_response
+        return await self.drive(await self.turn(*turns, run_child=runner, run_id=run_id), runner)

@@ -33,7 +33,6 @@ from mindroom.api.sandbox_runner_scripts import (
     prepare_script_worker_before_serving,
 )
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
-from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.worker_computer import router as worker_computer_router
 from mindroom.api.worker_preview import router as worker_preview_router
 from mindroom.api.worker_services import close_worker_services
@@ -42,6 +41,7 @@ from mindroom.api.worker_ssh import router as worker_ssh_router
 from mindroom.api.worker_ssh import stop_worker_ssh
 from mindroom.api.worker_terminal import close_worker_terminals
 from mindroom.api.worker_terminal import router as worker_terminal_router
+from mindroom.http_validation import validation_error_response
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 from mindroom.worker_computer.display import WorkerDisplay

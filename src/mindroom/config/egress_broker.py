@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
+from mindroom.config.egress_presets import EGRESS_PRESETS
 from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.credentials.policy import (
     egress_credential_service,
     is_oauth_client_config_service,
     is_oauth_token_service,
 )
-from mindroom.egress_broker.env import RUNNER_CA_BUNDLE_ENV
-from mindroom.egress_broker.presets import EGRESS_PRESETS
+from mindroom.runtime_env_policy import RUNNER_CA_BUNDLE_ENV
 
 if TYPE_CHECKING:
     from pydantic import ModelWrapValidatorHandler

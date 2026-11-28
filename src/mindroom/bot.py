@@ -21,7 +21,7 @@ from mindroom.contacts.turns import contact_room
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.email_invites.receiver import register_email_invite_receiver, revoke_orphaned_sends
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.legacy_turn_rows import legacy_responses_file_path
+from mindroom.event_journal.legacy_ledger import legacy_responses_file_path
 from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,

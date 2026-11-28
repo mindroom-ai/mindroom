@@ -36,6 +36,7 @@ import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
 from mindroom import public_fetch
+from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.public_fetch import PublicFetchError
@@ -50,7 +51,6 @@ from mindroom.tool_system.declarations import (
     ToolValidationInfo,
 )
 from mindroom.tool_system.metadata import (
-    _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
     ToolAuthoredOverrideValidator,
     ToolConfigOverrideError,
@@ -1416,10 +1416,10 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
 
     assert validate_authored_tool_entry_overrides(
         tool_name,
-        {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
+        {"workspace_id": AUTHORED_OVERRIDE_INHERIT},
         config_path_prefix="agents.code.tools[0]",
         tool_metadata=builtin_tool_registry().entries,
-    ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
+    ) == {"workspace_id": AUTHORED_OVERRIDE_INHERIT}
 
 
 def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_agent_override_arrays() -> None:

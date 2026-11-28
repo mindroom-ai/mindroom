@@ -48,6 +48,7 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
+from mindroom.config.authored_overrides import AUTHORED_OVERRIDE_INHERIT
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import (
     resolve_primary_runtime_paths,
@@ -1725,7 +1726,7 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
         function_name="clickup_read",
-        tool_config_overrides={"master_space_id": metadata_module._AUTHORED_OVERRIDE_INHERIT},
+        tool_config_overrides={"master_space_id": AUTHORED_OVERRIDE_INHERIT},
         tools=builtin_tool_registry(),
     )
 

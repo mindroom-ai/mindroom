@@ -49,6 +49,7 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import default_delegation_executor
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import drain
@@ -368,6 +369,7 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
         config,
         agent_workspace_root_path(runtime_paths.storage_root, "leader"),
         execution_identity=_owner(),
+        delegation_executor=default_delegation_executor(),
     )
     context = replace(
         _delegate_runtime_context(config, runtime_paths, execution_identity=_owner()),

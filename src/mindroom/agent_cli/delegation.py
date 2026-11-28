@@ -19,6 +19,7 @@ from mindroom.tool_system.tool_function import ToolGate
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from mindroom.delegation.state import ChildResponseRunner
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.runs import RunRequirement, ToolExecution
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
@@ -61,10 +62,9 @@ async def advance_cli_delegation(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     approval_calls: Sequence[ApprovalCall] | None,
     on_event: Callable[[object], None],
+    run_child: ChildResponseRunner,
 ) -> PausedAttempt | ToolExecution:
     """Advance one child, persisting state on the real parent run without resuming it."""
-    from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - envelope creation cycle
-
     catalog = binding.catalog
     context = catalog.runtime_context
     response = catalog.record
@@ -102,7 +102,7 @@ async def advance_cli_delegation(
             previous_state=previous,
             persist=persist,
             agent_name=context.agent_name,
-            run_child=run_delegated_child_response,
+            run_child=run_child,
             config=config,
             runtime_paths=context.runtime_paths,
             execution_identity=context.execution_identity,

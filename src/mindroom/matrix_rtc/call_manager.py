@@ -13,6 +13,7 @@ room's event lane nor multiply full state reads.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
+from mindroom.config.calls import LiveCustomVoice
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
@@ -159,7 +161,9 @@ _LIVE_VOICE_INSTRUCTIONS = (
     "Answer directly when the answer is already in the supplied context or conversation. "
     "Delegate requests needing tools, research, additional memory, or actions to the agent; "
     "it executes the tool workflows described above. Relay its answer conversationally. Never claim to have "
-    "checked information or completed work until the agent returns the result."
+    "checked information or completed work until the agent returns the result. "
+    "When the caller asks you to speak faster, slower, or at a specific speed, adjust your pace immediately "
+    "and delegate the speed change so it persists."
 )
 _LIVE_INSTRUCTION_TOKEN_LIMIT = 16_000
 _LIVE_MIN_BRIEF_TOKENS = 300
@@ -168,7 +172,9 @@ _LIVE_OVERSIZED_INSTRUCTIONS = (
     "not this voice model. Delegate every substantive user request to the agent, including questions, requests "
     "about identity or preferences, research, memory, tools, and actions. Do not answer substantive requests from "
     "your own knowledge or infer omitted instructions. Relay only the agent's returned answer, briefly and naturally, "
-    "without markdown. Never claim to have checked information or completed work until the agent returns the result."
+    "without markdown. Never claim to have checked information or completed work until the agent returns the result. "
+    "When the caller asks you to speak faster, slower, or at a specific speed, adjust your pace immediately "
+    "and delegate the speed change so it persists."
 )
 
 
@@ -228,6 +234,24 @@ class _LogicalCallState:
     blocked_memberships: _MembershipIdentities | None = None
     #: When the active session stops waiting for an emptied Matrix roster to return.
     roster_gap_deadline_ms: int | None = None
+    #: Mid-call speaking rate override preserved across media-session reconnects.
+    speaking_rate: float | None = None
+
+
+def _effective_starting_speaking_rate(
+    call_config: CallProfile,
+    logical_call: _LogicalCallState | None = None,
+) -> float:
+    """Return the call's effective starting speaking rate."""
+    if logical_call is not None and logical_call.speaking_rate is not None:
+        return logical_call.speaking_rate
+    if call_config.speed is not None:
+        return call_config.speed
+    if call_config.backend == "cascaded":
+        extra_speed = call_config.tts.extra_kwargs.get("speed")
+        if isinstance(extra_speed, (int, float)) and not isinstance(extra_speed, bool) and math.isfinite(extra_speed):
+            return float(extra_speed)
+    return 1.0
 
 
 def _membership_identities(members: Iterable[CallMember]) -> _MembershipIdentities:
@@ -1370,6 +1394,11 @@ class CallManager:
             )
         except Exception:
             logger.warning("call_origin_resolution_failed", room_id=room_id, agent=self._agent_name, exc_info=True)
+
+        def set_speaking_rate(rate: float) -> None:
+            logical_call.speaking_rate = rate
+            bridge.set_speaking_rate(rate)
+
         try:
             tooling = await self._build_tooling(
                 room_id,
@@ -1377,6 +1406,8 @@ class CallManager:
                 session_id=logical_call.agent_session_id,
                 call_config=call_config,
                 origin_context=origin_context,
+                set_speaking_rate=set_speaking_rate,
+                initial_speaking_rate=_effective_starting_speaking_rate(call_config, logical_call),
             )
             transcript = CallTranscript.start(
                 agent_name=self._agent_name,
@@ -1752,6 +1783,8 @@ class CallManager:
         session_id: str,
         call_config: CallProfile,
         origin_context: CallOriginContext | None = None,
+        set_speaking_rate: Callable[[float], None] | None = None,
+        initial_speaking_rate: float | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
         enable_responder = call_config.backend in {"cascaded", "live"}
@@ -1760,6 +1793,11 @@ class CallManager:
             active_model_name = call_config.agent_model
         elif call_config.backend == "cascaded":
             active_model_name = call_config.model
+        starting_rate = (
+            initial_speaking_rate
+            if initial_speaking_rate is not None
+            else _effective_starting_speaking_rate(call_config)
+        )
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -1778,6 +1816,9 @@ class CallManager:
             reconcile_spoken_response=call_config.backend != "live",
             origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
             instructions_room_id=origin_context.origin.room_id if origin_context is not None else None,
+            set_speaking_rate=set_speaking_rate,
+            speaking_rate_bounds=call_config.speaking_rate_bounds,
+            initial_speaking_rate=starting_rate,
         )
 
     def _call_context_text(self, origin_context: CallOriginContext | None, counter: TokenCounter) -> str:
@@ -1847,6 +1888,8 @@ class CallManager:
         def on_session_error(message: str) -> None:
             self._schedule_call_failure_notice(room.room_id, logical_call, message)
 
+        effective_speed = logical_call.speaking_rate if logical_call.speaking_rate is not None else call_config.speed
+
         if call_config.backend == "realtime":
             realtime_config = call_config
             if backend.realtime_api_key is None:
@@ -1860,6 +1903,7 @@ class CallManager:
                 model=realtime_config.model,
                 api_key=backend.realtime_api_key,
                 voice=realtime_config.voice,
+                speed=effective_speed,
                 greeting_instructions="Briefly greet the caller and let them know you joined the call.",
                 tools=tooling.tools,
                 close_tools=tooling.close,
@@ -1898,7 +1942,10 @@ class CallManager:
                 get_instructions=get_live_instructions,
                 model=live_config.model,
                 api_key=backend.realtime_api_key,
-                voice=live_config.voice,
+                voice=live_config.voice.model_dump()
+                if isinstance(live_config.voice, LiveCustomVoice)
+                else live_config.voice,
+                speed=effective_speed,
                 respond=tooling.responder,
                 record_usage=partial(
                     record_call_voice_usage,
@@ -1919,6 +1966,7 @@ class CallManager:
         return CascadedVoiceAgentOptions(
             stt=backend.stt,
             tts=backend.tts,
+            speed=effective_speed,
             respond=tooling.responder,
             finalize_spoken_response=tooling.finalize_spoken_response,
             close_responder=tooling.close,

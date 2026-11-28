@@ -20,6 +20,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    default_delegation_executor,
     native_delegation_config,
     respond,
     respond_team,
@@ -81,6 +82,7 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
             execution_identity=identity,
+            delegation_executor=default_delegation_executor(),
         )
         with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
             result = await toolkit.run_subagent(**arguments)

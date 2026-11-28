@@ -90,6 +90,10 @@ class VoiceBridgeLike(Protocol):
         """Start the configured voice agent on the connected room."""
         ...
 
+    def set_speaking_rate(self, rate: float) -> None:
+        """Adjust the voice speaking rate for subsequent speech."""
+        ...
+
     async def aclose(self) -> None:
         """Tear down the agent and leave the SFU."""
         ...

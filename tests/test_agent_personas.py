@@ -35,6 +35,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import install_model_providers, seed_session
+from tests.delegation_helpers import default_delegation_executor
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.history_helpers import compact_runs
 from tests.identity_helpers import persist_entity_accounts
@@ -825,7 +826,7 @@ def test_persona_loads_named_member_of_a_deferred_tool(tmp_path: Path) -> None:
 async def test_persona_delegate_tool_keeps_its_cap_without_runtime_context(tmp_path: Path) -> None:
     """An authored child's delegate tool enforces its own tools even without a Matrix tool context."""
     runtime = _runtime(tmp_path, tools=["filesystem", "calculator"], delegate_to=["helper"])
-    build = _child(runtime, ["delegate", "filesystem"])
+    build = _child(runtime, ["delegate", "filesystem"], delegation_executor=default_delegation_executor())
     run_subagent = build.spec.functions["run_subagent"].entrypoint
 
     unauthored = await run_subagent(task="Plain copy.")

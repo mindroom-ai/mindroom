@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from mindroom.agent_loop.helper import complete_prompt
 from mindroom.embeddings.errors import EmbedderRequestError, embedder_batch_cardinality_mismatch
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
-from mindroom.knowledge_graph.store import UnusableExtractionError, run_on_loop
+from mindroom.knowledge_graph.async_support import UnusableExtractionError, run_on_loop
 from mindroom.knowledge_graph.usage import current_usage_target
 from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage

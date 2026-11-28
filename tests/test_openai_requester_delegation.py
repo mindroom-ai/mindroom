@@ -30,6 +30,7 @@ from tests.access_schema_support import membership_index
 from tests.api.conftest import publish_api_config
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
+from tests.delegation_helpers import default_delegation_executor
 from tests.identity_helpers import persist_entity_accounts
 from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 
@@ -66,6 +67,7 @@ def _delegate_tools(
         workspace,
         execution_identity,
         delegation_depth=delegation_depth,
+        delegation_executor=default_delegation_executor(),
     )
 
 

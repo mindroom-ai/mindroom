@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 
-from mindroom.api.script_gateway import serve_listener
+from mindroom.api.listener import serve_listener
 from mindroom.api.workflow_gateway import bind_workflow_engine
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.script_runs import manager as manager_module
