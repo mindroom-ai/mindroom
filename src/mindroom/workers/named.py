@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import agent_policy
@@ -415,10 +415,12 @@ def validate_named_worker_options(
             msg = "worker must be 1 to 32 lowercase letters, digits, or hyphens, and start with a letter or digit."
             raise NamedWorkerError(msg)
         validated_name = name
-    if resource_profile is not None and resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
+    if resource_profile is not None and (
+        not isinstance(resource_profile, str) or resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES
+    ):
         msg = "resource_profile must be small, standard, or large."
         raise NamedWorkerError(msg)
-    return validated_name, cast("ScriptResourceProfileName | None", resource_profile)
+    return validated_name, resource_profile
 
 
 def resolve_named_worker_scope(

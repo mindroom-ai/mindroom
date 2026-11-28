@@ -118,7 +118,7 @@ from tests.tool_job_helpers import tool_job_journal
 from tests.workflow_helpers import NodeFailed, workflow_stack
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
     from pathlib import Path
 
     from tests.workflow_helpers import WorkflowStack
@@ -1403,11 +1403,28 @@ async def test_workflow_sandboxed_spawn_peer_closure_refusal_and_end_run_retirem
         expected_s_key = subagent_sandbox_worker_key(child_s1, stack.context.config, stack.context.runtime_paths)
         assert expected_s_key is not None
 
+        # load_follow_up_child refuses rebuild when storage scope changes (NEVER silently switches workspaces!).
+        original_scope = stack.context.config.agents["watcher"].worker_scope
+        stack.context.config.agents["watcher"].worker_scope = "user"
+        try:
+            with pytest.raises(NodeFailed) as failed_scope:
+                await stack.result(
+                    "@3",
+                    "turn",
+                    {"session": "@0", "turn": 3, "message": "Turn scope"},
+                    meta={"name": "sb"},
+                )
+            assert failed_scope.value.kind == "refused"
+            assert "storage scope changed" in str(failed_scope.value)
+            assert len(model_s.requests) == 2
+        finally:
+            stack.context.config.agents["watcher"].worker_scope = original_scope
+
         # load_follow_up_child refuses rebuild when mount_dir is deleted (NEVER silently rebuilds fresh!).
         repo_dir = agent_workspace_root_path(stack.context.runtime_paths.storage_root, "watcher") / "repo"
         repo_dir.rmdir()
         with pytest.raises(NodeFailed) as failed_turn3:
-            await stack.result("@3", "turn", {"session": "@0", "turn": 3, "message": "Turn three"}, meta={"name": "sb"})
+            await stack.result("@4", "turn", {"session": "@0", "turn": 3, "message": "Turn three"}, meta={"name": "sb"})
         assert failed_turn3.value.kind == "refused"
         assert "does not exist" in str(failed_turn3.value)
         assert len(model_s.requests) == 2
@@ -1945,11 +1962,11 @@ async def test_sandbox_built_toolkit_fails_closed_without_active_sandbox_placeme
     primary_calls: list[str] = []
 
     class _PrimaryToolkit(SupportsPrimaryCallPlacement):
-        def runs_on_primary(self, function_name: str, arguments: dict[str, object]) -> bool:
+        def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
             del function_name, arguments
             return True
 
-    def _local_fn() -> str:
+    async def _local_fn() -> str:
         primary_calls.append("ran-on-primary")
         return "leaked"
 
@@ -1965,7 +1982,7 @@ async def test_sandbox_built_toolkit_fails_closed_without_active_sandbox_placeme
         sandbox_required=True,
         expected_sandbox=expected_sandbox,
     )
-    wrapped = stand_ins("local_fn", _local_fn)
+    wrapped: Callable[[], Awaitable[object]] = stand_ins("local_fn", _local_fn)
     with pytest.raises(RuntimeError, match="cannot execute tool calls on the primary"):
         await wrapped()
     assert primary_calls == []

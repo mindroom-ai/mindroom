@@ -530,3 +530,26 @@ async def test_interrupted_workflow_run_replay_preserves_pods_until_terminal_set
         await _wait_retired(backend, {worker_key})
         assert not named_module._fleets
         assert stack.run_id not in stack.engine._runs
+
+
+@pytest.mark.asyncio
+async def test_unhashable_resource_profile_fails_as_refused_node(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-string/unhashable resource_profile (list/dict) in raw workflow.tool fails cleanly without TypeError."""
+    with _k8s_shell_harness(stack, monkeypatch) as (backend, _requests, _workspace):
+        for index, bad_profile in enumerate((["large"], {"size": "large"})):
+            with pytest.raises(NodeFailed) as exc_info:
+                await stack.result(
+                    f"@{index}",
+                    "tool",
+                    {
+                        "toolkit": "shell",
+                        "function": "run_shell_command",
+                        "arguments": {"args": "echo hi", "worker": "box", "resource_profile": bad_profile},
+                    },
+                )
+            assert exc_info.value.kind == "failed"
+            assert "resource_profile must be small, standard, or large." in str(exc_info.value)
+        assert backend.specs == []

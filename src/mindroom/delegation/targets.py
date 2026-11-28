@@ -176,7 +176,7 @@ async def lookup_follow_up_target(
             depth=depth,
         )
     except SubagentSessionError as error:
-        return FollowUpLookup(refusal=str(error), unavailable=True)
+        return FollowUpLookup(refusal=str(error), unavailable=error.unavailable)
     live_config = live_delegation_config(config)
     refusal = follow_up_refusal(
         previous_child.persona,

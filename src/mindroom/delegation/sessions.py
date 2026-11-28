@@ -35,6 +35,10 @@ SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
 class SubagentSessionError(ValueError):
     """A handle cannot be used by this caller or already owns another turn."""
 
+    def __init__(self, message: str, *, unavailable: bool = True) -> None:
+        super().__init__(message)
+        self.unavailable = unavailable
+
 
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
     if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
@@ -121,10 +125,10 @@ async def load_subagent(
         raise SubagentSessionError(_UNAVAILABLE)
     if any(name not in config.agents for name in child.storage_bindings):
         msg = "Subagent target or caller is no longer configured."
-        raise SubagentSessionError(msg)
+        raise SubagentSessionError(msg, unavailable=False)
     if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
         msg = "Subagent storage scope changed; start a new subagent."
-        raise SubagentSessionError(msg)
+        raise SubagentSessionError(msg, unavailable=False)
     return child
 
 
