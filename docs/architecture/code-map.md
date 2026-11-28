@@ -573,7 +573,7 @@ Matrix sync callback
 | `shell/registry.py` | Background shell process ownership (`ProcessRegistry`, `BackgroundProcess`), handle reservations, limits, and structured status/signal results |
 | `shell/background_scope.py` | Turn-scoped shell auto-backgrounding and remote cleanup tracking |
 | `shell/policy.py` | Shell argument normalization and foreground/request timeout budget helpers |
-| `shell/streaming.py` | Raw byte-streamed command execution (`CommandStdin`, `run_streamed_command`) for `workers run` |
+| `shell/streaming.py` | Raw byte-streamed command execution (`CommandStdin`, `stream_command`) for `workers run` |
 | `shell/supervisor.py` | Worker-local shell supervisor process that runs shell commands and script handles for sandbox request subprocesses, stopping a command whose relay dies |
 | `terminal/session.py` | Persistent shells in a pty in the sandbox runner: scrollback, attached viewers, input, resize, and the idle end |
 | `api/worker_terminal.py` | Runner routes that open, list, and close an owner's terminals, and the websocket a viewer attaches with |

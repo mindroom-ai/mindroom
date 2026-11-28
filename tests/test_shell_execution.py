@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import itertools
+import json
 import os
 import shlex
 import shutil
@@ -27,6 +28,7 @@ from mindroom.shell._process_target import (
 from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import ShellBackgroundScope
 from mindroom.shell.output import SpoolCapture
+from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.process import (
     ManagedProcess,
     _idle_io_launcher,
@@ -1626,17 +1628,37 @@ async def test_spawn_background_and_spool_capture_primitives(
     assert finished.exit_code == -signal.SIGKILL
 
 
+async def _assert_pid_stopped(pid: int) -> None:
+    if sys.platform == "linux":
+        await assert_linux_pid_not_running(pid)
+    else:
+        assert await _wait_until_gone(pid)
+
+
+async def _wait_for_pid_file(pid_file: Path) -> int:
+    for _ in range(400):
+        if pid_file.exists():
+            raw = pid_file.read_text(encoding="utf-8").strip()
+            if raw:
+                return int(raw)
+        await asyncio.sleep(0.01)
+    msg = f"Timed out waiting for PID file {pid_file}"
+    raise AssertionError(msg)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runner_kind", ["run_foreground", "run_or_background"])
 @pytest.mark.parametrize("exit_code", [0, 1])
-async def test_kill_group_false_inline_preserves_nohup_on_zero_and_kills_on_nonzero(
+@pytest.mark.parametrize("kill_group_after_exit", [False, True])
+async def test_kill_group_policy_inline_nohup_contract(
     registry: ProcessRegistry,
     tmp_path: Path,
     runner_kind: str,
     exit_code: int,
+    kill_group_after_exit: bool,
 ) -> None:
-    """With kill_group_after_exit=False, inline commands keep nohup children on exit 0 and kill them on exit 1."""
-    pid_file = tmp_path / f"inline-{runner_kind}-{exit_code}.pid"
+    """Inline natural exits (0 or non-zero) keep nohup children when kill_group_after_exit=False and stop them when True."""
+    pid_file = tmp_path / f"inline-{runner_kind}-{exit_code}-{kill_group_after_exit}.pid"
     argv = [
         "bash",
         "-c",
@@ -1651,7 +1673,7 @@ async def test_kill_group_false_inline_preserves_nohup_on_zero_and_kills_on_nonz
                 cwd=str(tmp_path),
                 tail=10,
                 timeout=5.0,
-                kill_group_after_exit=False,
+                kill_group_after_exit=kill_group_after_exit,
             )
         else:
             result = await registry.run_or_background(
@@ -1661,18 +1683,18 @@ async def test_kill_group_false_inline_preserves_nohup_on_zero_and_kills_on_nonz
                 cwd=str(tmp_path),
                 tail=10,
                 timeout=5.0,
-                kill_group_after_exit=False,
+                kill_group_after_exit=kill_group_after_exit,
             )
         assert result.handle is None
         assert result.return_code == exit_code
         nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
-        if exit_code == 0:
-            os.kill(nohup_pid, 0)
-        elif sys.platform == "linux":
-            await assert_linux_pid_not_running(nohup_pid)
+        if kill_group_after_exit:
+            await _assert_pid_stopped(nohup_pid)
         else:
-            assert await _wait_until_gone(nohup_pid)
+            os.kill(nohup_pid, 0)
     finally:
+        if nohup_pid is None and pid_file.exists() and (raw := pid_file.read_text(encoding="utf-8").strip()):
+            nohup_pid = int(raw)
         if nohup_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(nohup_pid, signal.SIGKILL)
@@ -1680,13 +1702,15 @@ async def test_kill_group_false_inline_preserves_nohup_on_zero_and_kills_on_nonz
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_code", [0, 1])
-async def test_kill_group_false_adopted_preserves_nohup_on_zero_and_kills_on_nonzero(
+@pytest.mark.parametrize("kill_group_after_exit", [False, True])
+async def test_kill_group_policy_adopted_nohup_natural_exit_contract(
     registry: ProcessRegistry,
     tmp_path: Path,
     exit_code: int,
+    kill_group_after_exit: bool,
 ) -> None:
-    """With kill_group_after_exit=False, adopted commands keep nohup children on exit 0 and kill them on exit 1."""
-    pid_file = tmp_path / f"adopted-{exit_code}.pid"
+    """Adopted natural exits (0 or non-zero) keep nohup children when kill_group_after_exit=False and stop them when True."""
+    pid_file = tmp_path / f"adopted-{exit_code}-{kill_group_after_exit}.pid"
     cmd = f"sleep 0.35; nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; exit {exit_code}"
     nohup_pid: int | None = None
     try:
@@ -1697,7 +1721,7 @@ async def test_kill_group_false_adopted_preserves_nohup_on_zero_and_kills_on_non
             cwd=str(tmp_path),
             tail=10,
             timeout=0.15,
-            kill_group_after_exit=False,
+            kill_group_after_exit=kill_group_after_exit,
         )
         assert result.handle is not None
         record = registry._records[result.handle]
@@ -1707,16 +1731,133 @@ async def test_kill_group_false_adopted_preserves_nohup_on_zero_and_kills_on_non
         assert record.return_code == exit_code
 
         nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
-        if exit_code == 0:
-            os.kill(nohup_pid, 0)
-        elif sys.platform == "linux":
-            await assert_linux_pid_not_running(nohup_pid)
+        if kill_group_after_exit:
+            await _assert_pid_stopped(nohup_pid)
         else:
-            assert await _wait_until_gone(nohup_pid)
+            os.kill(nohup_pid, 0)
     finally:
+        if nohup_pid is None and pid_file.exists() and (raw := pid_file.read_text(encoding="utf-8").strip()):
+            nohup_pid = int(raw)
         if nohup_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_mode", ["foreground_timeout", "adopted_signal", "adopted_timeout"])
+async def test_kill_group_false_stops_nohup_on_signal_or_timeout(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+    stop_mode: str,
+) -> None:
+    """Even with kill_group_after_exit=False, signal kills and timeouts stop detached nohup children."""
+    pid_file = tmp_path / f"stop-{stop_mode}.pid"
+    cmd = f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; sleep 30"
+    nohup_pid: int | None = None
+    try:
+        if stop_mode == "foreground_timeout":
+            result = await run_foreground(
+                argv=["bash", "-c", cmd],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=0.6,
+                kill_group_after_exit=False,
+            )
+            assert result.timed_out is True
+            nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        elif stop_mode == "adopted_signal":
+            result = await registry.run_or_background(
+                namespace="test",
+                argv=["bash", "-c", cmd],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=0.1,
+                kill_group_after_exit=False,
+            )
+            assert result.handle is not None
+            record = registry._records[result.handle]
+            assert record.monitor_task is not None
+            nohup_pid = await _wait_for_pid_file(pid_file)
+            os.kill(nohup_pid, 0)
+            # Kill only the leader so _monitor_process must clean up the surviving group on negative returncode.
+            os.kill(record.pid, signal.SIGKILL)
+            await asyncio.wait_for(record.monitor_task, timeout=5.0)
+            assert record.finished is True
+            assert record.return_code == -signal.SIGKILL
+        else:
+            result = await registry.run_or_background(
+                namespace="test",
+                argv=["bash", "-c", cmd],
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=0.1,
+                max_runtime_seconds=0.6,
+                kill_group_after_exit=False,
+            )
+            assert result.handle is not None
+            record = registry._records[result.handle]
+            assert record.monitor_task is not None
+            nohup_pid = await _wait_for_pid_file(pid_file)
+            await asyncio.wait_for(record.monitor_task, timeout=5.0)
+            assert record.finished is True
+            assert record.timed_out is True
+
+        await _assert_pid_stopped(nohup_pid)
+    finally:
+        if nohup_pid is None and pid_file.exists() and (raw := pid_file.read_text(encoding="utf-8").strip()):
+            nohup_pid = int(raw)
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kill_group_after_exit", [False, True])
+async def test_foreground_output_destination_does_not_overwrite_when_child_holds_stdout_on_nonzero_exit(
+    tmp_path: Path,
+    kill_group_after_exit: bool,
+) -> None:
+    """A foreground non-zero exit with a child still holding stdout must not overwrite an existing output file."""
+    destination = tmp_path / "existing.txt"
+    destination.write_text("existing-content", encoding="utf-8")
+    pid_file = tmp_path / f"writer-{kill_group_after_exit}.pid"
+    cmd = f"(sleep 1.2; printf delayed) & echo $! > {shlex.quote(str(pid_file))}; printf prefix; exit 7"
+    try:
+        result = await run_foreground(
+            argv=["bash", "-c", cmd],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=5.0,
+            output_destination=ShellOutputDestination(
+                workspace_root=str(tmp_path),
+                path="existing.txt",
+                max_bytes=1024,
+            ),
+            kill_group_after_exit=kill_group_after_exit,
+        )
+        assert result.handle is None
+        assert result.return_code == 7
+        assert result.output_file_handled is True
+        receipt = json.loads(result.message)["mindroom_tool_output"]
+        assert receipt["status"] == "error"
+        assert receipt["exit_code"] == 7
+        assert "no complete output file was saved" in receipt["error"]
+        assert destination.read_text(encoding="utf-8") == "existing-content"
+        if kill_group_after_exit:
+            child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            await _assert_pid_stopped(child_pid)
+    finally:
+        if pid_file.exists() and (raw := pid_file.read_text(encoding="utf-8").strip()):
+            child_pid = int(raw)
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                child_pgid = os.getpgid(child_pid)
+                if child_pgid != os.getpgrp():
+                    os.killpg(child_pgid, signal.SIGKILL)
+                os.kill(child_pid, signal.SIGKILL)
 
 
 @pytest.mark.asyncio
@@ -1724,7 +1865,7 @@ async def test_stale_sweep_skips_finished_record_with_active_spool(
     registry: ProcessRegistry,
     tmp_path: Path,
 ) -> None:
-    """Finished records whose caller owns an active spool are not swept until discarded."""
+    """Caller-owned spool records skip stale sweeping until discarded, while engine-owned output_capture records sweep."""
     spool = SpoolCapture(max_bytes=1024)
     try:
         started = await registry.spawn_background(
@@ -1735,15 +1876,40 @@ async def test_stale_sweep_skips_finished_record_with_active_spool(
             tail=10,
             spool=spool,
         )
+        captured = await registry.spawn_background(
+            namespace="test",
+            argv=["echo", "captured"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=10,
+            output_destination=ShellOutputDestination(
+                workspace_root=str(tmp_path),
+                path="captured.txt",
+                max_bytes=1024,
+            ),
+        )
         assert started.handle is not None
-        record = registry._records[started.handle]
-        assert record.monitor_task is not None
-        await asyncio.wait_for(record.monitor_task, timeout=5.0)
-        assert record.finished_at is not None
-        record.finished_at -= 700
+        assert captured.handle is not None
+        spool_record = registry._records[started.handle]
+        capture_record = registry._records[captured.handle]
+        assert spool_record.monitor_task is not None
+        assert capture_record.monitor_task is not None
+        await asyncio.wait_for(
+            asyncio.gather(spool_record.monitor_task, capture_record.monitor_task),
+            timeout=5.0,
+        )
+        assert spool_record.finished_at is not None
+        assert capture_record.finished_at is not None
+        assert capture_record.output_capture is not None
+        assert capture_record.output_capture.closed is True
+        assert (tmp_path / "captured.txt").read_text(encoding="utf-8") == "captured\n"
+
+        spool_record.finished_at -= 700
+        capture_record.finished_at -= 700
 
         await _run(registry, ["true"], tmp_path)
         assert started.handle in registry._records
+        assert captured.handle not in registry._records
 
         registry.discard(started.handle)
         assert started.handle not in registry._records

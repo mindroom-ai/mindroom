@@ -367,7 +367,7 @@ class ProcessRegistry:
             if (
                 r.finished
                 and r.finished_at is not None
-                and r._active_spool is None
+                and r.spool is None
                 and (now - r.finished_at) > _STALE_RECORD_SECONDS
             )
         ]:
@@ -506,7 +506,7 @@ class ProcessRegistry:
     ) -> None:
         """Wait for a backgrounded process to exit (or hit max_runtime_seconds) and finalize its record."""
         handle, managed = record.handle, record.managed
-        clean_exit = False
+        natural_exit = False
         try:
             timeout_seconds = (
                 None
@@ -515,7 +515,7 @@ class ProcessRegistry:
             )
             try:
                 await managed.wait_exit(timeout_seconds=timeout_seconds)
-                clean_exit = record.stop_reason is None and managed.returncode == 0
+                natural_exit = record.stop_reason is None and managed.returncode is not None and managed.returncode >= 0
             except TimeoutError:
                 record.stop_reason = record.stop_reason or "timeout"
                 await managed.terminate_tree(whole_group=True)
@@ -530,7 +530,7 @@ class ProcessRegistry:
                         spool.incomplete |= bool(pending)
                 finally:
                     should_kill = (
-                        not clean_exit or record.kill_group_after_exit
+                        not natural_exit or record.kill_group_after_exit
                     ) and record.stop_reason != "scope_ended"
                     if should_kill:
                         managed.kill_tree()

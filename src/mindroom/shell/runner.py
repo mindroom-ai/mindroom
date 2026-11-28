@@ -198,8 +198,17 @@ class ActiveCommand:
                 await self.managed.wait_exit(timeout_seconds=timeout, on_poll=on_poll)
             except TimeoutError:
                 return True
-            if self.kill_group_after_exit or self.managed.returncode != 0:
-                self.managed.kill_tree()
+            if self.kill_group_after_exit:
+                try:
+                    if self.output_capture is not None and not self.output_capture.closed:
+                        # Group cleanup can create EOF by killing a writer; decide completeness first.
+                        _, pending = await asyncio.wait(
+                            [self.stdout_reader, self.stderr_reader],
+                            timeout=POST_EXIT_READER_GRACE_SECONDS,
+                        )
+                        self.output_capture.incomplete |= bool(pending)
+                finally:
+                    self.managed.kill_tree()
             await self._drain_readers()
         except asyncio.CancelledError:
             await self.cancel_and_cleanup()
@@ -265,7 +274,7 @@ class ActiveCommand:
         if self.spool is not None:
             self.spool.incomplete |= readers_cancelled
         if self.output_capture is not None:
-            self.output_capture.incomplete = readers_cancelled
+            self.output_capture.incomplete |= readers_cancelled
             try:
                 return ShellRunResult(
                     self.output_capture.publish(return_code),
@@ -301,7 +310,7 @@ async def run_foreground(
     """Run one shell command in the foreground with zero background registry state.
 
     When the command exceeds ``timeout`` seconds, the process tree is terminated and partial output is returned.
-    With ``kill_group_after_exit=False``, intentionally detached ``nohup`` children survive clean exit (code 0).
+    With ``kill_group_after_exit=False``, intentionally detached ``nohup`` children survive natural exit.
     """
     started = await ActiveCommand.start(
         argv=argv,
