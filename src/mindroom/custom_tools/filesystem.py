@@ -760,8 +760,6 @@ def _parts_match(parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool
             p_idx, g_idx = star_p, star_g + 1
         else:
             return False
-    while g_idx < len(pattern_parts) and pattern_parts[g_idx] == "**":
-        g_idx += 1
     return g_idx == len(pattern_parts)
 
 
@@ -825,7 +823,7 @@ def _find_files_python(
 ) -> str:
     """Glob for files in Python, filter hidden and gitignored entries, and format results."""
     try:
-        candidates = [p for p in sorted(search_path.glob(pattern)) if p.is_file()]
+        candidates = [p for p in sorted(set(search_path.glob(pattern))) if p.is_file()]
     except (NotImplementedError, ValueError) as e:
         return f"Error: Invalid glob pattern '{pattern}': {e}"
     # A dot directory named in `path` or in the pattern's literal prefix was asked for, so only dot paths below it hide.

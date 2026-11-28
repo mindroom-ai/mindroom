@@ -2026,6 +2026,14 @@ class TestFindFiles:
         assert "sub/mod.py" in self._assert_find_parity(tools, monkeypatch, "**/*.py")
         assert self._assert_find_parity(tools, monkeypatch, "src/**/*.tsx") == "src/a.tsx\nsrc/app/index.tsx"
         assert "src/app/util.ts" in self._assert_find_parity(tools, monkeypatch, "**")
+        assert (
+            self._assert_find_parity(tools, monkeypatch, "**/hello.py/**")
+            == "No files matching '**/hello.py/**' found."
+        )
+        assert self._assert_find_parity(tools, monkeypatch, "**/sub/**") == "sub/mod.py\nsub/nested.txt"
+        nested_only = self._assert_find_parity(tools, monkeypatch, "**/*/**")
+        assert "hello.py" not in nested_only
+        assert "sub/nested.txt" in nested_only
         assert self._assert_find_parity(tools, monkeypatch, "**/[!0-9].py") == "^.py\na.py"
         assert self._assert_find_parity(tools, monkeypatch, "docs/**/*[!a-z]*.md") == "docs/architecture/foo_1.md"
         assert self._assert_find_parity(tools, monkeypatch, "docs/**/*[.-_]*.md") == "docs/architecture/foo_1.md"
