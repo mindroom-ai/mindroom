@@ -30,6 +30,7 @@ from tests.delegation_helpers import (
     _runtime_paths,
     _saved_approval_calls,
     approval_executor,
+    default_delegation_executor,
     respond,
     respond_team,
     resume,
@@ -96,6 +97,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
             execution_identity=identity,
+            delegation_executor=default_delegation_executor(),
         )
         if not native:
             if name == "run_subagent":
@@ -202,6 +204,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
         execution_identity=foreign_identity,
+        delegation_executor=default_delegation_executor(),
     )
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=foreign_identity)):
         assert "not available" in await toolkit.continue_subagent(subagent_id=subagent_id, message="Leak the word")
@@ -220,6 +223,7 @@ async def test_followup_reuses_child_history_after_parent_reconstruction(  # noq
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),
             execution_identity=identity,
+            delegation_executor=default_delegation_executor(),
         )
         assert "no longer an allowed target" in await toolkit.continue_subagent(
             subagent_id=subagent_id,
@@ -255,6 +259,7 @@ async def test_cancellation_during_direct_reservation_settles_claim(
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
         execution_identity=_identity(),
+        delegation_executor=default_delegation_executor(),
     )
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=_identity())):
         task = asyncio.create_task(toolkit.run_subagent(task="Cancelled before the child starts"))

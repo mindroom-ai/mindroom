@@ -19,9 +19,10 @@ from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_
 from mindroom.matrix import client_room_admin
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestration import computer_runtime, server_state
+from mindroom.orchestration import server_state
 from mindroom.orchestration.server_state import publish_server_state, server_state_content
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.worker_computer import provider as worker_computer_provider_mod
 from mindroom.worker_computer.sessions import ComputerError
 from tests.conftest import (
     TEST_PASSWORD,
@@ -135,7 +136,7 @@ def test_content_says_whether_the_entity_has_a_worker_computer(
 ) -> None:
     """Chat shows the Computer button only for an agent the Computers API would serve."""
     provider = MagicMock(return_value="browser", side_effect=provider_error)
-    monkeypatch.setattr(computer_runtime, "_computer_browser_provider", provider)
+    monkeypatch.setattr(worker_computer_provider_mod, "computer_browser_provider", provider)
     env = {"MINDROOM_WORKER_COMPUTER_ENABLED": "true"} if computers_on else {}
     assert server_state_content(entity, CONFIG, _paths(tmp_path, **env), api_enabled=True)["computer"] is computer
 

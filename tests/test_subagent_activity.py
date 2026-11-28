@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 import mindroom.live_frames.subagents as subagents_module
-from mindroom.ai import TurnResult, ai_response
+from mindroom.ai import TurnResult, ai_response, run_delegated_child_response
 from mindroom.approval import manager as approval_manager
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.agent import AgentConfig
@@ -1447,6 +1447,7 @@ async def test_a_workflow_participant_reports_source_workflow(
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         outcome = await run_direct_child_turn(
             child,
+            run_child=run_delegated_child_response,
             owner=identity,
             parent_run_id="root",
             config=config,

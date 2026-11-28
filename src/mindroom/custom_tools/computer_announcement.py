@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, Any
 from mindroom.browser.call_limit import BROWSER_READ_PAGE_ACTIONS
 from mindroom.custom_tools.chat_ui import show_computer_once
 from mindroom.logging_config import get_logger
-from mindroom.orchestration.computer_runtime import worker_computer_provider
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.worker_computer.provider import worker_computer_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

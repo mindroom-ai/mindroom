@@ -4,17 +4,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.sessions import reserve_subagent_turn
-from mindroom.delegation.state import CONTINUE_SUBAGENT, SubagentPersona
+from mindroom.delegation.state import CONTINUE_SUBAGENT, DelegationExecutor, SubagentPersona
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
@@ -182,8 +183,15 @@ async def test_follow_up_target_resolves_unique_prefix_once_to_full_id(tmp_path:
         await resolve_follow_up_target({"subagent_id": "b" * 8, "message": "Again"}, retained=retained, **common)
 
     capture = MagicMock(return_value="captured")
-    toolkit = DelegateTools("leader", paths, config, tmp_path, execution_identity=owner)
-    with tool_runtime_context(context), patch("mindroom.custom_tools.delegate.delegation_call_job", capture):
+    toolkit = DelegateTools(
+        "leader",
+        paths,
+        config,
+        tmp_path,
+        execution_identity=owner,
+        delegation_executor=DelegationExecutor(run_child=run_delegated_child_response, build_job=capture),
+    )
+    with tool_runtime_context(context):
         result = await toolkit.managed_job(
             CONTINUE_SUBAGENT,
             {"subagent_id": prefix, "message": "Again"},

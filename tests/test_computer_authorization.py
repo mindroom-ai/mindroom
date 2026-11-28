@@ -18,9 +18,10 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
-from mindroom.orchestration.computer_runtime import _authorize_computer, _computer_browser_provider
+from mindroom.orchestration.computer_runtime import _authorize_computer
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.worker_computer.provider import computer_browser_provider
 from mindroom.worker_computer.sessions import ComputerError
 from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.identity_helpers import entity_ids, persist_entity_accounts
@@ -255,10 +256,10 @@ def test_computer_browser_provider_matches_api_checks(
         },
     )
     if status is None:
-        assert _computer_browser_provider("writer", config, paths) == provider
+        assert computer_browser_provider("writer", config, paths) == provider
     else:
         with pytest.raises(ComputerError) as error:
-            _computer_browser_provider("writer", config, paths)
+            computer_browser_provider("writer", config, paths)
         assert error.value.status_code == status
 
 
