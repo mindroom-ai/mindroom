@@ -1,4 +1,4 @@
-"""MindRoom's tool authoring API: ``Toolkit``, ``@tool``, ``current_call()``, and ``toolkit_functions()``.
+"""MindRoom's tool authoring API: ``Toolkit``, ``@tool``, and ``current_call()``.
 
 A toolkit groups the functions an agent is offered under one name, with instructions the prompt shows while the agent
 offers any of them. Each function's model-facing description and parameter schema come from its docstring and
@@ -13,14 +13,12 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, overload
 
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.context_scope import CurrentCall, current_call
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from mindroom.history.types import HistoryScope
     from mindroom.tool_system.construction import ToolConstruction
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.toolkits import ToolkitFinishing
 
@@ -222,60 +220,6 @@ def tool_attributes(cls: type[Toolkit]) -> tuple[str, ...]:
     )
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class CurrentCall:
-    """The tool call a function runs for.
-
-    ``call_id`` is the provider's id of the call when a model made it. ``toolkit`` is the authored toolkit the agent
-    was offered the function from; None for a function generated for the agent. ``session_state`` is the session's
-    state, which the function may change in place and MindRoom stores after the run. ``history_scope`` names a team's
-    stored conversation for a call of a team run. ``runtime`` is the context ``get_tool_runtime_context()`` returns,
-    with the room, the requester, and the model the call runs for.
-    """
-
-    call_id: str | None
-    toolkit: str | None
-    session_id: str
-    session_state: dict[str, Any]
-    history_scope: HistoryScope | None
-    runtime: ToolRuntimeContext | None
-
-
-def current_call() -> CurrentCall | None:
-    """Return the tool call this task is running; None outside one, such as when code calls a tool method directly."""
-    # Deferred to keep plugin_api's import surface free of invocation and schema-generation dependencies;
-    # any code running inside a tool call has loaded it already.
-    from mindroom.tool_system.invocation import current_tool_call  # noqa: PLC0415
-
-    call = current_tool_call()
-    if call is None:
-        return None
-    return CurrentCall(
-        call_id=call.context.call_id,
-        toolkit=call.function.toolkit,
-        session_id=call.context.session_id,
-        session_state=call.context.session_state,
-        history_scope=call.context.history_scope,
-        runtime=get_tool_runtime_context(),
-    )
-
-
-def toolkit_functions(toolkit: Toolkit) -> dict[str, Callable[..., Any]]:
-    """Return the callables of ``toolkit``'s functions by name, one per name, as an agent's run calls them.
-
-    Each validates its arguments; for a toolkit ``get_tool_by_name`` built, each also handles ``mindroom_output_path``
-    and sends a call routed to a worker there.
-    A call through one inside an async tool shares that call's ownership of the synchronous work it starts, so the
-    tool may call them any number of times, at once too; a tool that calls them must be async.
-    """
-    # Deferred to keep authoring and plugin_api free of schema-generation imports at import time;
-    # code calling a toolkit's functions runs inside MindRoom, which has loaded it already.
-    from mindroom.tool_system.toolkits import adapt_toolkit  # noqa: PLC0415
-
-    adapted = adapt_toolkit(toolkit)
-    return {function.name: function.entrypoint for function in adapted.functions}
-
-
 __all__ = [
     "CurrentCall",
     "ToolMark",
@@ -285,5 +229,4 @@ __all__ = [
     "tool",
     "tool_attributes",
     "tool_mark",
-    "toolkit_functions",
 ]

@@ -25,8 +25,8 @@ from mindroom.external_triggers.store import (
 from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import shared_storage_root
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.runtime import worker_visible_storage_root

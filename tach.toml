@@ -489,8 +489,8 @@ expose = [
 path = "mindroom.agent_cli.shell_access"
 depends_on = [
     "mindroom.agent_cli.shell_contract",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
     "mindroom.workers.backend_kinds",
     "mindroom.tools.shell",
@@ -980,7 +980,7 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.output_files",
-    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
@@ -1770,7 +1770,7 @@ visibility = [
     "mindroom.slack.integration",
     "mindroom.slack.oauth",
     "mindroom.tool_system.agent_tools",
-    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.settings",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.toolkit_builder",
     "mindroom.tool_system.worker_proxy_client",
@@ -2403,7 +2403,7 @@ path = "mindroom.api.frontend"
 depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
-    "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
 ]
 
 [[modules]]
@@ -2415,6 +2415,7 @@ depends_on = [
     "mindroom.api.egress_status",
     "mindroom.api.oauth",
     "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
 ]
 
 [[modules]]
@@ -2427,6 +2428,7 @@ depends_on = [
     "mindroom.config.egress_presets",
     "mindroom.credentials.manager",
     "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
     "mindroom.oauth.service",
     "mindroom.workers.backend",
 ]
@@ -2616,6 +2618,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.connections"
 depends_on = [
+    "mindroom.egress_broker.env",
     "mindroom.matrix.users",
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
@@ -2624,7 +2627,6 @@ depends_on = [
     "mindroom.api.egress_credentials",
     "mindroom.contacts.parties",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.egress_broker",
     "mindroom.tool_system.plugins",
     "mindroom.credentials.manager",
     "mindroom.oauth.service",
@@ -2855,8 +2857,8 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
     "mindroom.tool_system.agent_tools",
-    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.settings",
     "mindroom.turn_model",
 ]
 
@@ -2977,7 +2979,7 @@ depends_on = [
     "mindroom.api.dashboard_credential_scope",
     "mindroom.config.tool_aliases",
     "mindroom.credentials.policy",
-    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.plugins",
     "mindroom.credentials.manager",
@@ -3002,7 +3004,7 @@ depends_on = [
     "mindroom.config.models",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.catalog",
-    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.plugins",
     "mindroom.mcp.registry",
@@ -3020,10 +3022,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.sandbox_exec"
 depends_on = [
+    "mindroom.egress_broker.env",
     "mindroom.path_confinement",
     "mindroom.constants",
     "mindroom.tool_system.worker_routing",
-    "mindroom.egress_broker",
 ]
 
 [[modules]]
@@ -3084,6 +3086,7 @@ path = "mindroom.api.sandbox_runner"
 depends_on = [
     "mindroom.file_access",
     "mindroom.media_delivery",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.worker_media",
     "mindroom.tool_system.media_transport",
     "mindroom.api.computer_browser_binding",
@@ -3170,7 +3173,7 @@ path = "mindroom.api.sandbox_worker_prep"
 depends_on = [
     "mindroom.path_confinement",
     "mindroom.api.sandbox_exec",
-    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend",
     "mindroom.workers.backends.local",
@@ -3649,9 +3652,9 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.invocation",
-    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.settings",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.tools.native_helpers",
@@ -4797,6 +4800,7 @@ depends_on = [
     "mindroom.api.startup_probes",
     "mindroom.approval.manager",
     "mindroom.approval.recovery",
+    "mindroom.egress_broker.env",
     "mindroom.matrix_rtc.call_manager",
     "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
@@ -5373,6 +5377,7 @@ depends_on = [
     "mindroom.tailnet_ssh.projection",
     "mindroom.tailnet_ssh.store",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
@@ -5676,7 +5681,7 @@ depends_on = [
     "mindroom.mcp.config",
     "mindroom.mcp.errors",
     "mindroom.mcp.toolkit",
-    "mindroom.tool_system.catalog",
+    "mindroom.tool_system.declarations",
 ]
 
 [[modules]]
@@ -7495,6 +7500,8 @@ path = "mindroom.tool_system.context_scope"
 depends_on = []
 visibility = [
     "mindroom.providers.registry",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
 ]
 
@@ -7527,24 +7534,35 @@ visibility = [
 [[modules]]
 path = "mindroom.tool_system.metadata"
 depends_on = [
-    "mindroom.config.authored_overrides",
     "mindroom.constants",
     "mindroom.file_access",
-    "mindroom.mcp.registry",
+    "mindroom.shared_directories.tool_roots",
+    "mindroom.tool_system.placement",
+    "mindroom.tool_system.settings",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.construction",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dependencies",
-    "mindroom.tool_system.filters",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.registry",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.agent_tools",
     "mindroom.config.tool_aliases",
-    "mindroom.credentials.manager",
+]
+
+[[modules]]
+path = "mindroom.tool_system.settings"
+depends_on = [
+    "mindroom.config.authored_overrides",
     "mindroom.config.legacy_fields",
-    "mindroom.shared_directories.tool_roots",
+    "mindroom.config.tool_aliases",
+    "mindroom.credentials.manager",
+    "mindroom.mcp.config",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.filters",
+    "mindroom.tool_system.placement",
 ]
 
 [[modules]]
@@ -7554,7 +7572,7 @@ visibility = [
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
     "mindroom.tool_jobs.authorization",
-    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.settings",
 ]
 
 [[modules]]
@@ -7563,6 +7581,7 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.registry",
+    "mindroom.tool_system.settings",
 ]
 
 [[modules]]
@@ -7619,6 +7638,7 @@ depends_on = [
     "mindroom.tool_system.registration",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
+    "mindroom.tool_system.toolkits",
     "mindroom.tool_system.worker_routing",
     "mindroom.turn_model",
     "mindroom.oauth.google",
@@ -7687,7 +7707,6 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.atomic_file",
     "mindroom.constants",
-    "mindroom.tool_system.toolkits",
     "mindroom.tool_system.progress",
     "mindroom.tool_system.tool_function",
 ]
@@ -7720,8 +7739,8 @@ path = "mindroom.tool_system.worker_media"
 depends_on = [
     "mindroom.llm",
     "mindroom.tool_system.media_transport",
+    "mindroom.tool_system.tool_function",
     "mindroom.tool_system.worker_proxy_client",
-    "mindroom.tool_system.toolkits",
 ]
 
 [[modules]]
@@ -7744,9 +7763,11 @@ depends_on = [
     "mindroom.config.egress_presets",
     "mindroom.constants",
     "mindroom.credentials.policy",
+    "mindroom.egress_broker.ca",
+    "mindroom.egress_broker.env",
     "mindroom.github_app_auth",
     "mindroom.oauth.credential_lifecycle",
-    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.worker_routing",
     "mindroom.worker_computer.browser_proxy",
     "mindroom.origins",
@@ -7763,14 +7784,39 @@ depends_on = [
 ]
 # The broker's wiring points: every module outside the feature that may import it.
 visibility = [
-    "mindroom.api.connections",
     "mindroom.api.egress_broker",
     "mindroom.api.egress_credentials",
     "mindroom.api.egress_status",
-    "mindroom.api.frontend",
-    "mindroom.api.sandbox_exec",
     "mindroom.api.secret_requests",
     "mindroom.custom_tools.egress_credentials",
+    "mindroom.orchestrator",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.tool_hooks",
+]
+
+[[modules]]
+path = "mindroom.egress_broker.ca"
+depends_on = ["mindroom.atomic_file"]
+visibility = [
+    "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
+]
+
+[[modules]]
+path = "mindroom.egress_broker.env"
+depends_on = [
+    "mindroom.egress_broker.ca",
+    "mindroom.origins",
+    "mindroom.tool_system.tool_environment",
+]
+visibility = [
+    "mindroom.api.connections",
+    "mindroom.api.egress_broker",
+    "mindroom.api.egress_status",
+    "mindroom.api.frontend",
+    "mindroom.api.sandbox_exec",
+    "mindroom.custom_tools.egress_credentials",
+    "mindroom.egress_broker",
     "mindroom.orchestrator",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
@@ -7793,6 +7839,7 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.credentials.manager",
     "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
     "mindroom.runtime_resolution",
     "mindroom.secret_request_cards",
     "mindroom.tool_system.authoring",
@@ -7870,6 +7917,7 @@ visibility = [
 path = "mindroom.tool_system.tool_hooks"
 depends_on = [
     "mindroom.egress_broker",
+    "mindroom.egress_broker.env",
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.tool_jobs.control",
@@ -7898,7 +7946,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.toolkits"
 depends_on = [
-    "mindroom.llm",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.output_files",
@@ -7908,11 +7955,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.authoring"
-depends_on = [
-    "mindroom.tool_system.toolkits",
-    "mindroom.tool_system.invocation",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.context_scope"]
 
 [[modules]]
 path = "mindroom.tool_system.tool_schema"
@@ -7925,6 +7968,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.tool_system.invocation"
 depends_on = [
+    "mindroom.tool_system.context_scope",
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
@@ -7954,8 +7998,10 @@ depends_on = ["mindroom.agent_loop.prompt", "mindroom.agent_loop.structured", "m
 [[modules]]
 path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
+    "mindroom.egress_broker.env",
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.progress",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
@@ -7969,12 +8015,18 @@ depends_on = [
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.egress_broker",
     "mindroom.workers.backend_kinds",
-    "mindroom.config.tool_aliases",
     "mindroom.shell.background_scope",
     "mindroom.shell.policy",
     "mindroom.workers.models",
     "mindroom.workers.placements",
     "mindroom.workers.protocol",
+]
+
+[[modules]]
+path = "mindroom.tool_system.placement"
+depends_on = [
+    "mindroom.config.tool_aliases",
+    "mindroom.workers.backend_kinds",
 ]
 
 [[modules]]
@@ -8063,10 +8115,10 @@ path = "mindroom.tool_system.agent_tools"
 depends_on = [
     "mindroom.config.models",
     "mindroom.config.resolution",
-    "mindroom.delegation.lifecycle",
+    "mindroom.constants",
     "mindroom.tool_system.registry",
-    "mindroom.tool_system.metadata",
     "mindroom.credentials.manager",
+    "mindroom.tool_system.settings",
 ]
 
 [[modules]]
@@ -8098,10 +8150,10 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_system.plugins"
 depends_on = [
+    "mindroom.egress_broker.env",
     "mindroom.http_validation",
     "mindroom.automations.registry",
     "mindroom.config.plugin",
-    "mindroom.egress_broker",
     "mindroom.hooks",
     "mindroom.mcp.registry",
     "mindroom.tool_system.plugin_imports",
@@ -9422,19 +9474,24 @@ expose = [
 from = ["mindroom.tool_system.registration"]
 
 [[interfaces]]
+expose = ["get_tool_by_name"]
+from = ["mindroom.tool_system.metadata"]
+visibility = ["mindroom.tool_system.catalog"]
+exclusive = true
+
+[[interfaces]]
 expose = [
     "ToolConfigOverrideError",
     "ToolInitOverrideError",
     "deserialize_tool_validation_snapshot",
     "export_tools_metadata",
-    "get_tool_by_name",
     "load_toolkit_class",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
     "validate_authored_tool_entry_overrides",
 ]
-from = ["mindroom.tool_system.metadata"]
+from = ["mindroom.tool_system.settings"]
 visibility = ["mindroom.tool_system.catalog"]
 exclusive = true
 
@@ -9585,8 +9642,12 @@ visibility = ["mindroom.custom_tools.desktop_attachment"]
 
 [[interfaces]]
 expose = [
+    "CurrentCall",
+    "bind_current_tool_call",
     "current_budget_monitor",
+    "current_call",
     "current_requester_id",
+    "current_tool_call",
     "detached_requester_context",
     "get_detached_requester_context",
     "get_tool_runtime_context",
@@ -9999,6 +10060,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.mcp_gateway.toolkits"
 depends_on = [
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.toolkit_builder",
     "mindroom.mcp.toolkit",
     "mindroom.mcp_gateway.execution",
@@ -10006,7 +10068,6 @@ depends_on = [
     "mindroom.tool_system.toolkits",
     "mindroom.tool_system.toolkit_connections",
     "mindroom.tool_system.agent_tools",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.credentials.manager",
 ]
 
@@ -10073,17 +10134,13 @@ from = ["mindroom.approval.tool_approval"]
 [[interfaces]]
 expose = [
     "INLINE_ATTACHMENT_BYTES_ENV",
-    "ToolPlacement",
     "WorkerAttachmentSaveReceipt",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "lease_worker_manager",
     "worker_stand_ins",
     "runner_config_snapshot",
-    "sandbox_proxy_config",
     "save_attachment_to_worker",
-    "tool_placement",
-    "primary_owns_tool_settings",
     "view_file_from_worker",
     "to_json_compatible",
     "worker_call",
@@ -10091,6 +10148,16 @@ expose = [
     "worker_route",
 ]
 from = ["mindroom.tool_system.sandbox_proxy"]
+
+[[interfaces]]
+expose = [
+    "SandboxProxyConfig",
+    "ToolPlacement",
+    "primary_owns_tool_settings",
+    "sandbox_proxy_config",
+    "tool_placement",
+]
+from = ["mindroom.tool_system.placement"]
 
 [[interfaces]]
 expose = [
@@ -11139,7 +11206,6 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.delegation.job_approvals",
     "mindroom.delegation.recovery",
-    "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.orchestration.script_runtime",
     "mindroom.delegation.targets",
@@ -11417,8 +11483,8 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backend_kinds",
 ]
@@ -11465,6 +11531,7 @@ path = "mindroom.plugin_worker_relay"
 depends_on = [
     "mindroom.plugin_worker_services",
     "mindroom.previews.relay",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.workers.backend_kinds",
@@ -11476,6 +11543,7 @@ depends_on = [
 path = "mindroom.plugin_worker_services"
 depends_on = [
     "mindroom.http_error_detail",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_proxy_client",
     "mindroom.workers.backend_kinds",
@@ -11524,8 +11592,8 @@ visibility = ["mindroom.orchestrator"]
 path = "mindroom.worker_computer.provider"
 depends_on = [
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.worker_computer.sessions",
     "mindroom.workers.backend_kinds",
 ]
@@ -15047,8 +15115,8 @@ depends_on = [
     "mindroom.custom_tools.tool_payloads",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
     "mindroom.external_triggers.auth",
     "mindroom.external_triggers.store",
@@ -15225,7 +15293,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.path_confinement",
-    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.settings",
     "mindroom.tool_system.toolkits",
     "mindroom.tools.native_helpers",
     "mindroom.credentials.manager",
@@ -15756,8 +15824,8 @@ depends_on = [
     "mindroom.orchestration.rooms",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.declarations",
+    "mindroom.tool_system.placement",
     "mindroom.tool_system.plugins",
-    "mindroom.tool_system.sandbox_proxy",
 ]
 
 [[modules]]

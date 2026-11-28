@@ -12,8 +12,8 @@ from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authoriti
 from mindroom.script_runs.manager import script_execution_uses_worker
 from mindroom.tool_system.agent_tools import AgentTools
 from mindroom.tool_system.declarations import unconfined_by_file_access
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

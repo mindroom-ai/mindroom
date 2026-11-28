@@ -101,10 +101,11 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.placement import sandbox_proxy_config
 from mindroom.tool_system.plugins import preload_plugins, refresh_plugins, worker_preload_plugin_paths
 from mindroom.tool_system.progress import report_tool_progress, structured_tool_result, tool_progress_reporter
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
+from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.toolkits import requires_connect, toolkit_function

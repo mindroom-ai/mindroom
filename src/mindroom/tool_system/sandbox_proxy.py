@@ -8,23 +8,21 @@ import binascii
 import functools
 import hashlib
 import inspect
-import json
 import math
 import secrets
 import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
 from mindroom.browser.call_limit import browser_request_budget_seconds
-from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
-from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
-from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.egress_broker.agent_scope import egress_agent_scope
+from mindroom.egress_broker.env import egress_broker_enabled
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES
 from mindroom.shell.background_scope import current_shell_background_scope
 from mindroom.shell.policy import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
@@ -32,6 +30,7 @@ from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
+from mindroom.tool_system.placement import SandboxProxyConfig, primary_owns_tool_settings, sandbox_proxy_config
 from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
@@ -92,26 +91,19 @@ from mindroom.workers.protocol import (
 from mindroom.workers.runtime import lease_primary_worker_manager, worker_config_snapshot
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection
+    from collections.abc import Awaitable, Callable
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.timing import ReplyTimingBinding
-    from mindroom.tool_system.declarations import ToolMetadata
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.models import WorkerSandboxConfig
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
-_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
-_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS = 60
-_MAX_CREDENTIAL_LEASE_TTL_SECONDS = 3600
 INLINE_ATTACHMENT_BYTES_ENV = "MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES"
-_SANDBOX_ALL_EXECUTION_MODES = frozenset({"all", "sandbox_all"})
-_SANDBOX_SELECTIVE_EXECUTION_MODES = frozenset({"selective", "sandbox_selective"})
-_UNSAFE_LOCAL_EXECUTION_MODES = frozenset({"off", "local", "disabled"})
 
 
 @dataclass(frozen=True)
@@ -165,41 +157,6 @@ def _validate_attachment_save_receipt(
     )
 
 
-@dataclass(frozen=True)
-class _SandboxProxyConfig:
-    """Resolved sandbox proxy settings for one explicit runtime context."""
-
-    runner_mode: bool
-    proxy_url: str | None
-    proxy_token: str | None
-    proxy_timeout_seconds: float
-    execution_mode: str | None
-    credential_lease_ttl_seconds: int
-    proxy_tools: set[str] | None
-    credential_policy: dict[str, tuple[str, ...]]
-
-
-def _read_proxy_url(runtime_paths: RuntimePaths) -> str | None:
-    value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"])
-    return None if value is None else value.strip().rstrip("/")
-
-
-def _read_proxy_token(runtime_paths: RuntimePaths) -> str | None:
-    value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"])
-    return None if value is None else value.strip()
-
-
-def _read_proxy_timeout(runtime_paths: RuntimePaths) -> float:
-    raw = runtime_paths.env_value(
-        SANDBOX_RUNTIME_ENV_BY_KEY["proxy_timeout_seconds"],
-        default=str(_DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS),
-    )
-    try:
-        return float(raw)
-    except ValueError:
-        return _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS
-
-
 def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     """Return the hard cap for inline primary-to-worker attachment saves, by default the retained media limit."""
     raw_value = runtime_paths.env_value(INLINE_ATTACHMENT_BYTES_ENV, default=str(RETAINED_MEDIA_MAX_BYTES))
@@ -212,92 +169,8 @@ def inline_attachment_byte_limit(runtime_paths: RuntimePaths) -> int:
     return limit
 
 
-def _read_execution_mode(runtime_paths: RuntimePaths) -> str | None:
-    raw = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["execution_mode"])
-    normalized = (raw or "").strip().lower()
-    if not normalized:
-        return None
-    supported = _SANDBOX_ALL_EXECUTION_MODES | _SANDBOX_SELECTIVE_EXECUTION_MODES | _UNSAFE_LOCAL_EXECUTION_MODES
-    if normalized not in supported:
-        msg = f"Invalid MINDROOM_SANDBOX_EXECUTION_MODE {raw!r}; expected one of {', '.join(sorted(supported))}"
-        raise ValueError(msg)
-    return normalized
-
-
-def _read_credential_lease_ttl(runtime_paths: RuntimePaths) -> int:
-    raw = runtime_paths.env_value(
-        SANDBOX_RUNTIME_ENV_BY_KEY["credential_lease_ttl_seconds"],
-        default=str(_DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS),
-    )
-    try:
-        ttl_seconds = int(raw)
-    except ValueError:
-        ttl_seconds = _DEFAULT_CREDENTIAL_LEASE_TTL_SECONDS
-    return max(1, min(_MAX_CREDENTIAL_LEASE_TTL_SECONDS, ttl_seconds))
-
-
-def _read_proxy_tools(
-    runtime_paths: RuntimePaths,
-    execution_mode: str | None,
-    *,
-    proxy_url: str | None,
-) -> set[str] | None:
-    default = (
-        "*"
-        if execution_mode in _SANDBOX_ALL_EXECUTION_MODES
-        or (
-            execution_mode is None
-            and proxy_url is not None
-            and worker_backend_kind(runtime_paths) is WorkerBackendKind.STATIC_RUNNER
-        )
-        else ""
-    )
-    raw_value = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_tools"], default=default).strip()
-    if raw_value == "*":
-        return None
-    if not raw_value:
-        return set()
-    return {canonical_tool_name(part.strip()) for part in raw_value.split(",") if part.strip()}
-
-
-def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
-    raw_policy = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["credential_policy_json"])
-    if raw_policy is None:
-        return {}
-
-    try:
-        parsed = json.loads(raw_policy)
-    except json.JSONDecodeError:
-        return {}
-
-    if not isinstance(parsed, dict):
-        return {}
-
-    return {
-        selector.strip(): tuple(service.strip() for service in services if isinstance(service, str) and service.strip())
-        for selector, services in parsed.items()
-        if isinstance(selector, str) and isinstance(services, list)
-    }
-
-
-def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
-    """Return sandbox proxy settings for one explicit runtime context."""
-    execution_mode = _read_execution_mode(runtime_paths)
-    proxy_url = _read_proxy_url(runtime_paths)
-    return _SandboxProxyConfig(
-        runner_mode=runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
-        proxy_url=proxy_url,
-        proxy_token=_read_proxy_token(runtime_paths),
-        proxy_timeout_seconds=_read_proxy_timeout(runtime_paths),
-        execution_mode=execution_mode,
-        credential_lease_ttl_seconds=_read_credential_lease_ttl(runtime_paths),
-        proxy_tools=_read_proxy_tools(runtime_paths, execution_mode, proxy_url=proxy_url),
-        credential_policy=_read_credential_policy(runtime_paths),
-    )
-
-
 def worker_proxy_client_config(
-    proxy_config: _SandboxProxyConfig,
+    proxy_config: SandboxProxyConfig,
     runtime_paths: RuntimePaths,
     *,
     request_budget_seconds: float = 0.0,
@@ -545,7 +418,7 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
     return worker_config_snapshot(runtime_config)
 
 
-def lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
+def lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: SandboxProxyConfig) -> PrimaryWorkerManagerLease:
     """Borrow the primary worker manager for one request under these proxy settings."""
     return lease_primary_worker_manager(
         runtime_paths,
@@ -569,10 +442,6 @@ def _execution_env_payload(
         extra_env_passthrough=extra_env_passthrough,
         shell_process_env=runtime_paths.process_env,
     )
-
-
-def _tool_defaults_to_worker(metadata: ToolMetadata | None) -> bool:
-    return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
 def save_attachment_to_worker(
@@ -743,102 +612,6 @@ def _make_progress_sink(
             pump.loop.call_soon_threadsafe(pump.queue.put_nowait, event)
 
     return sink
-
-
-def _sandbox_proxy_requested_for_tool(
-    *,
-    tool_name: str,
-    metadata: ToolMetadata | None,
-    proxy_config: _SandboxProxyConfig,
-    worker_tools: Collection[str] | None,
-) -> bool:
-    """Return whether config requests worker/proxy routing for one tool."""
-    if worker_tools is not None:
-        requested = tool_name in worker_tools
-    elif proxy_config.execution_mode in _UNSAFE_LOCAL_EXECUTION_MODES:
-        requested = False
-    elif proxy_config.execution_mode in _SANDBOX_ALL_EXECUTION_MODES:
-        requested = True
-    elif proxy_config.execution_mode in _SANDBOX_SELECTIVE_EXECUTION_MODES:
-        requested = proxy_config.proxy_tools is None or tool_name in proxy_config.proxy_tools
-    elif proxy_config.execution_mode is not None:
-        requested = False
-    elif proxy_config.proxy_tools is None:
-        requested = True
-    elif proxy_config.proxy_tools:
-        requested = tool_name in proxy_config.proxy_tools
-    else:
-        requested = _tool_defaults_to_worker(metadata)
-    return requested
-
-
-@dataclass(frozen=True)
-class ToolPlacement:
-    """The sandbox settings of one runtime, which decide where each tool of a registry runs: primary or worker.
-
-    Settings are parsed once; the worker backend is checked only when a tool's placement depends on it.
-    """
-
-    runtime_paths: RuntimePaths
-    proxy_config: _SandboxProxyConfig
-    tools: ToolRegistry
-
-    @cached_property
-    def _backend_kind(self) -> WorkerBackendKind:
-        return worker_backend_kind(self.runtime_paths)
-
-    def runs_in_worker(self, tool_name: str, worker_tools: Collection[str] | None) -> bool:
-        """Return whether calls of ``tool_name`` run in a worker for an agent with these ``worker_tools``.
-
-        ``worker_tools`` is the agent's resolved list, which takes precedence over the env-var based
-        execution mode and proxy tools; None follows them, and an empty list routes nothing.
-        """
-        proxy_config = self.proxy_config
-        metadata = self.tools.get(tool_name)
-        if proxy_config.runner_mode or (
-            metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
-        ):
-            return False
-        if not _sandbox_proxy_requested_for_tool(
-            tool_name=tool_name,
-            metadata=metadata,
-            proxy_config=proxy_config,
-            worker_tools=worker_tools,
-        ):
-            return False
-        if (
-            worker_tools is None
-            and proxy_config.execution_mode is None
-            and proxy_config.proxy_tools is not None
-            and not proxy_config.proxy_tools
-            and proxy_config.proxy_url is None
-            and self._backend_kind is WorkerBackendKind.STATIC_RUNNER
-        ):
-            return False
-        # A dedicated backend routes even when its config is incomplete, so the call fails instead of running here.
-        if self._backend_kind.dedicated or proxy_config.proxy_url:
-            return True
-        # Execution tools also fail closed on the default static backend. To allow
-        # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
-        # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
-        return not (
-            _tool_defaults_to_worker(metadata)
-            and self.runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
-        )
-
-
-def tool_placement(runtime_paths: RuntimePaths, tools: ToolRegistry) -> ToolPlacement:
-    """Return where each tool of ``tools`` runs in one runtime."""
-    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths), tools=tools)
-
-
-def primary_owns_tool_settings(tool_name: str, tools: ToolRegistry, *, runtime_paths: RuntimePaths) -> bool:
-    """Return whether this primary process owns the settings of a tool in ``tools``.
-
-    The primary builds every tool, including tools whose calls run in a worker, so a worker-writable store never
-    configures it; routed calls receive the settings through a per-call lease instead.
-    """
-    return tool_name in tools and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
 def _worker_argument_value(value: object) -> object:
@@ -1360,19 +1133,15 @@ def worker_call(
 
 __all__ = [
     "INLINE_ATTACHMENT_BYTES_ENV",
-    "ToolPlacement",
     "WorkerAttachmentSaveReceipt",
     "WorkerCall",
     "WorkerStandIns",
     "decode_attachment_save_bytes",
     "inline_attachment_byte_limit",
     "lease_worker_manager",
-    "primary_owns_tool_settings",
     "runner_config_snapshot",
-    "sandbox_proxy_config",
     "save_attachment_to_worker",
     "to_json_compatible",
-    "tool_placement",
     "view_file_from_worker",
     "worker_call",
     "worker_proxy_client_config",

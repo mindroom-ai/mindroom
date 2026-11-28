@@ -21,8 +21,9 @@ from mindroom.tailnet_ssh.projection import write_projection
 from mindroom.tailnet_ssh.store import read_links, update_links
 from mindroom.terminal.resolution import agent_terminals
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement, worker_call
+from mindroom.tool_system.sandbox_proxy import worker_call
 from mindroom.tool_system.worker_routing import build_requester_execution_identity, normal_worker_key, worker_log_id
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import worker_backend_kind

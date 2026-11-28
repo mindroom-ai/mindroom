@@ -82,10 +82,10 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, tool_workdir
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from mindroom.tool_system.worker_routing import (

@@ -10,12 +10,12 @@ import pytest
 import mindroom.tools  # noqa: F401
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import resolve_runtime_paths
+from mindroom.mcp.config import validate_mcp_agent_overrides
 from mindroom.mcp.errors import MCPTimeoutError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import (
     mcp_tool_entries,
     mcp_tool_name,
-    validate_mcp_agent_overrides,
     with_catalog_function_names,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
@@ -23,9 +23,9 @@ from mindroom.mcp.types import MCPServerState
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,

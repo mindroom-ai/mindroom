@@ -18,9 +18,9 @@ from mindroom.shared_directories import paths as shared_paths
 from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
-from mindroom.tool_system.authoring import toolkit_functions
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.toolkits import toolkit_functions
 from mindroom.tool_system.worker_routing import resolve_worker_target, worker_dir_name
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 

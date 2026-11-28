@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Never, cast
 
 from mindroom.config.worker_projection import worker_config_data
+from mindroom.tool_system.placement import sandbox_proxy_config
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker import configure_docker_worker_backend
@@ -295,8 +296,6 @@ def _configured_primary_worker_backend(runtime_paths: RuntimePaths) -> Configure
 
     A config never enters them.
     """
-    from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
-
     proxy_config = sandbox_proxy_config(runtime_paths)
     if not (proxy_config.proxy_token if worker_backend_kind(runtime_paths).dedicated else proxy_config.proxy_url):
         return None

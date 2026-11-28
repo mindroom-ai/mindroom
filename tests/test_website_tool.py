@@ -24,12 +24,9 @@ from mindroom.custom_tools.website import (
     _url_matches_crawl_host,
 )
 from mindroom.public_fetch import PublicFetchError
-from mindroom.tool_system.metadata import (
-    ToolConfigOverrideError,
-    get_tool_by_name,
-    validate_authored_tool_entry_overrides,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import ToolConfigOverrideError, validate_authored_tool_entry_overrides
 from mindroom.tools.website import website_tools
 
 if TYPE_CHECKING:

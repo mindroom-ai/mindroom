@@ -128,7 +128,7 @@ from mindroom.tool_system.atlassian_connections import (
     atlassian_connection_oauth_provider,
     register_atlassian_connection_tools,
 )
-from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool, toolkit_functions
+from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool
 from mindroom.tool_system.declarations import (
     ApprovalAlias,
     ConfigField,
@@ -157,6 +157,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.toolkits import toolkit_functions
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, dump_worker_target, load_worker_target
 from mindroom.turn_model import ModelScope, resolve_turn_model
 

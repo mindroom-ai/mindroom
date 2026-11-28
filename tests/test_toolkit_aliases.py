@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from mindroom.tool_system.authoring import Toolkit, tool, toolkit_functions
-from mindroom.tool_system.toolkits import rename_toolkit_functions, toolkit_function_names
+from mindroom.tool_system.authoring import Toolkit, tool
+from mindroom.tool_system.toolkits import rename_toolkit_functions, toolkit_function_names, toolkit_functions
 
 
 class OwnedDemoTools(Toolkit):

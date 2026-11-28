@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.toolkits import adapt_toolkit, toolkit_function
 
 if TYPE_CHECKING:

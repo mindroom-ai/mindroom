@@ -75,8 +75,8 @@ from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, t
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, current_tool_workdir
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_sync_tool_entrypoint

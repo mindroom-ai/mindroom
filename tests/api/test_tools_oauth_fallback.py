@@ -15,8 +15,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_cloud_oauth_provider, google_oauth_provider
-from mindroom.tool_system.metadata import export_tools_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import export_tools_metadata
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 

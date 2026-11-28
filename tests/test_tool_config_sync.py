@@ -23,8 +23,9 @@ from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
-from mindroom.tool_system.metadata import get_tool_by_name, validate_authored_tool_entry_overrides
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import validate_authored_tool_entry_overrides
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.toolkits import adapt_callable
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget

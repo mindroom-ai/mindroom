@@ -29,9 +29,9 @@ from mindroom.room_settings import THREAD_MODE, on_thread_mode_change, resolve_r
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.steward_duties import room_state_response_as_steward
+from mindroom.tool_system.placement import primary_owns_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import unwrap_extracted_collaborator

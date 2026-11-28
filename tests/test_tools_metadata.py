@@ -44,26 +44,26 @@ from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import (
+    ConfigField,
     SetupType,
+    ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolExecutionTarget,
     ToolFileAccess,
+    ToolManagedInitArg,
     ToolValidationInfo,
 )
-from mindroom.tool_system.metadata import (
-    ConfigField,
-    ToolAuthoredOverrideValidator,
-    ToolConfigOverrideError,
-    ToolManagedInitArg,
-    deserialize_tool_validation_snapshot,
-    export_tools_metadata,
-    get_tool_by_name,
-    serialize_tool_validation_snapshot,
-    validate_authored_tool_entry_overrides,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import (
+    ToolConfigOverrideError,
+    deserialize_tool_validation_snapshot,
+    export_tools_metadata,
+    serialize_tool_validation_snapshot,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -103,7 +103,7 @@ def test_export_tools_metadata_json() -> None:
         "tools_metadata.json is out of date, regenerate it with "
         './.venv/bin/python -c "import json; import mindroom.tools; '
         "from pathlib import Path; "
-        "from mindroom.tool_system.metadata import export_tools_metadata; "
+        "from mindroom.tool_system.settings import export_tools_metadata; "
         "from mindroom.tool_system.registry import builtin_tool_registry; "
         "Path('src/mindroom/tools_metadata.json').write_text("
         "json.dumps({'tools': export_tools_metadata(builtin_tool_registry().entries)}, indent=2, sort_keys=True) + '\\n', "

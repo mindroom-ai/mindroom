@@ -27,8 +27,9 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.schema import usage_upsert_sql
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.settings import ToolConfigOverrideError
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import _extract_run
 from mindroom.usage.storage import _LEGACY_USAGE_KINDS, USAGE_KINDS, IndependentUsageKind

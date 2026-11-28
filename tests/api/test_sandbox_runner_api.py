@@ -43,8 +43,8 @@ import mindroom.shell.policy as shell_policy_module
 import mindroom.shell.supervisor as shell_supervisor_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.output_files as output_files_module
+import mindroom.tool_system.placement as placement_module
 import mindroom.tool_system.registration as registration_module
-import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import __version__, runtime_env_policy, yaml_io
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -78,13 +78,11 @@ from mindroom.tool_system.declarations import (
     ToolStatus,
 )
 from mindroom.tool_system.media_transport import decode_media_result
-from mindroom.tool_system.metadata import (
-    get_tool_by_name,
-    serialize_tool_validation_snapshot,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.placement import primary_owns_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
-from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
+from mindroom.tool_system.settings import serialize_tool_validation_snapshot
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
 from mindroom.tool_system.worker_routing import (
@@ -3974,7 +3972,7 @@ def test_sandbox_runner_rejects_every_request_when_token_is_empty(
     monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", "")
     if source == "reader":
         # Pin the runner-side check even if the token reader stops normalizing empty values.
-        monkeypatch.setattr(sandbox_proxy_module, "_read_proxy_token", lambda _runtime_paths: "")
+        monkeypatch.setattr(placement_module, "_read_proxy_token", lambda _runtime_paths: "")
     _refresh_runner_app_from_env()
     request = {
         "protocol": WORKER_PROTOCOL_VERSION,

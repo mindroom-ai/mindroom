@@ -26,6 +26,7 @@ FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES = {
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registry",
+    "mindroom.tool_system.settings",
 }
 EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ConfigField",
@@ -302,15 +303,13 @@ def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
     """Tach should not publish catalog private registry helpers as public interfaces."""
     forbidden_catalog_exports = _private_registry_exports()
     catalog_interface_exposes = set(_tach_interface_exposes(from_modules=("mindroom.tool_system.catalog",)))
-    metadata_visible_to_catalog = set(
-        _tach_interface_exposes(
-            from_modules=("mindroom.tool_system.metadata",),
-            visibility={"mindroom.tool_system.catalog"},
-        ),
-    )
-
     assert forbidden_catalog_exports.isdisjoint(catalog_interface_exposes)
-    assert forbidden_catalog_exports.isdisjoint(metadata_visible_to_catalog)
+    for module in ("mindroom.tool_system.metadata", "mindroom.tool_system.settings"):
+        visible_to_catalog = _tach_interface_exposes(
+            from_modules=(module,),
+            visibility={"mindroom.tool_system.catalog"},
+        )
+        assert forbidden_catalog_exports.isdisjoint(visible_to_catalog)
 
 
 def test_private_registry_helpers_have_no_importers_outside_tool_system() -> None:
@@ -343,7 +342,10 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
         "mindroom.tool_system.declarations",
         "mindroom.tool_system.metadata",
         "mindroom.tool_system.registry",
+        "mindroom.tool_system.settings",
     }
+    assert "mindroom.tool_system.metadata" not in _tach_module_depends_on("mindroom.tool_system.agent_tools")
+    assert "mindroom.tool_system.agent_tools" not in _tach_module_depends_on("mindroom.tool_system.settings")
     assert declarations_deps == set()
     assert registration_deps == {
         "mindroom.tool_system.declarations",

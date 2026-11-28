@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.llm.media import File, named_by_resource
 from mindroom.llm.provider import ToolSpec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 
-    from mindroom.llm.media import Audio, File, Image, Video
+    from mindroom.llm.media import Audio, Image, Video
     from mindroom.llm.provider import MediaKind
     from mindroom.llm.runs import ToolExecution
     from mindroom.tool_system.invocation import ToolMiddleware
@@ -195,6 +197,22 @@ class ToolOutcome(ToolValue):
     counts_as_tool_failure: bool = True
     refused_by: Literal["plugin_hook", "approval"] | None = None
     saved_output: dict[str, object] | None = None
+
+
+def _normalize_file(file: File) -> File:
+    """When inline bytes sit beside a path, keep the path's name and type and drop the path so readers never open it."""
+    if file.content is not None and file.filepath is not None:
+        return replace(named_by_resource(file, Path(file.filepath).name), filepath=None)
+    return file
+
+
+def read_tool_value(result: object) -> ToolValue | None:
+    """Read a tool's return value as a ``ToolValue``; None for a value that is not a tool value."""
+    if not isinstance(result, ToolValue):
+        return None
+    if any(file.content is not None and file.filepath is not None for file in result.files):
+        return replace(result, files=tuple(_normalize_file(file) for file in result.files))
+    return result
 
 
 def media_reference(kind: MediaKind, medium: Image | Audio | Video | File) -> dict[str, object]:

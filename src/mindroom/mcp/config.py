@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -44,10 +44,28 @@ def validate_mcp_function_name(value: str, *, subject: str) -> str:
     return value
 
 
-def validate_mcp_tool_filter_overlap(include_tools: list[str], exclude_tools: list[str], *, message: str) -> None:
+def _validate_mcp_tool_filter_overlap(include_tools: list[str], exclude_tools: list[str], *, message: str) -> None:
     """Reject tool names that appear in both include and exclude filters."""
     if overlap := sorted(set(include_tools) & set(exclude_tools)):
         msg = f"{message}: {', '.join(overlap)}"
+        raise ValueError(msg)
+
+
+def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -> None:
+    """Validate normalized per-agent overrides for one MCP registry tool."""
+    if not overrides:
+        return
+
+    include_tools = cast("list[str]", overrides.get("include_tools", []))
+    exclude_tools = cast("list[str]", overrides.get("exclude_tools", []))
+    message = f"Invalid per-agent override for '{tool_name}': include_tools and exclude_tools overlap"
+    _validate_mcp_tool_filter_overlap(include_tools, exclude_tools, message=message)
+
+    timeout_seconds = overrides.get("call_timeout_seconds")
+    if timeout_seconds is not None and (
+        not isinstance(timeout_seconds, int | float) or isinstance(timeout_seconds, bool) or float(timeout_seconds) <= 0
+    ):
+        msg = f"Invalid per-agent override for '{tool_name}.call_timeout_seconds': expected a number greater than 0"
         raise ValueError(msg)
 
 
@@ -224,7 +242,7 @@ class MCPServerConfig(BaseModel):
     @model_validator(mode="after")
     def validate_transport_fields(self) -> Self:
         """Validate the transport-specific config shape."""
-        validate_mcp_tool_filter_overlap(
+        _validate_mcp_tool_filter_overlap(
             self.include_tools,
             self.exclude_tools,
             message="MCP include_tools and exclude_tools overlap",

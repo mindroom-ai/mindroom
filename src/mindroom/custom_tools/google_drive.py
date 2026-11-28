@@ -38,7 +38,7 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
 )
-from mindroom.tool_system.metadata import coerce_optional_finite_number
+from mindroom.tool_system.settings import coerce_optional_finite_number
 from mindroom.tool_system.toolkits import toolkit_function_names
 from mindroom.tools.native_helpers import restrict_actions
 

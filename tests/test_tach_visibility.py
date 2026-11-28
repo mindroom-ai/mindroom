@@ -37,3 +37,52 @@ def test_interfaces_name_only_declared_modules() -> None:
     declared = {module["path"] for module in config["modules"]}
     undeclared = sorted({path for interface in config["interfaces"] for path in interface["from"]} - declared)
     assert undeclared == [], "Each interface must name a declared module; delete or redeclare these blocks"
+
+
+def _strongly_connected_components(graph: dict[str, list[str]]) -> list[list[str]]:
+    """Find the strongly connected components using Tarjan's algorithm."""
+    indices: dict[str, int] = {}
+    low_links: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    components: list[list[str]] = []
+
+    def visit(module: str) -> None:
+        # Only dependencies still on the stack can link back to this component.
+        indices[module] = low_links[module] = len(indices)
+        stack.append(module)
+        on_stack.add(module)
+        for dependency in graph[module]:
+            if dependency not in indices:
+                visit(dependency)
+                low_links[module] = min(low_links[module], low_links[dependency])
+            elif dependency in on_stack:
+                low_links[module] = min(low_links[module], indices[dependency])
+
+        if low_links[module] != indices[module]:
+            return
+        component = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == module:
+                break
+        components.append(component)
+
+    for module in graph:
+        if module not in indices:
+            visit(module)
+    return components
+
+
+def test_tach_module_graph_is_acyclic() -> None:
+    """No strongly connected component may contain a dependency cycle, including self-dependencies."""
+    config = tomllib.loads(TACH_CONFIG.read_text(encoding="utf-8"))
+    graph = {module["path"]: module.get("depends_on", []) for module in config["modules"]}
+    cycles = [
+        sorted(component)
+        for component in _strongly_connected_components(graph)
+        if len(component) > 1 or component[0] in graph[component[0]]
+    ]
+    assert cycles == [], "Tach modules must form a directed acyclic graph"

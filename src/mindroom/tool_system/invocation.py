@@ -21,7 +21,6 @@ import ast
 import inspect
 import json
 from collections.abc import AsyncIterator, Iterator
-from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -29,15 +28,16 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_scope import bind_current_tool_call, current_tool_call
 from mindroom.tool_system.output_files import (
     OUTPUT_PATH_ARGUMENT,
     normalize_output_path_argument,
     saved_output_envelope,
 )
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_model_context
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue, media_reference, read_tool_value
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
-from mindroom.tool_system.toolkits import StreamCollector, model_arguments, read_tool_value
+from mindroom.tool_system.toolkits import StreamCollector, model_arguments
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -151,14 +151,6 @@ def _call_result(value: object) -> CallResult:
 
 type ToolNext = Callable[[dict[str, Any]], Awaitable[object]]
 type ToolMiddleware = Callable[[ToolCall, ToolNext], Awaitable[object]]
-
-_CURRENT_CALL: ContextVar[ToolCall | None] = ContextVar("mindroom_current_tool_call", default=None)
-
-
-def current_tool_call() -> ToolCall | None:
-    """Return the tool call ``run_tool_call`` is running in this task, with the arguments it was entered with."""
-    return _CURRENT_CALL.get()
-
 
 # One way a parameter schema admits a value: its allowed JSON types and its choices, each None when unrestricted.
 type _Alternative = tuple[frozenset[str] | None, tuple[object, ...] | None]
@@ -311,14 +303,11 @@ async def run_tool_call(
     if runtime is not None and not runtime.tool_output_paths and output_path is not None:
         msg = f"{OUTPUT_PATH_ARGUMENT} is not available in this turn; the result stays in the call's answer."
         return CallResult("failed", error=ValueError(msg))
-    token = _CURRENT_CALL.set(call)
     try:
-        with tool_runtime_model_context(context.model_name):
+        with bind_current_tool_call(call), tool_runtime_model_context(context.model_name):
             value = await _run_chain(call, middleware)
     except Exception as error:
         return CallResult("failed", error=error)
-    finally:
-        _CURRENT_CALL.reset(token)
     return _call_result(value)
 
 

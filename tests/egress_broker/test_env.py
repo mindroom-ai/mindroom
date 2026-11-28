@@ -9,13 +9,15 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.egress_broker.env import (
-    BROKER_CA_PEM_ENV,
+from mindroom.egress_broker.agent_scope import (
     EgressAgentScope,
-    apply_runner_ca_bundle,
-    broker_execution_env,
     broker_serves_primary_shell,
     egress_agent_scope,
+)
+from mindroom.egress_broker.env import (
+    BROKER_CA_PEM_ENV,
+    apply_runner_ca_bundle,
+    broker_execution_env,
     egress_broker_enabled,
     personal_page_served,
     primary_callback_hosts,

@@ -50,9 +50,10 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
-from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.settings import export_tools_metadata
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import (
     corrupt_oauth_credential_payload,

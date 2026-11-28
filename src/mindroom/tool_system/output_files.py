@@ -23,7 +23,7 @@ from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DE
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
 from mindroom.tool_system.progress import structured_result_requested
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, read_tool_value
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -423,9 +423,6 @@ def _normalize_json_value(value: object) -> object:  # noqa: PLR0911 - One branc
 
 
 def _serialize_tool_output(result: object) -> _SerializedToolOutput | str:
-    # Deferred because mindroom.tool_system.toolkits imports this module.
-    from mindroom.tool_system.toolkits import read_tool_value  # noqa: PLC0415
-
     if isinstance(result, ToolOutcome) and result.saved_output is not None and not any(result.media()):
         result = result.saved_output
     if (value := read_tool_value(result)) is not None:

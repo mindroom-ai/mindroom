@@ -31,6 +31,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -39,7 +40,6 @@ from mindroom.tool_system.runtime_context import (
     register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.access_schema_support import with_current_room_member_access

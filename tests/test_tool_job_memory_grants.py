@@ -21,9 +21,9 @@ from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_builder import build_agent_toolkit
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call

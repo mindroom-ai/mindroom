@@ -18,12 +18,8 @@ from yarl import URL
 
 from mindroom.plugin_worker_services import SERVICE_NAME_PATTERN
 from mindroom.previews.relay import no_redirects, relay_websocket
-from mindroom.tool_system.sandbox_proxy import (
-    lease_worker_manager,
-    sandbox_proxy_config,
-    worker_proxy_client_config,
-    worker_route,
-)
+from mindroom.tool_system.placement import sandbox_proxy_config
+from mindroom.tool_system.sandbox_proxy import lease_worker_manager, worker_proxy_client_config, worker_route
 from mindroom.tool_system.worker_proxy_client import worker_request_headers
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.in_flight import worker_call_in_flight

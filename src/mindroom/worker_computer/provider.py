@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.placement import tool_placement
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.worker_computer.sessions import ComputerError
 from mindroom.workers.backend_kinds import worker_backend_kind
 

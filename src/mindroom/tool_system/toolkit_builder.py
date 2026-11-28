@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.agent_tools import AgentTools
     from mindroom.tool_system.authoring import Toolkit
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
-    from mindroom.tool_system.sandbox_proxy import ToolPlacement
+    from mindroom.tool_system.placement import ToolPlacement
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 # Skill management keeps its own output handling; dynamic tool search returns inline.
