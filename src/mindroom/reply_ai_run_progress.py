@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from mindroom.ai_run_metadata import ai_run_metrics_fields, prior_usage_by_run
+from mindroom.ai_run_metadata import (
+    PROVISIONAL_METRIC_KEYS,
+    ai_run_metrics_fields,
+    prepared_context_tokens_from_metadata,
+    prior_usage_by_run,
+)
 from mindroom.budgets.pricing import format_cost_usd, model_prices
 from mindroom.constants import AI_RUN_METADATA_KEY
 
@@ -21,7 +26,6 @@ if TYPE_CHECKING:
     from mindroom.llm.usage import RunMetrics
 
 _AI_RUN_METADATA_VERSION = 1
-_PROVISIONAL_METRIC_KEYS = ("usage", "cost", "context", "tools")
 
 
 def _copy_provisional_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -40,6 +44,7 @@ def build_provisional_ai_run_content(
     prior_usage: Sequence[RunMetrics] = (),
     messages: Sequence[Message] | None = None,
     prepared_history: PreparedHistoryState | None = None,
+    prepared_context_tokens: int | None = None,
     tool_count: int | None = None,
     subagents_usd: float | None = None,
 ) -> dict[str, Any]:
@@ -61,6 +66,7 @@ def build_provisional_ai_run_content(
             prior_usage=prior_usage,
             messages=messages,
             prepared_history=prepared_history,
+            prepared_context_tokens=prepared_context_tokens,
             subagents_usd=subagents_usd,
             include_duration=False,
         ),
@@ -88,11 +94,9 @@ class ReplyAiRunProgress:
             return
         self._model = new_model
         if self._base_payload is not None:
-            updated = {
-                key: dict(value) if isinstance(value, Mapping) else value
-                for key, value in self._base_payload.items()
-                if key not in ("context", "tools")
-            }
+            updated = _copy_provisional_payload(self._base_payload)
+            updated.pop("context", None)
+            updated.pop("tools", None)
             if new_model is not None:
                 updated["model"] = dict(new_model)
             else:
@@ -137,6 +141,9 @@ class ReplyAiRunProgress:
     ) -> None:
         """Refresh provisional usage, cost, context, tools, and answering model from a live run."""
         tool_count = len(record.tools or ()) if tool_count_override is None else tool_count_override
+        prepared_context_tokens = (
+            prepared_context_tokens_from_metadata(record.metadata) if prepared_history is None else None
+        )
         self._store_payload(
             build_provisional_ai_run_content(
                 config=config,
@@ -148,6 +155,7 @@ class ReplyAiRunProgress:
                 prior_usage=prior_usage,
                 messages=messages,
                 prepared_history=prepared_history,
+                prepared_context_tokens=prepared_context_tokens,
                 tool_count=tool_count,
             )[AI_RUN_METADATA_KEY],
         )
@@ -178,7 +186,7 @@ class ReplyAiRunProgress:
             return True
         if self._base_payload is None:
             return False
-        return any(key in self._base_payload for key in _PROVISIONAL_METRIC_KEYS)
+        return any(key in self._base_payload for key in PROVISIONAL_METRIC_KEYS)
 
     def snapshot_version(self) -> tuple[int, str | None]:
         """Return a version key that advances on both request updates and subagent cost changes."""

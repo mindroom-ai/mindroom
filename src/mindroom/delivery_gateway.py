@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections import ChainMap
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -137,7 +138,7 @@ from mindroom.streaming import (
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -329,25 +330,41 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
-def _approval_note_provisional(
-    matching_handle: SpanHandle | None,
+def _is_model_switch(saved_model: object, live_model: Mapping[str, str]) -> bool:
+    """Return whether ``live_model`` switches away from ``saved_model``'s configured model."""
+    if not isinstance(saved_model, Mapping):
+        return False
+    saved_config = saved_model.get("config")
+    live_config = live_model.get("config")
+    if saved_config is not None and live_config is not None:
+        return saved_config != live_config
+    if saved_config is None:
+        return saved_model.get("id") != live_model.get("id")
+    return False
+
+
+def _resolve_provisional_ai_run(
+    handle: SpanHandle | None,
     *,
     live_model: Mapping[str, str] | None,
     fallback_model: Mapping[str, str] | None,
     shown_ai_run: Mapping[str, Any] | None,
+    provisional: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any] | None:
-    """Resolve provisional ``ai_run`` metrics for an approval failure/stop note, falling back to ``Presentation.ai_run``."""
-    if matching_handle is not None and matching_handle.ai_run_progress.has_metrics():
-        return matching_handle.ai_run_progress.payload(fallback_model=fallback_model)
+    """Resolve provisional ``ai_run`` metrics from a live span handle, explicit override, or ``Presentation.ai_run``."""
+    if handle is not None and handle.ai_run_progress.has_metrics():
+        return handle.ai_run_progress.payload(fallback_model=fallback_model)
+    if provisional is not None:
+        return provisional
     if shown_ai_run is not None:
-        if live_model is not None and shown_ai_run.get("model") != live_model:
+        if live_model is not None and _is_model_switch(shown_ai_run.get("model"), live_model):
             return {
-                **{k: v for k, v in shown_ai_run.items() if k not in ("context", "tools")},
+                **{key: value for key, value in shown_ai_run.items() if key not in ("context", "tools")},
                 "model": dict(live_model),
             }
         return shown_ai_run
-    if matching_handle is not None:
-        return matching_handle.ai_run_progress.payload(fallback_model=fallback_model)
+    if handle is not None:
+        return handle.ai_run_progress.payload(fallback_model=fallback_model)
     return None
 
 
@@ -1294,17 +1311,13 @@ class DeliveryGateway:
         """
         handle_model = write.handle.reply_model if write.handle is not None else None
         resolved_model = handle_model if handle_model is not None else model
-        handle_provisional = (
-            write.handle.ai_run_progress.payload(fallback_model=resolved_model) if write.handle is not None else None
+        resolved_provisional = _resolve_provisional_ai_run(
+            write.handle,
+            live_model=handle_model,
+            fallback_model=resolved_model,
+            shown_ai_run=write.shown.ai_run,
+            provisional=provisional,
         )
-        if write.handle is not None and write.handle.ai_run_progress.has_metrics():
-            resolved_provisional = handle_provisional
-        elif provisional is not None:
-            resolved_provisional = provisional
-        elif write.shown.ai_run is not None:
-            resolved_provisional = write.shown.ai_run
-        else:
-            resolved_provisional = handle_provisional
         extra_content: dict[str, Any] = {
             constants.STREAM_STATUS_KEY: rendered.stream_status,
             **build_terminal_note_ai_run_metadata_content(
@@ -1482,7 +1495,7 @@ class DeliveryGateway:
                 if live_model is not None
                 else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
             )
-            provisional = _approval_note_provisional(
+            provisional = _resolve_provisional_ai_run(
                 matching_handle,
                 live_model=live_model,
                 fallback_model=model,
@@ -1670,7 +1683,6 @@ class DeliveryGateway:
                 render(shown, state=reply.state),
                 target,
                 error_info=with_error_fallback(owed.error_info, note.text),
-                provisional=shown.ai_run,
             )
 
         sent = await self._send_note(compose)

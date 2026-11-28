@@ -940,7 +940,11 @@ expose = [
 [[interfaces]]
 from = ["mindroom.ai_run_metadata"]
 visibility = ["mindroom.reply_ai_run_progress"]
-expose = ["ai_run_metrics_fields"]
+expose = [
+    "PROVISIONAL_METRIC_KEYS",
+    "ai_run_metrics_fields",
+    "prepared_context_tokens_from_metadata",
+]
 
 [[modules]]
 path = "mindroom.reply_ai_run_progress"

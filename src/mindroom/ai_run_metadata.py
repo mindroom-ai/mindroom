@@ -170,6 +170,16 @@ def ai_run_error_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[s
     return dict(error) if isinstance(error, dict) else None
 
 
+def prepared_context_tokens_from_metadata(run_metadata: Mapping[str, Any] | None) -> int | None:
+    """Return the pre-flight ``prepared_context.tokens`` estimate stored in persisted run metadata, if present."""
+    if run_metadata is None:
+        return None
+    ai_run_metadata = run_metadata.get(AI_RUN_METADATA_KEY)
+    prepared = ai_run_metadata.get("prepared_context") if isinstance(ai_run_metadata, Mapping) else None
+    tokens = prepared.get("tokens") if isinstance(prepared, Mapping) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+
+
 def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> float | None:
     """Return the USD cost a reply's AI run metadata reports, or None when the cost is unknown.
 
@@ -188,6 +198,7 @@ def _reply_context_tokens_from_messages(
     messages: Sequence[Message] | None,
     prepared_history: PreparedHistoryState | None,
     *,
+    prepared_context_tokens: int | None = None,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
@@ -208,7 +219,11 @@ def _reply_context_tokens_from_messages(
         )
         if reported is not None:
             return reported
-    estimate = prepared_history.prepared_context_tokens if prepared_history is not None else None
+    estimate = (
+        prepared_history.prepared_context_tokens
+        if prepared_history is not None and prepared_history.prepared_context_tokens is not None
+        else prepared_context_tokens
+    )
     return None if estimate is None else ContextTokens(estimate)
 
 
@@ -362,7 +377,7 @@ def build_streaming_ai_run_metadata_content(config: Config, model_name: str) -> 
     return streaming_ai_run_content(model_payload(config, model_name))
 
 
-_PROVISIONAL_METRIC_KEYS = ("usage", "cost", "context", "tools")
+PROVISIONAL_METRIC_KEYS = ("usage", "cost", "context", "tools")
 
 
 def ai_run_metrics_fields(
@@ -377,6 +392,7 @@ def ai_run_metrics_fields(
     prior_usage: Sequence[RunMetrics],
     messages: Sequence[Message] | None,
     prepared_history: PreparedHistoryState | None,
+    prepared_context_tokens: int | None = None,
     subagents_usd: float | None,
     include_duration: bool,
 ) -> dict[str, Any]:
@@ -410,9 +426,11 @@ def ai_run_metrics_fields(
         cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
     if cost_payload:
         fields["cost"] = cost_payload
+    use_prepared_fallback = include_duration or resolved_model_name == model_name
     context = _reply_context_tokens_from_messages(
         messages,
-        prepared_history,
+        prepared_history if use_prepared_fallback else None,
+        prepared_context_tokens=prepared_context_tokens if use_prepared_fallback else None,
         provider=provider,
         configured_provider=configured_provider,
         model_id=model_id,
@@ -441,7 +459,7 @@ def build_terminal_note_ai_run_metadata_content(
     if resolved_model is not None:
         payload["model"] = dict(resolved_model)
     if provisional is not None:
-        for key in _PROVISIONAL_METRIC_KEYS:
+        for key in PROVISIONAL_METRIC_KEYS:
             value = provisional.get(key)
             if isinstance(value, Mapping):
                 payload[key] = dict(value)
