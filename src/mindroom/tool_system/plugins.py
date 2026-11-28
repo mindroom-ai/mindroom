@@ -988,7 +988,7 @@ def _plugin_routes_app(module: ModuleType, *, kind: str) -> PluginRoutesApp:
     from fastapi.exceptions import RequestValidationError  # noqa: PLC0415
     from fastapi.responses import JSONResponse  # noqa: PLC0415
 
-    from mindroom.api.validation_errors import validation_error_response  # noqa: PLC0415
+    from mindroom.http_validation import validation_error_response  # noqa: PLC0415
 
     router = vars(module).get("router")
     if not isinstance(router, APIRouter):

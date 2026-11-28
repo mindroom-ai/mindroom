@@ -115,7 +115,8 @@ Matrix sync callback
 | `event_journal/legacy_approval_records.py` | One-time conversion of an earlier release's per-kind approval tables to one row per call and card |
 | `event_journal/legacy_response_attempts.py` | One-time cancellation of the approvals an earlier release left pending, and removal of the tables that kept their reply identity |
 | `event_journal/turn_rows.py` | Turn state as rows, agent-scoped: lookups, narrow writes, the one reshape that forms a new source tuple, the agent's redaction record and the eligibility guard every write checks, delivery binding, and retention |
-| `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs, journal redaction tombstones, and the pre-journal JSON ledger into turn rows |
+| `event_journal/legacy_turn_rows.py` | One-time conversion of `turn_records` blobs and redaction tombstones into turn rows, shared with the pre-journal ledger importer |
+| `event_journal/legacy_ledger.py` | Pre-journal JSON ledger import and lookup of legacy summary revision provenance |
 | `event_journal/legacy_approval_failures.py` | One-time conversion of the free-text failure reasons failing approval continuations stored into their failure kind and detail |
 | `event_journal/scheduled_approvals.py` | Stored scheduled tool calls and their one-shot approvals: binding, fire-time arming, withdrawal, claim with its receipt, and outcome |
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish; silent schedule triggers and hidden routes run as messages |
@@ -477,7 +478,8 @@ Matrix sync callback
 | `skill_learning/library.py` | Confined workspace skill writes, ownership provenance, history snapshots, and archival |
 | `listening/` | Listening agents: durable per-room markers (`markers.py`), the polling service that hears rooms and decides when a silent turn is due (`service.py`), and the silent turn itself, which offers only `listen.tools` and never sends its text (`turn.py`) |
 | `automations/runner.py` | Automation schedule loop: cron timing per shared agent or private instance, definition lookup and `AutomationContext`, the visible prompts tagged `automation/<name>` in the agent's room or the requester's personal room, and the steps after their runs |
-| `automations/registry.py` | The `@automation` decorator, discovery in plugin hooks modules, and the catalog of plugin automations beside the lazily loaded built-ins, carried by the plugin snapshot (`HookRegistry.automations`) |
+| `automations/registry.py` | The `@automation` decorator, discovery in plugin hooks modules, the `HookRegistry.automations` plugin catalog, and config name validation |
+| `automations/builtins.py` | Built-in definitions and runtime lookup against the current plugin catalog |
 | `automations/steps.py` | `AutomationContext`, the `Ask` and `Done` steps an automation returns to the runner, the automation hook-source prefix, and the always-loaded workspace files the built-ins maintain |
 | `automations/threads.py` | The record of threads automations started, under `tracking/automations/`, so none is read back as a conversation |
 | `automations/prompt_curation.py` | The `prompt_curation` automation: size check over always-loaded files, the bounded prompt, and the verify that asks for a re-check |
@@ -596,13 +598,13 @@ Matrix sync callback
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |
 | `attachments/media.py` | Convert attachment records to the model media values in `llm/media.py` |
 | `media_inputs.py` | Shared media-input container passed across bot, teams, and AI layers |
+| `http_validation.py` | Shared 422 handler for the dashboard API, sandbox runner, and plugin routes that returns FastAPI's validation error detail without the rejected request values |
 | `api/` | FastAPI REST API (dashboard, credentials, OpenAI-compatible endpoint) |
 | `api/app_state.py` | One API app's state: what it owns itself, and the one `EmbeddedRuntime` value `mindroom run` lends it while it serves |
 | `api/auth_user.py` | The typed login of one API request and the one rule for which Matrix user it acts as |
 | `api/open_access.py` | Host allow-list and browser-origin guard for requests served without a credential (open dashboard auth, unauthenticated `/v1`) |
 | `api/slack_events.py` | Public `POST /api/slack/events`: verifies Slack's signature, answers `url_verification`, and delivers events within Slack's 3-second limit, finishing slower deliveries in the background |
 | `api/request_body_limit.py` | Pure ASGI middleware answering 413 for request bodies over 16 MiB on the dashboard API, except knowledge uploads, and on the plugin origin listener |
-| `api/validation_errors.py` | 422 handler for the dashboard API and sandbox runner that returns FastAPI's validation error detail without the rejected request values |
 | `api/budgets.py` | Dashboard and budget-service routes for budget status and setting or clearing one user's cap |
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
