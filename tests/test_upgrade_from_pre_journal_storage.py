@@ -27,7 +27,7 @@ import yaml
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.event_journal import turn_rows
-from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_responses_file_path
+from mindroom.event_journal.legacy_ledger import import_legacy_ledger_file, legacy_responses_file_path
 from mindroom.event_journal.opening import (
     bind_event_journal,
     event_journal_binding_path,

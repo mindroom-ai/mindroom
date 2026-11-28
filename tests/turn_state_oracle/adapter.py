@@ -25,7 +25,7 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.legacy_turn_rows import legacy_summary_sources
+from mindroom.event_journal.legacy_ledger import legacy_summary_sources
 from mindroom.history.types import HistoryScope
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
