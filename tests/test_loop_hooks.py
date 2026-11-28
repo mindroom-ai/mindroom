@@ -119,12 +119,12 @@ def test_agent_and_leader_runs_install_their_hooks_in_order(tmp_path: Path) -> N
         "job_definitions_hook",
         "participation_hook",
         "approval_receipt_hook",
-        "prune_in_turn_tool_images_hook",
+        "_prune_in_turn_tool_images_hook",
         "mid_turn_compaction_hook",
     ]
     assert _stages(leader.before_request) == [
         "approval_receipt_hook",
-        "prune_in_turn_tool_images_hook",
+        "_prune_in_turn_tool_images_hook",
         "mid_turn_compaction_hook",
     ]
     assert agent.answer_tool_calls is not None

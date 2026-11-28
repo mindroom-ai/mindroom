@@ -932,7 +932,7 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     assert isinstance(hooks, LoopHooks)
     assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == [
         "approval_receipt_hook",
-        "prune_in_turn_tool_images_hook",
+        "_prune_in_turn_tool_images_hook",
         "mid_turn_compaction_hook",
         "checkpoint_hooks",
     ]

@@ -209,7 +209,7 @@ def _loop_hooks(
     if participation is not None:
         before_request.append(participation_hook(participation, model))
     before_request.append(approval_receipt_hook)
-    before_request.append(prune_in_turn_tool_images_hook(model))
+    before_request.append(_prune_in_turn_tool_images_hook(model))
     before_request.append(
         mid_turn_compaction_hook(
             config=turn.config,
@@ -269,7 +269,7 @@ def _has_in_turn_fallback(messages: Sequence[Message]) -> bool:
     )
 
 
-def prune_in_turn_tool_images_hook(model: ModelProvider) -> BeforeRequestHook:
+def _prune_in_turn_tool_images_hook(model: ModelProvider) -> BeforeRequestHook:
     """Return a pre-request hook that batch-prunes older seen in-turn tool images.
 
     Skips pruning when the primary route enforces strict thinking prefixes or a fallback model already answered in

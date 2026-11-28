@@ -1570,7 +1570,7 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
         "child_usage_hook",
         "participation_hook",
         "approval_receipt_hook",
-        "prune_in_turn_tool_images_hook",
+        "_prune_in_turn_tool_images_hook",
         "mid_turn_compaction_hook",
         "checkpoint_hooks",
     ]

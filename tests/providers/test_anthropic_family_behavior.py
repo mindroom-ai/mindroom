@@ -47,7 +47,7 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.loop_hooks import prune_in_turn_tool_images_hook
+from mindroom.loop_hooks import _prune_in_turn_tool_images_hook
 from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
@@ -2473,7 +2473,7 @@ async def test_in_turn_tool_image_pruning_respects_claude_thinking_prefix_bindin
     await run_loop(
         spec(provider, toolkit(snap)),
         messages,
-        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(provider),)),
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(provider),)),
         request_template=EMPTY_REQUEST,
     )
 
@@ -2576,7 +2576,7 @@ async def test_in_turn_tool_image_pruning_preserves_prefix_after_failover_to_bed
     await run_loop(
         spec(provider, toolkit(snap)),
         messages,
-        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(provider),)),
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(provider),)),
         request_template=EMPTY_REQUEST,
     )
 

@@ -21,7 +21,7 @@ from mindroom.llm.messages import (
     is_media_follow_up,
 )
 from mindroom.llm.provider import DeferredTools
-from mindroom.loop_hooks import HookTurn, prune_in_turn_tool_images_hook
+from mindroom.loop_hooks import HookTurn, _prune_in_turn_tool_images_hook
 from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_loop.helpers import run_loop, spec, toolkit
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -303,7 +303,7 @@ async def test_prune_hook_skips_in_turn_fallback_but_ignores_history_fallback() 
     await run_loop(
         spec(in_turn_model),
         in_turn,
-        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(in_turn_model),)),
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(in_turn_model),)),
         request_template=EMPTY_REQUEST,
     )
     assert [img.id for m in in_turn_model.requests[0].messages for img in m.images or ()] == [
@@ -326,7 +326,7 @@ async def test_prune_hook_skips_in_turn_fallback_but_ignores_history_fallback() 
     await run_loop(
         spec(prior_model),
         prior_turn,
-        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(prior_model),)),
+        hooks=LoopHooks(before_request=(_prune_in_turn_tool_images_hook(prior_model),)),
         request_template=EMPTY_REQUEST,
     )
     assert [img.id for m in prior_model.requests[0].messages for img in m.images or ()] == ["shot-10", "shot-11"]
