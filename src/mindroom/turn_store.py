@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom import constants
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.event_journal import turn_rows
-from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_summary_sources
+from mindroom.event_journal.legacy_ledger import import_legacy_ledger_file, legacy_summary_sources
 from mindroom.history.session_context import load_scope_session_from_storage, load_scrubbed_scope_session
 from mindroom.history.storage import remove_runs_answering
 from mindroom.logging_config import get_logger
