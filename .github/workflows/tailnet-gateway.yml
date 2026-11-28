@@ -14,6 +14,7 @@ on:
       - "src/mindroom/api/*ssh*.py"
       - "src/mindroom/authorization.py"
       - "src/mindroom/config/tailnet_ssh.py"
+      - "src/mindroom/tool_system/placement.py"
       - "src/mindroom/tool_system/sandbox_proxy.py"
       - "src/mindroom/tool_system/worker_routing.py"
       - "src/mindroom/workers/backends/**"

@@ -184,7 +184,6 @@ class AgentTools:
                 ),
             )
             names.append(tool_name)
-        # Imported here to avoid the delegation -> personas -> agent tools import cycle.
         return tuple(
             entry
             for entry in entries

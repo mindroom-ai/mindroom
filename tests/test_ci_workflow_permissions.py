@@ -58,6 +58,7 @@ def test_headscale_e2e_triggers_on_shell_admission_and_worker_changes() -> None:
     paths = _load_workflow("tailnet-gateway.yml")["on"]["pull_request"]["paths"]
     assert {
         "src/mindroom/authorization.py",
+        "src/mindroom/tool_system/placement.py",
         "src/mindroom/tool_system/worker_routing.py",
         "src/mindroom/tool_system/sandbox_proxy.py",
         "src/mindroom/workers/backends/**",
