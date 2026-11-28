@@ -263,7 +263,7 @@ def _validate_and_stub(call: ToolCall, workspace: Path, state: dict[str, Any]) -
         msg = f"Invalid value for parameter: {exc.__cause__ or exc}"
         raise ValueError(msg) from exc
     name = call.function.name
-    action = str(bind_kw.get("action") or ("send" if name == "matrix_message" else ""))
+    action = str(bind_kw.get("action") or "")
     _check_semantics(name, action, bind_kw, workspace)
     return json.dumps(_stateful_stub(name, action, bind_kw, state))
 

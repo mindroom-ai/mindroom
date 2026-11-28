@@ -387,7 +387,14 @@ async def _accepted_and_relayed(world: _World) -> str:
     record = await _ask(world)
     room_id = await _bob_accepts(world, record.id)
     # Bob's agent never admits Alice by access, yet her agent can name it as recipient there and so wake it.
-    sent = await _matrix_message(world, "mind_alice", room_id, message="Free Friday?", recipient="mind_bob")
+    sent = await _matrix_message(
+        world,
+        "mind_alice",
+        room_id,
+        action="send",
+        message="Free Friday?",
+        recipient="mind_bob",
+    )
     assert sent["status"] == "ok", sent
     [relay] = world.server.rooms[room_id].timeline
     assert relay.content["m.mentions"] == {"user_ids": [_account(world.paths, "mind_bob")]}
@@ -431,7 +438,7 @@ async def test_a_removed_contact_takes_nothing_more_and_its_agents_leave(
     )
 
     await flow.remove_contact(alice, _stored(world.paths)[0].id)
-    refused = await _matrix_message(world, "mind_alice", room_id, message="Still there?")
+    refused = await _matrix_message(world, "mind_alice", room_id, action="send", message="Still there?")
 
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
     room = world.server.rooms[room_id]
@@ -516,7 +523,7 @@ async def test_removing_contacts_from_an_agent_ends_its_contact_for_both_sides(
     await _reconcile_rooms(world, losing)
 
     for name in ("mind_alice", "mind_bob"):
-        refused = await _matrix_message(world, name, room_id, message="Still there?")
+        refused = await _matrix_message(world, name, room_id, action="send", message="Still there?")
         assert refused["message"].endswith("was removed, so nothing more can be sent into its room"), name
     assert [stored.status for stored in _stored(world.paths)] == ["removed"]
     room = world.server.rooms[room_id]
@@ -562,7 +569,7 @@ async def test_removing_an_agent_ends_its_contact_for_both_sides(
 
     assert [stored.status for stored in _stored(world.paths)] == ["removed"]
     [staying] = {"mind_alice", "mind_bob"} - {removed}
-    refused = await _matrix_message(world, staying, room_id, message="Still there?")
+    refused = await _matrix_message(world, staying, room_id, action="send", message="Still there?")
     assert refused["message"].endswith("was removed, so nothing more can be sent into its room")
     room = world.server.rooms[room_id]
     assert (room.members, room.invited) == ({_account(world.paths, staying), OWNER}, invited_meanwhile)

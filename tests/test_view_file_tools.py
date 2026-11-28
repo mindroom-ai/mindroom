@@ -163,7 +163,7 @@ async def test_viewed_image_can_be_saved_and_explicitly_shared(tmp_path: Path) -
         assert (tmp_path / "copy.png").read_bytes() == image_bytes()
         send.assert_not_awaited()
         assert not context.client.room_send.called
-        shared = json.loads(await MatrixMessageTools().matrix_message(attachments=[handle]))
+        shared = json.loads(await MatrixMessageTools().matrix_message(action="send", attachments=[handle]))
         assert shared["status"] == "ok"
         assert shared["resolved_attachment_ids"] == [handle]
         send.assert_awaited_once()

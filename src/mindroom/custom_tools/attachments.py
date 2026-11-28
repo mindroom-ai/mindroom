@@ -666,7 +666,7 @@ class AttachmentTools(Toolkit):
         - `list`: list context attachments (optional `attachment_id` filter).
         - `get`: inspect `attachment_id` metadata, save raw bytes to `mindroom_output_path`, or pass `view=True` to load image/audio/video/document (<=20 MiB) into model context.
         - `register`: register a local file at `path` as a context `attachment_id`.
-        - `inline_image`: upload an image by `attachment_id` or `path` (not both; optional `alt`) and return `markdown` for a reply or `matrix_message` (on refusal, use `matrix_message(attachments=[...])`; never use placeholder URLs).
+        - `inline_image`: upload an image by `attachment_id` or `path` (not both; optional `alt`) and return `markdown` for a reply or `matrix_message` (on refusal, use `matrix_message(action="send", attachments=[...])`; never use placeholder URLs).
 
         Args:
             action: Operation to perform.

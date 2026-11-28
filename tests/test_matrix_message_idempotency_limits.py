@@ -56,7 +56,7 @@ async def test_stalled_transport_times_out_and_releases_scope(
     cast("AsyncMock", context.client.room_send).side_effect = stall_after_acceptance
     with tool_runtime_context(context):
         first_task = asyncio.create_task(
-            MatrixMessageTools().matrix_message(message="first", idempotency_key="stalled"),
+            MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="stalled"),
         )
         async with asyncio.timeout(10):
             await accepted.wait()
@@ -68,8 +68,12 @@ async def test_stalled_transport_times_out_and_releases_scope(
         assert row["payload"]["body"] == "first"
         monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 60)
         cast("AsyncMock", context.client.room_send).side_effect = transport.room_send
-        other = json.loads(await MatrixMessageTools().matrix_message(message="other", idempotency_key="other"))
-        retry = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="stalled"))
+        other = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="other", idempotency_key="other"),
+        )
+        retry = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="stalled"),
+        )
     assert other["status"] == retry["status"] == "ok"
     assert len(transport.events) == 2
     assert transport.attempts[0] == transport.attempts[-1]
@@ -88,12 +92,18 @@ async def test_full_scope_rejects_new_keys_but_recovers_existing(
     monkeypatch.setattr(durable, "_MAX_PENDING_RECORDS", 1, raising=False)
     transport.lose_response = pending
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="existing"))
-        full = json.loads(await MatrixMessageTools().matrix_message(message="new", idempotency_key="new"))
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="existing"),
+        )
+        full = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="new", idempotency_key="new"),
+        )
         assert full["status"] == "error"
         assert "capacity" in full["message"]
         assert len(transport.attempts) == 1
-        existing = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="existing"))
+        existing = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="existing"),
+        )
     assert existing["status"] == "ok"
     assert len(transport.events) == 1
     if not pending:
@@ -109,12 +119,16 @@ async def test_pending_capacity_reopens_after_completion(
     monkeypatch.setattr(durable, "_MAX_PENDING_RECORDS", 1, raising=False)
     transport.lose_response = True
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="pending")
-        full = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="new"))
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="pending")
+        full = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="new"),
+        )
         assert full["status"] == "error"
         assert len(transport.events) == 1
-        await MatrixMessageTools().matrix_message(message="retry", idempotency_key="pending")
-        admitted = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="new"))
+        await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="pending")
+        admitted = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="new"),
+        )
     assert admitted["status"] == "ok"
     assert len(transport.events) == 2
 
@@ -128,11 +142,15 @@ async def test_expired_receipt_pruning_frees_admission(
     monkeypatch.setattr(durable, "_MAX_RETAINED_RECORDS", 1, raising=False)
     now = time.time()
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="expired")
-        full = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="new"))
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="expired")
+        full = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="new"),
+        )
         assert full["status"] == "error"
         monkeypatch.setattr(durable.time, "time", lambda: now + 9 * 86400)
-        admitted = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="new"))
+        admitted = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="new"),
+        )
     assert admitted["status"] == "ok"
     assert len(transport.events) == 2
     assert len(json.loads(_state_path(context).read_bytes())["sends"]) == 1
@@ -153,17 +171,25 @@ async def test_byte_capacity_reserves_receipt_completion(
 
     cast("AsyncMock", context.client.room_send).side_effect = maximum_receipt
     with tool_runtime_context(context):
-        first = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="bytes"))
+        first = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="bytes"),
+        )
         assert first["status"] == "error"
         assert len(transport.events) == 1
         saved = _state_path(context).read_bytes()
-        full = json.loads(await MatrixMessageTools().matrix_message(message="second", idempotency_key="new"))
+        full = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="second", idempotency_key="new"),
+        )
         assert full["status"] == "error"
         assert "capacity" in full["message"]
         assert _state_path(context).read_bytes() == saved
         assert len(transport.attempts) == 1
-        completed = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="bytes"))
-        replay = json.loads(await MatrixMessageTools().matrix_message(message="replay", idempotency_key="bytes"))
+        completed = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="bytes"),
+        )
+        replay = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="replay", idempotency_key="bytes"),
+        )
     assert completed["status"] == "ok"
     assert replay == completed
     assert len(transport.events) == 1
@@ -178,7 +204,9 @@ async def test_oversized_payload_never_writes_or_sends(
     """Actual JSON escaping counts toward the durable byte limit before send."""
     monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 5200, raising=False)
     with tool_runtime_context(context):
-        result = json.loads(await MatrixMessageTools().matrix_message(message="\u2603" * 600, idempotency_key="large"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="\u2603" * 600, idempotency_key="large"),
+        )
     assert result["status"] == "error"
     assert "capacity" in result["message"]
     assert not transport.events
@@ -194,10 +222,12 @@ async def test_oversized_store_fails_before_json_parse(
 ) -> None:
     """Oversized on-disk data must fail at the size gate, even if malformed."""
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="existing")
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="existing")
         _state_path(context).write_bytes(b"x" * 501)
         monkeypatch.setattr(durable, "_MAX_STORE_BYTES", 500, raising=False)
-        result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="existing"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="retry", idempotency_key="existing"),
+        )
     assert result["status"] == "error"
     assert result["message"] == "Matrix message receipt store exceeds the size limit."
     assert len(transport.attempts) == 1
@@ -210,12 +240,16 @@ async def test_lock_wait_uses_the_claim_deadline(
 ) -> None:
     """Waiting behind another key has the same bounded lifetime as transport."""
     with tool_runtime_context(context):
-        await MatrixMessageTools().matrix_message(message="first", idempotency_key="first")
+        await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="first")
         monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 0.05)
         async with durable.async_exclusive_file_lock(_state_path(context).with_suffix(".lock")):
             async with asyncio.timeout(1):
                 result = json.loads(
-                    await MatrixMessageTools().matrix_message(message="second", idempotency_key="second"),
+                    await MatrixMessageTools().matrix_message(
+                        action="send",
+                        message="second",
+                        idempotency_key="second",
+                    ),
                 )
     assert result["status"] == "error"
     assert result["message"] == "Idempotent Matrix send timed out; retry with the same idempotency_key."
@@ -243,7 +277,9 @@ async def test_deadline_settles_durable_write_before_unlocking(
     # which can take a few hundred milliseconds on a loaded host.
     monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 1.0)
     with tool_runtime_context(context):
-        pending = asyncio.create_task(MatrixMessageTools().matrix_message(message="first", idempotency_key="writing"))
+        pending = asyncio.create_task(
+            MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="writing"),
+        )
         try:
             async with asyncio.timeout(10):
                 await entered.wait()
@@ -262,7 +298,9 @@ async def test_deadline_settles_durable_write_before_unlocking(
         assert "timed out" in result["message"]
         monkeypatch.setattr(durable, "write_json_file_durable", original_write)
         monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 60)
-        recovered = json.loads(await MatrixMessageTools().matrix_message(message="changed", idempotency_key="writing"))
+        recovered = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="changed", idempotency_key="writing"),
+        )
     assert recovered["status"] == "ok"
     assert len(transport.events) == 1
     assert transport.attempts[0]["content"]["body"] == "first"
@@ -276,7 +314,7 @@ async def test_ordinary_send_does_not_use_keyed_deadline(
     """Even an immediately expired keyed deadline must leave ordinary sends unchanged."""
     monkeypatch.setattr(durable, "_CLAIM_TIMEOUT_SECONDS", 0)
     with tool_runtime_context(context):
-        result = json.loads(await MatrixMessageTools().matrix_message(message="ordinary"))
+        result = json.loads(await MatrixMessageTools().matrix_message(action="send", message="ordinary"))
     assert result["status"] == "ok"
     assert len(transport.events) == 1
 
@@ -293,7 +331,9 @@ async def test_oversized_matrix_event_id_cannot_consume_reserved_space(
 
     cast("AsyncMock", context.client.room_send).side_effect = oversized_receipt
     with tool_runtime_context(context):
-        result = json.loads(await MatrixMessageTools().matrix_message(message="first", idempotency_key="invalid-id"))
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(action="send", message="first", idempotency_key="invalid-id"),
+        )
     assert result["status"] == "error"
     assert "invalid event ID" in result["message"]
     assert len(transport.events) == 1
@@ -324,6 +364,7 @@ async def test_stalled_title_send_preserves_confirmed_root_and_recovers_deduplic
     with tool_runtime_context(context):
         first = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="Ship release",
                 new_thread=True,
                 title="🚀 Ship",
@@ -341,12 +382,14 @@ async def test_stalled_title_send_preserves_confirmed_root_and_recovers_deduplic
         cast("AsyncMock", context.client.room_send).side_effect = transport.room_send
         recovered = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed",
                 idempotency_key="stalled-title",
             ),
         )
         replayed = json.loads(
             await MatrixMessageTools().matrix_message(
+                action="send",
                 message="changed again",
                 idempotency_key="stalled-title",
             ),
