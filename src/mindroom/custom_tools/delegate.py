@@ -11,10 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
-from mindroom.ai import run_delegated_child_response
 from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.delegation.direct import run_direct_child_turn
-from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
 from mindroom.delegation.personas import list_profiles, render_profile_listing
 from mindroom.delegation.sessions import SubagentSessionError
@@ -36,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import DelegationChild, SubagentPersona
+    from mindroom.delegation.state import DelegationChild, DelegationExecutor, SubagentPersona
     from mindroom.delegation.targets import DelegationTarget
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.tool_jobs.runtime import JobSpec, ToolJobRuntime
@@ -67,6 +65,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         refresh_scheduler: KnowledgeRefreshScheduler | None = None,
         persona: SubagentPersona | None = None,
         calls_as_jobs: bool = False,
+        delegation_executor: DelegationExecutor | None = None,
     ) -> None:
         self._agent_name = agent_name
         self._delegate_to = config.get_agent(agent_name).delegate_to
@@ -76,6 +75,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         self._delegation_depth = delegation_depth
         # Whether the agent's build lets these calls become jobs.
         self._calls_as_jobs = calls_as_jobs
+        self._delegation_executor = delegation_executor
         self._refresh_scheduler = refresh_scheduler
         self._minimal_targets = minimal_subagent_candidates(
             config,
@@ -310,13 +310,17 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
 
         The child's turn starts only once the job is admitted; the job starts and settles the child it is known by.
         """
+        executor = self._delegation_executor
+        if executor is None or executor.build_job is None:
+            msg = "Background delegation requires a delegation job builder"
+            raise RuntimeError(msg)
         prepared = await self._prepare(function_name, arguments)
         if isinstance(prepared, str):
             return prepared
         child, config, parent_run_id = prepared
         if function_name == CONTINUE_SUBAGENT:
             arguments = {**arguments, "subagent_id": child.subagent_id}
-        return delegation_call_job(
+        return executor.build_job(
             child,
             job_id=job_id,
             runtime=runtime,
@@ -324,7 +328,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             parent_run_id=parent_run_id,
             tool_name=function_name,
             arguments=arguments,
-            run_child=run_delegated_child_response,
+            run_child=executor.run_child,
             config=config,
             runtime_paths=self._runtime_paths,
             refresh_scheduler=self._refresh_scheduler,
@@ -395,6 +399,10 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
 
     async def _run_direct(self, function_name: str, arguments: Mapping[str, object]) -> str:
         """Run one call's child inside this call, settled by the shared lifecycle owner."""
+        executor = self._delegation_executor
+        if executor is None or executor.run_direct_child is None:
+            msg = "Direct delegation requires a direct child response runner"
+            raise RuntimeError(msg)
         prepared = await self._prepare(function_name, arguments)
         if isinstance(prepared, str):
             return prepared
@@ -407,6 +415,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
                 config=config,
                 runtime_paths=self._runtime_paths,
                 refresh_scheduler=self._refresh_scheduler,
+                run_child=executor.run_direct_child,
             )
         except SubagentSessionError as error:
             return str(error)

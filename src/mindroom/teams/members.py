@@ -16,6 +16,9 @@ from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, matrix_markdown_o
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
+from mindroom.ai import run_delegated_child_response
+from mindroom.delegation.execution import delegation_call_job
+from mindroom.delegation.state import DelegationExecutor
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -122,6 +125,11 @@ def resolve_exact_team_members(
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=supports_native_tool_approval,
             required_tool_names=(required_tool_names or {}).get(agent_name, ()),
+            delegation_executor=DelegationExecutor(
+                run_child=run_delegated_child_response,
+                run_direct_child=run_delegated_child_response,
+                build_job=delegation_call_job,
+            ),
         )
 
     return ResolvedExactTeamMembers(

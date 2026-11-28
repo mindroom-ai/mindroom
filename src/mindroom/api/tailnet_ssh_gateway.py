@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from starlette.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
-from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
+from mindroom.api.listener import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
 from mindroom.tailnet_ssh import links as ssh
 
 if TYPE_CHECKING:

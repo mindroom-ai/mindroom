@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from mindroom.agent_cli.cli_shell_agent import wrap_native_shell_window
+from mindroom.agent_cli.cli_shell_window import wrap_native_shell_window
 from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry

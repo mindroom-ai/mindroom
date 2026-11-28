@@ -21,9 +21,9 @@ from starlette.datastructures import Headers, QueryParams
 from starlette.responses import JSONResponse, Response
 
 from mindroom.api import config_lifecycle
+from mindroom.api.listener import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
 from mindroom.api.plugin_routes import FramedWebsocketDenials, published_plugins
 from mindroom.api.request_body_limit import RequestBodyLimitMiddleware
-from mindroom.api.script_gateway import SCRIPT_GATEWAY_PORT_ENV, listener_port, serve_listener
 from mindroom.logging_config import get_logger
 from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV

@@ -17,7 +17,7 @@ import pytest_asyncio
 
 from mindroom import workflow as workflow_sdk
 from mindroom.agents import create_agent
-from mindroom.api.script_gateway import serve_listener
+from mindroom.api.listener import serve_listener
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.manager import BackgroundApprovalDecision
 from mindroom.approval.tool_owners import required_approval_tool_names

@@ -18,8 +18,8 @@ from starlette.testclient import WebSocketDenialResponse
 from mindroom.api import config_lifecycle, main
 from mindroom.api.app_state import ensure_app_state
 from mindroom.api.client_sessions import ClientSessionStore, client_session_store
+from mindroom.api.listener import serve_listener
 from mindroom.api.plugin_routes import FramedWebsocketDenials, mount_plugin_routes
-from mindroom.api.script_gateway import serve_listener
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths

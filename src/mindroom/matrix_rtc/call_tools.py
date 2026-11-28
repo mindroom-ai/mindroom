@@ -38,6 +38,7 @@ from mindroom.background_tasks import (
     wait_for_future_until_complete,
 )
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
+from mindroom.delegation.state import DelegationExecutor
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
@@ -455,6 +456,8 @@ class _CallAgentCache:
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> AgentBuild:
         """Build the call's agent."""
+        from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - heavy optional call path
+
         # Build the same tools and system prompt as text chat, less its Markdown output format, which a call speaks,
         # and the background-job guidance, which its calls cannot use: they all finish inside the call's turn.
         # The shell's mindroom-agent CLI stays off: call turns answer no inbound message to own it.
@@ -475,6 +478,10 @@ class _CallAgentCache:
             supports_native_tool_approval=True,
             eager_deferred_tools=True,
             inline_tools=True,
+            delegation_executor=DelegationExecutor(
+                run_child=run_delegated_child_response,
+                run_direct_child=run_delegated_child_response,
+            ),
         )
         return _refuse_text_chat_functions(
             _spoken(build),
@@ -620,6 +627,8 @@ async def build_call_tools(
             config=config,
         ),
     )
+    from mindroom.ai import run_delegated_child_response  # noqa: PLC0415 - heavy optional call path
+
     build = _spoken(
         # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
         await run_blocking_until_complete(
@@ -637,6 +646,10 @@ async def build_call_tools(
                 eager_deferred_tools=True,
                 inline_tools=True,
                 model=turn_model,
+                delegation_executor=DelegationExecutor(
+                    run_child=run_delegated_child_response,
+                    run_direct_child=run_delegated_child_response,
+                ),
             ),
         ),
     )

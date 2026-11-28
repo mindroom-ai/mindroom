@@ -246,7 +246,6 @@ expose = [
 path = "mindroom.agent_cli.delegation"
 depends_on = [
     "mindroom.agent_cli.approval",
-    "mindroom.ai",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",
     "mindroom.event_journal",
@@ -320,6 +319,7 @@ visibility = [
     "mindroom.agent_cli.minimal_agent",
     "mindroom.response_turn",
     "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
 ]
 
 [[interfaces]]
@@ -482,7 +482,7 @@ depends_on = [
 visibility = [
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.minimal_mode_preflight",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
 ]
 
 [[interfaces]]
@@ -498,7 +498,7 @@ depends_on = []
 visibility = [
     "mindroom.config.main",
     "mindroom.agent_cli.bash",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
     "mindroom.agent_cli.client",
     "mindroom.agent_cli.shell_access",
     "mindroom.agent_cli.turn",
@@ -927,7 +927,7 @@ path = "mindroom.agents"
 depends_on = [
     "mindroom.preload_cap",
     "mindroom.knowledge.search",
-    "mindroom.agent_cli.cli_shell_agent",
+    "mindroom.agent_cli.cli_shell_window",
     "mindroom.delegation.personas",
     "mindroom.delegation.state",
     "mindroom.path_confinement",
@@ -1381,6 +1381,7 @@ depends_on = [
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
     "mindroom.delegation.execution",
+    "mindroom.delegation.state",
     "mindroom.history.session_context",
     "mindroom.llm",
     "mindroom.reply_scope",
@@ -1706,9 +1707,7 @@ path = "mindroom.custom_tools.delegate"
 depends_on = [
     "mindroom.agent_cli.minimal_mode_preflight",
     "mindroom.agent_descriptions",
-    "mindroom.ai",
     "mindroom.delegation.direct",
-    "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
     "mindroom.delegation.sessions",
@@ -2109,10 +2108,20 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.script_gateway"
 depends_on = [
+    "mindroom.api.listener",
     "mindroom.api.agent_cli",
     "mindroom.api.workflow_gateway",
     "mindroom.bounded_bytes",
     "mindroom.json_utils",
+]
+
+[[modules]]
+path = "mindroom.api.listener"
+depends_on = []
+visibility = [
+    "mindroom.api.plugin_origins",
+    "mindroom.api.script_gateway",
+    "mindroom.api.tailnet_ssh_gateway",
 ]
 
 [[modules]]
@@ -3160,7 +3169,7 @@ visibility = ["mindroom.custom_tools.matrix_user"]
 path = "mindroom.custom_tools.computer_announcement"
 depends_on = [
     "mindroom.custom_tools.chat_ui",
-    "mindroom.orchestration.computer_runtime",
+    "mindroom.worker_computer.provider",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.runtime_context",
 ]
@@ -5727,6 +5736,7 @@ depends_on = [
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.custom_tools.attachment_helpers",
+    "mindroom.delegation.state",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
@@ -8717,7 +8727,7 @@ path = "mindroom.mcp_gateway.types"
 depends_on = []
 
 [[interfaces]]
-expose = ["SCRIPT_GATEWAY_PORT_ENV", "bind_script_tool_broker", "listener_port", "router", "serve_listener", "serve_script_gateway_listener"]
+expose = ["bind_script_tool_broker", "router", "serve_script_gateway_listener"]
 from = ["mindroom.api.script_gateway"]
 
 [[interfaces]]
@@ -9475,7 +9485,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.delegation.direct"
 depends_on = [
-    "mindroom.ai",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.sessions",
     "mindroom.response_turn",
@@ -9742,7 +9751,7 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.plugin_routes",
     "mindroom.api.request_body_limit",
-    "mindroom.api.script_gateway",
+    "mindroom.api.listener",
     "mindroom.origins",
     "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
@@ -9753,7 +9762,7 @@ visibility = ["mindroom.orchestrator", "mindroom.plugin_http"]
 path = "mindroom.api.tailnet_ssh_gateway"
 depends_on = [
     "mindroom.api.config_lifecycle",
-    "mindroom.api.script_gateway",
+    "mindroom.api.listener",
     "mindroom.tailnet_ssh.links",
 ]
 visibility = ["mindroom.api.main", "mindroom.api.workers", "mindroom.orchestrator"]
@@ -9878,7 +9887,7 @@ visibility = ["mindroom.orchestrator", "mindroom.plugin_testing"]
 path = "mindroom.orchestration.server_state"
 depends_on = [
     "mindroom.matrix_openid",
-    "mindroom.orchestration.computer_runtime",
+    "mindroom.worker_computer.provider",
     "mindroom.matrix.state_failures",
 ]
 visibility = ["mindroom.bot"]
@@ -9889,14 +9898,27 @@ depends_on = [
     "mindroom.api.app_state",
     "mindroom.room_agent_access",
     "mindroom.tool_system.worker_routing",
+    "mindroom.worker_computer.provider",
     "mindroom.worker_computer.sessions",
-    "mindroom.workers.backend_kinds",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.api.config_lifecycle",
     "mindroom.api.main",
     "mindroom.api.computers",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.worker_computer.provider"
+depends_on = [
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.plugins",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.worker_computer.sessions",
+    "mindroom.workers.backend_kinds",
+]
+visibility = [
+    "mindroom.custom_tools.computer_announcement",
+    "mindroom.orchestration.computer_runtime",
+    "mindroom.orchestration.server_state",
 ]
 
 [[modules]]
@@ -10485,18 +10507,22 @@ path = "mindroom.agent_cli.cli_shell_agent"
 depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
-    "mindroom.agent_cli.shell_access",
-    "mindroom.agent_cli.shell_contract",
     "mindroom.custom_tools.job",
     "mindroom.delegation.state",
-    "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
+]
+visibility = ["mindroom.ai"]
+
+[[modules]]
+path = "mindroom.agent_cli.cli_shell_window"
+depends_on = [
+    "mindroom.agent_cli.lifetime",
+    "mindroom.agent_cli.shell_access",
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_function",
 ]
-visibility = [
-    "mindroom.agents",
-    "mindroom.ai",
-]
+visibility = ["mindroom.agents"]
 
 [[modules]]
 path = "mindroom.agent_cli.minimal_agent"

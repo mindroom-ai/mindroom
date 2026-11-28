@@ -23,7 +23,13 @@ from mindroom.approval.tool_owners import (
     validate_approval_tool_owners,
 )
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
-from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
+from mindroom.delegation.execution import (
+    answered_delegation_calls,
+    delegation_call_job,
+    drive_delegation_stream,
+    resume_from_approval,
+)
+from mindroom.delegation.state import DelegationExecutor
 from mindroom.error_handling import StructuredReplyError
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
@@ -514,6 +520,11 @@ class AgentApprovalExecution:
                 else "standard"
             ),
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
+            delegation_executor=DelegationExecutor(
+                run_child=run_delegated_child_response,
+                run_direct_child=run_delegated_child_response,
+                build_job=delegation_call_job,
+            ),
         )
         scope_context = ScopeSessionContext(
             scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
@@ -539,6 +550,7 @@ class AgentApprovalExecution:
                             paused_answer=paused_answer,
                             runtime_context=tool_context,
                             tool_trace_collector=tool_trace_collector,
+                            run_child=run_delegated_child_response,
                             refresh_scheduler=self.refresh_scheduler(),
                             authorize=lambda binding: authorize_prepared_tool_call(
                                 binding,

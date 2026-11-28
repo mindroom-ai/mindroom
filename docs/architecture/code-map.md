@@ -275,7 +275,8 @@ Matrix sync callback
 | `workflow_runs/graph.py` | Pure graph model of a run for people: the `meta`, node, group and edge rows, the snapshot fitted to one event by priority, and the delta between two graphs |
 | `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, posts and edits its card until it says how the run ended, and posts the questions whose card could not be sent |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
-| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
+| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through |
+| `api/listener.py` | Shared lifecycle for auxiliary HTTP listeners beside the primary API |
 | `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |
 | `tailnet_ssh/store.py` | Primary-only ledger of link IDs, hostnames, and host keys by worker key |
 | `tailnet_ssh/projection.py` | The `sshd_config`, `authorized_keys`, and host key the primary writes into a worker's read-only `.runtime/ssh/` |
@@ -287,6 +288,7 @@ Matrix sync callback
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workflow.py` | The standard-library SDK a workflow script imports: lanes and call keys, the gateway client, `tool`, `shell`, `phase`, `log`, and the loader that calls `main(args)` |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
+| `worker_computer/provider.py` | Resolves which browser toolkit, if any, gives an agent a worker computer |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
@@ -311,6 +313,7 @@ Matrix sync callback
 | `agent_policy.py` | Execution-policy derivation from one typed input, `PolicyInputs`, for validated agents, dashboard drafts, and worker config files |
 | `agent_cli/minimal_agent.py` | Minimal mode: the bootstrap prompt and context documents from the build surface, and the turn's one provider-facing Bash tool over the build's catalog |
 | `agent_cli/checkpoint.py` | Minimal Bash's provider batch, captured as a `before_dispatch` hook and saved as a run checkpoint before any Bash call takes effect, a failed save refusing the call |
+| `agent_cli/cli_shell_window.py` | Build-time eligibility and shell window for the standard-mode CLI |
 | `agent_cli/cli_shell_agent.py` | Standard agents whose native shell commands call their other tools through `mindroom-agent`, bound per attempt |
 | `agent_cli/` | Response-owned CLI grants, call admission, shell access, discovery, and result projection |
 | `agent_modes.py` | Conversation-scoped standard/minimal selection persistence |

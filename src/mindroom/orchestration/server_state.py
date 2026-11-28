@@ -11,7 +11,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
 from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix_openid import openid_audience
-from mindroom.orchestration.computer_runtime import worker_computer_provider
+from mindroom.worker_computer.provider import worker_computer_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

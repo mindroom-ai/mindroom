@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-from mindroom import agents
+from mindroom import agents, ai
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
 from mindroom.agent_loop.run import run_agent
@@ -33,6 +33,8 @@ from mindroom.delegation.cost import (
     receive_subagent_cost,
     received_subagent_cost_usd,
 )
+from mindroom.delegation.execution import delegation_call_job
+from mindroom.delegation.state import DelegationExecutor
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
@@ -86,6 +88,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.fakes.scripted_model import ScriptedModel
+
+
+def default_delegation_executor() -> DelegationExecutor:
+    """Supply the normal runtime callbacks for tests that build and run delegation tools directly."""
+    return DelegationExecutor(
+        run_child=ai.run_delegated_child_response,
+        run_direct_child=ai.run_delegated_child_response,
+        build_job=delegation_call_job,
+    )
 
 
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
