@@ -1205,12 +1205,15 @@ async def test_a_failed_progress_edit_is_retried_at_the_update_cadence_not_on_th
 
 @pytest.mark.asyncio
 async def test_progress_tool_boundaries_are_delivered_without_waiting_for_a_later_event(config: Config) -> None:
-    """With the real clock, tool starts and completions reach the reply at once like ordinary streamed tools."""
+    """With a frozen clock, tool starts and completions reach the reply at once like ordinary streamed tools."""
     gateway = _FakeGateway()
     started = "Seed. Running the build.\n\n🔧 `build` [1] ⏳"
     completed = "Seed. Running the build.\n\n🔧 `build` [1]"
 
-    with patch("mindroom.streaming.edit_message_result", new=gateway.edit):
+    with (
+        patch("mindroom.streaming.time.time", return_value=1_000.0),
+        patch("mindroom.streaming.edit_message_result", new=gateway.edit),
+    ):
         async with _progress_edits(config) as publish:
             await publish(StructuredStreamChunk(content="Seed."))
             await gateway.wait_for_ops(1)
@@ -1221,16 +1224,14 @@ async def test_progress_tool_boundaries_are_delivered_without_waiting_for_a_late
                     tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="build", tool_call_id="call-1")],
                 ),
             )
-            async with asyncio.timeout(1):
-                await gateway.wait_for_ops(2)
+            await gateway.wait_for_ops(2)
             await publish(
                 StructuredStreamChunk(
                     content=completed,
                     tool_trace=[ToolTraceEntry(type="tool_call_completed", tool_name="build", tool_call_id="call-1")],
                 ),
             )
-            async with asyncio.timeout(1):
-                await gateway.wait_for_ops(3)
+            await gateway.wait_for_ops(3)
 
     assert [op.display_text for op in gateway.ops] == ["Seed.", started, completed]
 
