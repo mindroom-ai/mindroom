@@ -1925,17 +1925,17 @@ class TestFindFiles:
         path: str | None = None,
         limit: int = 1000,
     ) -> str:
-        """Assert ripgrep and Python fallback produce identical find_files output."""
+        """Assert fast find_files (git ls-files / ripgrep) and pure Python fallback produce identical output."""
         _use_ripgrep(monkeypatch, ripgrep=True)
-        rg_result = tools.find_files(pattern, path=path, limit=limit)
+        fast_result = tools.find_files(pattern, path=path, limit=limit)
         with monkeypatch.context() as fallback_patch:
-            _use_ripgrep(fallback_patch, ripgrep=False)
+            fallback_patch.setattr(filesystem_module, "_find_files_fast", lambda *_args: None)
             py_result = tools.find_files(pattern, path=path, limit=limit)
-        assert rg_result == py_result
-        return rg_result
+        assert fast_result == py_result
+        return fast_result
 
     def test_find_batches_gitignore_checks(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Python fallback batches git check-ignore into one call; ripgrep skips it at repo root."""
+        """Non-recursive globs batch git check-ignore into one call; recursive globs use git ls-files."""
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
         (tmp_path / ".gitignore").write_text("ignored*.txt\n")
         for i in range(8):
@@ -1944,28 +1944,31 @@ class TestFindFiles:
             (tmp_path / f"ignored{i}.txt").write_text("x")
 
         tools = FilesystemTools(base_dir=str(tmp_path))
-        run_calls = 0
+        check_ignore_calls = 0
+        ls_files_calls = 0
         original_run = subprocess.run
 
         def counting_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[object]:
-            nonlocal run_calls
+            nonlocal check_ignore_calls, ls_files_calls
             cmd = args[0] if args else kwargs.get("args")
-            if isinstance(cmd, list) and "check-ignore" in cmd:
-                run_calls += 1
+            if isinstance(cmd, list):
+                if "check-ignore" in cmd:
+                    check_ignore_calls += 1
+                if "ls-files" in cmd:
+                    ls_files_calls += 1
             return original_run(*args, **kwargs)
 
         monkeypatch.setattr("mindroom.custom_tools.filesystem.subprocess.run", counting_run)
-        if shutil.which("rg") is not None:
-            rg_result = tools.find_files("*.txt")
-            assert "visible0.txt" in rg_result
-            assert "ignored0.txt" not in rg_result
-            assert run_calls == 0
-
-        monkeypatch.setattr("mindroom.custom_tools.filesystem.shutil.which", lambda _name: None)
         result = tools.find_files("*.txt")
         assert "visible0.txt" in result
         assert "ignored0.txt" not in result
-        assert run_calls == 1
+        assert check_ignore_calls == 1
+        assert ls_files_calls == 0
+
+        recursive = tools.find_files("**/*.txt")
+        assert recursive == result
+        assert check_ignore_calls == 1
+        assert ls_files_calls == 1
 
     def test_find_does_not_follow_symlink_outside_base(self, tools: FilesystemTools, tmp_base: Path) -> None:
         """find_files should ignore matches that resolve outside base_dir."""
@@ -2001,8 +2004,8 @@ class TestFindFiles:
         assert "src/link/match.txt" in result
         assert "No files matching" not in result
 
-    def test_find_ripgrep_pattern_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Ripgrep and Python fallback match across glob dialects, fallbacks, and invalid patterns."""
+    def test_find_pattern_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fast recursive enumeration and Python fallback match across glob dialects, fallbacks, and invalid patterns."""
         files = [
             "1.py",
             "^.py",
@@ -2025,9 +2028,9 @@ class TestFindFiles:
         assert "sub/mod.py" in self._assert_find_parity(tools, monkeypatch, "**/*.py")
         assert self._assert_find_parity(tools, monkeypatch, "sub/*.txt") == "sub/nested.txt"
         assert self._assert_find_parity(tools, monkeypatch, "src/**/*.tsx") == "src/app/index.tsx"
-        assert self._assert_find_parity(tools, monkeypatch, "[!0-9].py") == "^.py\na.py"
-        assert self._assert_find_parity(tools, monkeypatch, "[^0-9].py") == "1.py\n^.py"
-        assert self._assert_find_parity(tools, monkeypatch, "{a,b}.py") == "{a,b}.py"
+        assert self._assert_find_parity(tools, monkeypatch, "**/[!0-9].py") == "^.py\na.py"
+        assert self._assert_find_parity(tools, monkeypatch, "**/[^0-9].py") == "1.py\n^.py"
+        assert self._assert_find_parity(tools, monkeypatch, "**/{a,b}.py") == "{a,b}.py"
         assert self._assert_find_parity(tools, monkeypatch, "hello.py") == "hello.py"
         assert self._assert_find_parity(tools, monkeypatch, ".hidden.py") == ".hidden.py"
         assert self._assert_find_parity(tools, monkeypatch, "sub/") == "No files matching 'sub/' found."
@@ -2035,101 +2038,165 @@ class TestFindFiles:
         assert self._assert_find_parity(tools, monkeypatch, "").startswith("Error: Invalid glob pattern")
         assert self._assert_find_parity(tools, monkeypatch, "/abs/*.py").startswith("Error: Invalid glob pattern")
 
-    def test_find_ripgrep_gitignore_and_hidden_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Ripgrep matches Python on root/nested .gitignore, negations, dot-dirs, .ignore, and RIPGREP_CONFIG_PATH."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-        (repo / ".gitignore").write_text("*.log\nbuild/\n!build/keep.py\ndist/*\n!dist/keep.py\n")
-        (repo / ".ignore").write_text("visible.py\n")
-        (cfg := tmp_path / "rg.conf").write_text("--hidden\n--no-ignore\n--glob=!visible.py\n")
-        monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(cfg))
-
-        files = [
-            "visible.py",
-            "drop.log",
-            ".secret.py",
-            "sub/ok.py",
-            "sub/drop.tmp",
-            "build/drop.py",
-            "build/keep.py",
-            "dist/drop.py",
-            "dist/keep.py",
-            ".mindroom/runs/r1/memory/people.md",
-            ".mindroom/runs/r1/memory/.draft.md",
-        ]
-        for rel in files:
-            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
-            (repo / rel).write_text("x")
-        (repo / "sub" / ".gitignore").write_text("*.tmp\n")
-
-        tools = FilesystemTools(base_dir=str(repo))
-        assert self._assert_find_parity(tools, monkeypatch, "**/*.py") == "dist/keep.py\nsub/ok.py\nvisible.py"
-        assert self._assert_find_parity(tools, monkeypatch, "**/*.log") == "No files matching '**/*.log' found."
-        assert self._assert_find_parity(tools, monkeypatch, "**/*.tmp") == "No files matching '**/*.tmp' found."
-        assert self._assert_find_parity(tools, monkeypatch, "*.py", path="build") == "No files matching '*.py' found."
-        assert self._assert_find_parity(tools, monkeypatch, "build/*.py") == "No files matching 'build/*.py' found."
-        assert self._assert_find_parity(tools, monkeypatch, "*.py", path="dist") == "dist/keep.py"
-        assert self._assert_find_parity(tools, monkeypatch, "dist/*.py") == "dist/keep.py"
-        expected_md = ".mindroom/runs/r1/memory/people.md"
-        assert self._assert_find_parity(tools, monkeypatch, "*.md", path=".mindroom/runs/r1/memory") == expected_md
-        assert self._assert_find_parity(tools, monkeypatch, ".mindroom/runs/*/memory/*.md") == expected_md
-
-    def test_find_ripgrep_confinement_and_exit_codes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Ripgrep blocks outside symlinks and workspace swaps, allows internal links, and handles exit codes 2/3."""
-        workspace = tmp_path / "workspace"
-        outside = tmp_path / "outside"
-        (workspace / "src").mkdir(parents=True)
-        (workspace / "shared").mkdir()
-        outside.mkdir()
-        (workspace / "shared" / "match.txt").write_text("in")
-        (outside / "secret.txt").write_text("out")
-        (workspace / "link_out").symlink_to(outside, target_is_directory=True)
-        (workspace / "src" / "link_in").symlink_to(workspace / "shared", target_is_directory=True)
-
-        tools = FilesystemTools(base_dir=str(workspace))
-        assert (
-            self._assert_find_parity(tools, monkeypatch, "link_out/*.txt")
-            == "No files matching 'link_out/*.txt' found."
-        )
-        assert self._assert_find_parity(tools, monkeypatch, "**/*.txt") == "shared/match.txt"
-        assert self._assert_find_parity(tools, monkeypatch, "link_in/*.txt", path="src") == "src/link_in/match.txt"
-
-        # Exit code 2 (partial walk) keeps accessible files; exit code 3 falls back to Python.
-        fake_rg = tmp_path / "rg"
-        fake_rg.write_text("#!/bin/sh\nprintf 'shared/match.txt\\0'\nexit 2\n")
-        fake_rg.chmod(0o755)
-        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: str(fake_rg))
-        assert tools.find_files("**/*.txt") == "shared/match.txt"
-        fake_rg.write_text("#!/bin/sh\nexit 3\n")
-        assert tools.find_files("**/*.txt") == "shared/match.txt"
-
-        # Workspace replaced by symlink during rg execution is rejected by post-flight confinement.
-        moved = tmp_path / "moved"
-        fake_rg.write_text(
-            f"#!/bin/sh\nmv '{workspace}' '{moved}'\nln -s '{outside}' '{workspace}'\nprintf 'secret.txt\\0'\n",
-        )
-        assert tools.find_files("*.txt") == "No files matching '*.txt' found."
-        assert tools.find_files("*.txt").startswith("Error:")
-
-    def test_find_ripgrep_timeout_kills_process_without_fallback(
+    def test_find_git_tracked_ignored_deleted_dotfiles_and_fallbacks(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Slow ripgrep is killed at _GREP_TIMEOUT_SECONDS and returns a timeout error without Python fallback."""
+        """Git ls-files and ripgrep preserve tracked ignored files, drop deleted/dot files, and handle nested/corrupt repos."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / ".gitignore").write_text("*.log\nbuild/\ndist/*\n!dist/keep.py\ntest_gmail*.py\n.env*\n!.env.example\n")
+        for rel in (
+            "visible.py",
+            "drop.log",
+            ".secret.py",
+            ".env.example",
+            "deleted.py",
+            "sub/ok.py",
+            "sub/drop.tmp",
+            "build/drop.py",
+            "build/tracked.py",
+            "dist/drop.py",
+            "dist/keep.py",
+            "tests/test_gmail_tools.py",
+            ".mindroom/runs/r1/memory/people.md",
+            ".mindroom/runs/r1/memory/.draft.md",
+        ):
+            (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel).write_text("x")
+        (repo / "sub" / ".gitignore").write_text("*.tmp\n")
+        subprocess.run(
+            ["git", "add", "-f", "build/tracked.py", "tests/test_gmail_tools.py", "deleted.py", ".env.example"],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
+        (repo / "deleted.py").unlink()
+
+        tools = FilesystemTools(base_dir=str(repo))
+        expected_py = "build/tracked.py\ndist/keep.py\nsub/ok.py\ntests/test_gmail_tools.py\nvisible.py"
+        assert self._assert_find_parity(tools, monkeypatch, "**/*.py") == expected_py
+        assert self._assert_find_parity(tools, monkeypatch, "tests/test_gmail*.py") == "tests/test_gmail_tools.py"
+        assert self._assert_find_parity(tools, monkeypatch, "**/*.log") == "No files matching '**/*.log' found."
+        assert self._assert_find_parity(tools, monkeypatch, "**/*.tmp") == "No files matching '**/*.tmp' found."
+        assert self._assert_find_parity(tools, monkeypatch, "**/*.example") == "No files matching '**/*.example' found."
+        assert self._assert_find_parity(tools, monkeypatch, "**/*.py", path="build") == "build/tracked.py"
+        assert self._assert_find_parity(tools, monkeypatch, "dist/**/*.py") == "dist/keep.py"
+        expected_md = ".mindroom/runs/r1/memory/people.md"
+        assert self._assert_find_parity(tools, monkeypatch, ".mindroom/runs/**/*.md") == expected_md
+        assert ".git/HEAD" in self._assert_find_parity(tools, monkeypatch, ".git/**/*")
+
+        # Non-git workspace with nested repo: rg skips node_modules and honors --no-ignore-dot/--no-config; dotfiles stay hidden.
+        ws = tmp_path / "ws"
+        (ws / "repo1" / "node_modules" / "pkg").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=ws / "repo1", check=True)
+        (ws / "repo1" / ".gitignore").write_text("node_modules/\n.env*\n!.env.example\n")
+        (ws / "repo1" / ".ignore").write_text("app.py\n")
+        (ws / "repo1" / "node_modules" / "pkg" / "index.js").write_text("x")
+        (ws / "repo1" / "app.py").write_text("x")
+        (ws / "repo1" / ".env.example").write_text("x")
+        (cfg := tmp_path / "rg.conf").write_text("--hidden\n--no-ignore\n--glob=!app.py\n")
+        monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(cfg))
+        ws_tools = FilesystemTools(base_dir=str(ws))
+        _use_ripgrep(monkeypatch, ripgrep=True)
+        assert ws_tools.find_files("**/*") == "repo1/app.py"
+
+        # Corrupt .git falls back cleanly to Python.
+        corrupt = tmp_path / "corrupt"
+        (corrupt / ".git").mkdir(parents=True)
+        (corrupt / "a.py").write_text("x")
+        assert FilesystemTools(base_dir=str(corrupt)).find_files("**/*.py") == "a.py"
+
+    def test_find_symlinks_confinement_and_exit_codes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Directory/file symlinks preserve parity and confinement, and rg exit codes 2/3 and swaps behave safely."""
+        repo = tmp_path / "repo"
+        outside = tmp_path / "outside"
+        (repo / "knowledge").mkdir(parents=True)
+        (repo / "real_docs" / "sub").mkdir(parents=True)
+        outside.mkdir()
+        (repo / "real_docs" / "guide.md").write_text("g")
+        (repo / "real_docs" / "sub" / "deep.md").write_text("d")
+        (repo / "AGENTS.md").write_text("a")
+        (outside / "secret.md").write_text("s")
+        (repo / "knowledge" / "docs").symlink_to(repo / "real_docs", target_is_directory=True)
+        (repo / "linkdir").symlink_to(repo / "real_docs", target_is_directory=True)
+        (repo / "link_out").symlink_to(outside, target_is_directory=True)
+        (repo / "CLAUDE.md").symlink_to(repo / "AGENTS.md")
+        (repo / "evil.md").symlink_to(outside / "secret.md")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+        tools = FilesystemTools(base_dir=str(repo))
+        assert self._assert_find_parity(tools, monkeypatch, "knowledge/*/*.md") == "knowledge/docs/guide.md"
+        assert self._assert_find_parity(tools, monkeypatch, "*/*.md", path="knowledge") == "knowledge/docs/guide.md"
+        assert (
+            self._assert_find_parity(tools, monkeypatch, "knowledge/docs/**/*.md")
+            == "knowledge/docs/guide.md\nknowledge/docs/sub/deep.md"
+        )
+        assert self._assert_find_parity(tools, monkeypatch, "*/guide.md") == "linkdir/guide.md\nreal_docs/guide.md"
+        assert self._assert_find_parity(tools, monkeypatch, "*.md") == "AGENTS.md\nCLAUDE.md"
+        assert (
+            self._assert_find_parity(tools, monkeypatch, "**/*.md")
+            == "AGENTS.md\nCLAUDE.md\nreal_docs/guide.md\nreal_docs/sub/deep.md"
+        )
+        assert (
+            self._assert_find_parity(tools, monkeypatch, "link_out/**/*.md")
+            == "No files matching 'link_out/**/*.md' found."
+        )
+
+        # Non-git workspace: exit code 2 keeps accessible files, exit code 3 falls back, mid-call swap is rejected.
+        workspace = tmp_path / "workspace"
+        (workspace / "shared").mkdir(parents=True)
+        (workspace / "shared" / "match.txt").write_text("in")
+        (outside / "secret.txt").write_text("out")
+        ws_tools = FilesystemTools(base_dir=str(workspace))
+        fake_rg = tmp_path / "rg"
+        fake_rg.write_text("#!/bin/sh\nprintf 'shared/match.txt\\0'\nexit 2\n")
+        fake_rg.chmod(0o755)
+        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: str(fake_rg))
+        assert ws_tools.find_files("**/*.txt") == "shared/match.txt"
+        fake_rg.write_text("#!/bin/sh\nexit 3\n")
+        assert ws_tools.find_files("**/*.txt") == "shared/match.txt"
+        moved = tmp_path / "moved"
+        fake_rg.write_text(
+            f"#!/bin/sh\nmv '{workspace}' '{moved}'\nln -s '{outside}' '{workspace}'\nprintf 'secret.txt\\0'\n",
+        )
+        assert ws_tools.find_files("**/*.txt") == "No files matching '**/*.txt' found."
+        assert ws_tools.find_files("**/*.txt").startswith("Error:")
+
+    @pytest.mark.parametrize("backend", ["rg", "git"])
+    def test_find_timeout_kills_process_without_fallback(
+        self,
+        backend: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Slow git/ripgrep is killed at _GREP_TIMEOUT_SECONDS and returns a timeout error without Python fallback."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         (workspace / "hello.py").write_text("x")
         pid_file = tmp_path / "pid"
-        fake_rg = tmp_path / "rg"
-        fake_rg.write_text(f"#!/bin/sh\necho $$ > '{pid_file}'\nexec sleep 60\n")
-        fake_rg.chmod(0o755)
-        monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: str(fake_rg))
+        hang_script = f"#!/bin/sh\necho $$ > '{pid_file}'\nexec sleep 60\n"
+        if backend == "git":
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            fake_bin = tmp_path / "bin"
+            fake_bin.mkdir()
+            fake_git = fake_bin / "git"
+            fake_git.write_text(hang_script)
+            fake_git.chmod(0o755)
+            monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+        else:
+            fake_rg = tmp_path / "rg"
+            fake_rg.write_text(hang_script)
+            fake_rg.chmod(0o755)
+            monkeypatch.setattr(filesystem_module.shutil, "which", lambda _name: str(fake_rg))
         monkeypatch.setattr(filesystem_module, "_GREP_TIMEOUT_SECONDS", 1.0)
 
         started = time.monotonic()
-        result = FilesystemTools(base_dir=str(workspace)).find_files("*.py")
+        result = FilesystemTools(base_dir=str(workspace)).find_files("**/*.py")
         elapsed = time.monotonic() - started
 
         assert result == "Error: find_files timed out after 1 seconds."
@@ -2137,8 +2204,8 @@ class TestFindFiles:
         with pytest.raises(ProcessLookupError):
             os.kill(int(pid_file.read_text()), 0)
 
-    def test_find_ripgrep_sort_order_and_limit_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Ripgrep preserves component-wise Path sort order and exact limit truncation behavior."""
+    def test_find_sort_order_and_limit_parity(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Fast enumeration preserves component-wise Path sort order and exact limit truncation behavior."""
         for rel in ("a/b.py", "a/d.py", "a-b/c.py", "z.py"):
             file_path = tmp_path / rel
             file_path.parent.mkdir(parents=True, exist_ok=True)
