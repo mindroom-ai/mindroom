@@ -37,6 +37,7 @@ from mindroom.script_runs.store import mint_script_capability
 from mindroom.tool_system.invocation import CallResult
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workers.runtime import idle_worker_cleanup_owner
 from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import (
@@ -1046,12 +1047,28 @@ def test_shell_exit_completes_distinguishes_plain_and_workflow_contracts() -> No
 async def test_workflow_and_plain_script_shell_exit_contracts(stack: WorkflowStack) -> None:
     """Workflow shell launch failures get exit_code=127, plain scripts keep >3000-char exit output, and withheld/refused fail."""
     ctx = stack.context
-    env = {**ctx.runtime_paths.process_env, "MINDROOM_SANDBOX_RUNNER_MODE": "true"}
-    stack.resolver.context = replace(ctx, runtime_paths=replace(ctx.runtime_paths, process_env=env))
+    env = {
+        **ctx.runtime_paths.process_env,
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_WORKER_BACKEND": "kubernetes",
+        "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "60",
+    }
+    worker_paths = replace(ctx.runtime_paths, process_env=env)
+    watcher = ctx.config.agents["watcher"].model_copy(update={"worker_scope": "user_agent", "named_workers": 1})
+    worker_cfg = ctx.config.model_copy(update={"agents": {**ctx.config.agents, "watcher": watcher}})
+    worker_ctx = replace(ctx, config=worker_cfg, runtime_paths=worker_paths)
+    stack.context = worker_ctx
+    stack.resolver.context = worker_ctx
     missing = "/nonexistent-workflow-binary-xyz"
-    launch = await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args=[missing], worker="build"))
+    with idle_worker_cleanup_owner():
+        launch = await stack.result(
+            "@0",
+            "tool",
+            tool_args("shell", "run_shell_command", args=[missing], worker="build"),
+        )
     assert isinstance(launch, dict)
     assert (launch["exit_code"], missing in str(launch["output"])) == (127, True)
+    stack.context = ctx
 
     stack.resolver.context = replace(stack.resolver.context, hooks=_withhold_hooks())
     with pytest.raises(NodeFailed) as exc_info:

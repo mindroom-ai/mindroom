@@ -141,13 +141,14 @@ class PlacementProbeTools(Toolkit):
 @pytest.mark.parametrize(
     ("env", "allowed", "offered"),
     [
-        (_KUBERNETES, True, {"dedicated_worker", "resource_profile"}),
+        (_KUBERNETES, True, {"dedicated_worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only"}),
+        ({**_KUBERNETES, "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX": "0"}, True, {"dedicated_worker", "resource_profile"}),
         (_DOCKER, True, {"dedicated_worker"}),
         (_KUBERNETES, False, set()),
         ({**_KUBERNETES, "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "0"}, True, set()),
         ({}, True, set()),
     ],
-    ids=["kubernetes", "docker", "not-allowed", "no-cleanup", "static-runner"],
+    ids=["kubernetes", "kubernetes-sandbox-disabled", "docker", "not-allowed", "no-cleanup", "static-runner"],
 )
 def test_dedicated_options_are_offered_only_where_they_work(
     tmp_path: Path,
@@ -156,11 +157,15 @@ def test_dedicated_options_are_offered_only_where_they_work(
     allowed: bool,
     offered: set[str],
 ) -> None:
-    """The caller sees the worker options only with its setting, a dedicated backend, and idle cleanup."""
+    """The caller sees the worker/sandbox options only with its setting, backend, cleanup, and ephemeral cap."""
     paths = _paths(tmp_path, env)
     function = toolkit_offers(_tools(_config(paths, allowed=allowed), paths), "run_subagent")
 
-    assert set(function.parameters["properties"]) & {"dedicated_worker", "resource_profile"} == offered
+    assert (
+        set(function.parameters["properties"])
+        & {"dedicated_worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only"}
+        == offered
+    )
     assert ("dedicated_worker" in (function.description or "")) == bool(offered)
 
 

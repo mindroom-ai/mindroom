@@ -71,7 +71,6 @@ from mindroom.workers.backends.dedicated_launch import (
 )
 from mindroom.workers.backends.kubernetes_config import (
     resolve_kubeconfig_paths,
-    sandbox_mount_dir_runtime_class_refusal,
     validated_kubernetes_object,
 )
 from mindroom.workers.backends.kubernetes_pod_names import (
@@ -86,6 +85,7 @@ from mindroom.workers.models import (
     WORKER_SSH_PORT,
     WorkerSandboxConfig,
 )
+from mindroom.workers.sandbox_mounts import sandbox_mount_dir_runtime_class_refusal
 
 if TYPE_CHECKING:
     from collections.abc import Callable

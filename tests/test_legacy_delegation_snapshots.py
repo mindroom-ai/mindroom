@@ -52,6 +52,7 @@ _OWNER = ToolExecutionIdentity(
 _MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {
     "dedicated_worker": False,
     "worker_resource_profile": None,
+    "worker_sandbox": None,
     "cost_usd": None,
     "subagents_cost_usd": None,
     "subagents_cost_unknown": False,

@@ -732,7 +732,8 @@ def _memory_conversation(
     The copy lies beside the conversation's database, so in a private agent's own state root.
     """
     if (
-        ctx.persona is not None
+        ctx.worker_sandbox is not None
+        or ctx.persona is not None
         or ctx.agent_mode == "minimal"
         or ctx.scheduled_history_budget is not None
         or ctx.usage_kind is not None
@@ -763,7 +764,8 @@ def _with_prompt_hold(
     (``usage_kind``), which no later turn replays. The file lies in the state root of the conversation's database.
     """
     if (
-        ctx.persona is not None
+        ctx.worker_sandbox is not None
+        or ctx.persona is not None
         or ctx.agent_mode == "minimal"
         or ctx.usage_kind is not None
         or scope_context is None
@@ -781,7 +783,7 @@ async def _prepare_turn_memory(
     conversation: ConversationRef | None,
 ) -> MemoryPromptParts:
     """Recall memories for a configured agent turn; personas and minimal turns recall none automatically."""
-    if ctx.persona is not None or ctx.agent_mode == "minimal":
+    if ctx.worker_sandbox is not None or ctx.persona is not None or ctx.agent_mode == "minimal":
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
         ctx.prompt,
@@ -904,6 +906,7 @@ async def _prepare_agent_and_prompt(
                 inline_tools=ctx.inline_tools,
                 persona=ctx.persona,
                 tool_names=ctx.tool_names,
+                worker_sandbox=ctx.worker_sandbox,
                 delegation_executor=DelegationExecutor(
                     run_child=run_delegated_child_response,
                     run_direct_child=run_delegated_child_response,
@@ -1157,13 +1160,17 @@ async def run_delegated_child_response(
         return authorized_config
     # A caller's pre-approval overlay replaces the live config for the child's run.
     active_config = approval_config if approval_config is not None else authorized_config
-    knowledge = await resolve_agent_knowledge_access_async(
-        child.child_agent_name,
-        active_config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=identity,
-        only=child.persona.kept_knowledge if child.persona is not None else None,
+    knowledge = (
+        None
+        if child.worker_sandbox is not None
+        else await resolve_agent_knowledge_access_async(
+            child.child_agent_name,
+            active_config,
+            runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=identity,
+            only=child.persona.kept_knowledge if child.persona is not None else None,
+        )
     )
     context = get_tool_runtime_context()
     # The child's tools check reloads against the config its agent was built from, without the caller's approval
@@ -1174,6 +1181,7 @@ async def run_delegated_child_response(
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,
+        worker_sandbox=child.worker_sandbox,
         entity_label=child.child_agent_name,
         session_id=child.session_id,
         run_id=child.run_id,
@@ -1184,12 +1192,14 @@ async def run_delegated_child_response(
         requester_id=identity.requester_id,
         matrix_run_metadata=None,
         active_model_name=child.model_name,
-        transient_enrichment_items=tuple(append_knowledge_availability_enrichment((), knowledge.unavailable)),
+        transient_enrichment_items=(
+            () if knowledge is None else tuple(append_knowledge_availability_enrichment((), knowledge.unavailable))
+        ),
         prompt=prompt,
         show_tool_calls=False,
         execution_identity=identity,
         refresh_scheduler=refresh_scheduler,
-        knowledge=knowledge.knowledge,
+        knowledge=None if knowledge is None else knowledge.knowledge,
         include_interactive_questions=False,
         tool_function_filter=context.tool_function_filter if context is not None else None,
         delegation_depth=child.depth,

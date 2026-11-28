@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.authoring import Toolkit
+    from mindroom.workers.models import WorkerSandboxConfig
 
 logger = get_logger(__name__)
 
@@ -579,6 +580,7 @@ def _build_managed_tool_init_kwargs(
     workspace_in_worker: bool | None,
     agent_state_root: Path | None,
     in_sandbox_request: bool,
+    sandbox: bool = False,
 ) -> dict[str, object]:
     """Build declared MindRoom-managed constructor kwargs for one tool.
 
@@ -596,6 +598,9 @@ def _build_managed_tool_init_kwargs(
         # Shared directories change during a response, so path tools resolve them on each call.
         return (*shared_directory_roots(runtime_config, runtime_paths, agent_name), *saved_outputs)
 
+    def no_shared_roots() -> tuple[SharedDirectoryRoot, ...]:
+        return ()
+
     managed_values: dict[ToolManagedInitArg, Callable[[], object]] = {
         ToolManagedInitArg.RUNTIME_PATHS: lambda: runtime_paths,
         ToolManagedInitArg.CREDENTIALS_MANAGER: lambda: credentials_manager,
@@ -611,9 +616,11 @@ def _build_managed_tool_init_kwargs(
             execution_identity.room_id if execution_identity is not None else None
         ),
         ToolManagedInitArg.AGENT_NAME: lambda: agent_name,
-        ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
+        ToolManagedInitArg.FILE_ACCESS: lambda: (
+            "workspace" if sandbox else _managed_file_access(runtime_config, worker_target)
+        ),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
-        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: path_tool_roots,
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: no_shared_roots if sandbox else path_tool_roots,
         ToolManagedInitArg.IN_SANDBOX_REQUEST: lambda: in_sandbox_request,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
@@ -841,6 +848,8 @@ def get_tool_by_name(
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
     in_sandbox_request: bool = False,
+    sandbox: bool = False,
+    worker_sandbox: WorkerSandboxConfig | None = None,
     worker_target: ResolvedWorkerTarget | None,
 ) -> Toolkit:
     """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
@@ -858,11 +867,15 @@ def get_tool_by_name(
     tool_name = canonical_tool_name(tool_name)
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
+    sandbox_required = sandbox or worker_sandbox is not None
     routed = (
         _constructing_agent_runs_in_worker(tool_name, runtime_paths, tools, runtime_config, worker_target)
         if runs_in_worker is None
         else runs_in_worker
     )
+    if sandbox_required and not in_sandbox_request and not routed:
+        msg = f"Sandboxed tool '{tool_name}' must be routed to a worker."
+        raise RuntimeError(msg)
 
     def build() -> Toolkit:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
@@ -918,7 +931,9 @@ def get_tool_by_name(
                 runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
             )
             init_kwargs["named_workers"] = (
-                routed and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
+                not sandbox_required
+                and routed
+                and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
             )
         init_kwargs.update(
             _build_managed_tool_init_kwargs(
@@ -937,6 +952,7 @@ def get_tool_by_name(
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
                 in_sandbox_request=in_sandbox_request,
+                sandbox=sandbox_required,
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
@@ -969,6 +985,8 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tools=tools,
+                sandbox_required=sandbox_required,
+                expected_sandbox=worker_sandbox,
             )
             if routed
             else None,

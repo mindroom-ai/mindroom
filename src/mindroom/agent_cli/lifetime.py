@@ -41,13 +41,14 @@ class CliTurnLifetime:
         finally:
             _CURRENT.reset(token)
 
-    def register(self, owner: LiveTurnTools, registry: TurnToolRegistry) -> None:
-        """Accept an explicit orchestrator registry, never an ambient authority."""
+    def register(self, owner: LiveTurnTools, registry: TurnToolRegistry | None) -> None:
+        """Accept an explicit orchestrator registry, or None for sandbox-only Bash turns with no CLI grant."""
         if self._closed:
             msg = "The response's CLI lifetime has ended"
             raise RuntimeError(msg)
         owner.bind_response_task(self._response_task)
-        registry.register(owner)
+        if registry is not None:
+            registry.register(owner)
         self.owner = owner
         self._registry = registry
 

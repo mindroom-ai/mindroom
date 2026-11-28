@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.usage.storage import IndependentUsageKind
+    from mindroom.workers.models import WorkerSandboxConfig
 
 logger = get_logger(__name__)
 
@@ -368,6 +369,8 @@ class ResponseTurnContext:
     agent_mode: AgentMode = "standard"
     # Set only for authored subagents: their authored prompt and tool subset.
     persona: SubagentPersona | None = None
+    # Set only for sandboxed subagents running in an isolated Kubernetes sandbox pod.
+    worker_sandbox: WorkerSandboxConfig | None = None
     # Set only for contact turns and silent listening turns: the agent's own tools the turn may offer, with no skills
     # or knowledge.
     tool_names: tuple[str, ...] | None = None

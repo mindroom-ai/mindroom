@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -12,6 +12,7 @@ from mindroom.tool_system.construction import ToolConstruction, tool_config_sign
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.toolkits import configure_toolkit_functions
+from mindroom.workers.models import SANDBOX_ALLOWED_TOOLKITS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -25,9 +26,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.dynamic_toolkits import DeferredToolkit
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import WorkerSandboxConfig
 
 # Skill management keeps its own output handling; dynamic tool search returns inline.
 _DIRECT_OUTPUT_TOOLKITS = frozenset({"skill_manage", "dynamic_tools"})
+
+
+class _SandboxToolKwargs(TypedDict, total=False):
+    sandbox: bool
+    worker_sandbox: WorkerSandboxConfig
 
 
 @timed("system_prompt_assembly.agent_create.toolkit_build")
@@ -46,6 +53,7 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
     persona: SubagentPersona | None = None,
     deferred_toolkits: Callable[[], Sequence[DeferredToolkit]] | None = None,
     calls_as_jobs: bool = False,
+    worker_sandbox: WorkerSandboxConfig | None = None,
     delegation_executor: DelegationExecutor | None = None,
 ) -> Toolkit | None:
     """Build one of the toolkits ``agent_tools`` offers the agent, where ``placement`` runs it.
@@ -58,6 +66,8 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
     ``deferred_toolkits`` returns the wire-deferred toolkits that ``dynamic_tools`` searches, as the agent's runs offer
     them; without it ``dynamic_tools`` is skipped and None is returned.
     """
+    if worker_sandbox is not None and tool_name not in SANDBOX_ALLOWED_TOOLKITS:
+        return None
     config = agent_tools.config
     agent_name = agent_tools.agent_name
     if agent_runtime is None:
@@ -133,11 +143,16 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
 
             toolkit = DynamicToolsToolkit(deferred_toolkits=deferred_toolkits)
         case _:
+            sandboxed = worker_sandbox is not None
             worker_scope = agent_runtime.execution.execution_scope
             base_dir_override: dict[str, object] | None = (
-                {"base_dir": str(current_tool_workdir() or workspace_root)}
-                if "base_dir" in safe_tool_init_override_fields(tool_name, tool_metadata=agent_tools.tools.entries)
-                else None
+                None
+                if sandboxed
+                else (
+                    {"base_dir": str(current_tool_workdir() or workspace_root)}
+                    if "base_dir" in safe_tool_init_override_fields(tool_name, tool_metadata=agent_tools.tools.entries)
+                    else None
+                )
             )
             return get_tool_by_name(
                 tool_name,
@@ -148,12 +163,21 @@ def build_agent_toolkit(  # noqa: C901, PLR0912 - flat match dispatch over per-a
                 tool_config_overrides=tool_config_overrides,
                 tool_init_overrides=base_dir_override,
                 runs_in_worker=agent_tools.runs_in_worker(tool_name, placement),
-                allowed_shared_services=config.get_worker_grantable_credentials() if worker_scope is not None else None,
-                tool_output_workspace_root=workspace_root,
+                allowed_shared_services=(
+                    frozenset()
+                    if sandboxed
+                    else (config.get_worker_grantable_credentials() if worker_scope is not None else None)
+                ),
+                tool_output_workspace_root=None if sandboxed else workspace_root,
                 agent_state_root=agent_runtime.state_root,
                 tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
                 workspace_in_worker=workspace_in_worker,
                 worker_target=agent_runtime.execution.worker_target,
+                **(
+                    _SandboxToolKwargs(sandbox=True, worker_sandbox=worker_sandbox)
+                    if worker_sandbox is not None
+                    else _SandboxToolKwargs()
+                ),
             )
 
     if tool_name not in _DIRECT_OUTPUT_TOOLKITS:

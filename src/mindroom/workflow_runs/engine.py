@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import (
+    create_background_task,
     run_blocking_until_complete,
     run_coroutine_until_complete,
     wait_for_future_until_complete,
@@ -26,6 +27,7 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunState, utc_timestamp
 from mindroom.script_runs.store import ScriptRunNotFoundError
+from mindroom.tool_jobs.resources import ExecutionResources
 from mindroom.workflow_runs import interactions, nodes
 from mindroom.workflow_runs.agent_nodes import AgentRuntime, node_prompt, works
 from mindroom.workflow_runs.limits import WorkflowLimits, budget_exceeded, ceiling, limit_reached, run_usage, usd
@@ -115,9 +117,17 @@ class _RunState:
     charged_at: float | None = None
     # Whether this run's wait for an attempt was logged as refused, so the tries that follow say nothing.
     refused: bool = False
+    # Run-scoped worker resources (e.g. sandboxed workflow.spawn/shell pods) released on terminal end_run or close().
+    worker_resources: ExecutionResources | None = None
+    worker_cleanup_tokens: dict[str, object] = field(default_factory=dict)
 
     def is_idle(self) -> bool:
-        return self.places is None and self.charged_at is None and not (self.tasks or self.stopping or self.refused)
+        return (
+            self.places is None
+            and self.charged_at is None
+            and self.worker_resources is None
+            and not (self.tasks or self.stopping or self.refused)
+        )
 
 
 def _run_outcome(
@@ -209,6 +219,47 @@ class WorkflowEngine:
     def run_ended(self, run_id: str) -> bool:
         """Return whether *run_id* is stopping or already terminal."""
         return self.is_stopping(run_id) or self.store.get_run(run_id).state in TERMINAL_RUN_STATES
+
+    def worker_resources(self, run_id: str) -> ExecutionResources:
+        """Return the per-run worker resource holder for *run_id*, creating it lazily."""
+        state = self._state(run_id)
+        if state.worker_resources is None:
+            state.worker_resources = ExecutionResources()
+        return state.worker_resources
+
+    async def retain_worker_cleanup(
+        self,
+        run_id: str,
+        key: str,
+        callback: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        """Retain one idempotent per-run worker cleanup callback, or run it now if the run already ended."""
+        if self.closed or self.is_stopping(run_id):
+            create_background_task(callback(), name="workflow_worker_cleanup")
+            return
+        run_state = self._runs.get(run_id)
+        if run_state is None:
+            try:
+                run = await asyncio.to_thread(self.store.get_run, run_id)
+            except WorkflowRunNotFoundError:
+                create_background_task(callback(), name="workflow_worker_cleanup")
+                return
+            if self.closed or self.is_stopping(run_id) or run.state in TERMINAL_RUN_STATES:
+                create_background_task(callback(), name="workflow_worker_cleanup")
+                return
+            run_state = self._state(run_id)
+        token = run_state.worker_cleanup_tokens.setdefault(key, object())
+        if self.worker_resources(run_id).retain(token, callback) is None:
+            create_background_task(callback(), name="workflow_worker_cleanup")
+
+    def _pop_worker_resources(self, run_id: str) -> ExecutionResources | None:
+        state = self._runs.get(run_id)
+        if state is None:
+            return None
+        holder = state.worker_resources
+        state.worker_resources = None
+        state.worker_cleanup_tokens.clear()
+        return holder
 
     def places_for(self, run: WorkflowRun) -> _Places:
         """Return the slot pool for *run*, initializing it if absent."""
@@ -740,6 +791,7 @@ class WorkflowEngine:
         from the epoch *run* has, is returned as it is: what was decided about *run* says nothing about it.
         """
         cond = self.condition(run.run_id)
+        release_resources = False
         try:
             if state in TERMINAL_RUN_STATES:
                 # Without the lock, which the wait for the run's agents must not hold.
@@ -748,6 +800,7 @@ class WorkflowEngine:
             async with cond:
                 current = self.store.get_run(run.run_id)
                 if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
+                    release_resources = current.state in TERMINAL_RUN_STATES
                     return current
                 ended = state in TERMINAL_RUN_STATES
                 current = await self._stop_and_reconcile(run, ended=ended)
@@ -781,15 +834,19 @@ class WorkflowEngine:
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
                 ended_run = await asyncio.shield(end)
+                release_resources = ended_run.state in TERMINAL_RUN_STATES
                 if (run_state := self._runs.get(run.run_id)) is not None:
                     run_state.charged_at, run_state.refused = None, False
                 cond.notify_all()
                 if ended_run.state in TERMINAL_RUN_STATES and ended_run.parent_run_id is not None:
                     await self._settle_group(ended_run)
         finally:
+            holder = self._pop_worker_resources(run.run_id) if release_resources else None
             if (run_state := self._runs.get(run.run_id)) is not None:
                 run_state.stopping = False
                 self._gc(run.run_id)
+            if holder is not None:
+                await run_coroutine_until_complete(holder.release_parent())
         return ended_run
 
     async def _settle_group(self, child: WorkflowRun) -> None:
@@ -1024,11 +1081,15 @@ class WorkflowEngine:
         """Stop the engine's own tasks and start no more; what was starting or unsettled stays for the next start."""
         self.closed = True
         tasks = [*self._admissions, *(task for st in self._runs.values() for task in st.tasks)]
+        holders = [st.worker_resources for st in self._runs.values() if st.worker_resources is not None]
         self._admissions.clear()
         self._runs.clear()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        for holder in holders:
+            with suppress(Exception):
+                await run_coroutine_until_complete(holder.release_parent())
 
     async def nest(self, child: WorkflowRun) -> None:
         """Show the nested run *child* in the run it is in, as a group under the call that started it.

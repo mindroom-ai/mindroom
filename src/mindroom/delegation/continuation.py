@@ -27,6 +27,7 @@ from mindroom.delegation.state import (
     SPENT_RUNS_KEY,
     interrupted_by_restart,
 )
+from mindroom.delegation.workers import validate_sandbox_child
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
 from mindroom.tool_jobs.runtime import waited_for_approval, waited_for_user
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.runs import RunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob, JobSpec, ToolJobRuntime
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 # How many of a job's continuations its saved adapter counts, so the count survives further restarts.
 _CONTINUATIONS_KEY = "restart_continuations"
@@ -89,19 +91,13 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     if isinstance(sent, str):
         return sent
     prompt, paused, run = sent
-    tools = config_plugins(config, runtime_paths).tools
-    refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
-    if refusal is not None:
-        return refusal
-    authorized = authorize_delegation(
-        owner.agent_name,
-        child.child_agent_name,
+    authorized = _authorize_continuation(
+        child,
         prompt,
+        owner=owner,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=owner,
         depth=job.depth,
-        grant=delegation_grant(child),
     )
     if isinstance(authorized, str):
         return authorized
@@ -164,6 +160,35 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
             receipts=receipts,
         )
     return spec
+
+
+def _authorize_continuation(
+    child: DelegationChild,
+    prompt: str,
+    *,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> Config | str:
+    tools = config_plugins(config, runtime_paths).tools
+    refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=depth)
+    if refusal is not None:
+        return refusal
+    authorized = authorize_delegation(
+        owner.agent_name,
+        child.child_agent_name,
+        prompt,
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=owner,
+        depth=depth,
+        grant=delegation_grant(child),
+    )
+    if isinstance(authorized, str):
+        return authorized
+    sandbox_refusal = validate_sandbox_child(child, authorized, runtime_paths, caller_name=owner.agent_name)
+    return sandbox_refusal if sandbox_refusal is not None else authorized
 
 
 def _record_continuation_adapter(

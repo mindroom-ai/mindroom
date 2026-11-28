@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from urllib.parse import quote
 
-from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.placements import DedicatedWorkerPlacement
 
 if TYPE_CHECKING:
@@ -236,7 +236,7 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
         worker_scope=cast("WorkerScope | None", scope),
         execution_identity=identity,
         private_agent_names=frozenset(cast("list[str]", names)) if names is not None else None,
-        placement=DedicatedWorkerPlacement(**cast("dict[str, Any]", placement)) if placement is not None else None,
+        placement=_load_stored_placement(cast("dict[str, object]", placement)) if placement is not None else None,
         **cast("dict[str, str | None]", strings),
     )
     agent = target.routing_agent_name
@@ -262,9 +262,26 @@ def load_worker_target(data: object) -> ResolvedWorkerTarget:
     return target
 
 
+# LEGACY_COMPAT: version 2 stored worker target placements without the "sandbox" key.
+# Legacy format: a placement dict with only {"subagent_id", "resource_profile"}.
+# Last legacy release: v2026.11.690; the release with this change writes {"subagent_id", "resource_profile", "sandbox"}.
+# Handling: load_worker_target accepts both 2-key and 3-key placement dicts, defaulting missing "sandbox" to None.
+# Coverage: tests/test_worker_target_storage.py::test_a_legacy_two_key_placement_loads_without_sandbox
+_LEGACY_STORED_PLACEMENT_KEYS = frozenset({"subagent_id", "resource_profile"})
+_STORED_PLACEMENT_KEYS = _LEGACY_STORED_PLACEMENT_KEYS | {"sandbox"}
+
+
+def _is_stored_sandbox(sandbox: object) -> bool:
+    try:
+        WorkerSandboxConfig.from_stored_dict(sandbox)
+    except ValueError:
+        return False
+    return True
+
+
 def _is_stored_placement(placement: object) -> bool:
     """Return whether ``placement`` is a placement ``dump_worker_target`` writes."""
-    if not isinstance(placement, dict) or set(placement) != {"subagent_id", "resource_profile"}:
+    if not isinstance(placement, dict) or set(placement) not in (_LEGACY_STORED_PLACEMENT_KEYS, _STORED_PLACEMENT_KEYS):
         return False
     fields = cast("dict[str, object]", placement)
     subagent_id, profile = fields["subagent_id"], fields["resource_profile"]
@@ -272,6 +289,15 @@ def _is_stored_placement(placement: object) -> bool:
         isinstance(subagent_id, str)
         and _PIN_ID_PATTERN.fullmatch(subagent_id) is not None
         and profile in (None, *SCRIPT_RESOURCE_PROFILE_NAMES)
+        and _is_stored_sandbox(fields.get("sandbox"))
+    )
+
+
+def _load_stored_placement(fields: dict[str, object]) -> DedicatedWorkerPlacement:
+    return DedicatedWorkerPlacement(
+        subagent_id=cast("str", fields["subagent_id"]),
+        resource_profile=cast("Any", fields["resource_profile"]),
+        sandbox=WorkerSandboxConfig.from_stored_dict(fields.get("sandbox")),
     )
 
 

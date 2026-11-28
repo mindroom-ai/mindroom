@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.skills import Skill
+    from mindroom.workers.models import WorkerSandboxConfig
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -56,7 +57,8 @@ class AgentSurface:
     minimal_instructions: tuple[str, ...] = ()
     interactive_prompt: str = ""
     skills: tuple[Skill, ...] = ()
-    output_file_policy: ToolOutputFilePolicy
+    output_file_policy: ToolOutputFilePolicy | None
+    worker_sandbox: WorkerSandboxConfig | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

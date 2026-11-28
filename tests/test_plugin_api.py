@@ -375,7 +375,8 @@ _SIGNATURES = {
         "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
         "runtime_config, tool_config_overrides, tool_init_overrides, runtime_overrides, "
         "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
-        "tool_output_auto_save_threshold_bytes, workspace_in_worker, in_sandbox_request, worker_target)"
+        "tool_output_auto_save_threshold_bytes, workspace_in_worker, in_sandbox_request, sandbox, worker_sandbox, "
+        "worker_target)"
     ),
     "get_tool_runtime_context": "()",
     "google_cloud_oauth_provider": "()",
@@ -732,7 +733,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 40), "55f2e4f3f4c599decb9f6eb16caf7a35b419360a3ecf0c26b6b58a7be0068494")
+_PINNED_VERSION = ((1, 41), "79559211cbbb031807af8ca946b30f2faee9b90943f9fe6d72c58de8a9a7b1f3")
 
 
 def _is_enum(obj: object) -> bool:

@@ -127,7 +127,7 @@ def agent_loop_hooks(
         job_definitions=jobs,
         # A delegated child cannot collect jobs; its caller hears when they end. A team member hears of its
         # own jobs too: the notice reaches only the member whose account posts an ad hoc team's replies.
-        job_notices_for=jobs.name if jobs is not None and jobs.depth == 0 else None,
+        job_notices_for=jobs.name if jobs is not None and jobs.depth == 0 and not jobs.inline_only else None,
         queued_notices=queued_notices,
         steering=steering,
         skill_review_capture=skill_review_capture,

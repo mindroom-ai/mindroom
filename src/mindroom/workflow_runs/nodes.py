@@ -22,7 +22,22 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStoreError,
 )
+from mindroom.tool_jobs.resources import ExecutionResources, bind_execution_resources, execution_resources
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.named import (
+    LockedWorkerSpec,
+    NamedWorkerError,
+    deserialize_sandbox_config,
+    named_worker_owner,
+    parse_named_worker_sandbox,
+    resolve_locked_worker_options,
+    resolve_named_worker_scope,
+    serialize_sandbox_config,
+    validate_effective_sandbox,
+    validate_named_worker_options,
+)
 from mindroom.workflow_runs.agent_nodes import (
+    AgentNodeError,
     delegated_request,
     dispatch_agent,
     load_follow_up_child,
@@ -40,12 +55,19 @@ from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     SERVED_RUN_STATES,
     DispatchHandle,
+    NodeReceipt,
     WorkflowNode,
     WorkflowNodeState,
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.peers import script_op, session_turn_message, valid_wait_seconds, withdraw_unread
+from mindroom.workflow_runs.peers import (
+    is_sandboxed_workflow_request,
+    script_op,
+    session_turn_message,
+    valid_wait_seconds,
+    withdraw_unread,
+)
 from mindroom.workflow_runs.replay import (
     CALLING_NODE,
     DIRTY_DIGEST,
@@ -66,7 +88,12 @@ from mindroom.workflow_runs.replay import (
     unless_proven,
 )
 from mindroom.workflow_runs.saved import WORKFLOWS_DIR, validate_workflow_name
-from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
+from mindroom.workflow_runs.store import (
+    SupersededAttemptError,
+    WorkflowRunNotFoundError,
+    WorkflowRunStoreError,
+    WorkflowRunWorker,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -74,9 +101,10 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
     from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.engine import WorkflowEngine
-    from mindroom.workflow_runs.models import NodeReceipt, NodeRequest
+    from mindroom.workflow_runs.models import NodeRequest
 
 _CHANGED_WITHOUT_EDIT = (
     "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
@@ -94,6 +122,18 @@ _NOT_ANSWERED = "The run ended before the question was answered."
 _RATE_WAIT_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
+_SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
+_SHELL_WORKER_KEYS = ("worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only")
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellExecutionPlan:
+    """Resolved worker-routing plan for one workflow shell call."""
+
+    arguments: dict[str, object]
+    owner_id: str | None = None
+    run_scoped: bool = False
+    prelocked: dict[str, LockedWorkerSpec] | None = None
 
 
 class _ReuseStamp(TypedDict, total=False):
@@ -350,21 +390,129 @@ async def _reuse_saved(
     return replace(receipt(saved), cached=action == "hit")
 
 
-def _new_call_error(
+def _has_shell_worker_options(arguments: Mapping[str, object]) -> bool:
+    return any(arguments.get(key) is not None for key in _SHELL_WORKER_KEYS)
+
+
+def _verify_locked_worker(
+    existing: WorkflowRunWorker,
+    *,
+    worker_name: str,
+    owner_scope: str,
+    profile: ScriptResourceProfileName | None,
+    sandbox_config: WorkerSandboxConfig | None,
+    sandbox_specified: bool,
+) -> LockedWorkerSpec:
+    locked_profile: ScriptResourceProfileName | None = None
+    if existing.resource_profile is not None:
+        if existing.resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
+            msg = f"Worker '{worker_name}' has a corrupted persisted resource_profile."
+            raise NamedWorkerError(msg)
+        locked_profile = existing.resource_profile
+    locked_sandbox = deserialize_sandbox_config(existing.sandbox_json)
+    if existing.owner_scope != owner_scope:
+        msg = f"Worker '{worker_name}' belongs to a different owner scope in this run."
+        raise NamedWorkerError(msg)
+    return resolve_locked_worker_options(
+        (locked_profile, locked_sandbox),
+        worker_name=worker_name,
+        resource_profile=profile,
+        sandbox=sandbox_config,
+        sandbox_specified=sandbox_specified,
+        scope="run",
+    )
+
+
+def _prepare_shell_worker(
+    engine: WorkflowEngine,
+    run: WorkflowRun,
+    node: WorkflowNode,
+    context: ToolRuntimeContext,
+    arguments: dict[str, object],
+    *,
+    commit: bool,
+) -> _ShellExecutionPlan | None:
+    """Validate and optionally lock one workflow shell call's worker/sandbox plan before broker dispatch."""
+    if not _has_shell_worker_options(arguments):
+        return None
+    worker, resource_profile = arguments.get("worker"), arguments.get("resource_profile")
+    runtime_paths, config = context.runtime_paths, context.current_config
+    sandbox_config, sandbox_specified = parse_named_worker_sandbox(
+        arguments.get("sandbox"),
+        arguments.get("mount_dir"),
+        arguments.get("mount_read_only"),
+        runtime_paths=runtime_paths,
+    )
+    if worker is None and sandbox_config is None:
+        if resource_profile is not None:
+            msg = "resource_profile requires worker, sandbox=True, or mount_dir."
+            raise NamedWorkerError(msg)
+        return _ShellExecutionPlan({k: v for k, v in arguments.items() if k not in ("sandbox", "mount_read_only")})
+
+    owner_scope, private_names = resolve_named_worker_scope(
+        context.agent_name,
+        config,
+        context.execution_identity,
+        runtime_paths,
+    )
+    worker_name, profile = validate_named_worker_options(worker, resource_profile, require_name=worker is not None)
+    if sandbox_config is not None:
+        validate_effective_sandbox(runtime_paths, config, owner_scope, private_names, sandbox_config, arguments)
+    if worker_name is None:
+        synthetic = f"wf-{hashlib.sha256(f'{node.run_id}:{node.key}:{node.generation}'.encode()).hexdigest()[:24]}"
+        return _ShellExecutionPlan(
+            {**arguments, "worker": synthetic},
+            f"workflow-call:{node.run_id}:{node.key}:{node.generation}",
+        )
+
+    persisted = engine.store.admit_run_worker(
+        run.run_id,
+        worker_name,
+        run.epoch,
+        owner_scope=owner_scope,
+        resource_profile=profile,
+        sandbox_json=serialize_sandbox_config(sandbox_config),
+        commit=commit,
+    )
+    if persisted is None:
+        locked_profile, locked_sandbox = profile, sandbox_config
+    else:
+        locked_profile, locked_sandbox = _verify_locked_worker(
+            persisted,
+            worker_name=worker_name,
+            owner_scope=owner_scope,
+            profile=profile,
+            sandbox_config=sandbox_config,
+            sandbox_specified=sandbox_specified,
+        )
+        if locked_sandbox != sandbox_config:
+            validate_effective_sandbox(runtime_paths, config, owner_scope, private_names, locked_sandbox, arguments)
+    return _ShellExecutionPlan(
+        arguments,
+        f"workflow:{node.run_id}",
+        True,
+        {worker_name: (locked_profile, locked_sandbox)},
+    )
+
+
+async def _new_call_error(
     engine: WorkflowEngine,
     run: WorkflowRun,
     node: WorkflowNode,
     grant: ScriptToolGrant | None,
+    arguments: dict[str, object],
     delegated: bool,
     turn_ctx: _TurnContext | None,
 ) -> dict[str, object] | None:
     """Return a terminal error dict if a new tool/agent/turn call is refused before dispatch, else None."""
+    authorized: ToolRuntimeContext | None = None
     if grant is not None:
         access = engine.authorize(run, grant)
         if access is None:
             raise ScriptRuntimeUnavailableError(OWNER_NOT_READY)
         if isinstance(access, str):
             return {"kind": "failed", "message": access}
+        authorized = access
     if delegated and grant is not None and grant.function_name != RUN_SUBAGENT:
         return {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
     if (
@@ -377,6 +525,11 @@ def _new_call_error(
         schema_src = {**turn_ctx.session.request, **node.request} if turn_ctx is not None else node.request
         if (bad_schema := schema_failure(schema_src)) is not None:
             return {"kind": "schema", "message": bad_schema}
+    if grant == _SHELL_COMMAND and authorized is not None and _has_shell_worker_options(arguments):
+        try:
+            await asyncio.to_thread(_prepare_shell_worker, engine, run, node, authorized, arguments, commit=False)
+        except (NamedWorkerError, WorkflowRunStoreError) as exc:
+            return {"kind": "failed", "message": str(exc)}
     return None
 
 
@@ -422,7 +575,7 @@ async def _dispatch_new(
         session_key=None if turn_ctx is None else turn_ctx.session.key,
         started_at=utc_timestamp(),
     )
-    if (error := _new_call_error(engine, run, node, grant, delegated, turn_ctx)) is not None:
+    if (error := await _new_call_error(engine, run, node, grant, arguments, delegated, turn_ctx)) is not None:
         failed = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=node.started_at)
         return receipt(await asyncio.to_thread(engine.store.put_node, failed, epoch, dirty_after=True))
     if saved is not None and shown in ("agent", "turn", "send"):
@@ -432,18 +585,18 @@ async def _dispatch_new(
             return await _ask_gate(engine, run, attempt, node, (grant, arguments))
         follow_up = None
         if turn_ctx is not None:
-            mail = partial(
-                session_turn_message,
-                engine.store,
-                run.run_id,
-                turn_ctx.session,
-                key,
-                generation,
-                str(asked_args["message"]),
+            prepared_turn = await _prepare_session_turn_node(
+                engine,
+                run,
+                node,
+                epoch,
+                turn_ctx=turn_ctx,
+                saved=saved,
+                asked_args=asked_args,
             )
-            turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
-            follow_up, prompt = await _prepare_turn(engine, run, turn_ctx, saved, turn_msg)
-            node = replace(node, request={**asked_args, "prompt": prompt, "effective_message": turn_msg})
+            if isinstance(prepared_turn, NodeReceipt):
+                return prepared_turn
+            follow_up, node = prepared_turn
         start = partial(dispatch_agent, engine, run, timeout=_timeout(meta), follow_up=follow_up)
         return await engine.enter(run, node, start)
     if grant is not None:
@@ -545,6 +698,42 @@ def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict
     return _TurnContext(session, in_attempt, earlier, prev, digest)
 
 
+async def _prepare_session_turn_node(
+    engine: WorkflowEngine,
+    run: WorkflowRun,
+    node: WorkflowNode,
+    epoch: int,
+    *,
+    turn_ctx: _TurnContext,
+    saved: WorkflowNode | None,
+    asked_args: dict[str, object],
+) -> tuple[DelegationChild | None, WorkflowNode] | NodeReceipt:
+    if is_sandboxed_workflow_request(turn_ctx.session.request):
+        turn_msg = str(asked_args["message"])
+    else:
+        mail = partial(
+            session_turn_message,
+            engine.store,
+            run.run_id,
+            turn_ctx.session,
+            node.key,
+            node.generation,
+            str(asked_args["message"]),
+        )
+        turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
+    try:
+        follow_up, prompt = await _prepare_turn(engine, run, turn_ctx, saved, turn_msg)
+    except AgentNodeError as exc:
+        failed = replace(
+            node,
+            state=WorkflowNodeState.FAILED,
+            error={"kind": "refused", "message": str(exc)},
+            ended_at=node.started_at,
+        )
+        return receipt(await asyncio.to_thread(engine.store.put_node, failed, epoch, dirty_after=True))
+    return follow_up, replace(node, request={**asked_args, "prompt": prompt, "effective_message": turn_msg})
+
+
 async def _prepare_turn(
     engine: WorkflowEngine,
     run: WorkflowRun,
@@ -579,9 +768,14 @@ async def _prepare_turn(
                 return child, message
     if not completed:
         return None, message
+    sandboxed_session = is_sandboxed_workflow_request(turn_ctx.session.request)
     history = [
         (
-            str(turn.request.get("effective_message") or turn.request["message"]),
+            str(
+                turn.request["message"]
+                if sandboxed_session
+                else (turn.request.get("effective_message") or turn.request["message"]),
+            ),
             res
             if isinstance(res := await asyncio.to_thread(engine.store.whole_result, turn), str)
             else json.dumps(res),
@@ -648,6 +842,42 @@ async def _dispatch_tool(
     without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
     the run's here, and the call's task keeps it.
     """
+    shell_plan: _ShellExecutionPlan | None = None
+    run_resources: ExecutionResources | None = None
+    if tool_call[0] == _SHELL_COMMAND and _has_shell_worker_options(tool_call[1]):
+        access = engine.authorize(run, tool_call[0])
+        if access is None:
+            raise ScriptRuntimeUnavailableError(OWNER_NOT_READY)
+        refusal_message: str | None = access if isinstance(access, str) else None
+        if refusal_message is None:
+            try:
+                shell_plan = await asyncio.to_thread(
+                    _prepare_shell_worker,
+                    engine,
+                    run,
+                    node,
+                    cast("ToolRuntimeContext", access),
+                    tool_call[1],
+                    commit=True,
+                )
+            except (NamedWorkerError, WorkflowRunStoreError) as exc:
+                refusal_message = str(exc)
+        if refusal_message is not None:
+            error: dict[str, object] = {"kind": "failed", "message": refusal_message}
+            settled = await engine.settle_node(
+                node,
+                run.epoch,
+                state=WorkflowNodeState.FAILED,
+                error=error,
+                dirty_after=same_as is not None,
+            )
+            if not settled and not node.seq:
+                refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
+                await asyncio.to_thread(engine.store.put_node, refused, run.epoch, dirty_after=True)
+            engine.drop_slot(run.run_id, node.key)
+            return receipt(cast("WorkflowNode", engine.store.get_node(run.run_id, node.key)))
+        if shell_plan is not None and shell_plan.run_scoped:
+            run_resources = engine.worker_resources(node.run_id)
     call_id = _broker_call_id(node)
     # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
     handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
@@ -657,7 +887,16 @@ async def _dispatch_tool(
         # The node that waited for its place has an end by now: its run ended.
         raise SupersededAttemptError(RUN_ENDED)
     node = saved
-    call = partial(_broker_outcome, engine, attempt, node, run.epoch, tool_call)
+    call = partial(
+        _broker_outcome,
+        engine,
+        attempt,
+        node,
+        run.epoch,
+        tool_call,
+        shell_plan=shell_plan,
+        run_resources=run_resources,
+    )
     # The call has its task before anything else may fail: a saved call nobody runs would never end.
     engine.spawn(run.run_id, _run_tool_node(engine, node, run.epoch, call))
     # A run that waited for a person works again from here.
@@ -673,25 +912,43 @@ async def _broker_outcome(
     tool_call: tuple[ScriptToolGrant, dict[str, object]],
     *,
     gate_only: bool = False,
+    shell_plan: _ShellExecutionPlan | None = None,
+    run_resources: ExecutionResources | None = None,
 ) -> Outcome:
     """Run one broker call for *node* within the rate limit and return its node outcome."""
     waits = partial(node_waits, engine, node, epoch, gate_only=gate_only)
+    broker_arguments = shell_plan.arguments if shell_plan is not None else tool_call[1]
     call = partial(
         engine.broker.execute_for_workflow,
         attempt,
         call_id=_broker_call_id(node),
         grant=tool_call[0],
-        arguments=tool_call[1],
+        arguments=broker_arguments,
         waits=waits,
         gate_only=gate_only,
     )
-    while True:
-        try:
-            return call_outcome(node, await call())
-        except ScriptCallRateLimitError:
-            await asyncio.sleep(_RATE_WAIT_SECONDS)
-        except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
-            return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+
+    async def _run() -> Outcome:
+        while True:
+            try:
+                return call_outcome(node, await call())
+            except ScriptCallRateLimitError:
+                await asyncio.sleep(_RATE_WAIT_SECONDS)
+            except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
+                return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+
+    if shell_plan is None or shell_plan.owner_id is None:
+        return await _run()
+    if shell_plan.run_scoped:
+        assert run_resources is not None
+        with (
+            bind_execution_resources(run_resources, response=True, jobs_enabled=False),
+            named_worker_owner(shell_plan.owner_id, prelocked=shell_plan.prelocked),
+        ):
+            return await _run()
+    async with execution_resources(response=True, jobs_enabled=False):
+        with named_worker_owner(shell_plan.owner_id):
+            return await _run()
 
 
 async def _run_tool_node(

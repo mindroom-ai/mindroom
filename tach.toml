@@ -3196,6 +3196,7 @@ expose = [
     "WorkflowRunNotFoundError",
     "WorkflowRunStore",
     "WorkflowRunStoreError",
+    "WorkflowRunWorker",
     "owned_run",
     "redact_json_text",
 ]
@@ -3338,6 +3339,7 @@ expose = [
     "all_messages",
     "all_state",
     "get_state",
+    "is_sandboxed_workflow_request",
     "list_peers",
     "message_edges",
     "peer_op_id",
@@ -3402,6 +3404,7 @@ expose = [
 path = "mindroom.workflow_runs.nodes"
 depends_on = [
     "mindroom.delegation.state",
+    "mindroom.tool_jobs.resources",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
@@ -3436,6 +3439,7 @@ expose = [
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
+    "mindroom.tool_jobs.resources",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
@@ -6528,6 +6532,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.matrix_rtc.call_manager"
 depends_on = [
+    "mindroom.config.calls",
     "mindroom.matrix_rtc.audio_process",
     "mindroom.matrix_rtc.call_backends",
     "mindroom.matrix.room_membership",
@@ -6562,6 +6567,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.config.calls",
     "mindroom.providers.registry",
     "mindroom.session_storage.agent_storage",
     "mindroom.agent_loop.build",
@@ -11485,6 +11491,8 @@ visibility = [
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.nodes",
 ]
 
 [[modules]]

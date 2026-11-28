@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-    from mindroom.workers.models import ScriptResourceProfileName
+    from mindroom.workers.models import ScriptResourceProfileName, WorkerSandboxConfig
 
 logger = get_logger(__name__)
 
@@ -195,6 +195,17 @@ async def reserve_child_turn(
     """Claim a turn and adopt an exact retained attempt if its parent snapshot is stale."""
     retained = await reserve_subagent_turn(child, owner=owner, runtime_paths=runtime_paths)
     if retained is not None:
+        if (
+            retained.dedicated_worker,
+            retained.worker_resource_profile,
+            retained.worker_sandbox,
+        ) != (
+            child.dedicated_worker,
+            child.worker_resource_profile,
+            child.worker_sandbox,
+        ):
+            msg = "Delegation worker placement no longer matches its retained session"
+            raise RuntimeError(msg)
         child.run_id = retained.run_id
         child.model_name = retained.model_name
 
@@ -788,6 +799,7 @@ def prepare_child_turn(
     persona: SubagentPersona | None,
     dedicated_worker: bool = False,
     worker_resource_profile: ScriptResourceProfileName | None = None,
+    worker_sandbox: WorkerSandboxConfig | None = None,
     parent_tool_call_id: str = "",
     parent_requirement_id: str = "",
     title: str = "",
@@ -807,7 +819,11 @@ def prepare_child_turn(
         identity = child_execution_identity(previous)
         subagent_id, previous_delegation_id = previous.subagent_id, previous.delegation_id
         model, agent_mode, persona = previous.requested_model_name, previous.agent_mode, previous.persona
-        dedicated_worker, worker_resource_profile = previous.dedicated_worker, previous.worker_resource_profile
+        dedicated_worker, worker_resource_profile, worker_sandbox = (
+            previous.dedicated_worker,
+            previous.worker_resource_profile,
+            previous.worker_sandbox,
+        )
         title = previous.title
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
@@ -842,6 +858,7 @@ def prepare_child_turn(
         persona=persona,
         dedicated_worker=dedicated_worker,
         worker_resource_profile=worker_resource_profile,
+        worker_sandbox=worker_sandbox,
     )
 
 

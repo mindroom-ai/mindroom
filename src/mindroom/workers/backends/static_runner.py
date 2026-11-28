@@ -82,6 +82,9 @@ class StaticSandboxRunnerBackend(WorkerBackendDefaults):
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
         """Resolve or create one worker handle for the shared sandbox runner."""
+        if spec.sandbox is not None:
+            msg = "Sandboxed workers require the kubernetes worker backend."
+            raise WorkerBackendError(msg)
         del progress_sink
         self.require_compatible_runner()
 

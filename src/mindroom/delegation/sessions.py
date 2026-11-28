@@ -35,6 +35,10 @@ SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
 class SubagentSessionError(ValueError):
     """A handle cannot be used by this caller or already owns another turn."""
 
+    def __init__(self, message: str, *, unavailable: bool = True) -> None:
+        super().__init__(message)
+        self.unavailable = unavailable
+
 
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
     if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
@@ -121,10 +125,10 @@ async def load_subagent(
         raise SubagentSessionError(_UNAVAILABLE)
     if any(name not in config.agents for name in child.storage_bindings):
         msg = "Subagent target or caller is no longer configured."
-        raise SubagentSessionError(msg)
+        raise SubagentSessionError(msg, unavailable=False)
     if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
         msg = "Subagent storage scope changed; start a new subagent."
-        raise SubagentSessionError(msg)
+        raise SubagentSessionError(msg, unavailable=False)
     return child
 
 
@@ -191,13 +195,29 @@ async def reserve_subagent_turn(
         with advisory_file_lock(path.with_suffix(".lock")):
             if path.exists():
                 previous = _read(path, owner)
+                expected_worker = (
+                    previous.dedicated_worker,
+                    previous.worker_resource_profile,
+                    previous.worker_sandbox,
+                )
+                actual_worker = (
+                    child.dedicated_worker,
+                    child.worker_resource_profile,
+                    child.worker_sandbox,
+                )
                 if previous.delegation_id == child.delegation_id:
+                    if actual_worker != expected_worker:
+                        msg = "Delegation worker placement no longer matches its retained session"
+                        raise RuntimeError(msg)
                     return previous
                 if previous.status not in TERMINAL_CHILD_STATUSES:
                     raise SubagentSessionError(SUBAGENT_BUSY)
                 if child.previous_delegation_id != previous.delegation_id:
                     msg = "Subagent changed since this follow-up was prepared; retry the follow-up."
                     raise SubagentSessionError(msg)
+                if actual_worker != expected_worker:
+                    msg = "Delegation worker placement no longer matches its retained session"
+                    raise RuntimeError(msg)
             elif child.previous_delegation_id is not None:
                 raise SubagentSessionError(_UNAVAILABLE)
             write_json_file_durable(path, {"owner": _owner(owner), "child": asdict(child)}, strict_atomic_replace=True)

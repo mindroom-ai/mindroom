@@ -1820,7 +1820,7 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             ]:
                 with pytest.raises(
                     NamedWorkerError,
-                    match="mindroom_output_path is not supported in a sandboxed named worker",
+                    match="mindroom_output_path is not supported in a sandboxed worker",
                 ):
                     await call_shell("ls", worker=bad_worker, mindroom_output_path="out.txt", **bad_kwargs)
             assert len(backend.specs) == specs_before
@@ -1832,7 +1832,7 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             # Call 3: follow-up omitting mount_read_only still refuses mindroom_output_path.
             with pytest.raises(
                 NamedWorkerError,
-                match="mindroom_output_path is not supported in a sandboxed named worker",
+                match="mindroom_output_path is not supported in a sandboxed worker",
             ):
                 await call_shell("ls", worker="sbx-dir", mindroom_output_path="out.txt")
 
@@ -1841,7 +1841,7 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             await call_shell("pwd", worker="sbx-empty")
             with pytest.raises(
                 NamedWorkerError,
-                match="mindroom_output_path is not supported in a sandboxed named worker",
+                match="mindroom_output_path is not supported in a sandboxed worker",
             ):
                 await call_shell("pwd", worker="sbx-empty", mindroom_output_path="out.txt")
 
@@ -2025,7 +2025,7 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
             # Explicit mindroom_output_path is refused even on a writable mount_dir follow-up.
             with pytest.raises(
                 NamedWorkerError,
-                match="mindroom_output_path is not supported in a sandboxed named worker",
+                match="mindroom_output_path is not supported in a sandboxed worker",
             ):
                 await call_shell("echo done", worker="sbx-rw", mindroom_output_path="reports/out.txt")
             # Follow-up omitting mount_dir still translates auto-saved receipt paths using the admitted sandbox.

@@ -74,6 +74,18 @@ class UsageSummary:
     turn_costs: list[float]
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowRunWorker:
+    """Immutable persisted spec of one named shell worker admitted for a workflow run."""
+
+    run_id: str
+    worker_name: str
+    owner_scope: str
+    resource_profile: str | None
+    sandbox_json: str | None
+    created_at: str
+
+
 class WorkflowRunStoreError(ValueError):
     """Raised when durable workflow state cannot be used safely."""
 
@@ -551,6 +563,42 @@ class WorkflowRunStore:
             ).fetchone()
         return bytes(row["source"]), str(row["sha256"])
 
+    def admit_run_worker(
+        self,
+        run_id: str,
+        worker_name: str,
+        epoch: int,
+        *,
+        owner_scope: str,
+        resource_profile: str | None,
+        sandbox_json: str | None,
+        commit: bool = True,
+    ) -> WorkflowRunWorker | None:
+        """Read *worker_name*'s persisted lock, or atomically insert it if absent and *commit* is True."""
+        if not commit:
+            with self.read_connection() as connection:
+                return _select_run_worker(connection, run_id, worker_name)
+        with self.write_transaction() as connection:
+            _fenced(connection, run_id, epoch)
+            existing = _select_run_worker(connection, run_id, worker_name)
+            if existing is not None:
+                return existing
+            created = WorkflowRunWorker(
+                run_id,
+                worker_name,
+                owner_scope,
+                resource_profile,
+                sandbox_json,
+                utc_timestamp(),
+            )
+            connection.execute(
+                "INSERT INTO workflow_run_workers "
+                "(run_id, worker_name, owner_scope, resource_profile, sandbox_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (created.run_id, created.worker_name, owner_scope, resource_profile, sandbox_json, created.created_at),
+            )
+            return created
+
     def prune(self, finished_before: str, held: Collection[str] | None = ()) -> int:
         """Delete finished runs that ended before *finished_before*, with all they own; return how many.
 
@@ -929,7 +977,28 @@ _SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, op_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_run_workers (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        worker_name TEXT NOT NULL,
+        owner_scope TEXT NOT NULL,
+        resource_profile TEXT,
+        sandbox_json TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, worker_name)
+    )
+    """,
 )
+
+
+def _select_run_worker(connection: sqlite3.Connection, run_id: str, worker_name: str) -> WorkflowRunWorker | None:
+    row = connection.execute(
+        "SELECT run_id, worker_name, owner_scope, resource_profile, sandbox_json, created_at "
+        "FROM workflow_run_workers WHERE run_id = ? AND worker_name = ?",
+        (run_id, worker_name),
+    ).fetchone()
+    return None if row is None else WorkflowRunWorker(*row)
+
 
 # What a light read takes in place of the columns that can be megabytes: of a request, the operation of a group.
 _LIGHT = {

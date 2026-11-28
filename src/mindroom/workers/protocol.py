@@ -36,9 +36,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 # 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
 # 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
 # 13: ExecuteResponse carries `is_error` and `counts_as_tool_failure` so failed tool outcomes cross the worker boundary without raising.
+# 14: sandbox requests confine runner-side filesystem tools to file_access="workspace" with no shared directory roots.
 # A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
 # `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 13
+WORKER_PROTOCOL_VERSION = 14
 
 FailureKind = Literal["tool", "worker"]
 

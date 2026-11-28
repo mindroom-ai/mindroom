@@ -94,13 +94,15 @@ class JobActor:
     ``name`` is the agent the calls run as, or the team; ``team`` says a team's run saves them; ``depth`` is the
     actor's delegation depth. ``tools`` holds each function a MindRoom-assembled toolkit offers the actor, by name;
     the knowledge search, skill, and team delegation functions MindRoom adds beside those toolkits always run in its
-    reply.
+    reply. ``inline_only`` keeps every admitted call inline without offering ``background_after`` or detaching into a
+    background job (as for a sandboxed agent without ``JobTools``), while retaining per-call authorization checks.
     """
 
     name: str
     team: bool
     depth: int
     tools: Mapping[str, JobTool]
+    inline_only: bool = False
 
 
 class _JobCallError(Exception):
@@ -151,10 +153,17 @@ def _is_background_job_excluded(tool: JobTool, context: ToolRuntimeContext) -> b
     )
 
 
-def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> ToolWaitMode:
+def wait_mode(
+    tool: JobTool,
+    *,
+    depth: int,
+    context: ToolRuntimeContext,
+    inline_only: bool = False,
+) -> ToolWaitMode:
     """Classify one call from current policy: run it unchanged, run it here, or let it become a managed job.
 
     ``context`` is the turn's tool context, whose configuration decides whether the call's toolkit is excluded.
+    ``inline_only`` forces calls that could otherwise become managed jobs to stay inline.
     """
     if (
         isinstance(tool.toolkit, JobTools | WorkflowPeerTools)
@@ -165,7 +174,7 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.
-    if job_owns_execution() or depth > 0 or tool.function.controls_run or cli_dispatch_active():
+    if inline_only or job_owns_execution() or depth > 0 or tool.function.controls_run or cli_dispatch_active():
         return "inline"
     return "managed"
 
@@ -237,12 +246,12 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
     Each request projects them, and preparation sizes the reply's first request with them.
     """
     scope = _job_scope()
-    if scope is None:
+    if scope is None or actor.inline_only:
         return tuple(definitions)
     managed = {
         name: _default_wait(tool.function)
         for name, tool in actor.tools.items()
-        if wait_mode(tool, depth=actor.depth, context=scope.context) == "managed"
+        if wait_mode(tool, depth=actor.depth, context=scope.context, inline_only=actor.inline_only) == "managed"
         and tool.function.offer_background_after
     }
     return project_definitions(definitions, managed)
@@ -297,10 +306,10 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         job_checkpoint()
         check_current_execution_authority()
         return await _run_here(call_next, call.arguments, unassembled=job_call is None)
-    mode = wait_mode(job_call.tool, depth=actor.depth, context=scope.context)
+    mode = wait_mode(job_call.tool, depth=actor.depth, context=scope.context, inline_only=actor.inline_only)
     if job_approval and mode != "managed":
         raise ValueError(_UNASKABLE)
-    background_after = _wait_budget(call, mode=mode, depth=actor.depth)
+    background_after = _wait_budget(call, mode=mode, depth=actor.depth, inline_only=actor.inline_only)
     owner = scope.context.execution_identity
     job_checkpoint()
     with authorized_tool_call(owner, job_call):
@@ -321,7 +330,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
     )
 
 
-def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | None:
+def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int, inline_only: bool = False) -> float | None:
     """Return how long the caller waits for this call's job, or raise ValueError for an unusable budget."""
     background_after = None
     if mode != "native":
@@ -331,7 +340,10 @@ def _wait_budget(call: ToolCall, *, mode: ToolWaitMode, depth: int) -> float | N
                 "Rename it or add its toolkit to background_tool_jobs.exclude_toolkits."
             )
             raise ValueError(msg)
-        background_after = read_background_after(call.arguments, owned_execution=job_owns_execution() or depth > 0)
+        background_after = read_background_after(
+            call.arguments,
+            owned_execution=inline_only or job_owns_execution() or depth > 0,
+        )
     if call.function.controls_run and background_after is not None:
         msg = f"{BACKGROUND_AFTER} is not supported for tools that can stop the current model step"
         raise ValueError(msg)

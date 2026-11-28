@@ -1129,6 +1129,7 @@ def _resolve_entrypoint(
             ),
             tool_output_workspace_root=tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
+            sandbox=sandbox,
             worker_target=worker_target,
         )
     except (ToolConfigOverrideError, ToolInitOverrideError) as exc:
@@ -1236,7 +1237,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
     output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
     if request.sandbox and output_path is not None:
         msg = (
-            "mindroom_output_path is not supported in a sandboxed named worker; "
+            "mindroom_output_path is not supported in a sandboxed worker; "
             "write to a file inside mount_dir or capture stdout directly."
         )
         raise sandbox_worker_prep.WorkerRequestPreparationError(msg)

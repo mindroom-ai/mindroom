@@ -340,8 +340,14 @@ async def authorize_prepared_tool_call(
     ):
         msg = "Generated CLI function no longer belongs to its prepared Agent"
         raise PermissionError(msg)
+    current_worker_target = context.resolve_worker_target()
+    sandbox_placement_changed = (
+        (expected_worker_target.placement is not None and expected_worker_target.placement.sandbox is not None)
+        or (current_worker_target.placement is not None and current_worker_target.placement.sandbox is not None)
+    ) and current_worker_target.placement != expected_worker_target.placement
     if (
-        context.resolve_worker_target() != expected_worker_target
+        current_worker_target != expected_worker_target
+        or sandbox_placement_changed
         or not is_sender_allowed_for_entity_replies_in_room(
             context.requester_id,
             (context.agent_name,),

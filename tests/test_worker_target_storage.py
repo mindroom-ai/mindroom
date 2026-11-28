@@ -14,6 +14,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.plugin_api import ResolvedWorkerTarget, dump_worker_target, load_worker_target
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.workers.models import WorkerSandboxConfig
 from mindroom.workers.placements import DedicatedWorkerPlacement
 from tests.conftest import bind_runtime_paths
 
@@ -77,6 +78,36 @@ def test_a_version_1_target_loads_without_a_placement(tmp_path: Path) -> None:
     assert (loaded, loaded.placement) == (_target(tmp_path, _AGENTS["private per user and agent"]), None)
 
 
+def test_a_legacy_two_key_placement_loads_without_sandbox(tmp_path: Path) -> None:
+    """A v2026.11.690 placement dict with only subagent_id and resource_profile loads with sandbox=None."""
+    stored = _placement(_stored(tmp_path), resource_profile="small")
+
+    loaded = load_worker_target(stored)
+
+    assert loaded.placement == DedicatedWorkerPlacement("c" * 32, "small", None)
+
+
+@pytest.mark.parametrize(
+    "sandbox",
+    [
+        WorkerSandboxConfig(mount_dir=None, mount_read_only=False),
+        WorkerSandboxConfig(mount_dir="repo/app", mount_read_only=False),
+        WorkerSandboxConfig(mount_dir="repo/app", mount_read_only=True),
+    ],
+    ids=["scratch", "mount-rw", "mount-ro"],
+)
+def test_a_sandboxed_placement_round_trips_through_json(tmp_path: Path, sandbox: WorkerSandboxConfig) -> None:
+    """Sandboxed placement (scratch, mount RW, mount RO) survives dump/load without losing mount flags."""
+    target = replace(
+        _target(tmp_path, _AGENTS["private per user and agent"]),
+        placement=DedicatedWorkerPlacement("c" * 32, "standard", sandbox),
+    )
+
+    loaded = load_worker_target(_through_json(target))
+
+    assert (loaded, loaded.placement) == (target, target.placement)
+
+
 def _through_json(target: ResolvedWorkerTarget) -> dict[str, Any]:
     return json.loads(json.dumps(dump_worker_target(target)))
 
@@ -117,6 +148,19 @@ _MALFORMED: dict[str, Callable[[dict[str, Any]], object]] = {
     "a subagent ID that is not one": lambda stored: _placement(stored, subagent_id="C" * 32),
     "an unknown resource profile": lambda stored: _placement(stored, resource_profile="huge"),
     "a list for the resource profile": lambda stored: _placement(stored, resource_profile=["large"]),
+    "a malformed sandbox object": lambda stored: _placement(stored, sandbox="yes"),
+    "a sandbox with unknown field": lambda stored: _placement(
+        stored,
+        sandbox={"mount_dir": None, "mount_read_only": False, "extra": True},
+    ),
+    "a read-only sandbox without mount_dir": lambda stored: _placement(
+        stored,
+        sandbox={"mount_dir": None, "mount_read_only": True},
+    ),
+    "a sandbox with non-bool mount_read_only": lambda stored: _placement(
+        stored,
+        sandbox={"mount_dir": "repo", "mount_read_only": 1},
+    ),
     # A worker key that is not the one its scope, agent, and identity resolve to, here another person's worker.
     "another person's worker key": lambda stored: {
         **stored,

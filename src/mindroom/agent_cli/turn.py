@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -174,9 +174,10 @@ class LiveTurnTools(TurnToolBridge):
         catalog: PreparedAgentToolCatalog,
         authorize: Callable[[LiveTurnTools, ToolKey | str, dict[str, object]], Awaitable[None]],
         context: Mapping[str, str],
-        output_file_policy: ToolOutputFilePolicy,
+        output_file_policy: ToolOutputFilePolicy | None,
         delegation_depth: int,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
+        sandbox_only: bool = False,
         run_child: ChildResponseRunner | None = None,
     ) -> None:
         if owner.execution_identity != catalog.runtime_context.execution_identity:
@@ -185,8 +186,9 @@ class LiveTurnTools(TurnToolBridge):
         super().__init__(owner)
         self.catalog = catalog
         self.checkpoint = BatchCheckpoint(catalog)
-        # Set once the response's grant exists, before any Bash call.
+        # Set once the response's grant exists, before any Bash call (remains None when sandbox_only=True).
         self.shell_env: AgentCliShellEnv | None = None
+        self._sandbox_only = sandbox_only
         # Called with this owner, so it holds no reference back to it: that would be a reference cycle, which keeps
         # the turn's whole tool catalog until the cyclic garbage collector runs.
         self._authorize = authorize
@@ -725,11 +727,16 @@ class LiveTurnTools(TurnToolBridge):
     ) -> object:
         """Run the agent's own shell function, wherever it runs, with the CLI environment of ``window``."""
         self._check_live()
-        if self.shell_env is None:
+        if self.shell_env is None and not self._sandbox_only:
             msg = "Minimal Bash has no CLI environment"
             raise RuntimeError(msg)
         entrypoint = binding.function.entrypoint
-        with bound_agent_cli_shell_env(self.shell_env, window=window):
+        env_ctx = (
+            nullcontext()
+            if self._sandbox_only and self.shell_env is None
+            else bound_agent_cli_shell_env(cast("AgentCliShellEnv", self.shell_env), window=window)
+        )
+        with env_ctx:
             if inspect.iscoroutinefunction(entrypoint):
                 return await entrypoint(**arguments)
             # Sync calls must finish before the owning operation's lifetime ends.

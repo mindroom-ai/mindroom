@@ -21,12 +21,23 @@ def minimal_system_message(
     memory_root: Path | None = None,
     runtime_context: str = "",
     named_workers: bool = False,
+    sandbox_note: str | None = None,
 ) -> str:
     """Identify the same agent's workspace, memory, and discoverable CLI tools.
 
     An authored subagent's ``identity`` replaces the agent's own identity line. ``named_workers`` says the agent's
-    shell commands may run in workers it names, which Bash reaches only through the CLI.
+    shell commands may run in workers it names, which Bash reaches only through the CLI. When ``sandbox_note`` is
+    set, only the identity (or neutral sandbox role) and ``sandbox_note`` are rendered.
     """
+    if sandbox_note is not None:
+        return "\n".join(
+            part.strip()
+            for part in [
+                identity if identity is not None else "You are a sandboxed subagent running in minimal mode.",
+                sandbox_note,
+            ]
+            if part.strip()
+        )
     names = sorted(set(toolkit_names))
     roster = "Toolkits callable through mindroom-agent: " + ", ".join(names)
     if len(roster) > 2000:

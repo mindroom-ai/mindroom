@@ -17,13 +17,22 @@ from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_tu
 from mindroom.delegation.personas import list_profiles, render_profile_listing
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
-from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
-from mindroom.delegation.workers import dedicated_worker_refusal, resource_profiles_available
+from mindroom.delegation.targets import minimal_mode_refusal, resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.workers import (
+    dedicated_worker_refusal,
+    resource_profiles_available,
+    sandbox_workers_available,
+    validate_sandbox_target,
+)
 from mindroom.tool_jobs.runtime import ManagedJobToolkit, get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import current_budget_monitor, current_execution_identity
+from mindroom.tool_system.runtime_context import (
+    current_budget_monitor,
+    current_execution_identity,
+    get_tool_runtime_context,
+)
 from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
@@ -93,6 +102,10 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             dedicated_worker_refusal(agent_name, config, runtime_paths, resource_profile=None) is None
         )
         self._resource_profiles = self._dedicated_workers and resource_profiles_available(runtime_paths)
+        self._sandbox_workers = sandbox_workers_available(agent_name, config, runtime_paths)
+        self._minimal_sandbox = (
+            self._sandbox_workers and execution_identity is not None and execution_identity.channel == "matrix"
+        )
 
         super().__init__(
             name="delegate",
@@ -100,15 +113,19 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             tools=[self.run_subagent, self.continue_subagent],
         )
 
+    def _offers_minimal(self) -> bool:
+        return bool(self._minimal_targets or self._minimal_sandbox)
+
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Describe ``run_subagent`` with this caller's targets, offering no option the caller cannot use."""
         if function.name != RUN_SUBAGENT:
             return function
         hidden = {
-            *(() if self._minimal_targets else ("minimal",)),
+            *(() if self._offers_minimal() else ("minimal",)),
             *(() if self._authoring else ("system_prompt", "tools", "skills", "knowledge", "profile")),
             *(() if self._dedicated_workers else ("dedicated_worker",)),
             *(() if self._resource_profiles else ("resource_profile",)),
+            *(() if self._sandbox_workers else ("sandbox", "mount_dir", "mount_read_only")),
         }
         description = self._build_run_subagent_description()
         properties = {name: value for name, value in function.parameters["properties"].items() if name not in hidden}
@@ -193,11 +210,19 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         if not self._dedicated_workers:
             return ""
         profiles = " Set resource_profile (small/standard/large) to size it." if self._resource_profiles else ""
+        minimal_sandbox = " (or Bash-only with minimal=true)" if self._offers_minimal() else ""
+        sandbox = (
+            " Set sandbox=true (or mount_dir with optional mount_read_only=true on a self-copy) to isolate the child "
+            f"with only shell/filesystem{minimal_sandbox}, no credentials, memory, skills, knowledge, "
+            "or workspace outside mount_dir."
+            if self._sandbox_workers
+            else ""
+        )
         return (
             "Dedicated worker: set dedicated_worker=true to run shell/file/python/worker tools in an isolated worker "
             "(avoids sharing with you or sibling subagents; same workspace; first call waits for startup; excludes "
-            f"packages installed in the shared worker).{profiles} Follow-ups reuse it until idle-timeout expiry, "
-            "then start a clean one.\n"
+            f"packages installed in the shared worker).{profiles}{sandbox} Follow-ups reuse it until idle-timeout "
+            "expiry, then start a clean one.\n"
         )
 
     def _authoring_guidance(self) -> str:
@@ -229,28 +254,37 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         skills: list[str] | None = None,
         knowledge: list[str] | None = None,
         profile: str | None = None,
-        dedicated_worker: bool = False,
+        dedicated_worker: bool | None = None,
         resource_profile: ScriptResourceProfileName | None = None,
+        sandbox: bool | None = None,
+        mount_dir: str | None = None,
+        mount_read_only: bool | None = None,
         *,
         title: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
         The runtime-generated tool description lists caller-specific allowed
-        targets, model guidance, and subagents that support minimal mode.
+        targets, model guidance, and subagents that support minimal mode. Passing
+        ``mindroom_output_path`` writes the returned text answer in the caller's
+        own workspace on the primary (in-sandbox tool output redirection remains
+        disabled).
 
         Args:
             task: Self-contained task with context, constraints, and expected output.
             agent_name: Allowed subagent name (omit/null selects yourself if allowed).
             model: Model name or name@level override (omit/null for default).
-            minimal: Run in token-efficient minimal mode (only for listed subagents).
+            minimal: Run in token-efficient minimal mode (or Bash-only with sandbox=true).
             system_prompt: Custom prompt replacing your role/instructions on a self-copy.
             tools: Subset of your toolkits or toolkit.function entries (omit to keep all).
             skills: Subset of your skills (omit keeps all only if tools is also omitted).
             knowledge: Subset of your knowledge base IDs (omit keeps all only if tools is also omitted).
             profile: Saved workspace subagents/<name>.md profile (mutually exclusive with system_prompt/tools/skills/knowledge).
-            dedicated_worker: Run worker tools in an isolated worker for parallel/heavy work.
+            dedicated_worker: Run worker tools in an isolated worker for parallel/heavy work (implied by sandbox).
             resource_profile: Worker size: small, standard, or large (omit for default).
+            sandbox: Run in an isolated Kubernetes sandbox pod with only shell/filesystem and no credentials, memory, skills, or knowledge.
+            mount_dir: Workspace-relative subdirectory to mount into the sandbox (self-copy only; implies sandbox=true).
+            mount_read_only: Mount mount_dir read-only (requires mount_dir).
             title: 3-6 word task title shown to observers.
 
         Returns:
@@ -272,6 +306,9 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
                 "profile": profile,
                 "dedicated_worker": dedicated_worker,
                 "resource_profile": resource_profile,
+                "sandbox": sandbox,
+                "mount_dir": mount_dir,
+                "mount_read_only": mount_read_only,
             },
         )
 
@@ -375,13 +412,33 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         )
         if isinstance(config, str):
             return config
+        owner = self._caller_identity()
+        effective_mode = target.previous_child.agent_mode if target.previous_child is not None else target.agent_mode
+        minimal_refusal = minimal_mode_refusal(
+            effective_mode,
+            execution_identity=owner,
+            runtime_context=get_tool_runtime_context(),
+        )
+        if minimal_refusal is not None:
+            return minimal_refusal
+        sandbox_refusal = validate_sandbox_target(
+            caller_name=self._agent_name,
+            target=target,
+            previous_child=target.previous_child,
+            owner=owner,
+            config=config,
+            runtime_paths=self._runtime_paths,
+            delegation_depth=self._delegation_depth,
+        )
+        if sandbox_refusal is not None:
+            return sandbox_refusal
         # The parent's run and tool call are the framework's, never the model's arguments.
         parent = current_tool_call()
         child = prepare_child_turn(
             self._agent_name,
             target.agent_name,
             target.task,
-            owner=self._caller_identity(),
+            owner=owner,
             config=config,
             runtime_paths=self._runtime_paths,
             depth=self._delegation_depth,
@@ -394,6 +451,7 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,
+            worker_sandbox=target.sandbox,
         )
         return child, config, parent.context.run_id if parent is not None else None
 
