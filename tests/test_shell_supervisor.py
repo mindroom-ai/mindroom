@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import sys
@@ -66,6 +67,8 @@ _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
         ({"state": "exited", "exit_code": True, "message": "bool exit code"}, "error", None),
         ({"state": "running", "exit_code": 0, "message": "unexpected exit code"}, "error", None),
         ({"state": "mystery", "exit_code": None, "message": "bogus"}, "error", None),
+        ({"state": [], "exit_code": None, "message": "list state"}, "error", None),
+        ({"state": {}, "exit_code": None, "message": "dict state"}, "error", None),
         ({"message": "Error: Invalid shell supervisor request: bad"}, "error", None),
     ],
 )
@@ -89,6 +92,8 @@ def test_supervisor_status_wire_parser_fails_closed(
         ({"outcome": "unknown", "message": "Error: Unknown handle 'shell:missing'"}, "unknown"),
         ({"outcome": "error", "message": "Error: boom"}, "error"),
         ({"outcome": "bogus", "message": "unexpected"}, "error"),
+        ({"outcome": {}, "message": "dict outcome"}, "error"),
+        ({"outcome": [], "message": "list outcome"}, "error"),
         ({"message": "Error: Invalid shell supervisor request: bad"}, "error"),
     ],
 )
@@ -511,13 +516,16 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
         "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(0.01)\n"
     )
     async with _running_server(registry) as socket_path:
-        result = await _run(
+        spawned = await spawn_background_via_supervisor(
             socket_path,
-            [sys.executable, "-c", script, str(child_path), str(release_path)],
-            timeout=0,
+            namespace="ns",
+            argv=[sys.executable, "-c", script, str(child_path), str(release_path)],
+            env=_MINIMAL_ENV,
+            cwd=None,
             max_runtime_seconds=3,
         )
-        handle = _extract_handle(result)
+        assert spawned.handle is not None
+        handle = spawned.handle
         try:
             # The leader creates the pid file before writing it, so wait for its content.
             for _ in range(100):
@@ -1175,8 +1183,15 @@ async def test_finished_script_kills_same_group_descendants(
         ")\n"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
     )
-    result = await _run(socket_path, [sys.executable, "-c", script, str(child_pid_path)], timeout=0)
-    handle = _extract_handle(result)
+    spawned = await spawn_background_via_supervisor(
+        socket_path,
+        namespace="ns",
+        argv=[sys.executable, "-c", script, str(child_pid_path)],
+        env=_MINIMAL_ENV,
+        cwd=None,
+    )
+    assert spawned.handle is not None
+    handle = spawned.handle
     child_pid: int | None = None
     try:
         for _ in range(40):
@@ -1689,3 +1704,49 @@ def test_shell_run_result_failed_and_supervisor_flags_round_trip() -> None:
         json.dumps({**base, "return_code": -15, "timed_out": True, "background_rejected": True}).encode(),
     )
     assert (flagged.timed_out, flagged.background_rejected, flagged.failed) == (True, True, True)
+
+
+@pytest.mark.asyncio
+async def test_run_command_via_supervisor_inline_default_preserves_nohup_child(tmp_path: Path) -> None:
+    """Inline run_command_via_supervisor with default background_log=None preserves detached nohup children on exit 0."""
+    registry = ProcessRegistry()
+    pid_file = tmp_path / "nohup.pid"
+    nohup_pid: int | None = None
+    try:
+        async with _running_server(registry) as socket_path:
+            result = await run_command_via_supervisor(
+                socket_path,
+                namespace="ns",
+                argv=[
+                    "bash",
+                    "-c",
+                    f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; exit 0",
+                ],
+                env=_MINIMAL_ENV,
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=5.0,
+            )
+            assert result.handle is None
+            assert result.return_code == 0
+            nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            os.kill(nohup_pid, 0)
+    finally:
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
+        registry.kill_all()
+
+
+@pytest.mark.parametrize("bad_value", ["true", 1, [], {}])
+def test_parse_launch_payload_rejects_non_bool_kill_group_after_exit(bad_value: object) -> None:
+    """_parse_launch_payload validates kill_group_after_exit when present and rejects non-bool values."""
+    with pytest.raises(TypeError, match="kill_group_after_exit"):
+        shell_supervisor._parse_launch_payload(
+            {
+                "argv": ["true"],
+                "env": {},
+                "tail": 10,
+                "kill_group_after_exit": bad_value,
+            },
+        )

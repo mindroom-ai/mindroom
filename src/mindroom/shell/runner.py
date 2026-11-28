@@ -198,7 +198,7 @@ class ActiveCommand:
                 await self.managed.wait_exit(timeout_seconds=timeout, on_poll=on_poll)
             except TimeoutError:
                 return True
-            if self.kill_group_after_exit:
+            if self.kill_group_after_exit or self.managed.returncode != 0:
                 self.managed.kill_tree()
             await self._drain_readers()
         except asyncio.CancelledError:
@@ -301,7 +301,7 @@ async def run_foreground(
     """Run one shell command in the foreground with zero background registry state.
 
     When the command exceeds ``timeout`` seconds, the process tree is terminated and partial output is returned.
-    With ``kill_group_after_exit=False``, intentionally detached ``nohup`` children survive natural exit.
+    With ``kill_group_after_exit=False``, intentionally detached ``nohup`` children survive clean exit (code 0).
     """
     started = await ActiveCommand.start(
         argv=argv,

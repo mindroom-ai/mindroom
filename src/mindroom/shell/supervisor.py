@@ -140,7 +140,7 @@ async def _handle_launch(
     common, handle, kill_group_payload = _parse_launch_payload(payload)
     background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
     max_runtime_seconds = _parse_max_runtime_seconds(payload.get("max_runtime_seconds"))
-    kill_group_after_exit = kill_group_payload if kill_group_payload is not None else background_log is None
+    kill_group_after_exit = immediate if kill_group_payload is None else kill_group_payload
 
     bg_kwargs: dict[str, Any] = {
         **common,
@@ -168,7 +168,7 @@ async def _handle_launch(
             coro = run_foreground(
                 timeout=response_timeout,
                 on_progress=on_progress,
-                kill_group_after_exit=bool(kill_group_payload) if kill_group_payload is not None else False,
+                kill_group_after_exit=kill_group_after_exit,
                 **common,
             )
         else:
@@ -345,6 +345,7 @@ async def run_command_via_supervisor(
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
     background_log: BackgroundLogPolicy | None = None,
+    kill_group_after_exit: bool = False,
     launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command through the supervisor, preserving execution and output-file ownership."""
@@ -358,6 +359,7 @@ async def run_command_via_supervisor(
             "tail": tail,
             "timeout": timeout,
             "on_timeout": on_timeout,
+            "kill_group_after_exit": kill_group_after_exit,
             "launch_failure_exits": launch_failure_exits,
         },
         {
@@ -389,11 +391,19 @@ async def spawn_background_via_supervisor(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     background_log: BackgroundLogPolicy | None = None,
+    kill_group_after_exit: bool = True,
 ) -> ShellRunResult:
     """Spawn one command directly into the supervisor's background registry without a foreground wait."""
     request = _launch_request(
         "spawn_background",
-        {"namespace": namespace, "argv": argv, "env": env, "cwd": cwd, "tail": tail},
+        {
+            "namespace": namespace,
+            "argv": argv,
+            "env": env,
+            "cwd": cwd,
+            "tail": tail,
+            "kill_group_after_exit": kill_group_after_exit,
+        },
         {
             "handle": handle,
             "max_runtime_seconds": max_runtime_seconds,
@@ -505,7 +515,7 @@ def _parse_status_response(line: bytes) -> ProcessStatus:
     valid_exit = (
         isinstance(exit_code, int) and not isinstance(exit_code, bool) if state == "exited" else exit_code is None
     )
-    if state in _VALID_STATUS_STATES and isinstance(message, str) and valid_exit:
+    if isinstance(state, str) and state in _VALID_STATUS_STATES and isinstance(message, str) and valid_exit:
         return ProcessStatus(cast('Literal["running", "exited", "unknown", "error"]', state), exit_code, message)
     return ProcessStatus(
         "error",
@@ -518,7 +528,7 @@ def _parse_signal_response(line: bytes) -> SignalResult:
     if payload is None:
         return SignalResult(outcome="error", message=decode_error)
     outcome, message = payload.get("outcome"), payload.get("message")
-    if outcome in _VALID_SIGNAL_OUTCOMES and isinstance(message, str):
+    if isinstance(outcome, str) and outcome in _VALID_SIGNAL_OUTCOMES and isinstance(message, str):
         return SignalResult(cast('Literal["signalled", "finished", "unknown", "error"]', outcome), message)
     return SignalResult(
         "error",

@@ -23,7 +23,6 @@ from mindroom.shell._process_target import (
     _parse_proc_stat,
     _resolve_scope_cgroup_dir,
     _scan_session_members,
-    is_safe_slice_name,
 )
 from mindroom.shell.background_log import BackgroundLogPolicy
 from mindroom.shell.background_scope import ShellBackgroundScope
@@ -33,6 +32,7 @@ from mindroom.shell.process import (
     _idle_io_launcher,
     _idle_launch_argv,
     _idle_launcher,
+    _is_valid_systemd_slice_name,
     _probe_systemd_slice_launcher,
     _schedule_process_tree_idle,
     _systemd_slice_launcher,
@@ -1353,23 +1353,52 @@ async def test_systemd_scope_kills_setsid_sigterm_ignoring_child_on_timeout(
         _probe_systemd_slice_launcher.cache_clear()
 
 
-def test_is_safe_slice_name_accepts_valid_and_rejects_unsafe_names() -> None:
-    """Slice-name validation shared by _process_target and process rejects traversal, flags, and whitespace."""
-    assert is_safe_slice_name("app.slice") is True
-    assert is_safe_slice_name("mindroom-shell.slice") is True
+def test_escaped_systemd_slice_name_passes_validation_and_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escaped systemd slice names pass launch validation and reach _probe_systemd_slice_launcher."""
+    escaped = r"build\x20workers.slice"
+    assert _is_valid_systemd_slice_name("app.slice") is True
+    assert _is_valid_systemd_slice_name("mindroom-shell.slice") is True
+    assert _is_valid_systemd_slice_name(escaped) is True
     for bad in (
         "",
         ".slice",
         "mindroom.service",
         "-bad.slice",
         "a/b.slice",
-        "a\\b.slice",
-        "a..b.slice",
         "a b.slice",
         "a\tb.slice",
         "a\x00b.slice",
     ):
-        assert is_safe_slice_name(bad) is False
+        assert _is_valid_systemd_slice_name(bad) is False
+
+    sentinel = _SystemdSliceLauncher(
+        prefix=("/systemd-run", f"--slice={escaped}"),
+        slice_name=escaped,
+        env_bin="/env",
+        bus_env=(("XDG_RUNTIME_DIR", "/run/user/42"), ("DBUS_SESSION_BUS_ADDRESS", None)),
+        slice_cgroup_dir=None,
+    )
+    probed: list[tuple[str, str | None, str | None, int]] = []
+
+    def fake_probe(
+        slice_name: str,
+        runtime_dir: str | None,
+        dbus_addr: str | None,
+        generation: int,
+    ) -> _SystemdSliceLauncher:
+        probed.append((slice_name, runtime_dir, dbus_addr, generation))
+        return sentinel
+
+    monkeypatch.setenv("MINDROOM_SHELL_SYSTEMD_SLICE", escaped)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/42")
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr("mindroom.shell.process._user_manager_generation", lambda _r, _d: 12345)
+    monkeypatch.setattr("mindroom.shell.process._probe_systemd_slice_launcher", fake_probe)
+
+    assert _systemd_slice_launcher() == sentinel
+    assert probed == [(escaped, "/run/user/42", None, 12345)]
 
 
 def test_managed_process_owns_scope_directly_and_forwards_it_to_target_ops(
@@ -1595,3 +1624,128 @@ async def test_spawn_background_and_spool_capture_primitives(
     finished = registry.status("bg-direct", started.handle)
     assert finished.state == "exited"
     assert finished.exit_code == -signal.SIGKILL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner_kind", ["run_foreground", "run_or_background"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_kill_group_false_inline_preserves_nohup_on_zero_and_kills_on_nonzero(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+    runner_kind: str,
+    exit_code: int,
+) -> None:
+    """With kill_group_after_exit=False, inline commands keep nohup children on exit 0 and kill them on exit 1."""
+    pid_file = tmp_path / f"inline-{runner_kind}-{exit_code}.pid"
+    argv = [
+        "bash",
+        "-c",
+        f"nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; exit {exit_code}",
+    ]
+    nohup_pid: int | None = None
+    try:
+        if runner_kind == "run_foreground":
+            result = await run_foreground(
+                argv=argv,
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=5.0,
+                kill_group_after_exit=False,
+            )
+        else:
+            result = await registry.run_or_background(
+                namespace="test",
+                argv=argv,
+                env={"PATH": os.environ["PATH"]},
+                cwd=str(tmp_path),
+                tail=10,
+                timeout=5.0,
+                kill_group_after_exit=False,
+            )
+        assert result.handle is None
+        assert result.return_code == exit_code
+        nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        if exit_code == 0:
+            os.kill(nohup_pid, 0)
+        elif sys.platform == "linux":
+            await assert_linux_pid_not_running(nohup_pid)
+        else:
+            assert await _wait_until_gone(nohup_pid)
+    finally:
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_kill_group_false_adopted_preserves_nohup_on_zero_and_kills_on_nonzero(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    """With kill_group_after_exit=False, adopted commands keep nohup children on exit 0 and kill them on exit 1."""
+    pid_file = tmp_path / f"adopted-{exit_code}.pid"
+    cmd = f"sleep 0.35; nohup sleep 30 >/dev/null 2>&1 & echo $! > {shlex.quote(str(pid_file))}; exit {exit_code}"
+    nohup_pid: int | None = None
+    try:
+        result = await registry.run_or_background(
+            namespace="test",
+            argv=["bash", "-c", cmd],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            kill_group_after_exit=False,
+        )
+        assert result.handle is not None
+        record = registry._records[result.handle]
+        assert record.monitor_task is not None
+        await asyncio.wait_for(record.monitor_task, timeout=5.0)
+        assert record.finished is True
+        assert record.return_code == exit_code
+
+        nohup_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        if exit_code == 0:
+            os.kill(nohup_pid, 0)
+        elif sys.platform == "linux":
+            await assert_linux_pid_not_running(nohup_pid)
+        else:
+            assert await _wait_until_gone(nohup_pid)
+    finally:
+        if nohup_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(nohup_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_stale_sweep_skips_finished_record_with_active_spool(
+    registry: ProcessRegistry,
+    tmp_path: Path,
+) -> None:
+    """Finished records whose caller owns an active spool are not swept until discarded."""
+    spool = SpoolCapture(max_bytes=1024)
+    try:
+        started = await registry.spawn_background(
+            namespace="test",
+            argv=["echo", "spooled"],
+            env={"PATH": os.environ["PATH"]},
+            cwd=str(tmp_path),
+            tail=10,
+            spool=spool,
+        )
+        assert started.handle is not None
+        record = registry._records[started.handle]
+        assert record.monitor_task is not None
+        await asyncio.wait_for(record.monitor_task, timeout=5.0)
+        assert record.finished_at is not None
+        record.finished_at -= 700
+
+        await _run(registry, ["true"], tmp_path)
+        assert started.handle in registry._records
+
+        registry.discard(started.handle)
+        assert started.handle not in registry._records
+    finally:
+        spool.close()

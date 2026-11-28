@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING, NamedTuple
 from mindroom.shell._process_target import (
     ProcessScope,
     command_processes_exist,
-    is_safe_slice_name,
     kill_command_processes,
     make_scope_unit_name,
     parse_probe_slice_cgroup_dir,
@@ -195,10 +194,20 @@ def _probe_systemd_slice_launcher(
     return None
 
 
+def _is_valid_systemd_slice_name(slice_name: str) -> bool:
+    return (
+        len(slice_name) > len(".slice")
+        and slice_name.endswith(".slice")
+        and not slice_name.startswith("-")
+        and "/" not in slice_name
+        and not any(ch.isspace() or ch == "\x00" for ch in slice_name)
+    )
+
+
 def _systemd_slice_launcher() -> _SystemdSliceLauncher | None:
     """Return a ``systemd-run --user --scope`` launcher for ``MINDROOM_SHELL_SYSTEMD_SLICE``, or ``None``."""
     slice_name = os.environ.get(_SHELL_SYSTEMD_SLICE_ENV, "").strip()
-    if not is_safe_slice_name(slice_name):
+    if not _is_valid_systemd_slice_name(slice_name):
         return None
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or None
     dbus_addr = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or None

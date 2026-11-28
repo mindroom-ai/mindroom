@@ -317,7 +317,7 @@ class ProcessRegistry:
             _kill_record(record, stop_reason="stopped")
 
     async def close_namespace(self, namespace: str) -> int:
-        """Gracefully stop and remove every record in *namespace*, flushing log trailers."""
+        """Stop and remove all processes currently registered in *namespace*."""
         matching = [
             self._records.pop(handle) for handle, record in list(self._records.items()) if record.namespace == namespace
         ]
@@ -364,7 +364,12 @@ class ProcessRegistry:
         for handle in [
             h
             for h, r in self._records.items()
-            if r.finished and r.finished_at is not None and (now - r.finished_at) > _STALE_RECORD_SECONDS
+            if (
+                r.finished
+                and r.finished_at is not None
+                and r._active_spool is None
+                and (now - r.finished_at) > _STALE_RECORD_SECONDS
+            )
         ]:
             self._records.pop(handle, None)
 
@@ -501,7 +506,7 @@ class ProcessRegistry:
     ) -> None:
         """Wait for a backgrounded process to exit (or hit max_runtime_seconds) and finalize its record."""
         handle, managed = record.handle, record.managed
-        natural_exit = False
+        clean_exit = False
         try:
             timeout_seconds = (
                 None
@@ -510,7 +515,7 @@ class ProcessRegistry:
             )
             try:
                 await managed.wait_exit(timeout_seconds=timeout_seconds)
-                natural_exit = record.stop_reason is None and managed.returncode is not None and managed.returncode >= 0
+                clean_exit = record.stop_reason is None and managed.returncode == 0
             except TimeoutError:
                 record.stop_reason = record.stop_reason or "timeout"
                 await managed.terminate_tree(whole_group=True)
@@ -524,13 +529,12 @@ class ProcessRegistry:
                         _, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
                         spool.incomplete |= bool(pending)
                 finally:
-                    if (not natural_exit or record.kill_group_after_exit) and record.stop_reason != "scope_ended":
+                    should_kill = (
+                        not clean_exit or record.kill_group_after_exit
+                    ) and record.stop_reason != "scope_ended"
+                    if should_kill:
                         managed.kill_tree()
-                drain_timeout = (
-                    2.0
-                    if record.kill_group_after_exit and record.stop_reason != "scope_ended"
-                    else POST_EXIT_READER_GRACE_SECONDS
-                )
+                drain_timeout = 2.0 if should_kill else POST_EXIT_READER_GRACE_SECONDS
                 await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)
                 await cancel_pending_tasks(stdout_reader, stderr_reader)
                 if (live := self._records.get(handle)) is not None:
