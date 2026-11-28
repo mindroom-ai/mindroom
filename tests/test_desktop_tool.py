@@ -20,7 +20,7 @@ from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     scoped_credentials_path,
 )
-from mindroom.custom_tools.desktop import DesktopTools, desktop_configuration_for_scope
+from mindroom.custom_tools.desktop import DesktopTools, _AppArguments, _LocalArguments, desktop_configuration_for_scope
 from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
@@ -855,7 +855,13 @@ def test_desktop_exposes_folder_actions_and_separate_run_desktop_shell_tool() ->
     assert read_fn.parameters["required"] == ["action"]
     assert control_fn.parameters["required"] == ["action", "app"]
     assert len(properties) == 8
-    assert len(control_properties) == 20
+    assert len(control_properties) == 21
+    assert properties["observation"]["enum"] == ["tree", "screenshot", "both"]
+    assert control_properties["observation"]["enum"] == ["none", "tree", "screenshot", "both"]
+    assert "default" not in control_properties["observation"]
+    assert control_properties["settle_ms"]["type"] == "integer"
+    assert (control_properties["settle_ms"]["minimum"], control_properties["settle_ms"]["maximum"]) == (0, 2000)
+    assert "default" not in control_properties["settle_ms"]
     assert {"list_folders", "list_directory", "read_file"} <= set(properties["action"]["enum"])
     assert not ({"run_shell", "check_shell", "kill_shell"} & set(properties["action"]["enum"]))
     assert not ({"command", "cwd", "timeout_seconds", "handle", "force"} & set(properties))
@@ -1839,3 +1845,86 @@ async def test_desktop_split_boundaries_and_fail_closed_migration(
             },
             runtime_paths,
         )
+
+
+@pytest.mark.asyncio
+async def test_observation_none_settle_ms_validation_wire_omission_and_legacy_compat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """observation='none' and settle_ms validate locally, omit settle_ms=0, translate legacy errors, and reject forged receipts."""
+    ok_none = {"action": "click", "action_completed": True, "observation": {"mode": "none"}}
+    ok_tree = {
+        "action": "click",
+        "action_completed": True,
+        "observation": {"mode": "tree"},
+        "state": {"state_id": "s2", "elements": []},
+    }
+    request = _route_desktop_requests(
+        monkeypatch,
+        DesktopResponse("r1", "s", True, result=ok_none),
+        DesktopResponse("r2", "s", True, result=ok_tree),
+        DesktopResponse("r3", "s", True, result=ok_tree),
+        DesktopResponse("r4", "s", False, error="Desktop observation must be tree, screenshot, or both."),
+        DesktopResponse("r5", "s", False, error="Unexpected desktop parameters: settle_ms."),
+        DesktopResponse("r6", "s", True, result=ok_none),
+        DesktopResponse("r7", "s", True, result={**ok_none, "state": {"state_id": "s"}}),
+    )
+    tool = _configured_tool(monkeypatch)
+    click = lambda **kw: tool.desktop_control("click", app="com.example.Editor", state_id="s1", x=10, y=10, **kw)  # noqa: E731
+
+    for call in (
+        tool.desktop_read("screenshot", app="com.example.Editor", observation="none"),
+        tool.desktop_read("get_app_state", app="com.example.Editor", observation="none"),
+        click(observation="none", settle_ms=500),
+        click(settle_ms=True),
+        click(settle_ms=2001),
+        click(settle_ms=-1),
+        tool._execute_desktop(
+            "desktop_read",
+            frozenset({"list_folders"}),
+            sibling=("desktop_control", frozenset({"click"})),
+            action="list_folders",
+            app_arguments=_AppArguments(settle_ms=100),
+            local_arguments=_LocalArguments(),
+        ),
+    ):
+        assert json.loads((await call).content)["status"] == "error"
+    short = DesktopTools(
+        timeout_seconds=1.5,
+        credentials_manager=MagicMock(spec=CredentialsManager),
+        worker_target=_desktop_target(),
+    )
+    short_payload = json.loads(
+        (
+            await short.desktop_control("click", app="com.example.Editor", state_id="s1", x=10, y=10, settle_ms=1500)
+        ).content,
+    )
+    assert (short_payload["status"], "shorter than the request timeout" in short_payload["message"]) == ("error", True)
+    request.assert_not_awaited()
+
+    none_res = await click(observation="none", settle_ms=0)
+    assert (json.loads(none_res.content)["status"], bool(none_res.images)) == ("ok", False)
+    assert request.await_args_list[0].args[1].parameters == {
+        "app": "com.example.Editor",
+        "state_id": "s1",
+        "x": 10,
+        "y": 10,
+        "button": "left",
+        "observation": "none",
+    }
+
+    assert json.loads((await click(observation="tree", settle_ms=0)).content)["status"] == "ok"
+    assert "settle_ms" not in request.await_args_list[1].args[1].parameters
+
+    assert json.loads((await click(observation="tree", settle_ms=500)).content)["status"] == "ok"
+    assert request.await_args_list[2].args[1].parameters["settle_ms"] == 500
+
+    for idx_count, kwargs in ((4, {"observation": "none"}), (5, {"settle_ms": 500})):
+        legacy = json.loads((await click(**kwargs)).content)
+        assert legacy["status"] == "error"
+        assert "older version" in legacy["message"]
+        assert "No action was executed" in legacy["message"]
+        assert request.await_count == idx_count
+
+    assert json.loads((await click(observation="both")).content)["status"] == "partial"
+    assert json.loads((await click(observation="none")).content)["status"] == "partial"

@@ -309,7 +309,7 @@ With `return_attachment=true`, `screenshot` also returns an `att_*` handle that 
 - `keypress` supports navigation keys, shift plus navigation, command or ctrl plus a, c, x, v, z, or f, and command or ctrl plus shift plus z.
   App-switching, quit, launch, and address-bar shortcuts are rejected because they could reach apps outside the allowlist.
 
-Pass `observation="tree"` to skip the screenshot when semantic state is enough, or `observation="screenshot"` to omit the element list; `action="screenshot"` defaults to `observation="screenshot"` and other app actions default to `both`.
+Pass `observation="tree"` to skip the screenshot when semantic state is enough, `observation="screenshot"` to omit the element list, or `observation="none"` on intermediate `desktop_control` actions (reusing `state_id`) to skip follow-up capture altogether; `action="screenshot"` defaults to `observation="screenshot"` and other app actions default to `both`. On `desktop_control` actions that capture a follow-up observation, optional `settle_ms` (`0`–`2000`) waits after input before taking the fresh observation.
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.

@@ -45,11 +45,13 @@ from mindroom.desktop.protocol import (
     DESKTOP_FILE_ACTIONS,
     DESKTOP_RESPONSE_EVENT_TYPE,
     DESKTOP_SHELL_ACTIONS,
+    MAX_SETTLE_MS,
     DesktopCommand,
     DesktopObservationMode,
     DesktopProtocolError,
     DesktopResponse,
     desktop_observation_mode,
+    desktop_settle_ms,
     event_content,
 )
 from mindroom.desktop.provider import (
@@ -70,7 +72,7 @@ from mindroom.matrix.olm_to_device import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from contextlib import AbstractContextManager
     from pathlib import Path
 
@@ -226,6 +228,7 @@ class DesktopBridge:
     shell: DesktopShell | None = None
     clock: Callable[[], float] = time.time
     monotonic_clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     journal_path: Path | None = None
     legacy_journal_path: Path | None = None
     _journal: DesktopCommandJournal = field(init=False)
@@ -697,22 +700,16 @@ class DesktopBridge:
         policy_error = self._policy_error(command, controller_key)
         if policy_error is not None:
             return self._error_response(command, policy_error)
-        if command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS and "observation" in command.parameters:
-            return self._error_response(command, "Unexpected desktop parameters: observation.")
         try:
-            mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
-            if "state_id" in command.parameters:
-                resolved = self._observations.resolve(command, controller_key=controller_key)
-                allow_window_fallback = self._observations.allows_window_fallback(resolved.parameters["state_id"])
-            else:
-                resolved = command
-                allow_window_fallback = False
+            resolved, mode, settle_ms, allow_window_fallback = self._prepare_command(command, controller_key)
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
         self._journal.remember_started(command, command_fingerprint, controller_key)
         execution_command = replace(
             resolved,
-            parameters={key: value for key, value in resolved.parameters.items() if key != "observation"},
+            parameters={
+                key: value for key, value in resolved.parameters.items() if key not in {"observation", "settle_ms"}
+            },
         )
         execution = await self._execute_safely(
             execution_command,
@@ -720,7 +717,33 @@ class DesktopBridge:
             mode=mode,
             allow_window_fallback=allow_window_fallback,
         )
-        return await self._execution_response(command, execution, mode, controller_key)
+        return await self._execution_response(command, execution, mode, controller_key, settle_ms=settle_ms)
+
+    def _prepare_command(
+        self,
+        command: DesktopCommand,
+        controller_key: str,
+    ) -> tuple[DesktopCommand, DesktopObservationMode, int, bool]:
+        if command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS:
+            unexpected = sorted({"observation", "settle_ms"} & command.parameters.keys())
+            if unexpected:
+                msg = f"Unexpected desktop parameters: {', '.join(unexpected)}."
+                raise DesktopProtocolError(msg)
+        mode = desktop_observation_mode(command.action, command.parameters.get("observation", "both"))
+        settle_ms = desktop_settle_ms(
+            command.action,
+            command.parameters.get("settle_ms"),
+            supplied="settle_ms" in command.parameters,
+            mode=mode,
+        )
+        if settle_ms > 0 and command.expires_at_ms - round(self.clock() * 1000) <= settle_ms:
+            msg = "Desktop settle_ms exceeds the remaining command lifetime."
+            raise DesktopProtocolError(msg)
+        if "state_id" in command.parameters:
+            resolved = self._observations.resolve(command, controller_key=controller_key)
+            allow_window_fallback = self._observations.allows_window_fallback(resolved.parameters["state_id"])
+            return resolved, mode, settle_ms, allow_window_fallback
+        return command, mode, settle_ms, False
 
     async def _execution_response(
         self,
@@ -728,11 +751,15 @@ class DesktopBridge:
         execution: _Execution | DesktopResponse,
         mode: DesktopObservationMode,
         controller_key: str,
+        *,
+        settle_ms: int = 0,
     ) -> DesktopResponse:
         """Collect the requested fresh observation after an action."""
         if isinstance(execution, DesktopResponse):
             return execution
-        if execution.follow_up_app is not None:
+        if execution.follow_up_app is not None and mode != "none":
+            if settle_ms > 0:
+                await self.sleep(settle_ms / 1000)
             execution = await self._attach_follow_up_state(command, execution, controller_key, mode=mode)
             if isinstance(execution, DesktopResponse):
                 return execution
@@ -852,6 +879,18 @@ class DesktopBridge:
         refused = self._observation_refused(command, execution, app_id, controller_key, mode=mode)
         if refused is not None:
             return refused
+        if round(self.clock() * 1000) >= command.expires_at_ms:
+            warning = (
+                "The desktop action completed, but the command expired before a follow-up observation could be "
+                "taken; do not repeat the action automatically. Request get_app_state before deciding the next step."
+            )
+            return self._finalize_app_response(
+                command,
+                {**execution.result, "warning": warning, "follow_up_state": "expired"},
+                observed_state=None,
+                mode=mode,
+                controller_key=controller_key,
+            )
         try:
             state = await asyncio.to_thread(
                 self._required_gui_provider().get_app_state,
@@ -1221,7 +1260,8 @@ class DesktopBridge:
             "browser_enabled": self.policy.browser_enabled,
             "gui_available": resolved_gui_available,
             "gui_permissions_ready": resolved_gui_available and not missing_macos_desktop_permissions(),
-            "observation_modes": ["tree", "screenshot", "both"],
+            "observation_modes": ["tree", "screenshot", "both", "none"],
+            "max_settle_ms": MAX_SETTLE_MS,
             "durable_commands": True,
         }
         if controller_key is not None:
