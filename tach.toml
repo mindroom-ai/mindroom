@@ -5242,7 +5242,7 @@ depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"
-depends_on = ["mindroom.desktop.input"]
+depends_on = ["mindroom.desktop.input", "mindroom.desktop.macos_skylight"]
 
 [[modules]]
 path = "mindroom.desktop.provider"
@@ -9915,12 +9915,16 @@ path = "mindroom.desktop.displays"
 depends_on = ["mindroom.desktop.accessibility"]
 
 [[modules]]
-path = "mindroom.desktop.macos_input"
+path = "mindroom.desktop.macos_skylight"
 depends_on = []
 
 [[modules]]
+path = "mindroom.desktop.macos_input"
+depends_on = ["mindroom.desktop.macos_skylight"]
+
+[[modules]]
 path = "mindroom.desktop.macos_capture"
-depends_on = ["mindroom.desktop.accessibility"]
+depends_on = ["mindroom.desktop.accessibility", "mindroom.desktop.macos_skylight"]
 
 [[modules]]
 path = "mindroom.desktop.native_config"

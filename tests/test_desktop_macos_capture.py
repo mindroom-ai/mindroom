@@ -85,8 +85,9 @@ def framework(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def test_window_capture_uses_exact_content_and_retina_size(framework: SimpleNamespace) -> None:
-    """Another window cannot be captured by broadening the filter."""
+    """Another window cannot be captured by broadening the filter, and off-Space inventory is queried."""
     assert macos_capture.capture_window(3, 42, REGION) == "image"
+    assert framework.shared.call_args[0][:2] == (True, False)
     framework.filters.initWithDesktopIndependentWindow_.assert_called_once_with(framework.window)
     framework.filters.initWithDisplay_excludingWindows_.assert_not_called()
     framework.config.setWidth_.assert_called_once_with(1600)
@@ -138,6 +139,7 @@ def test_missing_callback_has_bounded_wait(
 def test_primary_display_is_selected_by_id(framework: SimpleNamespace) -> None:
     """Primary display selection cannot fall through to an arbitrary screen."""
     assert macos_capture.capture_display(7) == "image"
+    assert framework.shared.call_args[0][:2] == (True, True)
     framework.filters.initWithDisplay_excludingWindows_.assert_called_once_with(framework.display, [])
     with pytest.raises(macos_capture.MacOSCaptureError, match="display"):
         macos_capture.capture_display(8)
@@ -204,3 +206,34 @@ def test_filter_size_change_never_starts_capture(framework: SimpleNamespace) -> 
     with pytest.raises(macos_capture.MacOSCaptureError, match="bounds changed"):
         macos_capture.capture_window(3, 42, REGION)
     framework.screenshot.assert_not_called()
+
+
+def test_off_space_window_falls_back_to_hw_capture_and_validates_geometry(
+    framework: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An off-Space window uses SLSHWCaptureWindowList without switching Spaces and rejects bad dimensions."""
+    framework.window.isOnScreen = lambda: False
+    hw_calls: list[int] = []
+    monkeypatch.setattr(
+        macos_capture.macos_skylight,
+        "hw_capture_window",
+        lambda wid: hw_calls.append(wid) or "hw-image",
+    )
+
+    assert macos_capture.capture_window(3, 42, REGION) == "hw-image"
+    assert hw_calls == [3]
+    framework.screenshot.assert_not_called()
+
+    # Rejects zero, mismatched aspect ratio, and >4x scale on off-Space hardware captures.
+    for bad_size in ((0, 1200), (1600, 900), (4000, 3000)):
+        monkeypatch.setitem(
+            sys.modules,
+            "Quartz",
+            SimpleNamespace(
+                CGImageGetWidth=lambda _image, w=bad_size[0]: w,
+                CGImageGetHeight=lambda _image, h=bad_size[1]: h,
+            ),
+        )
+        with pytest.raises(macos_capture.MacOSCaptureError, match="dimensions"):
+            macos_capture.capture_window(3, 42, REGION)
