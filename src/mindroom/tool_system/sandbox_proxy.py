@@ -337,7 +337,12 @@ def worker_route(
     its backend knows none. The shared runner starts nothing, so its worker is ensured either way.
     ``named`` routes the request to the worker its call names instead of the agent's normal worker.
     """
-    route, worker_handle, _admitted_sandbox = _worker_route_with_sandbox(
+    placement = _resolve_call_placement(
+        worker_target,
+        sandbox_required=sandbox_required,
+        expected_sandbox=expected_sandbox,
+    )
+    route, worker_handle, _ = _worker_route_with_sandbox(
         runtime_paths=runtime_paths,
         runtime_config=runtime_config,
         tool_name=tool_name,
@@ -348,8 +353,7 @@ def worker_route(
         progress_sink=progress_sink,
         start=start,
         named=named,
-        sandbox_required=sandbox_required,
-        expected_sandbox=expected_sandbox,
+        placement=placement,
     )
     return route, worker_handle
 
@@ -363,49 +367,39 @@ def _worker_route_with_sandbox(
     worker_target: ResolvedWorkerTarget | None,
     worker_manager: WorkerBackend,
     base_dir: str | None,
+    placement: DedicatedWorkerPlacement | None,
     progress_sink: ProgressSink | None = None,
     start: bool = True,
     named: NamedWorkerCall | None = None,
-    sandbox_required: bool = False,
-    expected_sandbox: WorkerSandboxConfig | None = None,
 ) -> tuple[WorkerRoute, WorkerHandle | None, WorkerSandboxConfig | None]:
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    required_placement = _resolve_call_placement(
+    if placement is not None and placement.sandbox is not None:
+        if worker_backend_kind(runtime_paths) is not WorkerBackendKind.KUBERNETES:
+            msg = "Sandboxed subagent requires the kubernetes worker backend."
+            raise RuntimeError(msg)
+        if worker_scope is None:
+            msg = "Sandboxed subagent requires a worker-scoped tool route."
+            raise RuntimeError(msg)
+    spec = _resolve_base_worker_spec(
         worker_target,
-        sandbox_required=sandbox_required,
-        expected_sandbox=expected_sandbox,
-    )
-    _require_sandbox_route_preconditions(required_placement, runtime_paths=runtime_paths, worker_scope=worker_scope)
-    spec, private_agent_names = _resolve_base_worker_spec(
-        worker_target=worker_target,
-        worker_scope=worker_scope,
-        execution_identity=execution_identity,
         tool_name=tool_name,
         function_name=function_name,
         runtime_paths=runtime_paths,
         worker_manager=worker_manager,
     )
-    _assert_sandbox_spec(required_placement, spec, check_sandbox=False)
-    # A call is placed only on a dedicated backend (``delegation.workers``, ``workers.named``), where every call has a
-    # worker spec; a stored target's placement reaches here only through relays and worker services, which need one
-    # too.
-    worker_handle = None
+    private_agent_names = spec.private_agent_names if spec is not None else None
     if spec is not None:
         # The runner launches a streamed command itself, without the runtime that a worker's setup prepares.
         streamed = tool_name == "shell" and get_call_output_stream() is not None
         spec = replace(
-            _placed_worker_spec(
-                spec,
-                worker_target,
-                named,
-                sandbox_required=sandbox_required,
-                expected_sandbox=expected_sandbox,
-            ),
+            _placed_worker_spec(spec, placement=placement, named=named),
             wait_for_setup=not streamed,
         )
-        _assert_sandbox_spec(required_placement, spec, check_sandbox=True)
+    _assert_sandbox_spec(placement, spec)
+    worker_handle = None
+    if spec is not None:
         worker_handle, spec = _ensure_route_worker(
             spec,
             named=named,
@@ -416,8 +410,8 @@ def _worker_route_with_sandbox(
             progress_sink=progress_sink,
             start=start,
         )
-        _assert_sandbox_spec(required_placement, spec, check_sandbox=True)
-    worker_key = spec.worker_key if spec is not None else None
+        # Check the admitted spec independently of the spec requested above.
+        _assert_sandbox_spec(placement, spec)
     route_base_dir = _resolve_route_base_dir(
         base_dir,
         spec=spec,
@@ -427,7 +421,7 @@ def _worker_route_with_sandbox(
     )
     route = WorkerRoute(
         protocol=WORKER_PROTOCOL_VERSION,
-        worker_key=worker_key,
+        worker_key=spec.worker_key if spec is not None else None,
         worker_scope=worker_scope,
         routing_agent_name=routing_agent_name,
         execution_identity=(
@@ -440,34 +434,16 @@ def _worker_route_with_sandbox(
     return route, worker_handle, spec.sandbox if spec is not None else None
 
 
-def _require_sandbox_route_preconditions(
-    placement: DedicatedWorkerPlacement | None,
-    *,
-    runtime_paths: RuntimePaths,
-    worker_scope: object,
-) -> None:
-    if placement is None or placement.sandbox is None:
-        return
-    if worker_backend_kind(runtime_paths) is not WorkerBackendKind.KUBERNETES:
-        msg = "Sandboxed subagent requires the kubernetes worker backend."
-        raise RuntimeError(msg)
-    if worker_scope is None:
-        msg = "Sandboxed subagent requires a worker-scoped tool route."
-        raise RuntimeError(msg)
-
-
 def _assert_sandbox_spec(
     placement: DedicatedWorkerPlacement | None,
     spec: WorkerSpec | None,
-    *,
-    check_sandbox: bool,
 ) -> None:
     if placement is None or placement.sandbox is None:
         return
     if spec is None:
         msg = "Sandboxed subagent requires a worker-scoped tool route."
         raise RuntimeError(msg)
-    if check_sandbox and (
+    if (
         spec.sandbox != placement.sandbox
         or spec.resource_profile != placement.resource_profile
         or spec.mirror_grantable_credentials
@@ -479,15 +455,14 @@ def _assert_sandbox_spec(
 
 
 def _resolve_base_worker_spec(
-    *,
     worker_target: ResolvedWorkerTarget | None,
-    worker_scope: object,
-    execution_identity: object,
+    *,
     tool_name: str,
     function_name: str,
     runtime_paths: RuntimePaths,
     worker_manager: WorkerBackend,
-) -> tuple[WorkerSpec | None, frozenset[str] | None]:
+) -> WorkerSpec | None:
+    worker_scope = worker_target.worker_scope if worker_target is not None else None
     if worker_scope is None:
         if worker_backend_kind(runtime_paths).dedicated:
             unscoped_key = normal_worker_key(worker_target) if worker_target is not None else None
@@ -497,10 +472,10 @@ def _resolve_base_worker_spec(
                     "when using a dedicated worker backend."
                 )
                 raise RuntimeError(msg)
-            return WorkerSpec(unscoped_key), None
+            return WorkerSpec(unscoped_key)
         cast("StaticSandboxRunnerBackend", worker_manager).require_compatible_runner()
-        return None, None
-    if worker_target is None or execution_identity is None:
+        return None
+    if worker_target is None or worker_target.execution_identity is None:
         msg = f"Worker-routed tool '{tool_name}.{function_name}' requires execution identity context."
         raise RuntimeError(msg)
     if worker_scope == "user_agent" and worker_target.private_agent_names is None:
@@ -516,7 +491,7 @@ def _resolve_base_worker_spec(
         )
         raise RuntimeError(msg)
     private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
-    return WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names), private_agent_names
+    return WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names)
 
 
 def _ensure_route_worker(
@@ -530,42 +505,25 @@ def _ensure_route_worker(
     progress_sink: ProgressSink | None,
     start: bool,
 ) -> tuple[WorkerHandle | None, WorkerSpec]:
+    state_scope_key = spec.state_scope_worker_key or spec.worker_key
+    validate_mount = functools.partial(
+        sandbox_mount_relative_path,
+        storage_root=runtime_paths.storage_root,
+        worker_key=state_scope_key,
+        private_agent_names=private_agent_names,
+        config=runtime_config,
+        validate=True,
+    )
+    sandbox = named.locked_sandbox(state_scope_key) if named is not None else spec.sandbox
+    if sandbox is not None and sandbox.mount_dir is not None:
+        validate_mount(sandbox=sandbox)
     if named is not None:
-        state_scope_key = spec.state_scope_worker_key or spec.worker_key
-        pre_sandbox = named.locked_sandbox(state_scope_key)
-        if pre_sandbox is not None and pre_sandbox.mount_dir is not None:
-            sandbox_mount_relative_path(
-                storage_root=runtime_paths.storage_root,
-                worker_key=state_scope_key,
-                private_agent_names=private_agent_names,
-                config=runtime_config,
-                sandbox=pre_sandbox,
-                validate=True,
-            )
         handle, effective_spec = ensure_named_worker(worker_manager, spec, named, progress_sink=progress_sink)
-        if (
-            effective_spec.sandbox is not None
-            and effective_spec.sandbox.mount_dir is not None
-            and effective_spec.sandbox != pre_sandbox
-        ):
-            sandbox_mount_relative_path(
-                storage_root=runtime_paths.storage_root,
-                worker_key=state_scope_key,
-                private_agent_names=private_agent_names,
-                config=runtime_config,
-                sandbox=effective_spec.sandbox,
-                validate=True,
-            )
+        # A competing call can lock a different sandbox before this call is admitted.
+        admitted = effective_spec.sandbox
+        if admitted is not None and admitted.mount_dir is not None and admitted != sandbox:
+            validate_mount(sandbox=admitted)
         return handle, effective_spec
-    if spec.sandbox is not None and spec.sandbox.mount_dir is not None:
-        sandbox_mount_relative_path(
-            storage_root=runtime_paths.storage_root,
-            worker_key=spec.state_scope_worker_key or spec.worker_key,
-            private_agent_names=private_agent_names,
-            config=runtime_config,
-            sandbox=spec.sandbox,
-            validate=True,
-        )
     if start or not worker_backend_kind(runtime_paths).dedicated:
         return worker_manager.ensure_worker(spec, progress_sink=progress_sink), spec
     return worker_manager.touch_worker(spec.worker_key), spec
@@ -606,11 +564,9 @@ def _resolve_call_placement(
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     target_placement = worker_target.placement if worker_target is not None else None
     bound_sandbox = bound_sandbox_placement()
-    if bound_sandbox is not None:
-        bound_session_id, _bound_placement = bound_sandbox
-        if execution_identity is None or execution_identity.session_id != bound_session_id:
-            msg = "Sandboxed subagent tool call session does not match active sandbox placement."
-            raise RuntimeError(msg)
+    if bound_sandbox is not None and (execution_identity is None or execution_identity.session_id != bound_sandbox[0]):
+        msg = "Sandboxed subagent tool call session does not match active sandbox placement."
+        raise RuntimeError(msg)
     session_placement = placement_for_session(execution_identity.session_id) if execution_identity is not None else None
     if (
         target_placement is not None
@@ -633,35 +589,16 @@ def _resolve_call_placement(
 
 def _placed_worker_spec(
     normal_spec: WorkerSpec,
-    worker_target: ResolvedWorkerTarget | None,
-    named: NamedWorkerCall | None,
     *,
-    sandbox_required: bool = False,
-    expected_sandbox: WorkerSandboxConfig | None = None,
+    placement: DedicatedWorkerPlacement | None,
+    named: NamedWorkerCall | None,
 ) -> WorkerSpec:
-    """Return the spec of the worker a call runs in: its normal worker, or the worker of its own it is placed in.
-
-    Either worker of its own serves the normal worker's workspaces and credentials, in a runtime of its own.
-    """
-    placement = _resolve_call_placement(
-        worker_target,
-        sandbox_required=sandbox_required,
-        expected_sandbox=expected_sandbox,
-    )
-    if placement is not None and placement.sandbox is not None:
-        if named is not None:
+    """Pin the worker runtime to a placement or name, keeping its normal worker's state scope."""
+    sandbox = placement.sandbox if placement is not None else None
+    if named is not None:
+        if sandbox is not None:
             msg = "Named workers cannot be used inside a sandboxed subagent."
             raise NamedWorkerError(msg)
-        return replace(
-            normal_spec,
-            worker_key=subagent_worker_key(normal_spec.worker_key, placement.subagent_id),
-            state_scope_worker_key=normal_spec.worker_key,
-            resource_profile=placement.resource_profile,
-            sandbox=placement.sandbox,
-            mirror_grantable_credentials=False,
-        )
-    if named is not None:
-        # The worker a call names, whatever non-sandboxed worker its session is placed in.
         return named.worker_spec(normal_spec)
     if placement is None:
         return normal_spec
@@ -670,6 +607,8 @@ def _placed_worker_spec(
         worker_key=subagent_worker_key(normal_spec.worker_key, placement.subagent_id),
         state_scope_worker_key=normal_spec.worker_key,
         resource_profile=placement.resource_profile,
+        sandbox=sandbox if sandbox is not None else normal_spec.sandbox,
+        mirror_grantable_credentials=sandbox is None and normal_spec.mirror_grantable_credentials,
     )
 
 
@@ -749,8 +688,9 @@ def save_attachment_to_worker(
             f"({byte_count} bytes > {byte_limit} bytes)."
         )
         raise RuntimeError(msg)
+    required_placement = None
     if sandbox_required or expected_sandbox is not None:
-        _resolve_call_placement(
+        required_placement = _resolve_call_placement(
             worker_target,
             sandbox_required=sandbox_required,
             expected_sandbox=expected_sandbox,
@@ -758,7 +698,7 @@ def save_attachment_to_worker(
 
     proxy_config = sandbox_proxy_config(runtime_paths)
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = worker_route(
+        route, worker_handle, _ = _worker_route_with_sandbox(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -766,8 +706,7 @@ def save_attachment_to_worker(
             worker_target=worker_target,
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
-            sandbox_required=sandbox_required,
-            expected_sandbox=expected_sandbox,
+            placement=required_placement or _resolve_call_placement(worker_target),
         )
         sha256 = hashlib.sha256(payload_bytes).hexdigest()
         response = post_worker_proxy_request(
@@ -817,15 +756,16 @@ def view_file_from_worker(
     expected_sandbox: WorkerSandboxConfig | None = None,
 ) -> ToolValue:
     """View one file in the selected worker, for an agent whose workspace tools run in a worker."""
+    required_placement = None
     if sandbox_required or expected_sandbox is not None:
-        _resolve_call_placement(
+        required_placement = _resolve_call_placement(
             worker_target,
             sandbox_required=sandbox_required,
             expected_sandbox=expected_sandbox,
         )
     proxy_config = sandbox_proxy_config(runtime_paths)
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = worker_route(
+        route, worker_handle, _ = _worker_route_with_sandbox(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -833,8 +773,7 @@ def view_file_from_worker(
             worker_target=worker_target,
             worker_manager=worker_manager,
             base_dir=str(workspace_root) if workspace_root is not None else None,
-            sandbox_required=sandbox_required,
-            expected_sandbox=expected_sandbox,
+            placement=required_placement or _resolve_call_placement(worker_target),
         )
         if workspace_root is not None:
             # Translate the mount spelling only; resolve and authorize the path inside the worker.
@@ -1110,10 +1049,12 @@ def _build_execute_request(
     start: bool = True,
     include_execution_env: bool = True,
     named: NamedWorkerCall | None = None,
+    required_placement: DedicatedWorkerPlacement | None = None,
 ) -> tuple[ExecuteRequest, WorkerHandle | None, WorkerSandboxConfig | None]:
     """Build one call that ``stand_ins`` sends, unsent, and return it with its worker handle and admitted sandbox.
 
     That worker starts unless ``start`` is False, and is the worker ``named`` asks for, as ``worker_route`` describes.
+    If supplied, ``required_placement`` was already checked against ``stand_ins``'s sandbox requirements.
     """
     runtime_paths = stand_ins.runtime_paths
     tool_name = stand_ins.tool_name
@@ -1121,11 +1062,7 @@ def _build_execute_request(
     runtime_config = stand_ins.runtime_config
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
     has_output_path = normalize_output_path_argument(wire_kwargs.get(OUTPUT_PATH_ARGUMENT)) is not None
-    placement = _resolve_call_placement(
-        worker_target,
-        sandbox_required=stand_ins.sandbox_required,
-        expected_sandbox=stand_ins.expected_sandbox,
-    )
+    placement = required_placement if required_placement is not None else stand_ins._resolve_placement()
     pre_route_sandbox = placement.sandbox if placement is not None else None
     if pre_route_sandbox is None and named is not None:
         normal_key = worker_target.worker_key or normal_worker_key(worker_target) if worker_target is not None else None
@@ -1147,16 +1084,8 @@ def _build_execute_request(
         progress_sink=progress_sink,
         start=start,
         named=named,
-        sandbox_required=stand_ins.sandbox_required,
-        expected_sandbox=stand_ins.expected_sandbox,
+        placement=placement,
     )
-    if stand_ins.sandbox_required or stand_ins.expected_sandbox is not None:
-        if admitted_sandbox is None:
-            msg = "Sandboxed subagent tool call requires an admitted sandbox worker."
-            raise RuntimeError(msg)
-        if stand_ins.expected_sandbox is not None and admitted_sandbox != stand_ins.expected_sandbox:
-            msg = "Sandboxed subagent tool call admitted sandbox does not match the toolkit's expected sandbox."
-            raise RuntimeError(msg)
     _reject_sandbox_output_path(has_output_path=has_output_path, sandbox=admitted_sandbox)
     sandboxed = admitted_sandbox is not None
     config_overrides = dict(stand_ins.tool_config_overrides or {})
@@ -1236,17 +1165,14 @@ def _call_proxy_sync(
     kwargs: dict[str, object],
     cancellation: WorkerCallCancellation | None = None,
     named: NamedWorkerCall | None = None,
+    required_placement: DedicatedWorkerPlacement | None = None,
 ) -> object:
     runtime_paths = stand_ins.runtime_paths
     tool_name = stand_ins.tool_name
     # A call for a worker that fails before it is sent never started, which a caller that stores results reads.
     report_tool_metadata(not_started=True)
-    if stand_ins.sandbox_required or stand_ins.expected_sandbox is not None:
-        _resolve_call_placement(
-            stand_ins.worker_target,
-            sandbox_required=stand_ins.sandbox_required,
-            expected_sandbox=stand_ins.expected_sandbox,
-        )
+    if required_placement is None and stand_ins._requires_sandbox:
+        required_placement = stand_ins._resolve_placement()
     wire_args, wire_kwargs = _worker_call_arguments(args, kwargs)
     proxy_config = sandbox_proxy_config(runtime_paths)
     # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
@@ -1274,6 +1200,7 @@ def _call_proxy_sync(
             wire_kwargs=wire_kwargs,
             progress_sink=progress_sink,
             named=named,
+            required_placement=required_placement,
         )
         # A CLI call that asked for its command's raw output (`workers run`) gets it as frames while it runs.
         stream = get_call_output_stream() if tool_name == "shell" else None
@@ -1424,25 +1351,24 @@ class WorkerStandIns:
     sandbox_required: bool = False
     expected_sandbox: WorkerSandboxConfig | None = None
 
-    def _forbid_primary_if_sandboxed(self) -> None:
-        if self.sandbox_required or self.expected_sandbox is not None:
-            report_tool_metadata(not_started=True)
-            msg = "Sandboxed subagent cannot execute tool calls on the primary."
-            raise RuntimeError(msg)
-        active_placement = _resolve_call_placement(self.worker_target)
-        if active_placement is not None and active_placement.sandbox is not None:
-            report_tool_metadata(not_started=True)
-            msg = "Sandboxed subagent cannot execute tool calls on the primary."
-            raise RuntimeError(msg)
+    @property
+    def _requires_sandbox(self) -> bool:
+        return self.sandbox_required or self.expected_sandbox is not None
 
-    def _require_sandbox_placement(self) -> None:
-        if self.sandbox_required or self.expected_sandbox is not None:
+    def _resolve_placement(self) -> DedicatedWorkerPlacement | None:
+        return _resolve_call_placement(
+            self.worker_target,
+            sandbox_required=self.sandbox_required,
+            expected_sandbox=self.expected_sandbox,
+        )
+
+    def _forbid_primary_if_sandboxed(self) -> None:
+        if self._requires_sandbox or (
+            (placement := self._resolve_placement()) is not None and placement.sandbox is not None
+        ):
             report_tool_metadata(not_started=True)
-            _resolve_call_placement(
-                self.worker_target,
-                sandbox_required=self.sandbox_required,
-                expected_sandbox=self.expected_sandbox,
-            )
+            msg = "Sandboxed subagent cannot execute tool calls on the primary."
+            raise RuntimeError(msg)
 
     def __call__(self, function_name: str, local: Callable[..., object]) -> Callable[..., object]:
         """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
@@ -1467,7 +1393,11 @@ class WorkerStandIns:
                 if local_is_async:
                     return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
                 return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
-            self._require_sandbox_placement()
+            # Explicit sandbox requirements fail before interpreting named-worker arguments or offloading.
+            required_placement = None
+            if self._requires_sandbox:
+                report_tool_metadata(not_started=True)
+                required_placement = self._resolve_placement()
             cancellation = WorkerCallCancellation()
             try:
                 call = functools.partial(
@@ -1479,6 +1409,7 @@ class WorkerStandIns:
                     cancellation=cancellation,
                     # Read here, in the call's own context, which names the reply that owns the worker.
                     named=_named_worker_call(self, local, args, kwargs),
+                    required_placement=required_placement,
                 )
                 return await run_blocking(call)
             except NamedWorkerError:

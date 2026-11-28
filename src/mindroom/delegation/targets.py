@@ -62,7 +62,7 @@ class DelegationTarget:
 
 
 @dataclass(frozen=True)
-class FollowUpLookup:
+class _FollowUpLookup:
     """Outcome of looking up a follow-up subagent: resolved target, missing session, or policy/sandbox refusal."""
 
     target: DelegationTarget | None = None
@@ -144,59 +144,48 @@ async def lookup_follow_up_target(
     config: Config,
     runtime_paths: RuntimePaths,
     depth: int,
-) -> FollowUpLookup:
+) -> _FollowUpLookup:
     """Resolve a follow-up child while distinguishing unavailable session files from permission/sandbox refusals."""
     subagent_id, task = args.get("subagent_id"), args.get("message")
     if not isinstance(subagent_id, str) or not isinstance(task, str):
-        return FollowUpLookup(refusal="Cannot continue: subagent_id and message must be strings.")
-    if retained is not None:
+        return _FollowUpLookup(refusal="Cannot continue: subagent_id and message must be strings.")
+    if (previous_child := retained) is not None:
         # A resumed call continues the child it started, whatever the caller's tools are now.
-        if retained.subagent_id != subagent_id and not (
-            SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) and retained.subagent_id.startswith(subagent_id)
+        if previous_child.subagent_id != subagent_id and not (
+            SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) and previous_child.subagent_id.startswith(subagent_id)
         ):
             msg = "Subagent ID no longer matches its retained requirement"
             raise RuntimeError(msg)
-        return FollowUpLookup(
-            target=DelegationTarget(
-                retained.child_agent_name,
-                task,
-                previous_child=retained,
-                dedicated_worker=retained.dedicated_worker,
-                resource_profile=retained.worker_resource_profile,
-                sandbox=retained.worker_sandbox,
-            ),
-        )
-    try:
-        resolved_id = await resolve_subagent_id(subagent_id, owner=owner, runtime_paths=runtime_paths, depth=depth)
-        previous_child = await load_settled_subagent(
-            resolved_id,
-            owner=owner,
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=depth,
-        )
-    except SubagentSessionError as error:
-        return FollowUpLookup(refusal=str(error), unavailable=error.unavailable)
-    live_config = live_delegation_config(config)
-    refusal = follow_up_refusal(
-        previous_child.persona,
-        owner.agent_name,
-        live_config,
-        config_plugins(live_config, runtime_paths).tools,
-        delegation_depth=depth,
-    )
-    if refusal is not None:
-        return FollowUpLookup(refusal=refusal)
-    if (
-        sandbox_refusal := validate_sandbox_child(
+    else:
+        try:
+            resolved_id = await resolve_subagent_id(subagent_id, owner=owner, runtime_paths=runtime_paths, depth=depth)
+            previous_child = await load_settled_subagent(
+                resolved_id,
+                owner=owner,
+                config=config,
+                runtime_paths=runtime_paths,
+                depth=depth,
+            )
+        except SubagentSessionError as error:
+            return _FollowUpLookup(refusal=str(error), unavailable=error.unavailable)
+        live_config = live_delegation_config(config)
+        refusal = follow_up_refusal(
+            previous_child.persona,
+            owner.agent_name,
+            live_config,
+            config_plugins(live_config, runtime_paths).tools,
+            delegation_depth=depth,
+        ) or validate_sandbox_child(
             previous_child,
             live_config,
             runtime_paths,
             caller_name=owner.agent_name,
+            # Full validation runs on the authorized turn, not while resolving its handle.
+            check_mount=False,
         )
-    ) is not None:
-        return FollowUpLookup(refusal=sandbox_refusal)
-    return FollowUpLookup(
+        if refusal is not None:
+            return _FollowUpLookup(refusal=refusal)
+    return _FollowUpLookup(
         target=DelegationTarget(
             previous_child.child_agent_name,
             task,
@@ -247,21 +236,14 @@ def resolve_fresh_target(
 
     ``workspace_root`` returns the caller's workspace, resolved only to read a profile or the caller's skills, and
     ``cap`` is the persona of the authored subagent making the call, if any. On-disk ``mount_dir`` existence is
-    intentionally NOT checked here; callers validate it via ``validate_sandbox_execution`` after authorization.
+    intentionally not checked here; callers validate it via ``validate_sandbox_target`` after authorization.
     """
     child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
     model, title = cast("str | None", args.get("model")), args.get("title")
     if child_name is None:
         child_name = caller_name
-    header_error = _option_refusal(minimal, title) or (
-        None
-        if isinstance(child_name, str) and isinstance(task, str)
-        else "Cannot delegate: task must be a string and agent_name must be a string or null."
-    )
-    if header_error is not None:
-        return header_error
-    assert isinstance(child_name, str)
-    assert isinstance(task, str)
+    if (refusal := _option_refusal(minimal, title)) or not isinstance(child_name, str) or not isinstance(task, str):
+        return refusal or "Cannot delegate: task must be a string and agent_name must be a string or null."
     parsed = parse_delegation_sandbox(args, runtime_paths=runtime_paths)
     if isinstance(parsed, str):
         return parsed

@@ -391,29 +391,20 @@ def _agent_options(
     allowed = frozenset(_SHARED_OPTIONS) | extra
     _check_options(function, unknown, allowed)
     keys = (*_SHARED_OPTIONS, "name") if "name" in extra else _SHARED_OPTIONS
-    has_worker_option = any(
-        values.get(opt) is not None for opt in ("resource_profile", "sandbox", "mount_dir", "mount_read_only")
-    )
-    has_sandbox_target = values.get("mount_dir") is not None or values.get("mount_read_only") is True
+    has_mount = values.get("mount_dir") is not None
+    keep_false = {
+        "minimal": False,
+        "dedicated_worker": any(
+            values.get(opt) is not None for opt in ("resource_profile", "sandbox", "mount_dir", "mount_read_only")
+        ),
+        "sandbox": has_mount or values.get("mount_read_only") is True,
+        "mount_read_only": has_mount or values.get("sandbox") is True,
+    }
     out: dict[str, object] = {}
-    for k in keys:
-        value = values[k]
-        if value is None:
-            continue
-        if k == "minimal" and value is False:
-            continue
-        if k == "dedicated_worker" and value is False and not has_worker_option:
-            continue
-        if k == "sandbox" and value is False and not has_sandbox_target:
-            continue
-        if (
-            k == "mount_read_only"
-            and value is False
-            and values.get("mount_dir") is None
-            and values.get("sandbox") is not True
-        ):
-            continue
-        out[k] = value
+    for key in keys:
+        value = values[key]
+        if value is not None and (value is not False or keep_false.get(key, True)):
+            out[key] = value
     return out
 
 

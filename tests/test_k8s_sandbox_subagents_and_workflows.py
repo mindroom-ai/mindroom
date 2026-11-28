@@ -33,6 +33,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths, write_startu
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation import lifecycle as delegation_lifecycle
+from mindroom.delegation import workers as delegation_workers
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import (
@@ -78,6 +79,7 @@ from mindroom.tool_system.sandbox_proxy import (
     _build_execute_request,
     _ensure_route_worker,
     _placed_worker_spec,
+    _resolve_call_placement,
     _worker_route_with_sandbox,
     save_attachment_to_worker,
     view_file_from_worker,
@@ -456,7 +458,10 @@ def test_sandbox_persona_and_profile_tool_skill_knowledge_enforcement(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(tmp_path: Path) -> None:
+async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Sandboxed placement refuses named-worker overrides, mismatches, missing scope, invalid mount_dir, and output_path."""
     paths = _paths(tmp_path, _K8S_ENV)
     cfg = _config(paths)
@@ -475,7 +480,7 @@ async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(tmp_p
     )
     normal = WorkerSpec(_NORMAL_KEY, private_agent_names=frozenset(), mirror_grantable_credentials=True)
 
-    spec = _placed_worker_spec(normal, target, named=None)
+    spec = _placed_worker_spec(normal, placement=placement, named=None)
     assert spec.sandbox == sandbox
     assert spec.mirror_grantable_credentials is False
     assert spec.worker_key == subagent_worker_key(_NORMAL_KEY, "a" * 32)
@@ -491,23 +496,17 @@ async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(tmp_p
         )
         assert named is not None
         with pytest.raises(NamedWorkerError, match="Named workers cannot be used inside a sandboxed subagent"):
-            _placed_worker_spec(normal, target, named=named)
+            _placed_worker_spec(normal, placement=placement, named=named)
 
-    rw_placement = DedicatedWorkerPlacement(
-        "a" * 32,
-        "small",
-        WorkerSandboxConfig(mount_dir="repo", mount_read_only=False),
-    )
     with (
-        dedicated_worker_placement("sb-sess", rw_placement),
+        dedicated_worker_placement("sb-sess", replace(placement, sandbox=replace(sandbox, mount_read_only=False))),
         pytest.raises(
             RuntimeError,
             match="does not match active session placement",
         ),
     ):
-        _placed_worker_spec(normal, target, named=None)
+        _resolve_call_placement(target)
 
-    other_target = replace(target, execution_identity=_identity("leader", session_id="other-sess"), placement=None)
     with (
         dedicated_worker_placement("sb-sess", placement),
         pytest.raises(
@@ -515,18 +514,20 @@ async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(tmp_p
             match="session does not match active sandbox placement",
         ),
     ):
-        _placed_worker_spec(normal, other_target, named=None)
+        _resolve_call_placement(
+            replace(target, execution_identity=_identity("leader", session_id="other-sess"), placement=None),
+        )
 
-    unscoped_target = replace(target, worker_scope=None, worker_key=None)
     with pytest.raises(RuntimeError, match="worker-scoped tool route"):
         _worker_route_with_sandbox(
             runtime_paths=paths,
             runtime_config=cfg,
             tool_name="shell",
             function_name="run_shell_command",
-            worker_target=unscoped_target,
+            worker_target=replace(target, worker_scope=None, worker_key=None),
             worker_manager=MagicMock(),
             base_dir=None,
+            placement=placement,
         )
 
     backend = MagicMock()
@@ -620,10 +621,28 @@ async def test_fail_closed_sandbox_proxy_dispatch_and_named_worker_refusal(tmp_p
             )
         backend.ensure_worker.assert_not_called()
 
+    monkeypatch.setattr(
+        sandbox_proxy_module,
+        "_ensure_route_worker",
+        MagicMock(return_value=(None, replace(spec, mirror_grantable_credentials=True))),
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Sandboxed subagent worker spec does not match its required sandbox placement\.$",
+    ):
+        _build_execute_request(
+            replace(stand_ins, expected_sandbox=sandbox),
+            worker_manager=backend,
+            function_name="run_shell_command",
+            wire_args=[],
+            wire_kwargs={"args": "echo hi"},
+        )
+
 
 @pytest.mark.asyncio
 async def test_child_placement_reserve_scope_and_continuation_fail_closed_on_sandbox_tamper_or_loss(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """child_placement raises (never None), tampering fails reserve/scope checks, and continuation fails closed."""
     paths = _paths(tmp_path, _K8S_ENV)
@@ -716,12 +735,19 @@ async def test_child_placement_reserve_scope_and_continuation_fail_closed_on_san
         caller_execution_identity=ctx_owner,
     )
     await finish_child_turn(done_child, config=cfg, runtime_paths=paths, status="completed", reason="done")
+    tools = DelegateTools("leader", paths, cfg, ws, ctx_owner, delegation_depth=0)
+    # Revoking the self-copy grant refuses the follow-up without checking the retained mount.
+    mount_resolver = MagicMock(wraps=delegation_workers.resolve_worker_sandbox_mount)
+    with monkeypatch.context() as patch, tool_runtime_context(ctx):
+        patch.setattr(cfg.agents["leader"], "delegate_to", ["helper"])
+        patch.setattr(delegation_workers, "resolve_worker_sandbox_mount", mount_resolver)
+        denied = await tools.continue_subagent(subagent_id=done_child.subagent_id, message="follow up")
+    assert denied == "Cannot delegate to 'leader'. Allowed subagents: helper."
+    mount_resolver.assert_not_called()
+
     (ws / "repo").rmdir()
     with tool_runtime_context(ctx):
-        cont_res = await DelegateTools("leader", paths, cfg, ws, ctx_owner, delegation_depth=0).continue_subagent(
-            subagent_id=done_child.subagent_id,
-            message="follow up",
-        )
+        cont_res = await tools.continue_subagent(subagent_id=done_child.subagent_id, message="follow up")
     assert "does not exist" in cont_res
 
 
@@ -1420,7 +1446,7 @@ async def test_workflow_sandboxed_spawn_peer_closure_refusal_and_end_run_retirem
         finally:
             stack.context.config.agents["watcher"].worker_scope = original_scope
 
-        # load_follow_up_child refuses rebuild when mount_dir is deleted (NEVER silently rebuilds fresh!).
+        # Authorized turn preparation refuses a deleted mount rather than silently rebuilding fresh.
         repo_dir = agent_workspace_root_path(stack.context.runtime_paths.storage_root, "watcher") / "repo"
         repo_dir.rmdir()
         with pytest.raises(NodeFailed) as failed_turn3:

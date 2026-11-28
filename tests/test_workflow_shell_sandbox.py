@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from contextlib import contextmanager
 from dataclasses import replace
@@ -39,6 +38,8 @@ from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflo
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
     from pathlib import Path
+
+    from mindroom.workflow_runs.store import WorkflowRunStore, WorkflowRunWorker
 
 
 @pytest_asyncio.fixture
@@ -115,6 +116,10 @@ async def _wait_retired(backend: _FakeBackend, expected: set[str]) -> None:
 
 def _shell_call(cmd: str, **kwargs: object) -> dict[str, object]:
     return tool_args("shell", "run_shell_command", args=cmd, **kwargs)
+
+
+def _persisted_lock(db: WorkflowRunStore, run_id: str, name: str) -> WorkflowRunWorker | None:
+    return db.admit_run_worker(run_id, name, 0, owner_scope="", resource_profile=None, sandbox_json=None, commit=False)
 
 
 def test_sdk_shell_forwarding_and_legacy_digest_identity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,10 +257,10 @@ async def test_restart_resume_persisted_worker_lock_order_independence_and_tampe
     )
     with _k8s_shell_harness(stack, monkeypatch) as (backend1, requests1, _workspace):
         await stack.result("@0", "tool", first_call)
-        lock = stack.store.get_run_worker(stack.run_id, "box")
+        assert _persisted_lock(stack.store, stack.run_id, "unrelated") is None
+        lock = _persisted_lock(stack.store, stack.run_id, "box")
         assert lock is not None
-        assert lock.resource_profile == "small"
-        assert lock.sandbox_json == json.dumps({"mount_dir": "repo", "mount_read_only": True}, separators=(",", ":"))
+        assert (lock.resource_profile, lock.sandbox_json) == ("small", '{"mount_dir":"repo","mount_read_only":true}')
         assert requests1[-1]["request"].sandbox is True
 
         await stack.engine.end_run(stack.store.get_run(stack.run_id), WorkflowRunState.INTERRUPTED, "restart")
@@ -338,7 +343,7 @@ async def test_restart_resume_persisted_worker_lock_order_independence_and_tampe
         # Verify store.prune() cascades deletion of workflow_run_workers via ON DELETE CASCADE.
         await stack.engine.end_run(stack.store.get_run(stack.run_id), WorkflowRunState.COMPLETED, None)
         assert stack.store.prune("2999-01-01T00:00:00Z") == 1
-        assert stack.store.get_run_worker(stack.run_id, "box") is None
+        assert _persisted_lock(stack.store, stack.run_id, "box") is None
 
 
 @pytest.mark.asyncio
@@ -367,7 +372,7 @@ async def test_unnamed_sandbox_call_scoped_parallel_isolation_and_immediate_reti
         # Synthetic worker name is NOT persisted in node.request or workflow_run_workers.
         assert "worker" not in stack.store.get_node(stack.run_id, "/0:a@0").request["arguments"]  # type: ignore[union-attr,index]
         assert "worker" not in stack.store.get_node(stack.run_id, "/0:b@0").request["arguments"]  # type: ignore[union-attr,index]
-        assert stack.store.get_run_worker(stack.run_id, str(by_cmd["job-a"])) is None
+        assert all(_persisted_lock(stack.store, stack.run_id, worker) is None for worker in by_cmd.values())
 
         # Both ephemeral pods retire immediately while the run is still RUNNING.
         assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING

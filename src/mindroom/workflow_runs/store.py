@@ -563,11 +563,6 @@ class WorkflowRunStore:
             ).fetchone()
         return bytes(row["source"]), str(row["sha256"])
 
-    def get_run_worker(self, run_id: str, worker_name: str) -> WorkflowRunWorker | None:
-        """Return the persisted immutable lock for *worker_name* in *run_id*, if admitted."""
-        with self.read_connection() as connection:
-            return _select_run_worker(connection, run_id, worker_name)
-
     def admit_run_worker(
         self,
         run_id: str,
@@ -579,7 +574,7 @@ class WorkflowRunStore:
         sandbox_json: str | None,
         commit: bool = True,
     ) -> WorkflowRunWorker | None:
-        """Return *worker_name*'s immutable lock, atomically inserting it on first admission when *commit* is True."""
+        """Read *worker_name*'s persisted lock, or atomically insert it if absent and *commit* is True."""
         if not commit:
             with self.read_connection() as connection:
                 return _select_run_worker(connection, run_id, worker_name)
