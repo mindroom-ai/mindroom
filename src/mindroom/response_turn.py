@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
@@ -475,6 +476,8 @@ class TurnSinks:
     # Collects what the subagent turns whose results the turn receives cost, which its run metadata reports; a turn
     # whose caller passes none keeps its own, and a delegated child's is the one its settlement reads.
     subagent_cost: SubagentCost | None = None
+    # Receives live provisional io.mindroom.ai_run updates for the reply owning this top-level turn.
+    live_ai_run: ReplyAiRunProgress | None = None
 
 
 @dataclass(frozen=True)
@@ -927,7 +930,12 @@ def publish_error_run_metadata(
     if collector is None:
         return
     model = sinks.active_model() if sinks.active_model is not None else None
-    terminal = build_terminal_note_ai_run_metadata_content("error", model=model)[AI_RUN_METADATA_KEY]
+    provisional = sinks.live_ai_run.payload(fallback_model=model) if sinks.live_ai_run is not None else None
+    terminal = build_terminal_note_ai_run_metadata_content(
+        "error",
+        model=None if provisional is not None and "model" in provisional else model,
+        provisional=provisional,
+    )[AI_RUN_METADATA_KEY]
     merged = {**terminal, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
     if error_info is not None:
         merged["error"] = dict(error_info)
@@ -1183,6 +1191,8 @@ async def stream_response_turn[ChunkT](
     subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
     # The turn goes on from what its run metadata holds: a replay's, what the attempts a restart cut short received.
     subagent_cost.add(stored_receipts(ctx.matrix_run_metadata))
+    if sinks.live_ai_run is not None:
+        sinks.live_ai_run.bind_subagent_cost(subagent_cost)
 
     @contextmanager
     def bind() -> Iterator[None]:

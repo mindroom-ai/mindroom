@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.model_loop import LoopHooks, LoopState
     from mindroom.agent_loop.run import Persist
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.config.main import Config
@@ -235,6 +235,8 @@ class ResumeRunner:
     """Whether the resumed run owns its reply, as a top-level approval's does; a delegated child's does not."""
     checkpoints: bool = False
     """Whether the resume saves checkpoints: a paused reply's approval settles from the paused row, so its does not."""
+    on_usage_updated: Callable[[AnyRunRecord, Sequence[Message]], None] | None = None
+    """Receives the live record and messages as the resumed run's usage, model, or tool calls advance."""
 
     @cached_property
     def _replay_plan(self) -> ResolvedReplayPlan:
@@ -246,6 +248,12 @@ class ResumeRunner:
 
     @cached_property
     def _hooks(self) -> LoopHooks:
+        on_usage = self.on_usage_updated
+
+        def _note_usage(state: LoopState) -> None:
+            if on_usage is not None:
+                on_usage(state.record, state.messages)
+
         return agent_loop_hooks(
             self.build,
             HookTurn(
@@ -256,6 +264,7 @@ class ResumeRunner:
                 replay_plan=self._replay_plan,
                 prompt_id=None,
                 checkpoints=self.checkpoints,
+                on_usage_updated=_note_usage if on_usage is not None else None,
             ),
             steering=self.steering,
         )

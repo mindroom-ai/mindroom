@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from collections import ChainMap
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from html import escape as html_escape
@@ -137,7 +138,7 @@ from mindroom.streaming import (
 from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from contextlib import AbstractAsyncContextManager
 
     import structlog
@@ -329,10 +330,49 @@ def _with_note(shown: Presentation, note: Segment) -> Presentation:
     return with_trailing_note(shown, note)
 
 
+def _is_model_switch(saved_model: object, live_model: Mapping[str, str]) -> bool:
+    """Return whether ``live_model`` switches away from ``saved_model``'s configured model."""
+    if not isinstance(saved_model, Mapping):
+        return False
+    saved_config = saved_model.get("config")
+    live_config = live_model.get("config")
+    if saved_config is not None and live_config is not None:
+        return saved_config != live_config
+    if saved_config is None:
+        return saved_model.get("id") != live_model.get("id")
+    return False
+
+
+def _resolve_provisional_ai_run(
+    handle: SpanHandle | None,
+    *,
+    live_model: Mapping[str, str] | None,
+    fallback_model: Mapping[str, str] | None,
+    shown_ai_run: Mapping[str, Any] | None,
+    provisional: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any] | None:
+    """Resolve provisional ``ai_run`` metrics from a live span handle, explicit override, or ``Presentation.ai_run``."""
+    if handle is not None and handle.ai_run_progress.has_metrics():
+        return handle.ai_run_progress.payload(fallback_model=fallback_model)
+    if provisional is not None:
+        return provisional
+    if shown_ai_run is not None:
+        if live_model is not None and _is_model_switch(shown_ai_run.get("model"), live_model):
+            return {
+                **{key: value for key, value in shown_ai_run.items() if key not in ("context", "tools")},
+                "model": dict(live_model),
+            }
+        return shown_ai_run
+    if handle is not None:
+        return handle.ai_run_progress.payload(fallback_model=fallback_model)
+    return None
+
+
 def _ensure_terminal_ai_run_metadata(
     extra_content: dict[str, Any],
     *,
     reply_model: Mapping[str, str] | None,
+    provisional: Mapping[str, Any] | None = None,
     edited_existing: bool,
 ) -> None:
     """Guarantee that a finalized write never leaves ``io.mindroom.ai_run`` status-less or drops an earlier one."""
@@ -344,7 +384,13 @@ def _ensure_terminal_ai_run_metadata(
         updated_ai_run["status"] = constants.STREAM_STATUS_COMPLETED
         extra_content[constants.AI_RUN_METADATA_KEY] = updated_ai_run
     elif edited_existing and constants.AI_RUN_METADATA_KEY not in extra_content:
-        extra_content.update(build_terminal_note_ai_run_metadata_content("completed", model=reply_model))
+        extra_content.update(
+            build_terminal_note_ai_run_metadata_content(
+                "completed",
+                model=None if provisional is not None and "model" in provisional else reply_model,
+                provisional=provisional,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -357,6 +403,7 @@ class _NoteRow:
     target: MessageTarget
     model: Mapping[str, str] | None = None
     error_info: Mapping[str, Any] | None = None
+    provisional: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1236,6 +1283,7 @@ class DeliveryGateway:
                     event_id=row.reply.event_id,
                     model=row.model,
                     error_info=row.error_info,
+                    provisional=row.provisional,
                 )
             except ReplyWriteRefusedError as refused:
                 if refused.transition.outcome is ReplyOutcome.RECOMPUTE:
@@ -1254,6 +1302,7 @@ class DeliveryGateway:
         event_id: str | None,
         model: Mapping[str, str] | None = None,
         error_info: Mapping[str, Any] | None = None,
+        provisional: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Send one rendered reply row as an edit of the reply's event, or as its create.
 
@@ -1262,12 +1311,20 @@ class DeliveryGateway:
         """
         handle_model = write.handle.reply_model if write.handle is not None else None
         resolved_model = handle_model if handle_model is not None else model
+        resolved_provisional = _resolve_provisional_ai_run(
+            write.handle,
+            live_model=handle_model,
+            fallback_model=resolved_model,
+            shown_ai_run=write.shown.ai_run,
+            provisional=provisional,
+        )
         extra_content: dict[str, Any] = {
             constants.STREAM_STATUS_KEY: rendered.stream_status,
             **build_terminal_note_ai_run_metadata_content(
                 rendered.stream_status,
-                model=resolved_model,
+                model=None if resolved_provisional is not None and "model" in resolved_provisional else resolved_model,
                 error_info=error_info if rendered.stream_status == "error" else None,
+                provisional=resolved_provisional,
             ),
         }
         compactions = write.handle.compactions.content() if write.handle is not None else None
@@ -1429,13 +1486,20 @@ class DeliveryGateway:
             state = ReplyState.CANCELLED if shown_note is NoteKind.CANCELLED else ReplyState.FAILED
             write = approval_note_write(reply, span, shown, approval_id=approval_id, state=state)
             live_handle = current_span()
-            live_model = (
-                live_handle.reply_model if live_handle is not None and live_handle.reply_id == reply.reply_id else None
+            matching_handle = (
+                live_handle if live_handle is not None and live_handle.reply_id == reply.reply_id else None
             )
+            live_model = matching_handle.reply_model if matching_handle is not None else None
             model = (
                 live_model
                 if live_model is not None
                 else (model_payload(self.deps.runtime.config, model_name) if model_name is not None else None)
+            )
+            provisional = _resolve_provisional_ai_run(
+                matching_handle,
+                live_model=live_model,
+                fallback_model=model,
+                shown_ai_run=shown.ai_run,
             )
             return _NoteRow(
                 reply,
@@ -1446,6 +1510,7 @@ class DeliveryGateway:
                 error_info=with_error_fallback(error_info, approval_note.text)
                 if shown_note is NoteKind.ERROR
                 else None,
+                provisional=provisional,
             )
 
         sent = await self._send_note(compose)
@@ -1893,6 +1958,7 @@ class DeliveryGateway:
         _ensure_terminal_ai_run_metadata(
             delivery_extra_content,
             reply_model=handle.reply_model,
+            provisional=handle.ai_run_progress.payload(fallback_model=handle.reply_model),
             edited_existing=edited_event_id is not None,
         )
         await self._maybe_suppress_final_push(
@@ -2198,6 +2264,7 @@ class DeliveryGateway:
             tool_trace_collector=request.tool_trace_collector,
             compactions=request.compactions,
             active_model=lambda: handle.reply_model,
+            ai_run_progress=handle.ai_run_progress,
             pipeline_timing=request.pipeline_timing,
             visible_event_id_callback=request.visible_event_id_callback,
             visible_progress_callback=request.visible_progress_callback,
@@ -2237,7 +2304,8 @@ class DeliveryGateway:
         def shown(progress: ProgressState) -> Presentation:
             whole = None if published is None else _take_published(published, progress.text)
             if whole is not None:
-                return whole
+                ai_run = handle.ai_run_progress.payload(fallback_model=handle.reply_model)
+                return replace(whole, ai_run=ai_run) if ai_run is not None else whole
             return handle.presentation(
                 progress.text,
                 progress.tool_trace,
@@ -2298,6 +2366,7 @@ class DeliveryGateway:
                 ),
                 placeholder=handle.base.placeholder,
                 show_tool_calls=handle.base.show_tool_calls,
+                ai_run=handle.ai_run_progress.payload(fallback_model=handle.reply_model),
             )
             canonical = shown(replace(progress, text=progress.untransformed_text))
             return terminal_write(handle, canonical, state=ReplyState.COMPLETED, frozen_display=whole)
@@ -2376,6 +2445,7 @@ class DeliveryGateway:
             show_tool_calls=show_tool_calls,
             extra_content=extra_content,
             active_model=lambda: handle.reply_model,
+            ai_run_progress=handle.ai_run_progress,
             visible_progress_callback=visible_progress_callback,
             transport_is_current=self._stream_transport_gate(
                 identity.response_envelope.source_event_id,

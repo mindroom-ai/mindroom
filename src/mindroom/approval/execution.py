@@ -64,7 +64,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
@@ -75,8 +75,10 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.media_inputs import MediaInputs
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
@@ -170,7 +172,7 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
 def note_reply_model(config: Config, model_name: str) -> None:
     """Name the model the current span's reply runs on, which its live writes and error notes carry."""
     if (handle := current_span()) is not None:
-        handle.reply_model = model_payload(config, model_name)
+        handle.set_reply_model(model_payload(config, model_name))
 
 
 def continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
@@ -206,11 +208,26 @@ async def _continue_persisted_agent(
     system_enrichment_items: tuple[EnrichmentItem, ...],
     quiet: bool,
     subagent_cost: SubagentCost,
+    live_ai_run: ReplyAiRunProgress | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Resume a persisted agent with event streaming so presentation order is retained.
 
     ``subagent_cost`` collects what the resumed turn's subagents cost, and its reply reports it.
     """
+    on_usage_updated = None
+    if live_ai_run is not None:
+
+        def _note_resumed_usage(record: AnyRunRecord, messages: Sequence[Message]) -> None:
+            live_ai_run.update_from_run(
+                config,
+                model_name=model_name,
+                record=record,
+                messages=messages,
+                prior_usage=tuple(prior_usage_by_run(record.metadata).values()),
+                prepared_history=None,
+            )
+
+        on_usage_updated = _note_resumed_usage
     runner = ResumeRunner(
         build=build,
         config=config,
@@ -219,6 +236,7 @@ async def _continue_persisted_agent(
         storage=storage,
         user_id=continuation.requester_id,
         steering=True,
+        on_usage_updated=on_usage_updated,
     )
     native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(
@@ -385,6 +403,11 @@ async def _stream_continuation_turn(
             subagent_cost=subagent_cost,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
+            live_ai_run=(
+                span_handle.ai_run_progress
+                if delegation_depth == 0 and (span_handle := current_span()) is not None
+                else None
+            ),
         ),
         resume=resume,
     )
@@ -536,6 +559,16 @@ class AgentApprovalExecution:
         storage = scope_run_storage(scope_context)
         # The resumed turn goes on from what its subagents had cost before the pause.
         subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
+        delegation_depth = cli_call.delegation_depth if cli_call is not None else 0
+        span_handle = current_span()
+        live_ai_run = span_handle.ai_run_progress if delegation_depth == 0 and span_handle is not None else None
+        if live_ai_run is not None:
+            live_ai_run.seed_from_paused(
+                config,
+                model_name=model.model_name,
+                persisted=persisted,
+                subagent_cost=subagent_cost,
+            )
         try:
             with helper_usage_context(scope_context):
                 if cli_call is not None:
@@ -567,7 +600,14 @@ class AgentApprovalExecution:
                             reusable_build=recovered.reusable_build,
                             resume=TurnResume(
                                 continuation_count=recovered.initial_continuation_count,
-                                prior_usage=prior_usage_by_run(persisted.metadata),
+                                prior_usage={
+                                    **prior_usage_by_run(persisted.metadata),
+                                    **(
+                                        {persisted.run_id: persisted.metrics}
+                                        if persisted.metrics is not None and persisted.metrics.reported
+                                        else {}
+                                    ),
+                                },
                             ),
                             delegation_depth=recovered.delegation_depth,
                             media=recovered.media,
@@ -607,6 +647,7 @@ class AgentApprovalExecution:
                         system_enrichment_items=system_enrichment_items,
                         quiet=quiet,
                         subagent_cost=subagent_cost,
+                        live_ai_run=live_ai_run,
                     )
         finally:
             await finalize_consumption()

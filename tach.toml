@@ -638,6 +638,7 @@ depends_on = ["mindroom.reply_lifecycle", "mindroom.streaming", "mindroom.tool_s
 [[modules]]
 path = "mindroom.reply_scope"
 depends_on = [
+    "mindroom.reply_ai_run_progress",
     "mindroom.event_journal",
     "mindroom.history.reply_compactions",
     "mindroom.reply_lifecycle",
@@ -963,6 +964,50 @@ depends_on = [
     "mindroom.providers.identity",
     "mindroom.providers.names",
     "mindroom.budgets.pricing",
+]
+
+[[interfaces]]
+from = ["mindroom.ai_run_metadata"]
+expose = [
+    "ReplyUsage",
+    "ai_run_error_from_metadata",
+    "ai_run_extra_content_from_metadata",
+    "build_ai_run_metadata_content",
+    "build_prepared_history_metadata_content",
+    "build_streaming_ai_run_metadata_content",
+    "build_terminal_note_ai_run_metadata_content",
+    "merge_usage",
+    "model_payload",
+    "prior_usage_by_run",
+    "prompt_input_tokens",
+    "reply_cost_usd",
+    "streaming_ai_run_content",
+    "turn_usage",
+    "with_prior_usage",
+]
+
+[[interfaces]]
+from = ["mindroom.ai_run_metadata"]
+visibility = ["mindroom.reply_ai_run_progress"]
+expose = [
+    "PROVISIONAL_METRIC_KEYS",
+    "ai_run_metrics_fields",
+    "prepared_context_tokens_from_metadata",
+]
+
+[[modules]]
+path = "mindroom.reply_ai_run_progress"
+depends_on = [
+    "mindroom.ai_run_metadata",
+    "mindroom.budgets.pricing",
+    "mindroom.constants",
+]
+
+[[interfaces]]
+from = ["mindroom.reply_ai_run_progress"]
+expose = [
+    "ReplyAiRunProgress",
+    "build_provisional_ai_run_content",
 ]
 
 [[modules]]
@@ -9935,7 +9980,7 @@ expose = ["MemberEvent", "team_usage", "team_usage_runs"]
 from = ["mindroom.teams.runtime"]
 
 [[interfaces]]
-expose = ["TeamDecisions", "continue_team", "leader_tool_specs", "run_team"]
+expose = ["TeamDecisions", "TeamUsageHook", "continue_team", "leader_tool_specs", "run_team"]
 from = ["mindroom.teams.runtime"]
 visibility = ["mindroom.teams"]
 

@@ -13,6 +13,7 @@ a team leader's delegation does for a paused member.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +47,7 @@ from mindroom.llm.provider import (
     StreamTracker,
     TextDelta,
     TurnCompleted,
+    UsageReported,
     answering_identity,
 )
 from mindroom.llm.request_identity import cache_routing_digest, request_prefixes
@@ -117,6 +119,7 @@ type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunctio
 type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
 type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[bool | None]]
+type TurnProgressHook = Callable[[LoopState], None]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
 
 
@@ -148,6 +151,10 @@ class LoopHooks:
     - ``on_resume_entry``: awaited in order by a resume with the live messages and the decided calls' results after
       they are appended, before the loop continues; a resumed batch that stops the run runs none. Its hooks return as
       ``after_tool_batch`` hooks do.
+    - ``on_usage_updated``: called synchronously whenever the run's live usage, answering model, or recorded tool
+      calls change — on mid-request ``UsageReported`` events (with a non-mutating projected state), after a completed
+      turn is accepted, after a tool batch is recorded, and after a cut-off request's usage is kept. Errors raised by
+      this telemetry hook are logged and ignored so they never disrupt a run.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -160,6 +167,7 @@ class LoopHooks:
     tool_middleware: tuple[ToolMiddleware, ...] = ()
     after_tool_batch: tuple[AfterToolBatchHook, ...] = ()
     on_resume_entry: tuple[AfterToolBatchHook, ...] = ()
+    on_usage_updated: TurnProgressHook | None = None
     on_loop_end: LoopEndHook | None = None
 
 
@@ -237,7 +245,24 @@ async def run_model_loop(
         progress.last_request = request
         tracker = StreamTracker(identity)
         turn: TurnCompleted | None = None
-        events = _stream_turn(model, request, messages, state.record, tracker)
+        events = _stream_turn(
+            model,
+            request,
+            messages,
+            state.record,
+            tracker,
+            on_usage=(
+                None
+                if hooks.on_usage_updated is None
+                else lambda active_tracker, received: _notify_in_flight_usage(
+                    hooks,
+                    state,
+                    active_tracker,
+                    received,
+                )
+            ),
+            on_unaccepted=(None if hooks.on_usage_updated is None else lambda: _notify_usage_updated(hooks, state)),
+        )
         async with closing_async_stream(events):
             async for event in events:
                 # No await or break between taking the turn and asking for the next event: _stream_turn settles
@@ -249,6 +274,7 @@ async def run_model_loop(
         assert turn is not None
         message = turn.message
         _accept_turn(message, state, progress, tracker)
+        _notify_usage_updated(hooks, state)
         await _after_turn(hooks, state, request, message)
         if not message.tool_calls:
             break
@@ -297,6 +323,60 @@ async def _before_request(
         if isinstance(await hook(state), EndRun):
             return False
     return True
+
+
+def _notify_usage_updated(hooks: LoopHooks, state: LoopState) -> None:
+    """Invoke ``hooks.on_usage_updated`` defensively so telemetry errors never disrupt a run."""
+    if hooks.on_usage_updated is None:
+        return
+    try:
+        hooks.on_usage_updated(state)
+    except Exception:
+        logger.warning("usage_progress_hook_failed", entity=_entity(state.record), exc_info=True)
+
+
+def _notify_in_flight_usage(
+    hooks: LoopHooks,
+    state: LoopState,
+    tracker: StreamTracker,
+    received: MessageMetrics,
+) -> None:
+    """Project one mid-request usage report and forward it defensively."""
+    if hooks.on_usage_updated is None:
+        return
+    try:
+        hooks.on_usage_updated(_in_flight_state(state, tracker, received))
+    except Exception:
+        logger.warning("usage_progress_hook_failed", entity=_entity(state.record), exc_info=True)
+
+
+def _in_flight_state(state: LoopState, tracker: StreamTracker, received: MessageMetrics) -> LoopState:
+    """Return a non-mutating ``LoopState`` snapshot projecting one mid-request usage report."""
+    assert state.record.metrics is not None
+    projected_metrics = deepcopy(state.record.metrics)
+    for prior_identity, prior_metrics in tracker.prior_usage:
+        _count_request(projected_metrics, prior_metrics, prior_identity)
+    _count_request(projected_metrics, received, tracker.identity)
+    projected_record = replace(
+        state.record,
+        metrics=projected_metrics,
+        model=tracker.identity.id,
+        model_provider=tracker.identity.provider,
+        model_name=tracker.model_name if tracker.model_name is not None else state.record.model_name,
+    )
+    projected_messages = list(state.messages)
+    if not tracker.reported.sums_attempts:
+        projected_messages.append(
+            Message(
+                role="assistant",
+                metrics=received,
+                meta=MessageMeta(
+                    model=ModelProvenance(tracker.identity.id, tracker.identity.provider),
+                    aggregate_usage=False,
+                ),
+            ),
+        )
+    return replace(state, record=projected_record, messages=projected_messages)
 
 
 async def _after_turn(hooks: LoopHooks, state: LoopState, request: ModelRequest, message: Message) -> None:
@@ -356,6 +436,7 @@ async def _run_tool_batch(
             failing_tools=state.record.failing_tools,
         )
     _record_batch(state.record, batch)
+    _notify_usage_updated(hooks, state)
     if hooks.before_dispatch is not None:
         await hooks.before_dispatch(state, batch.planned)
     for call in batch.calls:
@@ -540,6 +621,9 @@ async def _stream_turn(
     messages: list[Message],
     record: AnyRunRecord,
     tracker: StreamTracker,
+    *,
+    on_usage: Callable[[StreamTracker, MessageMetrics], None] | None = None,
+    on_unaccepted: Callable[[], None] | None = None,
 ) -> AsyncIterator[TextDelta | ReasoningDelta | TurnCompleted]:
     """Stream one request, yielding its deltas and then its finished turn.
 
@@ -558,7 +642,10 @@ async def _stream_turn(
         async with closing_async_stream(stream):
             async for event in stream:
                 tracker.observe(event)
-                if isinstance(event, TextDelta):
+                if isinstance(event, UsageReported) and on_usage is not None:
+                    if (received := tracker.reported.received) is not None and received.reported:
+                        on_usage(tracker, received)
+                elif isinstance(event, TextDelta):
                     shown.append(event.text)
                     yield event
                 elif isinstance(event, ReasoningDelta):
@@ -572,7 +659,9 @@ async def _stream_turn(
         handed_off = True
     finally:
         if not handed_off:
-            _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
+            recorded_usage = _keep_unaccepted(messages, record, turn, tracker, "".join(shown))
+            if recorded_usage and on_unaccepted is not None:
+                on_unaccepted()
 
 
 def _keep_unaccepted(
@@ -581,8 +670,8 @@ def _keep_unaccepted(
     turn: TurnCompleted | None,
     tracker: StreamTracker,
     shown: str,
-) -> None:
-    """Keep a cut-off request under its answering identity and update the record when the active model answered."""
+) -> bool:
+    """Keep a cut-off request under its answering identity and return whether new usage or a turn was recorded."""
     metrics = record.metrics
     assert metrics is not None
     for prior_identity, prior_metrics in tracker.prior_usage:
@@ -592,9 +681,10 @@ def _keep_unaccepted(
         answered = answering_identity(turn.message, tracker.identity)
         _stamp_answering_model(record, answered, tracker.model_name)
         _keep_cut_off(messages, metrics, answered, turn.message.metrics, shown, sums_attempts=sums_attempts)
-        return
+        return True
     active_billed = tracker.reported.received
-    if tracker.answered or (active_billed is not None and active_billed.reported):
+    active_reported = active_billed is not None and active_billed.reported
+    if tracker.answered or active_reported:
         _stamp_answering_model(record, tracker.identity, tracker.model_name)
     _keep_cut_off(
         messages,
@@ -604,6 +694,7 @@ def _keep_unaccepted(
         shown,
         sums_attempts=tracker.reported.sums_attempts,
     )
+    return bool(tracker.prior_usage or active_reported)
 
 
 def _validate_completed_turn(turn: TurnCompleted | None, *, provider: str) -> TurnCompleted:
@@ -715,5 +806,6 @@ __all__ = [
     "RequestDecision",
     "RewriteToolCalls",
     "SendRequest",
+    "TurnProgressHook",
     "run_model_loop",
 ]

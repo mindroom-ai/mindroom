@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -20,12 +21,13 @@ from mindroom.providers.identity import model_identity
 from mindroom.providers.names import provider_route
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
+    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, RunStatus
     from mindroom.llm.usage import TokenCounts
 
@@ -81,13 +83,14 @@ class ReplyUsage:
         )
         return cls(metrics.tokens, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self, *, include_duration: bool = True) -> dict[str, Any]:
         """Return the published object; the uncached input is published as given, zero included."""
-        values = {
+        values: dict[str, Any] = {
             **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
             "time_to_first_token": self.time_to_first_token,
-            "duration": self.duration,
         }
+        if include_duration:
+            values["duration"] = self.duration
         wire: dict[str, Any] = {
             key: format(value, ".12g") if isinstance(value, float) else value
             for key, value in values.items()
@@ -167,6 +170,16 @@ def ai_run_error_from_metadata(run_metadata: Mapping[str, Any] | None) -> dict[s
     return dict(error) if isinstance(error, dict) else None
 
 
+def prepared_context_tokens_from_metadata(run_metadata: Mapping[str, Any] | None) -> int | None:
+    """Return the pre-flight ``prepared_context.tokens`` estimate stored in persisted run metadata, if present."""
+    if run_metadata is None:
+        return None
+    ai_run_metadata = run_metadata.get(AI_RUN_METADATA_KEY)
+    prepared = ai_run_metadata.get("prepared_context") if isinstance(ai_run_metadata, Mapping) else None
+    tokens = prepared.get("tokens") if isinstance(prepared, Mapping) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+
+
 def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> float | None:
     """Return the USD cost a reply's AI run metadata reports, or None when the cost is unknown.
 
@@ -181,20 +194,21 @@ def reply_cost_usd(content: Mapping[str, Any] | None, *, completed: bool) -> flo
     return 0.0 if completed else None
 
 
-def _reply_context_tokens(
-    run: AnyRunRecord | None,
+def _reply_context_tokens_from_messages(
+    messages: Sequence[Message] | None,
     prepared_history: PreparedHistoryState | None,
     *,
+    prepared_context_tokens: int | None = None,
     provider: str | None,
     configured_provider: str | None,
     model_id: str | None,
 ) -> ContextTokens | None:
-    """Return the context the run's last own model request reported, else the pre-flight estimate of its history.
+    """Return the context the last own model message reported, else the pre-flight estimate of its history.
 
-    The estimate stands in when the run holds no request its model answered, and when the last one reported no usage
+    The estimate stands in when no request was answered by the model, and when the last one reported no usage
     of its own: on a route that reports none, or for a retried request whose usage sums its attempts.
     """
-    newest_first = reversed(run.messages) if run is not None else ()
+    newest_first = reversed(messages) if messages is not None else ()
     last = next((message for message in newest_first if is_own_model_message(message)), None)
     if last is not None:
         reported = message_context_tokens(
@@ -205,7 +219,11 @@ def _reply_context_tokens(
         )
         if reported is not None:
             return reported
-    estimate = prepared_history.prepared_context_tokens if prepared_history is not None else None
+    estimate = (
+        prepared_history.prepared_context_tokens
+        if prepared_history is not None and prepared_history.prepared_context_tokens is not None
+        else prepared_context_tokens
+    )
     return None if estimate is None else ContextTokens(estimate)
 
 
@@ -359,19 +377,91 @@ def build_streaming_ai_run_metadata_content(config: Config, model_name: str) -> 
     return streaming_ai_run_content(model_payload(config, model_name))
 
 
+PROVISIONAL_METRIC_KEYS = ("usage", "cost", "context", "tools")
+
+
+def ai_run_metrics_fields(
+    *,
+    config: Config,
+    model_name: str,
+    model: str | None,
+    model_provider: str | None,
+    answering_model_name: str | None,
+    prices: Mapping[tuple[str, str], PricedModel],
+    metrics: RunMetrics | None,
+    prior_usage: Sequence[RunMetrics],
+    messages: Sequence[Message] | None,
+    prepared_history: PreparedHistoryState | None,
+    prepared_context_tokens: int | None = None,
+    subagents_usd: float | None,
+    include_duration: bool,
+) -> dict[str, Any]:
+    """Build the shared ``model``, ``usage``, ``cost``, and ``context`` fields for provisional and terminal payloads."""
+    total_metrics = turn_usage(prior_usage, metrics)
+    resolved_model_name = answering_model_name or model_name
+    model_config = config.models.get(resolved_model_name)
+    model_id = model or (model_config.id if model_config is not None else None)
+    provider = model_provider or (model_config.provider if model_config is not None else None)
+    configured_provider = model_config.provider if model_config is not None else None
+
+    fields: dict[str, Any] = {
+        "model": model_payload(config, resolved_model_name, model_id=model_id, provider=provider),
+    }
+    if resolved_model_name != model_name:
+        fields["model"]["fallback_from"] = model_name
+    if total_metrics is not None and (
+        usage := ReplyUsage.of(
+            total_metrics,
+            provider=provider,
+            configured_provider=configured_provider,
+            model_id=model_id,
+        ).to_wire(include_duration=include_duration)
+    ):
+        fields["usage"] = usage
+    cost = run_cost_usd(total_metrics, model_provider=model_provider, model_id=model_id, prices=prices)
+    cost_payload: dict[str, str] = {}
+    if cost is not None:
+        cost_payload["usd"] = format_cost_usd(cost)
+    if subagents_usd is not None:
+        cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
+    if cost_payload:
+        fields["cost"] = cost_payload
+    context = _reply_context_tokens_from_messages(
+        messages,
+        prepared_history,
+        prepared_context_tokens=prepared_context_tokens,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+    if context_payload := _build_context_payload(context, model_config):
+        fields["context"] = context_payload
+    return fields
+
+
 def build_terminal_note_ai_run_metadata_content(
     status: Literal["completed", "cancelled", "error"],
     *,
     model: Mapping[str, str] | None = None,
     error_info: Mapping[str, Any] | None = None,
+    provisional: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build terminal ``io.mindroom.ai_run`` metadata for a note or finalized reply without full run metrics."""
     payload: dict[str, Any] = {
         "version": _AI_RUN_METADATA_VERSION,
         "status": status,
     }
-    if model is not None:
-        payload["model"] = dict(model)
+    provisional_model = provisional.get("model") if provisional is not None else None
+    resolved_model = (
+        model if model is not None else (provisional_model if isinstance(provisional_model, Mapping) else None)
+    )
+    if resolved_model is not None:
+        payload["model"] = dict(resolved_model)
+    if provisional is not None:
+        for key in PROVISIONAL_METRIC_KEYS:
+            value = provisional.get(key)
+            if isinstance(value, Mapping):
+                payload[key] = dict(value)
     if error_info is not None:
         payload["error"] = dict(error_info)
     return {AI_RUN_METADATA_KEY: payload}
@@ -410,55 +500,26 @@ def build_ai_run_metadata_content(
     model requests. What the subagent turns whose results the turn received cost is published beside it, read from the
     turn running in this context when this builds: an approval resume makes its builder before its calls run.
     """
-    metrics = turn_usage(prior_usage, metrics)
-    configured_name = model_name
-    model_name = answering_model_name or model_name
-    model_config = config.models.get(model_name)
-    model_id = model or (model_config.id if model_config is not None else None)
-    provider = model_provider or (model_config.provider if model_config is not None else None)
-    configured_provider = model_config.provider if model_config is not None else None
-
     payload: dict[str, Any] = {
         "version": _AI_RUN_METADATA_VERSION,
         "run_id": run_id,
         "session_id": session_id,
         "status": status.value.lower(),
+        **ai_run_metrics_fields(
+            config=config,
+            model_name=model_name,
+            model=model,
+            model_provider=model_provider,
+            answering_model_name=answering_model_name,
+            prices=prices,
+            metrics=metrics,
+            prior_usage=prior_usage,
+            messages=context_run.messages if context_run is not None else None,
+            prepared_history=prepared_history,
+            subagents_usd=received_subagent_cost_usd(),
+            include_duration=True,
+        ),
     }
-    payload["model"] = model_payload(config, model_name, model_id=model_id, provider=provider)
-    if model_name != configured_name:
-        payload["model"]["fallback_from"] = configured_name
-    if metrics is not None:
-        usage = ReplyUsage.of(
-            metrics,
-            provider=provider,
-            configured_provider=configured_provider,
-            model_id=model_id,
-        ).to_wire()
-        if usage:
-            payload["usage"] = usage
-    cost = run_cost_usd(
-        metrics,
-        model_provider=model_provider,
-        model_id=model_id,
-        prices=prices,
-    )
-    cost_payload: dict[str, str] = {}
-    if cost is not None:
-        cost_payload["usd"] = format_cost_usd(cost)
-    if (subagents_usd := received_subagent_cost_usd()) is not None:
-        cost_payload["subagents_usd"] = format_cost_usd(subagents_usd)
-    if cost_payload:
-        payload["cost"] = cost_payload
-    context = _reply_context_tokens(
-        context_run,
-        prepared_history,
-        provider=provider,
-        configured_provider=configured_provider,
-        model_id=model_id,
-    )
-    context_payload = _build_context_payload(context, model_config)
-    if context_payload:
-        payload["context"] = context_payload
     if prepared_history is not None:
         payload.update(_prepared_history_payload(prepared_history))
     payload["tools"] = {"count": tool_count}

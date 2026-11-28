@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 from structlog.testing import capture_logs
 
@@ -24,134 +23,107 @@ from mindroom.ai_run_metadata import (
 )
 from mindroom.approval.response import continuation_target
 from mindroom.approval.tool_approval import shutdown_approval_runtime
-from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.cold_cache import ColdCacheConfig
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing
+from mindroom.config.models import ModelPricing
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
-    STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
-from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, EventClass, EventKind, InboundEvent
+from mindroom.event_journal import (
+    ApprovalDecisionMetadata,
+    CallKey,
+    EventClass,
+    EventKind,
+    InboundEvent,
+)
 from mindroom.llm.errors import STREAM_STALLED, ProviderUnavailable
-from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
+from mindroom.llm.provider import TextDelta
 from mindroom.llm.runs import RunStatus
-from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.users import AgentMatrixUser
-from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.message_target import MessageTarget
 from mindroom.providers.identity import model_identity
-from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, NoteKind, Presentation
+from mindroom.reply_presentation import (
+    AGENT_PLACEHOLDER,
+    TEAM_PLACEHOLDER,
+    NoteKind,
+    Presentation,
+)
 from mindroom.reply_scope import SpanHandle
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.streaming import send_streaming_response
-from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.events import FailedReply
 from mindroom.turn_model import resolve_turn_model
 from mindroom.turn_policy import ResponseAction
-from mindroom.turn_record import TurnRecord
-from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import dispatch_approval
-from tests.bot_helpers import make_test_agent_bot
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
-    TEST_PASSWORD,
-    bind_runtime_paths,
-    initialize_approval_store_for_test,
-    install_model_providers,
-    install_runtime_journal_support,
     make_ingress_facts,
     make_matrix_client_mock,
     runtime_paths_for,
-    test_runtime_paths,
     unwrap_extracted_collaborator,
-    wrap_extracted_collaborators,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
-from tests.response_attempt_helpers import install_direct_response_admission
+from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.response_runner_helpers import _plain_request, _target
-from tests.scripted_agent_helpers import raising, registered_toolkit
+from tests.scripted_agent_helpers import raising
 from tests.streaming_helpers import FakeReplyRecords
+from tests.streaming_metadata_helpers import (
+    ECHO_TOOL,
+    REQUESTER,
+    ROOM,
+    SOURCE,
+    THREAD,
+    Homeserver,
+    TurnHarness,
+    ai_run,
+    assert_provisional_ai_run,
+    assert_provisional_contract,
+    gated_answer,
+    install_approval_store,
+    register_echo_tool,
+    setup_turn,
+    stream_status,
+    streaming_metadata_config,
+    visible_content,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
     from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import PreparedHistoryState
     from mindroom.reply_turn.request import ResponseRequest
-    from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import PausedAttempt
     from mindroom.turn_model import ModelScope, TurnBudget, TurnModel
 
-_SOURCE = "$event"
-
-
-def _gated_answer(
-    prefix: str,
-    gate: asyncio.Event,
-    suffix: str,
-    *,
-    metrics: MessageMetrics | None = None,
-) -> list[ScriptStep]:
-    """Stream ``prefix``, pause until ``gate`` is set, then stream ``suffix`` and complete."""
-    final = metrics or MessageMetrics()
-    return [
-        TextDelta(prefix),
-        Await(gate.wait),
-        TextDelta(suffix),
-        UsageReported(final),
-        TurnCompleted(message=Message(role="assistant", content=prefix + suffix, metrics=final), stop_reason="end"),
-    ]
-
-
-_ROOM = "!room:localhost"
-_THREAD = "$thread"
-_REQUESTER = "@user:localhost"
-_ECHO_TOOL = "streaming_model_meta_echo"
-
-
-def _visible_content(event_content: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the visible Matrix content, following an edit into ``m.new_content``."""
-    return dict(visible_content_from_content(event_content))
-
-
-def _ai_run(event_content: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return ``io.mindroom.ai_run`` from a Matrix message or edit payload."""
-    visible = _visible_content(event_content)
-    ai_run = visible.get(AI_RUN_METADATA_KEY)
-    return dict(ai_run) if isinstance(ai_run, dict) else None
-
-
-def _stream_status(event_content: Mapping[str, Any]) -> str | None:
-    """Return ``io.mindroom.stream_status`` from a Matrix message or edit payload."""
-    visible = _visible_content(event_content)
-    status = visible.get(STREAM_STATUS_KEY)
-    return status if isinstance(status, str) else None
-
-
-def _assert_provisional_ai_run(event_content: Mapping[str, Any], expected_model: Mapping[str, str]) -> None:
-    """Assert ``event_content`` carries provisional, status-less ``io.mindroom.ai_run`` for ``expected_model``."""
-    ai_run = _ai_run(event_content)
-    assert ai_run == {"version": 1, "model": dict(expected_model)}
-    assert "status" not in ai_run
-    assert "run_id" not in ai_run
-    assert "session_id" not in ai_run
+_SOURCE = SOURCE
+_ROOM = ROOM
+_THREAD = THREAD
+_REQUESTER = REQUESTER
+_ECHO_TOOL = ECHO_TOOL
+_gated_answer = gated_answer
+_visible_content = visible_content
+_ai_run = ai_run
+_stream_status = stream_status
+_assert_provisional_ai_run = assert_provisional_ai_run
+_assert_provisional_contract = assert_provisional_contract
+_Homeserver = Homeserver
+_config = streaming_metadata_config
+_TurnHarness = TurnHarness
+_setup_turn = setup_turn
+_install_approval_store = install_approval_store
 
 
 def _assert_only_final_write_reports_error(
@@ -173,184 +145,11 @@ def _assert_only_final_write_reports_error(
     assert final_ai_run.get("model") == model
 
 
-@dataclass
-class _Homeserver:
-    """In-memory Matrix server recording every ``m.room.message`` payload in send order."""
-
-    events: dict[str, str] = field(default_factory=dict)
-    writes: list[dict[str, Any]] = field(default_factory=list)
-
-    async def room_send(
-        self,
-        *,
-        room_id: str,
-        message_type: str,
-        content: dict[str, Any],
-        tx_id: str | None = None,
-        **_kwargs: object,
-    ) -> nio.RoomSendResponse:
-        event_id = self.events.setdefault(tx_id or f"anon-{len(self.events)}", f"$sent{len(self.events)}")
-        if message_type == "m.room.message":
-            self.writes.append(content)
-        return nio.RoomSendResponse(event_id=event_id, room_id=room_id)
-
-
-def _config(
-    tmp_path: Path,
-    *,
-    budgets: BudgetsConfig | None = None,
-    cold_cache: ColdCacheConfig | None = None,
-    cheap_model: str | None = None,
-    tools: Sequence[str] = (),
-) -> Config:
-    return bind_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "general": AgentConfig(
-                        display_name="General",
-                        rooms=[_ROOM],
-                        model="default",
-                        cheap_model=cheap_model,
-                        cold_cache=cold_cache,
-                        tools=list(tools),
-                    ),
-                    "writer": AgentConfig(display_name="Writer", role="Writes.", model="writer-model"),
-                    "checker": AgentConfig(display_name="Checker", role="Checks.", model="checker-model"),
-                },
-                models={
-                    "default": ModelConfig(provider="openai", id="gpt-primary", display_name="Primary"),
-                    "large": ModelConfig(provider="anthropic", id="claude-large", display_name="Large"),
-                    "cheap": ModelConfig(provider="openai", id="gpt-mini", display_name="Mini"),
-                    "writer-model": ModelConfig(provider="openai", id="writer-model"),
-                    "checker-model": ModelConfig(provider="openai", id="checker-model"),
-                },
-                budgets=budgets,
-                memory={"backend": "none"},
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-
-
-@dataclass
-class _TurnHarness:
-    bot: AgentBot
-    runner: ResponseRunner
-    homeserver: _Homeserver
-    models: dict[str, ScriptedModel]
-
-
-async def _setup_turn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    scripts: Mapping[str, Sequence[Sequence[ScriptStep]]],
-    streaming: bool = True,
-    budgets: BudgetsConfig | None = None,
-    cold_cache: ColdCacheConfig | None = None,
-    cheap_model: str | None = None,
-    tools: Sequence[str] = (),
-    thread_id: str | None = None,
-) -> _TurnHarness:
-    config = _config(
-        tmp_path,
-        budgets=budgets,
-        cold_cache=cold_cache,
-        cheap_model=cheap_model,
-        tools=tools,
-    )
-    agent_user = AgentMatrixUser(
-        agent_name="general",
-        password=TEST_PASSWORD,
-        display_name="General",
-        user_id="@mindroom_general:localhost",
-    )
-    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=[_ROOM])
-    install_direct_response_admission(bot)
-    bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
-    install_runtime_journal_support(bot)
-    wrap_extracted_collaborators(bot)
-    await bot._reply_runtime.start()
-    target = _target(thread_id=thread_id)
-    await bot.journal_principal().admit(
-        InboundEvent(
-            event_id=_SOURCE,
-            room_id=_ROOM,
-            thread_id=thread_id,
-            kind=EventKind.MESSAGE,
-            event_class=EventClass.ACTIONABLE,
-            sender=_REQUESTER,
-            origin_server_ts=1,
-            source={},
-        ),
-    )
-    await bot._turn_store.record_pending_turn(
-        bot._turn_store.attach_response_context(
-            TurnRecord.create([_SOURCE], requester_id=_REQUESTER),
-            history_scope=bot._turn_store.response_history_scope(ResponseAction(kind="individual")),
-            conversation_target=target,
-        ),
-    )
-    progress = bot.config.defaults.streaming
-    progress.update_interval = 0.0
-    progress.min_update_interval = 0.0
-    progress.max_idle = 0.0
-    models = {
-        name: ScriptedModel(
-            [list(steps) for steps in turns],
-            identity=ModelIdentity(
-                id=bot.config.models[name].id,
-                provider=bot.config.models[name].provider,
-            ),
-        )
-        for name, turns in scripts.items()
-    }
-    install_model_providers(monkeypatch, models)
-    homeserver = _Homeserver()
-    bot.client.room_send = AsyncMock(side_effect=homeserver.room_send)
-    presence = MagicMock(spec=nio.PresenceGetResponse)
-    presence.presence = "online" if streaming else "offline"
-    presence.last_active_ago = 0
-    bot.client.get_presence = AsyncMock(return_value=presence)
-    return _TurnHarness(
-        bot=bot,
-        runner=unwrap_extracted_collaborator(bot._response_runner),
-        homeserver=homeserver,
-        models=models,
-    )
-
-
 @pytest.fixture
 def echo_tool() -> Iterator[None]:
     """Register a lightweight echo toolkit for approval tests."""
-
-    class _EchoTools(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="echo_tools", tools=[self.echo])
-
-        def echo(self, text: str) -> str:
-            return f"echo:{text}"
-
-    with registered_toolkit(_ECHO_TOOL, _EchoTools):
+    with register_echo_tool():
         yield
-
-
-def _install_approval_store(turn: _TurnHarness) -> None:
-    """Initialize the approval store the turn's bot pauses into, with approval cards that deliver at once."""
-
-    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
-        return content
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=AsyncMock(return_value="$approval-card"),
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        sender_bot=lambda _entity_name, _room_id: object(),
-        sender_device_id=AsyncMock(return_value="DEVICE"),
-    )
 
 
 async def _approve_and_resume(
@@ -596,8 +395,12 @@ async def test_agent_placeholder_streaming_and_final_metadata_lifecycle(
 
     streaming_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_STREAMING]
     assert streaming_writes
-    for write in streaming_writes:
-        _assert_provisional_ai_run(write, expected_model)
+    _assert_provisional_ai_run(streaming_writes[0], expected_model)
+    for write in streaming_writes[1:]:
+        provisional = _assert_provisional_contract(_ai_run(write))
+        assert provisional["model"] == expected_model
+        if "usage" in provisional:
+            assert provisional["usage"]["total_tokens"] == 15
 
     final_write = turn.homeserver.writes[-1]
     assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
@@ -656,7 +459,7 @@ async def test_team_placeholder_streaming_and_final_metadata_lifecycle(
     streaming_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_STREAMING]
     assert streaming_writes
     for write in streaming_writes:
-        _assert_provisional_ai_run(write, expected_model)
+        _assert_provisional_ai_run(write, expected_model, expected_tools=1)
 
     final_write = turn.homeserver.writes[-1]
     assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
@@ -1291,9 +1094,10 @@ async def test_approval_pause_resumed_stream_progress_and_final_carry_model_meta
             started = turn.runner.generate_response(request)
         assert await started == Owned()
 
+        expected_tools = 2 if team else 1
         pause_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_APPROVAL_PENDING]
         assert pause_writes
-        _assert_provisional_ai_run(pause_writes[-1], expected_model)
+        _assert_provisional_ai_run(pause_writes[-1], expected_model, expected_tools=expected_tools)
 
         continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
         assert continuation is not None
@@ -1303,7 +1107,7 @@ async def test_approval_pause_resumed_stream_progress_and_final_carry_model_meta
         resumed_streaming = [w for w in resumed_writes if _stream_status(w) == STREAM_STATUS_STREAMING]
         assert resumed_streaming
         for write in resumed_streaming:
-            _assert_provisional_ai_run(write, expected_model)
+            _assert_provisional_ai_run(write, expected_model, expected_tools=expected_tools)
 
         final_write = resumed_writes[-1]
         assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
@@ -1413,6 +1217,7 @@ async def test_approval_failure_note_carries_terminal_ai_run_with_model(
             "version": 1,
             "status": "error",
             "model": model_payload(turn.bot.config, "default"),
+            "tools": {"count": 1},
         }
     finally:
         await shutdown_approval_runtime()
@@ -1523,6 +1328,7 @@ async def test_provider_failure_after_tool_approval_emits_structured_ai_run_erro
             "version": 1,
             "status": "error",
             "model": model_payload(turn.bot.config, "default"),
+            "tools": {"count": 1},
             "error": {
                 "kind": "provider_unavailable",
                 "title": "OpenRouter unavailable (503)",
@@ -1595,6 +1401,7 @@ async def test_approval_cancellation_and_restart_notes_omit_structured_error(
             "version": 1,
             "status": expected_ai_run_status,
             "model": model_payload(turn.bot.config, "default"),
+            "tools": {"count": 1},
         }
     finally:
         await shutdown_approval_runtime()

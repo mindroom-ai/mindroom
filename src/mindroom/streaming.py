@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.history.reply_compactions import ReplyCompactions
     from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.message_target import MessageTarget
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import WorkerProgressEvent, WorkerProgressPump
@@ -302,6 +303,7 @@ class _CommittedDeliveryState:
     # The text before the final transform reshaped it, when it did.
     untransformed_text: str | None = None
     tool_trace_version: int = 0
+    ai_run_version: tuple[int, str | None] | None = None
 
 
 def _normalize_stream_accumulated_text(text: str) -> str:
@@ -430,6 +432,7 @@ class _StreamingDeliverySnapshot:
     untransformed_text: str | None = None
     suppress_push: bool = False
     tool_trace_version: int = 0
+    ai_run_version: tuple[int, str | None] | None = None
 
 
 def _progress_state(committed: _CommittedDeliveryState) -> ProgressState:
@@ -544,6 +547,7 @@ def _prepare_delivery_from_snapshot(snapshot: _StreamingDeliverySnapshot) -> _Pr
             stream_status=snapshot.stream_status,
             untransformed_text=snapshot.untransformed_text,
             tool_trace_version=snapshot.tool_trace_version,
+            ai_run_version=snapshot.ai_run_version,
         ),
         had_warmup_suffix=bool(snapshot.warmup_suffix_lines),
         chars_since_last_update=snapshot.chars_since_last_update,
@@ -671,6 +675,8 @@ class StreamingResponse:
     compactions: ReplyCompactions | None = None
     # Reads the active model payload for provisional streaming metadata until settled run metadata arrives.
     active_model: Callable[[], Mapping[str, str] | None] | None = None
+    # Live provisional, status-less io.mindroom.ai_run progress for this reply span.
+    ai_run_progress: ReplyAiRunProgress | None = None
     # Returns whether the finalized reply should suppress push while background work continues.
     suppress_final_push: Callable[[], Awaitable[bool]] | None = None
     # Returns whether the current turn resolved its target thread, so creates/edits never auto-reopen it.
@@ -716,6 +722,7 @@ class StreamingResponse:
     tool_progress: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _tool_trace_version: int = field(default=0, init=False, repr=False)
     _last_delivered_tool_trace_version: int = field(default=0, init=False, repr=False)
+    _last_delivered_ai_run_version: tuple[int, str | None] | None = field(default=None, init=False, repr=False)
     _tool_progress_version: int = field(default=0, init=False, repr=False)
     _live_tool_cache: list[tuple[tuple[object, ...], dict[str, object]]] = field(
         default_factory=list,
@@ -1064,8 +1071,8 @@ class StreamingResponse:
             if elapsed_since_last_update >= self.update_interval:
                 await self._send_or_edit_message(
                     client,
-                    # A finished warm-up line is cleared even before any text arrived.
-                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit,
+                    # A finished warm-up line is cleared even before any text arrived; uncommitted ai_run rides checkpoints too.
+                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit or self.has_uncommitted_ai_run(),
                     capture_completions=capture_completions,
                 )
             else:
@@ -1084,7 +1091,7 @@ class StreamingResponse:
             and elapsed_since_last_update >= self.min_char_update_interval
         )
         should_send = time_triggered or char_triggered or idle_triggered
-        allow_empty_progress = progress_hint and not self.accumulated_text.strip()
+        allow_empty_progress = (progress_hint or self.has_uncommitted_ai_run()) and not self.accumulated_text.strip()
         if should_send and (self.accumulated_text.strip() or allow_empty_progress):
             await self._send_or_edit_message(
                 client,
@@ -1356,6 +1363,7 @@ class StreamingResponse:
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return None
 
+        ai_run_version = self.ai_run_progress.snapshot_version() if self.ai_run_progress is not None else None
         return _StreamingDeliverySnapshot(
             config=self.config,
             runtime_paths=self.runtime_paths,
@@ -1376,6 +1384,7 @@ class StreamingResponse:
             markdown_renderer=self._render_markdown,
             chars_since_last_update=self.chars_since_last_update,
             tool_trace_version=self._tool_trace_version,
+            ai_run_version=ai_run_version,
         )
 
     def _active_model_payload(self) -> dict[str, str] | None:
@@ -1401,35 +1410,62 @@ class StreamingResponse:
             provider=provider,
         ).to_wire(fallback=self._failed_reply_text)
 
+    def _provisional_ai_run_payload(self, fallback_model: Mapping[str, str] | None) -> dict[str, Any] | None:
+        if self.ai_run_progress is None:
+            return None
+        return self.ai_run_progress.payload(fallback_model=fallback_model)
+
+    def _apply_provisional_ai_run_metadata(
+        self,
+        extra_content: dict[str, Any],
+        ai_run: dict[str, Any] | None,
+        model: dict[str, str] | None,
+    ) -> None:
+        settled_model = ai_run.get("model") if ai_run is not None else None
+        resolved_model = model if model is not None else (settled_model if isinstance(settled_model, dict) else None)
+        provisional = self._provisional_ai_run_payload(resolved_model)
+        if provisional is not None:
+            extra_content[AI_RUN_METADATA_KEY] = provisional
+        elif resolved_model is not None:
+            extra_content.update(streaming_ai_run_content(resolved_model))
+        elif ai_run is not None and "status" in ai_run:
+            del extra_content[AI_RUN_METADATA_KEY]
+
     def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
         """Attach ``io.mindroom.ai_run`` metadata: provisional on a progress write, terminal on the final one.
 
-        A progress write names the reply's model alone, even once the turn has settled its run metadata into the
-        caller's content, so a terminal status reaches the room only with the final write, which keeps settled run
-        metadata whole.
+        A progress write emits only the status-less provisional projection (model plus live usage, cost, context, and
+        tool count), even once the turn has settled its run metadata into the caller's content, so terminal fields
+        reach the room only with the final write, which keeps settled run metadata whole.
         """
         settled = extra_content.get(AI_RUN_METADATA_KEY)
         ai_run = dict(settled) if isinstance(settled, dict) else None
         model = self._active_model_payload()
         if not is_final:
-            settled_model = ai_run.get("model") if ai_run is not None else None
-            if model is None and isinstance(settled_model, dict):
-                model = settled_model
-            if model is not None:
-                extra_content.update(streaming_ai_run_content(model))
-            elif ai_run is not None and "status" in ai_run:
-                del extra_content[AI_RUN_METADATA_KEY]
+            self._apply_provisional_ai_run_metadata(extra_content, ai_run, model)
             return
         terminal_status: Literal["completed", "error"] = "error" if self._saw_failed_reply else "completed"
         error_info = self._failed_reply_error_info(model, ai_run)
+        provisional = self._provisional_ai_run_payload(model)
         if ai_run is None:
-            if model is not None or self._saw_failed_reply:
+            if provisional is not None or model is not None or self._saw_failed_reply:
                 extra_content.update(
-                    build_terminal_note_ai_run_metadata_content(terminal_status, model=model, error_info=error_info),
+                    build_terminal_note_ai_run_metadata_content(
+                        terminal_status,
+                        model=None if provisional is not None and "model" in provisional else model,
+                        error_info=error_info,
+                        provisional=provisional,
+                    ),
                 )
             return
         if "status" not in ai_run:
-            if model is not None and "model" not in ai_run:
+            if provisional is not None:
+                ai_run = {
+                    **provisional,
+                    **ai_run,
+                    **({"model": provisional["model"]} if "model" in provisional else {}),
+                }
+            elif model is not None and "model" not in ai_run:
                 ai_run["model"] = model
             ai_run["status"] = terminal_status
         if error_info is not None and ai_run["status"] == "error":
@@ -1511,6 +1547,7 @@ class StreamingResponse:
         self._last_delivered_text = committed_state.accumulated_text
         self._last_delivered_tool_trace = deepcopy(committed_state.tool_trace)
         self._last_delivered_tool_trace_version = committed_state.tool_trace_version
+        self._last_delivered_ai_run_version = committed_state.ai_run_version
         self._last_delivered_presentation_state = deepcopy(committed_state.presentation_state)
         self._last_placeholder_progress_sent = committed_state.placeholder_progress_sent
         self._last_committed_rendered_body = committed_state.rendered_body
@@ -1554,6 +1591,16 @@ class StreamingResponse:
         self.placeholder_progress_sent = self._last_placeholder_progress_sent
         self._tool_trace_version += 1
         self._last_delivered_tool_trace_version = self._tool_trace_version
+
+    def has_uncommitted_ai_run(self) -> bool:
+        """Return whether live provisional ``io.mindroom.ai_run`` metrics changed since the last committed edit."""
+        return (
+            self.event_id is not None
+            and self._shows_stream
+            and self.ai_run_progress is not None
+            and self.ai_run_progress.has_metrics()
+            and self.ai_run_progress.snapshot_version() != self._last_delivered_ai_run_version
+        )
 
     def has_uncommitted_presentation(self) -> bool:
         """Return whether buffered ordered presentation state has not reached Matrix."""
@@ -2391,6 +2438,7 @@ async def _run_live_frames(
             and now - max(streaming.last_update, last_checkpoint_request) >= streaming.update_interval
             and (
                 streaming.has_uncommitted_presentation()
+                or streaming.has_uncommitted_ai_run()
                 or streaming._warmup_state.active_warmups
                 or streaming._warmup_state.needs_warmup_clear_edit
             )
@@ -2497,6 +2545,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     tool_trace_collector: list[ToolTraceEntry] | None = None,
     compactions: ReplyCompactions | None = None,
     active_model: Callable[[], Mapping[str, str] | None] | None = None,
+    ai_run_progress: ReplyAiRunProgress | None = None,
     pipeline_timing: DispatchPipelineTiming | None = None,
     visible_event_id_callback: Callable[[str], None] | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
@@ -2544,6 +2593,7 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         resumed_tool_trace=resumed.tool_trace if resumed is not None else (),
         compactions=compactions,
         active_model=active_model,
+        ai_run_progress=ai_run_progress,
         suppress_final_push=suppress_final_push,
         resolved_in_turn=resolved_in_turn,
         initial_send=initial_send,
@@ -2650,6 +2700,26 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
     return transport_outcome
 
 
+async def _publish_progress_chunk(
+    streaming: StreamingResponse,
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    chunk: StructuredStreamChunk,
+    *,
+    apply_presentation: Callable[[str], None],
+) -> None:
+    trace_changed = chunk.tool_trace is not None and streaming.replace_tool_trace(chunk.tool_trace)
+    if chunk.content != streaming.accumulated_text or (trace_changed and streaming.show_tool_calls):
+        await _apply_visible_text_chunk(
+            streaming,
+            delivery_queue,
+            chunk.content,
+            apply_chunk=apply_presentation,
+            boundary_refresh=trace_changed and streaming.show_tool_calls,
+        )
+    elif streaming.has_uncommitted_ai_run():
+        _queue_delivery_request(delivery_queue, progress_hint=True)
+
+
 @asynccontextmanager
 async def stream_progress_edits(
     client: nio.AsyncClient,
@@ -2663,6 +2733,7 @@ async def stream_progress_edits(
     progress_delivered: ProgressDelivered,
     extra_content: dict[str, Any] | None = None,
     active_model: Callable[[], Mapping[str, str] | None] | None = None,
+    ai_run_progress: ReplyAiRunProgress | None = None,
     visible_progress_callback: Callable[[str, Sequence[ToolTraceEntry]], None] | None = None,
     transport_is_current: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[ProgressPublisher]:
@@ -2694,6 +2765,7 @@ async def stream_progress_edits(
         show_tool_calls=show_tool_calls,
         extra_content=extra_content,
         active_model=active_model,
+        ai_run_progress=ai_run_progress,
         visible_progress_callback=visible_progress_callback,
         transport_is_current=transport_is_current,
         progress_write_ahead=progress_write_ahead,
@@ -2724,22 +2796,20 @@ async def stream_progress_edits(
             if chunk.tool_progress is not None:
                 # Only live frames show it; no write carries it.
                 streaming.replace_tool_progress(chunk.tool_progress)
-            trace_changed = False
-            if chunk.tool_trace is not None:
-                # Callers keep mutating their trace entries; hold the published state.
-                trace_changed = streaming.replace_tool_trace(chunk.tool_trace)
             if not published:
                 published = True
+                if chunk.tool_trace is not None:
+                    # Callers keep mutating their trace entries; hold the published state.
+                    streaming.replace_tool_trace(chunk.tool_trace)
                 streaming.accumulated_text = chunk.content
                 _queue_delivery_request(delivery_queue, force_refresh=True, allow_empty_progress=True)
-            elif chunk.content != streaming.accumulated_text or (trace_changed and streaming.show_tool_calls):
-                await _apply_visible_text_chunk(
-                    streaming,
-                    delivery_queue,
-                    chunk.content,
-                    apply_chunk=apply_presentation,
-                    boundary_refresh=trace_changed and streaming.show_tool_calls,
-                )
+                return
+            await _publish_progress_chunk(
+                streaming,
+                delivery_queue,
+                chunk,
+                apply_presentation=apply_presentation,
+            )
 
         ended_early = True
         try:

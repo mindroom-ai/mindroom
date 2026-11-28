@@ -501,7 +501,7 @@ class ResponseRunner:
     def _set_span_reply_model(self, model_name: str | None) -> None:
         """Record the active model payload on the running span, if any."""
         if model_name is not None and (handle := current_span()) is not None:
-            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+            handle.set_reply_model(model_payload(self.deps.runtime.config, model_name))
 
     def _agent_placeholder_model_name(
         self,
@@ -2237,7 +2237,7 @@ class ResponseRunner:
         tool_trace: list[ToolTraceEntry] = []
 
         def note_resolved_model(model_name: str) -> None:
-            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+            handle.set_reply_model(model_payload(self.deps.runtime.config, model_name))
 
         sinks = TurnSinks(
             turn_recorder=recorder,
@@ -2246,6 +2246,7 @@ class ResponseRunner:
             active_model=lambda: handle.reply_model,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
+            live_ai_run=handle.ai_run_progress,
         )
 
         def response_stream() -> AsyncIterator[StreamInputChunk]:

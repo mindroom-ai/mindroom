@@ -41,7 +41,7 @@ from mindroom.tool_system.context_bound_streams import callback_event_stream, cl
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
-    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.model_loop import LoopHooks, LoopState, TurnProgressHook
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.agent_loop.spec import AgentSpec, RunContext
     from mindroom.llm.events import RunEvent
@@ -69,6 +69,7 @@ type Emit = Callable[[TeamRunEvent], None]
 # One call a paused team waits for: the member whose run issued it, or None for the leader's own, and the call id.
 # Members' providers number their calls independently, so a call id alone does not name a call of the team.
 type TeamCallKey = tuple[str | None, str]
+type TeamUsageHook = Callable[[TeamRunRecord, Sequence[Message], Sequence[RunRecord]], None]
 
 
 def run_team(
@@ -79,6 +80,7 @@ def run_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     request_template: ModelRequest,
+    on_usage_updated: TeamUsageHook | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one team turn: the leader's system messages, then ``run_input`` as the history subsystem built it.
 
@@ -98,6 +100,7 @@ def run_team(
         hooks=hooks,
         persist=persist,
         template=request_template,
+        on_usage_updated=on_usage_updated,
     )
 
 
@@ -111,6 +114,7 @@ def continue_team(
     hooks: LoopHooks,
     persist: Persist[AnyRunRecord],
     request_template: ModelRequest,
+    on_usage_updated: TeamUsageHook | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Resume a paused team run: its paused members with the decisions on their calls, then the leader.
 
@@ -158,6 +162,7 @@ def continue_team(
         template=request_template,
         entry=entry,
         resumed=decided,
+        on_usage_updated=on_usage_updated,
     )
 
 
@@ -288,6 +293,20 @@ def leader_tool_specs(spec: TeamSpec) -> tuple[ToolSpec, ...]:
     return sorted_specs((*PreparedTools(functions=spec.leader.functions).specs(), DELEGATION_TOOLS[spec.mode]))
 
 
+def _compose_usage_hooks(
+    existing: TurnProgressHook | None,
+    extra: TurnProgressHook,
+) -> TurnProgressHook:
+    if existing is None:
+        return extra
+
+    def combined(state: LoopState) -> None:
+        existing(state)
+        extra(state)
+
+    return combined
+
+
 @dataclass(frozen=True, slots=True)
 class _MemberRuns:
     """Run and resume the members of one team run, forwarding their events tagged with the member."""
@@ -296,6 +315,20 @@ class _MemberRuns:
     ctx: RunContext
     emit: Emit
     persist: Persist[AnyRunRecord]
+    on_usage_updated: Callable[[], None] | None = None
+    active_members: dict[str, RunRecord] = field(default_factory=dict)
+
+    def _member_hooks(self, build: MemberBuild, run_id: str) -> LoopHooks:
+        hooks = build.hooks(run_id)
+        if self.on_usage_updated is None:
+            return hooks
+        return replace(hooks, on_usage_updated=_compose_usage_hooks(hooks.on_usage_updated, self._note_member_usage))
+
+    def _note_member_usage(self, state: LoopState) -> None:
+        if isinstance(state.record, RunRecord):
+            self.active_members[state.record.run_id] = state.record
+        if self.on_usage_updated is not None:
+            self.on_usage_updated()
 
     async def run(self, member: TeamMember, task: str) -> RunRecord:
         """Run ``member`` on the leader's task as a child of the team run; the task text is its whole input.
@@ -328,7 +361,7 @@ class _MemberRuns:
             build.spec,
             run_input,
             ctx=ctx,
-            hooks=build.hooks(ctx.run_id),
+            hooks=self._member_hooks(build, ctx.run_id),
             persist=self._persist,
             request_template=build.request_template,
         )
@@ -342,7 +375,7 @@ class _MemberRuns:
             planned.plan,
             build_resume_request(paused=paused.messages, summary=None, history=[]),
             context=self._member_context,
-            hooks=build.hooks(paused.run_id),
+            hooks=self._member_hooks(build, paused.run_id),
             persist=self._persist,
             request_template=build.request_template,
         )
@@ -355,12 +388,15 @@ class _MemberRuns:
     async def _persist(self, record: RunRecord) -> None:
         # The team keeps member runs in the order they first ended; a member resumed within the run ends twice, and
         # its later record replaces the paused one where it stood.
+        self.active_members.pop(record.run_id, None)
         run_ids = [run.run_id for run in self.record.ended_member_runs]
         if record.run_id in run_ids:
             self.record.ended_member_runs[run_ids.index(record.run_id)] = record
         else:
             self.record.ended_member_runs.append(record)
         await self.persist(record)
+        if self.on_usage_updated is not None:
+            self.on_usage_updated()
 
     async def _finish(self, member: TeamMember, run_id: str, stream: AsyncIterator[RunEvent]) -> RunRecord:
         """Forward the member's events and return the terminal record its loop stored however it ended.
@@ -397,6 +433,7 @@ async def _drive_team(
     template: ModelRequest,
     entry: Callable[[_MemberRuns], Awaitable[None]] | None = None,
     resumed: Sequence[RunRequirement] | None = None,
+    on_usage_updated: TeamUsageHook | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Stream the leader's loop over ``messages`` and its members' runs, owning the team run's cancellation.
 
@@ -404,14 +441,51 @@ async def _drive_team(
     """
 
     async def produce(emit: Emit) -> None:
-        members = _MemberRuns(record, ctx, emit, persist)
+        members: _MemberRuns
+
+        def notify_usage(
+            leader_record: TeamRunRecord | None = None,
+            leader_messages: Sequence[Message] | None = None,
+        ) -> None:
+            if on_usage_updated is None:
+                return
+            active_leader = record if leader_record is None else leader_record
+            active_messages = messages if leader_messages is None else leader_messages
+            by_id: dict[str, RunRecord] = {run.run_id: run for run in record.ended_member_runs}
+            by_id.update(members.active_members)
+            try:
+                on_usage_updated(active_leader, active_messages, tuple(by_id.values()))
+            except Exception:
+                logger.warning("team_usage_progress_hook_failed", team_id=record.team_id, exc_info=True)
+
+        def note_leader_usage(state: LoopState) -> None:
+            if isinstance(state.record, TeamRunRecord):
+                notify_usage(state.record, state.messages)
+            else:
+                notify_usage()
+
+        members = _MemberRuns(
+            record,
+            ctx,
+            emit,
+            persist,
+            on_usage_updated=None if on_usage_updated is None else notify_usage,
+        )
+        leader_hooks = (
+            hooks
+            if on_usage_updated is None
+            else replace(
+                hooks,
+                on_usage_updated=_compose_usage_hooks(hooks.on_usage_updated, note_leader_usage),
+            )
+        )
         leader = _leader_spec(spec, record, members.run)
         events = drive_run(
             leader,
             record,
             messages,
             ctx=ctx,
-            hooks=hooks,
+            hooks=leader_hooks,
             persist=persist,
             template=template,
             entry=None if entry is None else lambda: entry(members),
@@ -435,6 +509,7 @@ __all__ = [
     "TeamCallKey",
     "TeamDecisions",
     "TeamRunEvent",
+    "TeamUsageHook",
     "continue_team",
     "leader_tool_specs",
     "run_team",

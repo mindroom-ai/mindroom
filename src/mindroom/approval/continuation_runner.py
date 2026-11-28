@@ -461,14 +461,16 @@ class ApprovalContinuationRunner:
         runtime_model_name: str | None,
         handle: SpanHandle,
     ) -> dict[str, Any]:
-        """Build pause write metadata carrying stream status and provisional active model."""
+        """Build pause write metadata carrying stream status and provisional active run progress."""
         extra_content: dict[str, Any] = {STREAM_STATUS_KEY: stream_status}
         if runtime_model_name is not None:
             model = model_payload(self.deps.runtime.config, runtime_model_name)
             handle.reply_model = model
-            extra_content.update(streaming_ai_run_content(model))
-        elif handle.reply_model is not None:
-            extra_content.update(streaming_ai_run_content(handle.reply_model))
+            # Keep the answering/fallback model and live metrics already recorded by the run; only seed the
+            # configured runtime model when no provisional metrics have been recorded yet.
+            if not handle.ai_run_progress.has_metrics():
+                handle.ai_run_progress.set_model(model)
+        extra_content.update(handle.ai_run_progress.content(fallback_model=handle.reply_model))
         return extra_content
 
     async def _show_pause(
@@ -594,11 +596,14 @@ class ApprovalContinuationRunner:
         reply = await handle.runtime.store.replies.load(handle.reply_id)
         assert reply is not None
         handle.note_reply(reply)
+        shown = decode_presentation(reply.presentation)
+        if (ai_run := handle.ai_run_progress.payload(fallback_model=handle.reply_model)) is not None:
+            shown = replace(shown, ai_run=ai_run)
         await self.deps.delivery_gateway.end_reply_span(
             handle,
             pause_decision(
                 handle,
-                decode_presentation(reply.presentation),
+                shown,
                 in_place=False,
                 stage=None,
             ),
@@ -660,16 +665,19 @@ class ApprovalContinuationRunner:
 
         A rule that refuses the pause (a Stop committed while it was prepared) raises ``ReplyWriteRefusedError``.
         """
+        extra_content = self._pause_extra_content(
+            stream_status,
+            runtime_model_name=hold.runtime_model_name,
+            handle=handle,
+        )
+        if (ai_run := handle.ai_run_progress.payload(fallback_model=handle.reply_model)) is not None:
+            shown = replace(shown, ai_run=ai_run)
         return await self.deps.delivery_gateway.edit_text(
             EditTextRequest(
                 target=target,
                 event_id=event_id,
                 new_text=text,
-                extra_content=self._pause_extra_content(
-                    stream_status,
-                    runtime_model_name=hold.runtime_model_name,
-                    handle=handle,
-                ),
+                extra_content=extra_content,
                 tool_trace=list(tool_trace) or None,
                 reply_write=pause_write(
                     handle,
@@ -867,7 +875,7 @@ class ApprovalContinuationRunner:
             model = model_payload(self.deps.runtime.config, claimed.runtime_model_name)
             provisional_ai_run = streaming_ai_run_content(model)
             if (handle := current_span()) is not None:
-                handle.reply_model = model
+                handle.set_reply_model(model)
         # Streaming requesters watch the resumed work in the reply it continues, unless the turn is quiet.
         # Progress closes before any terminal edit, which stays owned below.
         progress_scope: AbstractAsyncContextManager[ProgressPublisher | None] = (
@@ -1361,6 +1369,9 @@ class ApprovalContinuationRunner:
                             progress=progress,
                             system_enrichment_items=system_enrichment_items,
                             quiet=request.quiet,
+                            live_ai_run=(
+                                span_handle.ai_run_progress if (span_handle := current_span()) is not None else None
+                            ),
                         )
                 else:
                     result = await self._approval_execution.continue_run(

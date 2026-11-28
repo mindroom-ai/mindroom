@@ -35,6 +35,7 @@ from mindroom.final_delivery import Cancelled, Failed, FailureCause
 from mindroom.history.reply_compactions import ReplyCompactions
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
+from mindroom.reply_ai_run_progress import ReplyAiRunProgress
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     NoteKind,
@@ -94,10 +95,19 @@ class SpanHandle:
     compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
     # The active model payload this span's writes carry until settled run metadata replaces it.
     reply_model: dict[str, str] | None = None
+    # Live provisional, status-less io.mindroom.ai_run progress for this span's writes.
+    ai_run_progress: ReplyAiRunProgress = field(default_factory=ReplyAiRunProgress, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Know from the start whether the claimed reply already shows an event."""
         self.note_reply(self.reply)
+        if self.reply_model is not None:
+            self.ai_run_progress.set_model(self.reply_model)
+
+    def set_reply_model(self, model: Mapping[str, str] | None) -> None:
+        """Record the active model payload on this span and its provisional progress."""
+        self.reply_model = dict(model) if model is not None else None
+        self.ai_run_progress.set_model(self.reply_model)
 
     @property
     def exited(self) -> bool:
@@ -182,7 +192,12 @@ class SpanHandle:
         """Return the whole reply as it would show with this span's answer so far."""
         answer = self._answer_segment(text, tool_trace, team_state=team_state)
         presentation = with_answer(self.base, answer) if answer.text.strip() or answer.tool_trace else self.base
-        return replace(presentation, trailing_note=trailing_note)
+        ai_run = self.ai_run_progress.payload(fallback_model=self.reply_model)
+        return replace(
+            presentation,
+            trailing_note=trailing_note,
+            ai_run=ai_run if ai_run is not None else presentation.ai_run,
+        )
 
 
 @dataclass

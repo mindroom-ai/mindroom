@@ -23,6 +23,7 @@ from mindroom.ai_run_metadata import (
     build_ai_run_metadata_content,
     build_prepared_history_metadata_content,
     model_payload,
+    prior_usage_by_run,
     with_prior_usage,
 )
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
@@ -130,7 +131,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.model_loop import LoopHooks, LoopState, TurnProgressHook
     from mindroom.agent_loop.spec import AgentSpec
     from mindroom.approval.resume import ResumeDecisions
     from mindroom.config.main import Config
@@ -145,6 +146,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.media_inputs import MediaInputs
+    from mindroom.reply_ai_run_progress import ReplyAiRunProgress
     from mindroom.response_turn import TurnRunState
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -527,9 +529,41 @@ def _begin_attempt(
     return storage, attempt
 
 
+def _prepare_live_ai_run_hook(
+    live_ai_run: ReplyAiRunProgress | None,
+    *,
+    config: Config,
+    prepared_run: _PreparedAgentRun,
+    prior_usage: Sequence[RunMetrics],
+) -> TurnProgressHook | None:
+    """Seed pre-flight provisional metadata and return the loop hook that updates it as requests settle."""
+    if live_ai_run is None:
+        return None
+    live_ai_run.set_prepared_context(
+        config,
+        prepared_run.runtime_model_name,
+        prepared_run.prepared_history,
+        prior_usage=prior_usage,
+    )
+
+    def _note_usage(loop_state: LoopState) -> None:
+        live_ai_run.update_from_run(
+            config,
+            model_name=prepared_run.runtime_model_name,
+            record=loop_state.record,
+            messages=loop_state.messages,
+            prior_usage=tuple(prior_usage_by_run(loop_state.record.metadata).values()),
+            prepared_history=prepared_run.prepared_history,
+        )
+
+    return _note_usage
+
+
 def _agent_loop_hooks(
     run_context: _AgentRunContext,
     storage: RunStorage,
+    *,
+    on_usage_updated: TurnProgressHook | None = None,
 ) -> LoopHooks:
     """Return the hooks of one agent run: the turn's gate, lifecycle, recorder, and skill capture around the shared set.
 
@@ -553,6 +587,7 @@ def _agent_loop_hooks(
             checkpoints=not ctx.inline_tools,
             memory_copy=prepared.memory_copy,
             history_inputs=prepared.prepared_history.resolved_inputs,
+            on_usage_updated=on_usage_updated,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
@@ -567,6 +602,7 @@ async def _start_agent_run(
     *,
     storage: RunStorage,
     terminal: TerminalRecord[RunRecord],
+    on_usage_updated: TurnProgressHook | None = None,
 ) -> AsyncIterator[RunEvent]:
     """Run one attempt on the agent loop, storing its terminal record where the turn's scope stores.
 
@@ -585,7 +621,7 @@ async def _start_agent_run(
         model_name=prepared.runtime_model_name,
     )
     spec = prepared.spec
-    hooks = _agent_loop_hooks(run_context, storage)
+    hooks = _agent_loop_hooks(run_context, storage, on_usage_updated=on_usage_updated)
     if build.surface.mode == "minimal":
         spec, hooks = await minimal_attempt(
             build,
@@ -1386,6 +1422,7 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
+    on_usage_updated: TurnProgressHook | None = None,
 ) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
@@ -1397,7 +1434,13 @@ async def _stream_agent_attempt_chunks(
         with bind_llm_request_log_context(**request_context):
             if pipeline_timing is not None:
                 pipeline_timing.mark_model_request()
-            run_events = _start_agent_run(run_context, attempt, storage=storage, terminal=state.terminal)
+            run_events = _start_agent_run(
+                run_context,
+                attempt,
+                storage=storage,
+                terminal=state.terminal,
+                on_usage_updated=on_usage_updated,
+            )
         events = stream_with_llm_request_log_context(run_events, request_context=request_context)
         chunks = _process_stream_events(
             events,
@@ -1515,6 +1558,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             yield AttemptResolved(HandledAttempt(FailedReply(text, e), error_info=error_info))
             return
         prepared_run = run_context.prepared_run
+        on_usage_updated = _prepare_live_ai_run_hook(
+            sinks.live_ai_run if ctx.delegation_depth == 0 else None,
+            config=config,
+            prepared_run=prepared_run,
+            prior_usage=tuple(run.prior_usage.values()),
+        )
         state = _StreamingAttemptState()
         storage, attempt = _begin_attempt(run, run_context, continuation_state, stream_state=state)
         attempt_stream = _stream_agent_attempt_chunks(
@@ -1523,6 +1572,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             storage=storage,
             state=state,
             on_attempt_start=sinks.on_attempt_start,
+            on_usage_updated=on_usage_updated,
         )
         async with closing_async_stream(attempt_stream):
             async for stream_chunk in attempt_stream:

@@ -234,3 +234,43 @@ def test_a_delivery_failed_note_shows_alone_where_a_cancellation_keeps_the_answe
 
     assert body.endswith(str(note_segment(kind).text))
     assert ("Partial answer" in body) is (kind is NoteKind.CANCELLED)
+
+
+def test_codec_round_trips_ai_run_and_decodes_legacy_json_without_ai_run() -> None:
+    """Presentation.ai_run round-trips through JSON, stays omitted when unset, and survives notes/resumes."""
+    provisional = {
+        "version": 1,
+        "model": {"config": "default", "id": "gpt-primary", "provider": "OpenAI"},
+        "usage": {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+        "cost": {"usd": "0.0028"},
+        "context": {"input_tokens": 1000, "window_tokens": 100000},
+        "tools": {"count": 1},
+    }
+    presentation = Presentation(
+        segments=(_answer("partial"),),
+        trailing_note=note_segment(NoteKind.APPROVAL_WAIT, "Waiting"),
+        ai_run=provisional,
+    )
+
+    encoded = encode_presentation(presentation)
+    assert '"ai_run":' in encoded
+    restored = decode_presentation(encoded)
+    assert restored == presentation
+    assert restored.ai_run == provisional
+
+    # Unset ai_run stays absent from serialized JSON, and legacy JSON without ai_run decodes as None.
+    assert '"ai_run"' not in encode_presentation(Presentation())
+    legacy = '{"placeholder":"Thinking...","segments":[],"show_tool_calls":true,"version":1}'
+    assert decode_presentation(legacy).ai_run is None
+
+    # Non-object ai_run is rejected as malformed.
+    with pytest.raises(TypeError, match="malformed"):
+        decode_presentation(
+            '{"version": 1, "segments": [], "placeholder": "x", "show_tool_calls": true, "ai_run": "bad"}',
+        )
+
+    # Notes and approval resumes preserve ai_run; restart clears it only when replacing an empty placeholder.
+    assert with_trailing_note(presentation, note_segment(NoteKind.CANCELLED)).ai_run == provisional
+    assert continued_by(presentation, "span-2").ai_run == provisional
+    assert after_restart(presentation).ai_run == provisional
+    assert after_restart(Presentation(ai_run=provisional)).ai_run is None

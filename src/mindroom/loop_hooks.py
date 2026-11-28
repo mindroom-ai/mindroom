@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
-    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook, LoopState
+    from mindroom.agent_loop.model_loop import AnswerToolCalls, BeforeRequestHook, LoopState, TurnProgressHook
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.turn_recorder import TurnRecorder
@@ -94,6 +94,7 @@ class HookTurn:
     checkpoints: bool = True
     memory_copy: Path | None = None
     history_inputs: HistoryPreparationInputs | None = None
+    on_usage_updated: TurnProgressHook | None = None
 
 
 def agent_loop_hooks(
@@ -253,6 +254,7 @@ def _loop_hooks(
         on_resume_entry=(
             (ai_runtime.queued_notice_on_resume_entry(notice_text, steering=steering),) if queued_notices else ()
         ),
+        on_usage_updated=turn.on_usage_updated,
         on_loop_end=(
             capture_final_request(skill_review_capture, model, model_name=turn.model_name)
             if skill_review_capture is not None
