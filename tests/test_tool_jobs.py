@@ -3046,7 +3046,7 @@ async def test_start_avoids_redundant_load_by_id_reads_on_new_admissions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """New non-reattach admissions skip load_by_id, and reattach admissions read load_by_id at most once."""
+    """Brand-new admissions skip load_by_id for both reattach modes, reading only on cold reattach."""
     owner = job_owner()
     cold_id = "aaaa1111" + "0" * 56
 
@@ -3080,7 +3080,7 @@ async def test_start_avoids_redundant_load_by_id_reads_on_new_admissions(
             reattach=True,
             **start_kw,  # type: ignore[arg-type]
         )
-        assert reads == ["brand-new-2"]
+        assert reads == []
         await restored.release_wait("brand-new-2", claim_reattach_new)
 
         reattached, claim_cold = await restored.start(
@@ -3089,5 +3089,41 @@ async def test_start_avoids_redundant_load_by_id_reads_on_new_admissions(
             reattach=True,
             **start_kw,  # type: ignore[arg-type]
         )
-        assert (reattached.job_id, claim_cold is not None, reads) == (cold_id, True, ["brand-new-2", cold_id])
+        assert (reattached.job_id, claim_cold is not None, reads) == (cold_id, True, [cold_id])
         await restored.release_wait(cold_id, claim_cold)
+
+
+@pytest.mark.asyncio
+async def test_cold_reattach_handles_pending_grant_wrong_owner_and_operation_mismatch(tmp_path: Path) -> None:
+    """Cold reattach returns claim=None on pending grant and rejects foreign owners, denied grants, or mismatched ops."""
+    owner = job_owner()
+    other_owner = replace(owner, requester_id="@other:test")
+    cold_id = "bbbb2222" + "0" * 56
+
+    async with _open_runtime(tmp_path) as runtime:
+        await _finish_and_ack(runtime, cold_id, owner=owner, adapter={"k": 1})
+
+    grant: dict[str, runtime_module.JobGrant] = {"access": "allowed"}
+    restored = await tool_job_runtime(tmp_path, grant=lambda _job: grant["access"])
+    try:
+        await restored.recover()
+        assert restored._entries == {}
+        base_kw = {"tool_name": "tool", "depth": 0, "operation": _completed, "reattach": True}
+
+        with pytest.raises(runtime_module.JobUnavailableError):
+            await restored.start(cold_id, adapter={"k": 1}, owner=other_owner, **base_kw)  # type: ignore[arg-type]
+        with pytest.raises(JobAccessError):
+            await restored.start(cold_id, adapter={"k": 2}, owner=owner, **base_kw)  # type: ignore[arg-type]
+
+        grant["access"] = "pending"
+        reattached, claim = await restored.start(cold_id, adapter={"k": 1}, owner=owner, **base_kw)  # type: ignore[arg-type]
+        assert (reattached.job_id, claim, cold_id in restored._entries) == (cold_id, None, False)
+        with pytest.raises(JobAccessError):
+            await restored.start("missing-job", adapter={}, owner=owner, **base_kw)  # type: ignore[arg-type]
+
+        grant["access"] = "denied"
+        with pytest.raises(runtime_module.JobUnavailableError):
+            await restored.start(cold_id, adapter={"k": 1}, owner=owner, **base_kw)  # type: ignore[arg-type]
+        assert restored._entries == {}
+    finally:
+        await restored.shutdown()

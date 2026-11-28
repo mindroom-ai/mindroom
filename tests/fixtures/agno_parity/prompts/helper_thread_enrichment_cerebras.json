@@ -66,15 +66,15 @@
         "json_schema": {
           "description": "Structured second-summary response with one-shot topic tags.",
           "properties": {
-            "title": {
-              "description": "Short one-line title of the thread conversation",
-              "title": "Title",
-              "type": "string"
-            },
             "keep_current": {
               "description": "True to keep the thread's current title, when one is shown",
               "title": "Keep Current",
               "type": "boolean"
+            },
+            "title": {
+              "description": "Short one-line title of the thread conversation",
+              "title": "Title",
+              "type": "string"
             },
             "tags": {
               "description": "1-3 durable topic tags, most relevant first",

@@ -200,19 +200,26 @@ def unexpected_action_args_error(
 
 def validate_action_params(
     function_name: str | None,
-    action: str,
+    action: object,
     allowed_by_action: Mapping[str, str | Collection[str]],
     params: Mapping[str, object],
     *,
     required_by_action: Mapping[str, str | Collection[str]] | None = None,
     reject_blank_required: bool = False,
+    sibling: tuple[str, Collection[str]] | None = None,
 ) -> str | None:
     """Validate ``action``, reject unexpected non-``None`` parameters, and check required parameters."""
-    allowed = allowed_by_action.get(action)
+    allowed = allowed_by_action.get(action) if isinstance(action, str) else None
     if allowed is None:
         label = f"{function_name} action" if function_name else "action"
         expected = ", ".join(allowed_by_action)
-        return f"Unsupported {label} {action!r}. Expected one of: {expected}."
+        hint = (
+            f" Use {sibling[0]}(action={action!r}) instead."
+            if sibling is not None and isinstance(action, str) and action in sibling[1]
+            else ""
+        )
+        return f"Unsupported {label} {action!r}. Expected one of: {expected}.{hint}"
+    assert isinstance(action, str)
     if unexpected := _unexpected_params(allowed, params):
         names = ", ".join(f"'{name}'" for name in unexpected)
         return f"Parameter(s) {names} cannot be used with action={action!r}."

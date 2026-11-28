@@ -3961,6 +3961,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.origins",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.response_activity",
     "mindroom.script_runs.recovery",
     "mindroom.script_runs.worker_client",
@@ -5263,7 +5264,7 @@ depends_on = ["mindroom.constants"]
 
 [[modules]]
 path = "mindroom.desktop.accessibility"
-depends_on = ["mindroom.desktop.input"]
+depends_on = ["mindroom.desktop.input", "mindroom.desktop.macos_skylight"]
 
 [[modules]]
 path = "mindroom.desktop.provider"
@@ -7645,8 +7646,8 @@ depends_on = [
     "mindroom.knowledge.manager",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_locks",
+    "mindroom.knowledge.refresh_outcome",
     "mindroom.knowledge.registry",
-    "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
 ]
 
@@ -9010,6 +9011,7 @@ expose = [
     "RETIRED_CONSOLIDATED_FUNCTIONS",
     "RETIRED_SPLIT_FUNCTIONS",
     "SINGLE_VERB_RENAMED_TARGETS",
+    "SPLIT_APPROVAL_ONLY_FUNCTIONS",
     "STRICT_WILDCARD_SCRIPT_RENAMES",
     "STRICT_WILDCARD_SCRIPT_TOOLKITS",
 ]
@@ -9939,12 +9941,16 @@ path = "mindroom.desktop.displays"
 depends_on = ["mindroom.desktop.accessibility"]
 
 [[modules]]
-path = "mindroom.desktop.macos_input"
+path = "mindroom.desktop.macos_skylight"
 depends_on = []
 
 [[modules]]
+path = "mindroom.desktop.macos_input"
+depends_on = ["mindroom.desktop.macos_skylight"]
+
+[[modules]]
 path = "mindroom.desktop.macos_capture"
-depends_on = ["mindroom.desktop.accessibility"]
+depends_on = ["mindroom.desktop.accessibility", "mindroom.desktop.macos_skylight"]
 
 [[modules]]
 path = "mindroom.desktop.native_config"

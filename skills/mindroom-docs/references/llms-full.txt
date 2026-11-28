@@ -2191,7 +2191,7 @@ These settings are global-only:
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](https://docs.mindroom.chat/tools/execution-and-coding/#workspace-and-tool-output-files) |
 | `allow_shell_without_worker` | `false` | Let the [`shell`](https://docs.mindroom.chat/tools/execution-and-coding/#shell) tool run commands in the MindRoom process for agents whose `shell` does not run in a worker; when `false`, each such call is refused with a message naming this setting. `mindroom config init` sets it to `true` |
 | `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) |
-| `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
+| `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `4` | Automatic thread summaries; see [Automatic Thread Summaries](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) |
 
 # Model Configuration
 
@@ -11463,14 +11463,14 @@ Locally, the bridge keeps command arguments and outcomes, including shell comman
 
 On macOS, `get_app_state` returns the app's accessibility tree with roles, names, values, bounds, and available actions, plus a screenshot of the app window.
 The agent normally acts on an element from that state instead of guessing a coordinate, and every completed action returns fresh state for the next step.
-Taking a screenshot on macOS brings the selected app to the front.
+On macOS, app screenshots and actions run in the background without bringing the selected app to the front or moving the physical cursor, including when the window is covered by other windows or on another Space.
 
 `desktop_read(action=...)` provides read-only observation actions: `status` (screen, lease, enabled capabilities, pending shell request, auto-approval time, and the caller's shell handles), `list_apps`, `get_app_state`, `screenshot`, and `request_status` (see [Uncertain Outcomes](#uncertain-outcomes)).
 With `return_attachment=true`, `screenshot` also returns an `att_*` handle that `matrix_message` can send in the same turn.
 
 `desktop_control(action=...)` provides control actions, which require a control lease or full control:
 
-- `launch_app` launches or foregrounds one allowlisted app.
+- `launch_app` launches one allowlisted app in the background (or unhides it if hidden) without stealing foreground focus.
 - `click_element`, `perform_action`, `scroll_element`, and `set_value` act on an element from the latest state; `set_value` works only on elements that report they are writable.
 - `click`, `double_click`, `hover`, and `drag` use coordinates from `0` to `1000` inside the app window, not raw screen pixels, and `scroll` scrolls a bounded number of pages.
 - `type_text` types up to 2,000 characters; line breaks and tabs need an element target, otherwise send Enter or Tab with `keypress`.
@@ -11481,7 +11481,7 @@ Pass `observation="tree"` to skip the screenshot when semantic state is enough, 
 
 Element references expire after 120 seconds or when the app's window or target element changes; when the bridge reports stale state, observe again instead of reusing the old reference or coordinate.
 Coordinate input, typing without an element, `scroll`, and `keypress` need a fresh, complete, stable observation, so let the UI settle and observe again first.
-On macOS, keyboard input fails if the app has lost focus, and pointer input fails if another window, such as a notification banner, floating panel, or Picture in Picture, covers the target point.
+On macOS, app-targeted background pointer and keyboard input are delivered directly to the validated app window even when occluded, failing if the window disappears or changes geometry mid-action (element-targeted typing also checks element focus inside that app); the `primary-screen` target still posts global pointer and keyboard input to whatever window covers the point or has foreground focus.
 Windows on secondary displays are supported when the window lies on one display; move a window that spans displays fully onto one.
 
 ## Read-Only Folders
@@ -14419,14 +14419,17 @@ personal_agents:
 
 MindRoom starts a background title for a new thread from its first prompt, using the transcription for voice messages, without waiting for the agent's reply.
 It only does so when the first threshold below is 1 or 2, so the first reply would already title the thread. This provisional title does not change the summary or topic-tag refresh schedule below.
-MindRoom checks a thread's title after a response brings it to `defaults.thread_summary_first_threshold` messages (default `1`), then again after every `defaults.thread_summary_subsequent_interval` further messages (default `10`), and posts a summary notice when the title changes.
+MindRoom generates a thread's title after a response brings it to `defaults.thread_summary_first_threshold` ordinary messages (default `1`), then runs one final title check and initial tagging pass after `defaults.thread_summary_subsequent_interval` further ordinary messages (default `4`), after which automatic retitling stops.
+MindRoom meta notices such as compaction, skill-review, and canvas UI-action notices do not count as ordinary messages.
 Threads that are pinned with [`thread_summary`] or marked `resolved` are skipped, as are threads whose full history cannot be read, which always includes threads longer than 2,000 messages or 16 MiB of content.
 For threads with more than 50 ordinary messages with non-empty text after tool-marker removal, the summary model sees the first 5, 12 evenly spaced messages from the middle, and the last 5 (with omission notes for each gap), and overlong message bodies in that sample are clipped to 600 characters while keeping both head and tail.
-A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, accumulating prior rejections across up to 3 attempts; if no attempt passes validation on an untitled thread's post-reply pass, it uses the shortest complete title within 80 characters instead of leaving the thread untitled, while a provisional title or an already-titled thread posts nothing (keeping its current title). The prompt asks for the emoji, but a title without one is still posted. The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
+A new automatic title is one emoji and at most six words, such as `🧪 Attachment cache live test`: MindRoom sends a longer answer back to the model with the reason, accumulating prior rejections across up to 3 attempts; if no attempt passes validation on an untitled thread's post-reply pass, it uses the shortest complete title within 80 characters instead of leaving the thread untitled, while a provisional title or an already-titled thread posts nothing (keeping its current title).
+The prompt asks for the emoji, but a title without one is still posted.
+The emoji and dashes are not words but count toward the 80 characters; only the ` (forked)` marker MindRoom adds to a fork's title is outside both limits.
 Text without spaces, such as Chinese or Japanese, is bounded only by the 80 characters.
-A check shows the model the current title, and the model keeps it unless the thread moved to a different subject or goal outside the current title's scope and persisted on it for a large share of the thread (same-domain goal changes count, while follow-up steps like PRs, reviews, deploys, and related fixes do not): a kept title usually posts nothing, and the next check is a full interval later.
-Two checks re-post the unchanged title once: the first check after the first reply, and the check that adds tags. After a restart, the next check may come early.
-A title longer than six words, such as one from an older version, is not offered to keep, so the next check asks for a new title; a retitle, such as after a call's notes, always does too.
+The first post-reply summary generates a fresh title from the conversation without keeping a provisional prompt title.
+The final check shows the model the current title, and the model keeps it unless the opening message was too vague or the thread moved to a different subject or goal outside the current title's scope; it posts the summary notice once even when keeping the title so initial enrichment completion is recorded.
+A title longer than six words, such as one from an older version, is not offered to keep on that check, so the model writes a new title; an explicit retitle, such as after a call's notes, still runs even after automatic retitling has finished and always writes a fresh title.
 
 The summary uses the first match of:
 
@@ -14455,10 +14458,12 @@ Precedence, lowest to highest: the built-in `THREAD_SUMMARY_INSTRUCTIONS`, its `
 Values are trimmed and cut to 2,000 characters.
 To clear the setting, send `{}`; a missing event, `{}`, a non-string or blank `value`, or a failed read all mean the normal instructions, and a failed read never skips the title.
 
-The first automatic refresh of a thread that already has a summary also adds up to three topic tags, but only when the thread has never had tags; when that refresh keeps the title, it posts the title again unchanged with the tags.
-Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder. Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model. An override's own length rules still meet the six-word limit: retries accumulate prior rejections across up to 3 attempts, and for an untitled thread if no attempt passes validation the shortest complete title within 80 characters is used instead of leaving the thread untitled (while an already-titled thread keeps its current title and posts nothing).
-Later summaries never change tags, so tags someone removed are not re-added.
-These tags are room state, so in a room where the agent's power level is too low to send state events, summaries arrive without tags and MindRoom logs one warning for the room; a later summary adds them once the power level allows it.
+That final automatic refresh also adds up to three topic tags, but only when the thread has never had tags; when it keeps the title, it posts the title again unchanged to record completion.
+Override `THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE` (placeholder `{current_title}`) to change how a check shows the current title, and `THREAD_SUMMARY_KEEP_INSTRUCTIONS` for the rule on keeping it; MindRoom appends them after `THREAD_SUMMARY_USER_PROMPT_TEMPLATE` and the title instructions, so overrides of those need no new placeholder.
+Override `THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE` (placeholders `{rejected_title}` and `{error}`) to change how an overlong title and its reason go back to the model.
+An override's own length rules still meet the six-word limit: retries accumulate prior rejections across up to 3 attempts, and for an untitled thread if no attempt passes validation the shortest complete title within 80 characters is used instead of leaving the thread untitled (while an already-titled thread keeps its current title and posts nothing).
+Explicit retitles never change tags, so tags someone removed are not re-added.
+Automatic tags are best-effort on that final pass: these tags are room state, so when the agent's power level is too low to send state events (logged once per room) or a tag write fails (logged once for the summary), the thread still finishes without tags and automatic retitling does not retry later.
 
 ## Related Docs
 
@@ -14672,7 +14677,7 @@ A sent request returns `UI action request sent.`
 ## Show the worker browser
 
 The [`browser`](https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser) toolkit controls the agent's worker browser when routed to that worker.
-The agent's first worker browser call in a conversation, `browser_read` or `browser_control` with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
+The agent's first live worker browser call in a conversation, `browser_control` or a live `browser_read` (`snapshot`/`screenshot`) with `target="host"` or any `browser_mcp` function, already shows the user the Computer panel.
 The agent calls `open_panel(panel="computer")` only to show the panel again in a later reply, for example when the user should log in or after they closed it.
 One reply shows the panel once.
 Opening the Computer panel does not navigate or take control:

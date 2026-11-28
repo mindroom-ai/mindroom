@@ -255,7 +255,7 @@ def _script_check_agent_failure(config: Config, agent_name: str) -> _ScriptCheck
     return None
 
 
-def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
+def agent_supports_script_check(config: Config, agent_name: str) -> bool:
     """Return whether ``agent_name`` is configured with triggers plus script or eligible workflow tools."""
     return _script_check_agent_failure(config, agent_name) is None
 

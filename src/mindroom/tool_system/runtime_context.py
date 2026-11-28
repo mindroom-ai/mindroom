@@ -102,7 +102,6 @@ class ToolRuntimeContext:
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
-    resolved_thread_ids: set[str] = field(default_factory=set)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
     hooks: HookBindings = field(default_factory=HookBindings)
@@ -131,6 +130,9 @@ class ToolRuntimeContext:
     # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
     fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
     automation_origin: str | None = None
+    # Threads resolved during this turn; underscore-prefixed so it stays out of the plugin API constructor signature
+    # while remaining an init field so ``replace(...)`` views (e.g. ``tool_runtime_model_context``) share the same set.
+    _resolved_thread_ids: set[str] = field(default_factory=set, kw_only=True, repr=False, compare=False)
 
     @property
     def current_config(self) -> Config:
@@ -146,6 +148,11 @@ class ToolRuntimeContext:
     def budget_monitor(self) -> BudgetMonitor | None:
         """Return the managed runtime's spend monitor; detached contexts have none."""
         return self.orchestrator.budgets if self.orchestrator is not None else None
+
+    @property
+    def resolved_thread_ids(self) -> set[str]:
+        """Threads resolved during this turn, shared across ``replace(...)`` copies."""
+        return self._resolved_thread_ids
 
     def require_agent_reply_memberships(self) -> AgentReplyMembershipIndex:
         """Return the injected index or reject membership-aware extension work."""

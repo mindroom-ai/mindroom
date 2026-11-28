@@ -187,14 +187,14 @@ async def test_browser_call_announces_only_when_it_runs_on_the_worker(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["help", "actions", " Help "])
-async def test_reference_actions_do_not_announce(
+@pytest.mark.parametrize("action", ["status", "profiles", "tabs", "console", "help", "actions", " Help "])
+async def test_non_page_browser_read_actions_do_not_announce(
     tmp_path: Path,
     announce: AsyncMock,
     events: list[str],
     action: str,
 ) -> None:
-    """Help and actions only return reference data, so the first real browser call still announces."""
+    """Non-page browser_read queries never launch Chromium or announce a blank Computer panel."""
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _real_browser(runtime_paths, events, default_target="host")
     middleware = _middleware(toolkit, "browser", config, runtime_paths)
@@ -204,6 +204,41 @@ async def test_reference_actions_do_not_announce(
 
     assert await _call(toolkit, "browser_control", [middleware], action="open") == "browsed"
     announce.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["snapshot", "screenshot"])
+async def test_browser_read_page_actions_announce_only_after_success(
+    tmp_path: Path,
+    announce: AsyncMock,
+    events: list[str],
+    action: str,
+) -> None:
+    """browser_read snapshot/screenshot announce only after succeeding on host, never on stopped-profile failure."""
+    config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
+    toolkit = _real_browser(runtime_paths, events, default_target="host")
+    middleware = _middleware(toolkit, "browser", config, runtime_paths)
+
+    async def stopped(**_arguments: object) -> str:
+        msg = "Browser profile 'mindroom' is not running."
+        raise ValueError(msg)
+
+    toolkit.functions["browser_read"] = stopped
+    result = await _call(toolkit, "browser_read", [middleware], failed=True, action=action)
+    assert "not running" in str(result)
+    announce.assert_not_awaited()
+
+    # After Chromium is running, a succeeding host page read announces after call_next completes.
+    toolkit = _real_browser(runtime_paths, events, default_target="host")
+    middleware = _middleware(toolkit, "browser", config, runtime_paths)
+    assert await _call(toolkit, "browser_read", [middleware], action=action) == "browsed"
+    announce.assert_awaited_once_with()
+    assert events == [f"{action} on default", "announced"]
+
+    # Desktop page reads never announce the worker computer.
+    announce.reset_mock()
+    assert await _call(toolkit, "browser_read", [middleware], action=action, target="desktop") == "browsed"
+    announce.assert_not_awaited()
 
 
 @pytest.mark.asyncio

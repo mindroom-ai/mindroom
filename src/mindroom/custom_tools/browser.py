@@ -26,7 +26,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
-from mindroom.browser.call_limit import HOST_CALL_TIMEOUT_SECONDS, HostCallTimeLimitError
+from mindroom.browser.call_limit import BROWSER_FUNCTION_NAMES, HOST_CALL_TIMEOUT_SECONDS, HostCallTimeLimitError
 from mindroom.browser.fetch_guard import continue_or_abort_browser_fetch, run_browser_tool_url_check
 from mindroom.browser.profile_locks import clear_stale_singleton_locks
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
@@ -129,11 +129,10 @@ _ALL_ACTIONS = tuple(sorted(_READ_ACTIONS | _CONTROL_ACTIONS))
 
 # Actions that only return reference data and never use a browser.
 _REFERENCE_ACTIONS = frozenset({"actions", "help"})
-
-
-def is_reference_action(action: object) -> bool:
-    """Return whether a browser_read action only returns reference data and never uses a browser."""
-    return str(action).strip().lower() in _REFERENCE_ACTIONS
+_STOPPED_PROFILE_READ_ERROR = (
+    "Browser profile {profile_name!r} is not running. "
+    'Open a page with browser_control(action="open", targetUrl=...) first.'
+)
 
 
 _ACT_REQUEST_KINDS = (
@@ -216,72 +215,29 @@ _HOST_CONTROL_PARAM_DESCRIPTIONS: dict[str, str] = {
     "timeoutMs": "Upload/dialog timeout (ms).",
 }
 
-_BROWSER_ACTION_TABLE = (
-    {
-        "action": "status",
-        "tool": "browser_read",
-        "description": "Report whether the selected browser profile is running.",
-    },
-    {"action": "start", "tool": "browser_control", "description": "Start the selected browser profile."},
-    {"action": "stop", "tool": "browser_control", "description": "Stop the selected browser profile."},
-    {"action": "profiles", "tool": "browser_read", "description": "List known browser profiles."},
-    {
-        "action": "tabs",
-        "tool": "browser_read",
-        "description": "List tabs for the selected browser profile without launching it.",
-    },
-    {
-        "action": "open",
-        "tool": "browser_control",
-        "description": "Open targetUrl, or one HTML file from paths, in a new tab.",
-    },
-    {
-        "action": "focus",
-        "tool": "browser_control",
-        "description": "Host target only: focus targetId; desktop does not support focus.",
-    },
-    {
-        "action": "close",
-        "tool": "browser_control",
-        "description": "Host target only: close targetId or the active host tab.",
-    },
-    {
-        "action": "snapshot",
-        "tool": "browser_read",
-        "description": "Capture a model-friendly page snapshot and element refs.",
-    },
-    {
-        "action": "screenshot",
-        "tool": "browser_read",
-        "description": "Capture a screenshot; host retains it while desktop removes its transient scratch file.",
-    },
-    {
-        "action": "navigate",
-        "tool": "browser_control",
-        "description": "Host target only: navigate targetId or the active tab to targetUrl.",
-    },
-    {"action": "console", "tool": "browser_read", "description": "Read collected console entries."},
-    {"action": "pdf", "tool": "browser_control", "description": "Host target only: save the selected page as a PDF."},
-    {
-        "action": "upload",
-        "tool": "browser_control",
-        "description": (
-            "Host target only: upload browser artifacts, agent workspace files, or att_* context attachments "
-            "through a selector or ref."
-        ),
-    },
-    {
-        "action": "dialog",
-        "tool": "browser_control",
-        "description": "Host target only: arm how the next browser dialog should be handled.",
-    },
-    {
-        "action": "act",
-        "tool": "browser_control",
-        "description": "Host target only: run request.kind; desktop control requires upstream stable targeting.",
-    },
-    {"action": "help", "tool": "browser_read", "description": "Return this browser action and request-kind table."},
-    {"action": "actions", "tool": "browser_read", "description": "Alias for help."},
+_BROWSER_ACTION_TABLE: tuple[tuple[str, str], ...] = (
+    ("status", "Report whether the selected browser profile is running."),
+    ("start", "Start the selected browser profile."),
+    ("stop", "Stop the selected browser profile."),
+    ("profiles", "List known browser profiles."),
+    ("tabs", "List tabs for the selected browser profile without launching it."),
+    ("open", "Open targetUrl, or one HTML file from paths, in a new tab."),
+    ("focus", "Host target only: focus targetId; desktop does not support focus."),
+    ("close", "Host target only: close targetId or the active host tab."),
+    ("snapshot", "Capture a model-friendly page snapshot and element refs."),
+    ("screenshot", "Capture a screenshot; host retains it while desktop removes its transient scratch file."),
+    ("navigate", "Host target only: navigate targetId or the active tab to targetUrl."),
+    ("console", "Read collected console entries."),
+    ("pdf", "Host target only: save the selected page as a PDF."),
+    (
+        "upload",
+        "Host target only: upload browser artifacts, agent workspace files, or att_* context attachments "
+        "through a selector or ref.",
+    ),
+    ("dialog", "Host target only: arm how the next browser dialog should be handled."),
+    ("act", "Host target only: run request.kind; desktop control requires upstream stable targeting."),
+    ("help", "Return this browser action and request-kind table."),
+    ("actions", "Alias for help."),
 )
 
 _SNAPSHOT_JS = """
@@ -524,7 +480,14 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
         "controlActions": list(get_args(_BrowserControlAction)),
         "actKinds": list(_ACT_REQUEST_KINDS),
         "actRequestDescription": _ACT_REQUEST_DESCRIPTION,
-        "actionTable": list(_BROWSER_ACTION_TABLE),
+        "actionTable": [
+            {
+                "action": name,
+                "tool": "browser_read" if name in _READ_ACTIONS else "browser_control",
+                "description": description,
+            }
+            for name, description in _BROWSER_ACTION_TABLE
+        ],
         "status": "ok",
     }
 
@@ -848,9 +811,9 @@ class BrowserTools(Toolkit):
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
-        if function_name not in {"browser_read", "browser_control"}:
+        if function_name not in BROWSER_FUNCTION_NAMES:
             return False
-        if function_name == "browser_read" and is_reference_action(arguments.get("action")):
+        if function_name == "browser_read" and str(arguments.get("action")).strip().lower() in _REFERENCE_ACTIONS:
             return False
         return (
             self._resolve_target(
@@ -1015,7 +978,7 @@ class BrowserTools(Toolkit):
 
         """
         if action not in _READ_ACTIONS:
-            hint = " Use browser_control instead." if action in _CONTROL_ACTIONS else ""
+            hint = f" Use browser_control(action={action!r}) instead." if action in _CONTROL_ACTIONS else ""
             msg = f"Unsupported browser_read action: {action}.{hint}"
             raise ValueError(msg)
         return await self._dispatch(
@@ -1085,7 +1048,7 @@ class BrowserTools(Toolkit):
 
         """
         if action not in _CONTROL_ACTIONS:
-            hint = " Use browser_read instead." if action in _READ_ACTIONS else ""
+            hint = f" Use browser_read(action={action!r}) instead." if action in _READ_ACTIONS else ""
             msg = f"Unsupported browser_control action: {action}.{hint}"
             raise ValueError(msg)
         return await self._dispatch(
@@ -1762,6 +1725,18 @@ class BrowserTools(Toolkit):
             "timeoutMs": timeout_ms,
         }
 
+    async def _require_running_read_tab(
+        self,
+        profile_name: str,
+        target_id: str | None,
+        *,
+        action_label: str,
+    ) -> tuple[str, _BrowserTabState]:
+        state = await self._running_profile(profile_name, action_label=action_label)
+        if state is None:
+            raise ValueError(_STOPPED_PROFILE_READ_ERROR.format(profile_name=profile_name))
+        return self._resolve_read_tab(state, target_id, profile_name=profile_name)
+
     async def _screenshot(
         self,
         *,
@@ -1772,14 +1747,11 @@ class BrowserTools(Toolkit):
         element: str | None,
         image_type: str | None,
     ) -> tuple[dict[str, Any], bytes]:
-        state = await self._running_profile(profile_name, action_label="taking a screenshot")
-        if state is None:
-            msg = (
-                f"Browser profile {profile_name!r} is not running. "
-                'Open a page with browser_control(action="open") or browser_control(action="start") first.'
-            )
-            raise ValueError(msg)
-        resolved_target_id, tab = self._resolve_read_tab(state, target_id, profile_name=profile_name)
+        resolved_target_id, tab = await self._require_running_read_tab(
+            profile_name,
+            target_id,
+            action_label="taking a screenshot",
+        )
         resolved_type = "jpeg" if image_type == "jpeg" else "png"
         output_path = self._next_output_path("jpg" if resolved_type == "jpeg" else "png")
         selector = self._resolve_selector(tab, element or ref)
@@ -1817,14 +1789,11 @@ class BrowserTools(Toolkit):
         depth: int | None,
         selector: str | None,
     ) -> dict[str, Any]:
-        state = await self._running_profile(profile_name, action_label="taking a snapshot")
-        if state is None:
-            msg = (
-                f"Browser profile {profile_name!r} is not running. "
-                'Open a page with browser_control(action="open") or browser_control(action="start") first.'
-            )
-            raise ValueError(msg)
-        resolved_target_id, tab = self._resolve_read_tab(state, target_id, profile_name=profile_name)
+        resolved_target_id, tab = await self._require_running_read_tab(
+            profile_name,
+            target_id,
+            action_label="taking a snapshot",
+        )
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
         resolved_limit = limit if limit is not None and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT

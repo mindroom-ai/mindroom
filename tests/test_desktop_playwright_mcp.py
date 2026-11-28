@@ -230,7 +230,7 @@ async def test_observation_cannot_start_the_extension_without_control(tmp_path: 
     """An observe-only command cannot launch or foreground the user's browser."""
     provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
 
-    with pytest.raises(PlaywrightBrowserError, match=r"browser\(action='start'"):
+    with pytest.raises(PlaywrightBrowserError, match=r"browser_control\(action='start'"):
         await provider.execute("tabs", {})
 
     assert provider.running is False
@@ -271,7 +271,7 @@ async def test_observation_overlapping_a_local_stop_cannot_reconnect_the_extensi
     session.release.set()
     await stop
 
-    with pytest.raises(PlaywrightBrowserError, match=r"browser\(action='start'"):
+    with pytest.raises(PlaywrightBrowserError, match=r"browser_control\(action='start'"):
         await observation
     new_session.assert_not_called()
     assert provider.running is False

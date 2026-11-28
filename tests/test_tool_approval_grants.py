@@ -5217,6 +5217,10 @@ def test_triggers_write_watch_script_cannot_receive_timed_grant() -> None:
         )
         is None
     )
+    assert grant_operation(config, "triggers_write", {"action": "watch_script"}, tools=None) is None
+    assert grant_operation(config, "triggers_write", {"action": " watch_script "}, tools=None) is None
+    assert grant_operation(config, "triggers_write", {}, tools=None) is None
+    assert grant_operation(config, "triggers_write", {"action": 123}, tools=None) is None
     delete_op = grant_operation(
         config,
         "triggers_write",

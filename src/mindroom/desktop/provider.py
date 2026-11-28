@@ -13,10 +13,12 @@ from mindroom.desktop import macos_capture, macos_input
 from mindroom.desktop.accessibility import (
     AccessibilityActionOutcomeUnknownError,
     AccessibilityBackend,
+    AccessibilityCapture,
     AccessibilityError,
     AccessibilityState,
     DesktopApp,
     DesktopRect,
+    KeyboardTarget,
     create_accessibility_backend,
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError, display_for_region, macos_displays
@@ -116,7 +118,7 @@ class DesktopProvider(Protocol):
         ...
 
     def launch_app(self, app_id: str) -> None:
-        """Launch or foreground one exact allowlisted application."""
+        """Launch or unhide one exact allowlisted application without stealing foreground focus."""
         ...
 
     def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
@@ -266,7 +268,7 @@ class PyAutoGuiDesktopProvider:
         self._capture_screen: Callable[[], PillowImage] = (
             _capture_macos_primary_screen if sys.platform == "darwin" else pyautogui.screenshot
         )
-        self._capture_app_window: Callable[[int, DesktopRect], PillowImage] | None = (
+        self._capture_app_window: Callable[[int, DesktopRect, int | None], PillowImage] | None = (
             _capture_macos_window if sys.platform == "darwin" else None
         )
         self._display_geometry = macos_displays if sys.platform == "darwin" else self._primary_display_geometry
@@ -303,7 +305,7 @@ class PyAutoGuiDesktopProvider:
         return self._accessibility.list_apps()
 
     def launch_app(self, app_id: str) -> None:
-        """Launch or foreground one exact allowlisted application."""
+        """Launch or unhide one exact allowlisted application without stealing foreground focus."""
         self._accessibility.launch_app(app_id)
 
     def get_app_state(self, app_id: str, *, include_elements: bool = True) -> AccessibilityState:
@@ -311,7 +313,7 @@ class PyAutoGuiDesktopProvider:
         return self._accessibility.get_app_state(app_id, include_elements=include_elements)
 
     def screenshot(self, *, app_id: str, state_id: str) -> ScreenCapture:
-        """Revalidate, foreground, capture, and downscale one allowed app as JPEG."""
+        """Revalidate, capture, and downscale one allowed app as JPEG."""
         target = self._accessibility.prepare_capture(app_id, state_id)
         state = target.state
         region = state.window
@@ -331,13 +333,13 @@ class PyAutoGuiDesktopProvider:
             if self._capture_app_window is None:
                 msg = "Window-bound capture is unavailable for this accessibility backend."
                 raise DesktopProviderError(msg)
-            image = self._capture_app_window(target.process_id, region)
+            image = self._capture_app_window(target.process_id, region, target.window_id)
         if self._mapped_display(region) != display:
             msg = "The display changed during capture; request fresh app state."
             raise DesktopProviderError(msg)
         source_width, source_height = image.size
         capture_scale = source_width / region.width
-        if not math.isclose(capture_scale, source_height / region.height, rel_tol=0.01):
+        if not math.isclose(capture_scale, source_height / region.height, rel_tol=0.02):
             msg = "Capture pixels do not match the logical window; request fresh app state."
             raise DesktopProviderError(msg)
         image_width, image_height = image.size
@@ -387,14 +389,22 @@ class PyAutoGuiDesktopProvider:
         pages: int,
     ) -> None:
         """Scroll at the center of one current semantic element."""
-        element, process_id = self._accessibility.element_for_action(app_id, state_id, element_index)
-        if element.bounds is None:
+        target = self._accessibility.element_for_action(app_id, state_id, element_index)
+        if target.element.bounds is None:
             msg = f"Accessibility element {element_index} has no scrollable screen bounds."
             raise DesktopProviderError(msg)
         clicks = _scroll_clicks(direction, pages)
-        x, y = _rect_center(element.bounds)
+        x, y = _rect_center(target.element.bounds)
         self._mapped_display(DesktopRect(x, y, 1, 1))
-        self._scroll_input(direction, clicks, x, y, process_id=process_id)
+        self._scroll_input(
+            direction,
+            clicks,
+            x,
+            y,
+            process_id=target.process_id,
+            window_id=target.window_id,
+            window_rect=target.window,
+        )
 
     def perform_action(
         self,
@@ -421,14 +431,14 @@ class PyAutoGuiDesktopProvider:
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        point, process_id = self._fallback_point(
+        point, target = self._fallback_target(
             app_id,
             state_id,
             x,
             y,
             allow_window_fallback=allow_window_fallback,
         )
-        self._click_input(*point, button=button, count=1, process_id=process_id)
+        self._click_input(*point, button=button, count=1, target=target)
 
     def type_text(
         self,
@@ -451,7 +461,7 @@ class PyAutoGuiDesktopProvider:
             )
             raise DesktopProviderError(msg)
         if element_index is None:
-            guard = self._accessibility.prepare_keyboard(
+            target = self._accessibility.prepare_keyboard(
                 app_id,
                 state_id,
                 allow_window_fallback=allow_window_fallback,
@@ -460,11 +470,18 @@ class PyAutoGuiDesktopProvider:
             if type(element_index) is not int or element_index < 0:
                 msg = "element_index must be a nonnegative integer."
                 raise DesktopProviderError(msg)
-            guard = self._accessibility.prepare_typing(app_id, state_id, element_index)
+            target = self._accessibility.prepare_typing(app_id, state_id, element_index)
         if sys.platform == "darwin":
-            _type_macos_unicode(text, before_chunk=guard)
+            if isinstance(target, KeyboardTarget) and target.process_id is not None:
+                if target.window is None:
+                    msg = "macOS could not bind the accessibility target to one exact application window."
+                    raise DesktopProviderError(msg)
+                resolved_window_id = _resolve_macos_window_id(target.process_id, target.window, target.window_id)
+                macos_input.type_text_background(target.process_id, resolved_window_id, text, before_chunk=target)
+            else:
+                _type_macos_unicode(text, before_chunk=target)
         else:
-            guard()
+            target()
             self._pyautogui.write(text, interval=0.01)
 
     def scroll(
@@ -491,7 +508,14 @@ class PyAutoGuiDesktopProvider:
         point = _normalized_point(window, x=x, y=y) if x is not None and y is not None else _rect_center(window)
         self._mapped_display(window)
         clicks = _scroll_clicks(direction, pages)
-        self._scroll_input(direction, clicks, *point, process_id=target.process_id)
+        self._scroll_input(
+            direction,
+            clicks,
+            *point,
+            process_id=target.process_id,
+            window_id=target.window_id,
+            window_rect=window,
+        )
 
     def keypress(self, *, app_id: str, state_id: str, keys: list[str], allow_window_fallback: bool = False) -> None:
         """Press only an explicitly allowed application editing/navigation chord."""
@@ -499,15 +523,22 @@ class PyAutoGuiDesktopProvider:
             normalized = normalize_key_chord(keys)
         except ValueError as exc:
             raise DesktopProviderError(str(exc)) from exc
-        self._accessibility.prepare_keyboard(app_id, state_id, allow_window_fallback=allow_window_fallback)()
-        if len(normalized) == 1:
+        target = self._accessibility.prepare_keyboard(app_id, state_id, allow_window_fallback=allow_window_fallback)
+        target()
+        if sys.platform == "darwin" and isinstance(target, KeyboardTarget) and target.process_id is not None:
+            if target.window is None:
+                msg = "macOS could not bind the accessibility target to one exact application window."
+                raise DesktopProviderError(msg)
+            resolved_window_id = _resolve_macos_window_id(target.process_id, target.window, target.window_id)
+            macos_input.keypress_background(target.process_id, resolved_window_id, normalized)
+        elif len(normalized) == 1:
             self._pyautogui.press(normalized[0])
         else:
             self._pyautogui.hotkey(*normalized)
 
     def hover(self, *, app_id: str, state_id: str, x: int, y: int, allow_window_fallback: bool = False) -> None:
         """Move inside the revalidated allowed window without pressing a button."""
-        point, process_id = self._fallback_point(
+        point, target = self._fallback_target(
             app_id,
             state_id,
             x,
@@ -515,7 +546,25 @@ class PyAutoGuiDesktopProvider:
             allow_window_fallback=allow_window_fallback,
         )
         if sys.platform == "darwin":
-            macos_input.move(*point, check=self._pointer_check(process_id))
+            if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
+                macos_input.move_background(
+                    target.process_id,
+                    *point,
+                    window_id=resolved_window_id,
+                    window_rect=target.state.window,
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
+                )
+            else:
+                macos_input.move(*point)
         else:
             self._pyautogui.moveTo(*point)
 
@@ -533,14 +582,14 @@ class PyAutoGuiDesktopProvider:
         if button not in {"left", "middle", "right"}:
             msg = "button must be left, middle, or right."
             raise DesktopProviderError(msg)
-        point, process_id = self._fallback_point(
+        point, target = self._fallback_target(
             app_id,
             state_id,
             x,
             y,
             allow_window_fallback=allow_window_fallback,
         )
-        self._click_input(*point, button=button, count=2, process_id=process_id)
+        self._click_input(*point, button=button, count=2, target=target)
 
     def drag(
         self,
@@ -567,17 +616,41 @@ class PyAutoGuiDesktopProvider:
         end = _normalized_point(target.state.window, x=end_x, y=end_y)
         self._mapped_display(target.state.window)
         if sys.platform == "darwin":
-            macos_input.drag(
-                start,
-                end,
-                duration=duration_ms / 1000,
-                check=self._pointer_check(target.process_id),
-                before_press=lambda: self._accessibility.prepare_fallback(
+
+            def before_press() -> AccessibilityCapture:
+                return self._accessibility.prepare_fallback(
                     app_id,
                     state_id,
                     allow_window_fallback=allow_window_fallback,
-                ),
-            )
+                )
+
+            if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
+                macos_input.drag_background(
+                    target.process_id,
+                    start,
+                    end,
+                    duration=duration_ms / 1000,
+                    window_id=resolved_window_id,
+                    window_rect=target.state.window,
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
+                    before_press=before_press,
+                )
+            else:
+                macos_input.drag(
+                    start,
+                    end,
+                    duration=duration_ms / 1000,
+                    before_press=before_press,
+                )
             return
         self._pyautogui.moveTo(*start)
         self._accessibility.prepare_fallback(
@@ -591,7 +664,7 @@ class PyAutoGuiDesktopProvider:
         finally:
             self._pyautogui.mouseUp(button="left")
 
-    def _fallback_point(
+    def _fallback_target(
         self,
         app_id: str,
         state_id: str,
@@ -599,7 +672,7 @@ class PyAutoGuiDesktopProvider:
         y: int,
         *,
         allow_window_fallback: bool = False,
-    ) -> tuple[tuple[int, int], int | None]:
+    ) -> tuple[tuple[int, int], AccessibilityCapture]:
         target = self._accessibility.prepare_fallback(
             app_id,
             state_id,
@@ -607,43 +680,86 @@ class PyAutoGuiDesktopProvider:
         )
         point = _normalized_point(target.state.window, x=x, y=y)
         self._mapped_display(target.state.window)
-        return point, target.process_id
+        return point, target
 
-    def _pointer_check(self, process_id: int | None) -> Callable[[tuple[int, int]], None]:
-        """Return a check for right before each Quartz pointer event: the window at the point."""
+    def _background_pointer_check(
+        self,
+        process_id: int,
+        window_id: int,
+        window_rect: DesktopRect,
+    ) -> Callable[[tuple[int, int]], None]:
+        """Verify the background target window still exists with the same PID/window_id/bounds, ignoring occlusion."""
         posted = False
 
-        # Quartz events go to whichever window is on top at the point, such as a notification or floating panel.
-        def check(point: tuple[int, int]) -> None:
+        def check(_point: tuple[int, int]) -> None:
             nonlocal posted
-            if process_id is not None and macos_input.window_owner_at(point) != process_id:
+            try:
+                _macos_window_id(process_id, window_rect, expected_window_id=window_id)
+            except DesktopProviderError as exc:
                 if not posted:
-                    msg = "Another window covers the allowed app at the pointer; nothing was sent."
-                    raise AccessibilityError(msg)
-                msg = "Another window covers the allowed app at the pointer; input stopped and its outcome may be partial."
-                raise AccessibilityActionOutcomeUnknownError(msg)
-            # Every passing check is followed by an event.
+                    msg = "The allowed application window changed before any input was sent; nothing was sent."
+                    raise AccessibilityError(msg) from exc
+                msg = "The allowed application window changed; input stopped and its outcome may be partial."
+                raise AccessibilityActionOutcomeUnknownError(msg) from exc
             posted = True
 
         return check
 
-    def _click_input(self, x: int, y: int, *, button: str, count: int, process_id: int | None) -> None:
+    def _click_input(self, x: int, y: int, *, button: str, count: int, target: AccessibilityCapture) -> None:
         if sys.platform == "darwin":
-            macos_input.click(x, y, button=button, count=count, check=self._pointer_check(process_id))
+            if target.process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(
+                    target.process_id,
+                    target.state.window,
+                    target.window_id,
+                )
+                macos_input.click_background(
+                    target.process_id,
+                    x,
+                    y,
+                    button=button,
+                    count=count,
+                    window_id=resolved_window_id,
+                    window_rect=target.state.window,
+                    check=self._background_pointer_check(
+                        target.process_id,
+                        resolved_window_id,
+                        target.state.window,
+                    ),
+                )
+            else:
+                macos_input.click(x, y, button=button, count=count)
         elif count == 1:
             self._pyautogui.click(x=x, y=y, button=button)
         else:
             self._pyautogui.doubleClick(x=x, y=y, button=button, interval=0.1)
 
-    def _scroll_input(self, direction: str, clicks: int, x: int, y: int, *, process_id: int | None) -> None:
+    def _scroll_input(
+        self,
+        direction: str,
+        clicks: int,
+        x: int,
+        y: int,
+        *,
+        process_id: int | None,
+        window_rect: DesktopRect,
+        window_id: int | None = None,
+    ) -> None:
         if sys.platform == "darwin":
-            macos_input.scroll(
-                x,
-                y,
-                clicks=clicks,
-                horizontal=direction in {"left", "right"},
-                check=self._pointer_check(process_id),
-            )
+            if process_id is not None:
+                resolved_window_id = _resolve_macos_window_id(process_id, window_rect, window_id)
+                macos_input.scroll_background(
+                    process_id,
+                    x,
+                    y,
+                    clicks=clicks,
+                    horizontal=direction in {"left", "right"},
+                    window_id=resolved_window_id,
+                    window_rect=window_rect,
+                    check=self._background_pointer_check(process_id, resolved_window_id, window_rect),
+                )
+            else:
+                macos_input.scroll(x, y, clicks=clicks, horizontal=direction in {"left", "right"})
             return
         operation = self._pyautogui.hscroll if direction in {"left", "right"} else self._pyautogui.scroll
         operation(clicks, x=x, y=y)
@@ -690,37 +806,48 @@ def _capture_macos_primary_screen() -> PillowImage:
     return _pillow_image_from_macos_capture(cg_image)
 
 
-def _capture_macos_window(process_id: int, region: DesktopRect) -> PillowImage:
-    """Capture the one on-screen Core Graphics window matching the revalidated AX target."""
+def _capture_macos_window(process_id: int, region: DesktopRect, window_id: int | None = None) -> PillowImage:
+    """Capture the one Core Graphics window matching the revalidated AX target."""
     import Quartz  # noqa: PLC0415
 
     if not Quartz.CGPreflightScreenCaptureAccess():  # ty: ignore[missing-attribute]
         msg = "macOS Screen Recording permission is required for desktop screenshots."
         raise DesktopProviderError(msg)
-    window_id = _macos_window_id(process_id, region)
+    resolved_window_id = _macos_window_id(process_id, region, expected_window_id=window_id)
     try:
-        cg_image = macos_capture.capture_window(window_id, process_id, region)
+        cg_image = macos_capture.capture_window(resolved_window_id, process_id, region)
     except macos_capture.MacOSCaptureError as exc:
         raise DesktopProviderError(str(exc)) from exc
-    if _macos_window_id(process_id, region) != window_id:
+    if _macos_window_id(process_id, region, expected_window_id=resolved_window_id) != resolved_window_id:
         msg = "The application window changed during capture; request fresh app state."
         raise DesktopProviderError(msg)
     return _pillow_image_from_macos_capture(cg_image)
 
 
-def _macos_window_id(process_id: int, region: DesktopRect) -> int:
-    """Resolve the exact on-screen window without capturing unrelated pixels."""
+def _resolve_macos_window_id(process_id: int, region: DesktopRect, window_id: int | None) -> int:
+    """Resolve and validate the exact Core Graphics window ID once before posting background input."""
+    return _macos_window_id(process_id, region, expected_window_id=window_id)
+
+
+def _macos_window_id(
+    process_id: int,
+    region: DesktopRect,
+    *,
+    expected_window_id: int | None = None,
+) -> int:
+    """Resolve the exact Core Graphics window across all Spaces without capturing unrelated pixels."""
     import Quartz  # noqa: PLC0415
 
-    on_screen_only = Quartz.kCGWindowListOptionOnScreenOnly  # ty: ignore[missing-attribute]
-    exclude_desktop = Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[missing-attribute]
-    options = on_screen_only | exclude_desktop
-    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)  # ty: ignore[missing-attribute]
+    options = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements  # ty: ignore[missing-attribute]
+    window_infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or ()  # ty: ignore[missing-attribute]
     matching_window_ids: list[int] = []
     for info in window_infos:
         if int(info.get(Quartz.kCGWindowOwnerPID, -1)) != process_id:  # ty: ignore[missing-attribute]
             continue
-        if int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[missing-attribute]
+        if expected_window_id is None and int(info.get(Quartz.kCGWindowLayer, -1)) != 0:  # ty: ignore[missing-attribute]
+            continue
+        window_number = int(info.get(Quartz.kCGWindowNumber, -1))  # ty: ignore[missing-attribute]
+        if expected_window_id is not None and window_number != expected_window_id:
             continue
         raw_bounds = info.get(Quartz.kCGWindowBounds)  # ty: ignore[missing-attribute]
         if raw_bounds is None:
@@ -735,9 +862,9 @@ def _macos_window_id(process_id: int, region: DesktopRect) -> int:
             round(bounds.size.height),
         )
         if candidate == region:
-            matching_window_ids.append(int(info[Quartz.kCGWindowNumber]))  # ty: ignore[missing-attribute]
+            matching_window_ids.append(window_number)
     if len(matching_window_ids) != 1:
-        msg = "macOS could not bind the accessibility target to one exact on-screen application window."
+        msg = "macOS could not bind the accessibility target to one exact application window."
         raise DesktopProviderError(msg)
     return matching_window_ids[0]
 

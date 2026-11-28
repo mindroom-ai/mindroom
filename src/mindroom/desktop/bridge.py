@@ -1478,7 +1478,7 @@ class DesktopBridge:
             )
         else:
             recovery_action = (
-                "browser(action='tabs' or 'snapshot', target='desktop')"
+                "browser_read(action='tabs' or 'snapshot', target='desktop')"
                 if command.action in DESKTOP_BROWSER_ACTIONS
                 else "get_app_state"
             )

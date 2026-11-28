@@ -55,20 +55,17 @@ from mindroom.knowledge.index_metadata import (
     Publication,
     load_publication,
     load_refresh_status,
-    new_publication,
     publication_unreadable,
-    save_publication,
-    utc_now,
 )
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_locks import refresh_source_root_lock
+from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.registry import (
     PublishedIndexKey,
     index_availability,
     mark_knowledge_source_changed_async,
     mark_published_index_stale,
-    published_collection_exists,
     published_index_storage_path,
     record_refresh_failed,
     record_refresh_succeeded,
@@ -79,7 +76,6 @@ from mindroom.knowledge.registry import (
     source_root_for_refresh_target,
 )
 from mindroom.logging_config import get_logger, setup_subprocess_logging, subprocess_logging_env
-from mindroom.runtime_resolution import resolve_knowledge_binding
 from mindroom.tool_system.worker_routing import (
     SerializedToolExecutionIdentity,
     ToolExecutionIdentity,
@@ -106,18 +102,10 @@ class KnowledgeRefreshResult:
     last_error: str | None = None
 
 
-@dataclass(frozen=True)
-class _RefreshChildResult:
+@dataclass(frozen=True, slots=True)
+class _RefreshChildResult(RefreshOutcome):
     """What one refresh child did, reported to the runtime that started it."""
 
-    indexed_count: int = 0
-    published: bool = False
-    #: Why the refresh failed, credential-redacted, or None.
-    error: str | None = None
-    #: A content-gated base with no files yet, which publishes nothing.
-    deferred: bool = False
-    #: Why other bases over the same source must refresh too, when this refresh found the source changed.
-    source_changed: str | None = None
     #: The files above the read cap this refresh skipped, for the runtime to warn about once.
     oversized_files: tuple[OversizedKnowledgeFile, ...] = ()
 
@@ -577,6 +565,21 @@ async def knowledge_binding_mutation_lock(
         yield
 
 
+def _knowledge_manager(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> KnowledgeManager:
+    return KnowledgeManager(
+        base_id=key.base_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        storage_path=Path(key.storage_root),
+        knowledge_path=Path(key.knowledge_path),
+    )
+
+
 async def _refresh_knowledge_binding(
     base_id: str,
     *,
@@ -594,167 +597,15 @@ async def _refresh_knowledge_binding(
         create=True,
     )
     async with refresh_source_root_lock(source_root_for_published_index_key(key)):
-        return await _refresh_locked(
-            key,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            force_reindex=force_reindex,
-        )
-
-
-async def _refresh_locked(
-    key: PublishedIndexKey,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-    force_reindex: bool,
-) -> _RefreshChildResult:
-    base_id = key.base_id
-    manager = _knowledge_manager(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
-    if config.get_knowledge_base_config(base_id).mode == "files":
-        return await _refresh_files_mode(manager, key)
-    # Read once: only this child, under the source-root lock, publishes the base until it returns.
-    publication = await asyncio.to_thread(load_publication, published_index_storage_path(key))
-    if await _should_defer_cold_empty_publication(manager, publication):
-        return _RefreshChildResult(deferred=True)
-    source_changed: str | None = None
-    git_head: str | None = None
-    if manager.git_source.is_configured():
-        git_sync_result = await manager.git_source.sync()
-        if git_sync_result.updated:
-            source_changed = "git_source_updated"
-        else:
-            git_head = git_sync_result.head
-    if not force_reindex and source_changed is None and publication is not None:
-        unchanged = await _publish_unchanged(manager, key, publication, git_head=git_head)
-        if unchanged:
-            return _RefreshChildResult(indexed_count=publication.indexed_count, published=True)
-        if unchanged is False and not manager.git_source.is_configured():
-            source_changed = "source_changed"
-    elif force_reindex and publication is not None and not manager.git_source.is_configured():
-        # The rebuild trusts no claim, but the aliases over this folder still need to hear of an edit it finds; the
-        # stat-first scan is the one the rebuild then reuses.
-        known = (
-            None if publication.collection is None else await manager.published_file_signatures(publication.collection)
-        )
-        if await manager.source_signature(known) != publication.source_signature:
-            source_changed = "source_changed"
-    outcome = await manager.reindex_all(force_reindex=force_reindex)
+        manager = _knowledge_manager(key, config=config, runtime_paths=runtime_paths)
+        outcome = await manager.refresh(force_reindex=force_reindex)
     return _RefreshChildResult(
         indexed_count=outcome.indexed_count,
         published=outcome.published,
         error=outcome.error,
-        source_changed=source_changed,
+        deferred=outcome.deferred,
+        source_changed=outcome.source_changed,
     )
-
-
-def _knowledge_manager(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None,
-) -> KnowledgeManager:
-    binding = resolve_knowledge_binding(
-        base_id,
-        config,
-        runtime_paths,
-        execution_identity=execution_identity,
-        start_watchers=False,
-        create=True,
-    )
-    return KnowledgeManager(
-        base_id=base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        storage_path=binding.storage_root,
-        knowledge_path=binding.knowledge_path,
-    )
-
-
-async def _should_defer_cold_empty_publication(manager: KnowledgeManager, publication: Publication | None) -> bool:
-    """Return whether a content-gated cold index has no corpus to publish yet."""
-    if not manager.config.get_knowledge_base_config(manager.base_id).require_content_before_publish:
-        return False
-    if await asyncio.to_thread(manager.list_files):
-        return False
-    return publication is None or not publication.indexed_count
-
-
-async def _publish_unchanged(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-    publication: Publication,
-    *,
-    git_head: str | None,
-) -> bool | None:
-    """Republish an index whose source has not changed, without opening a candidate or building an embedder.
-
-    Returns True when it did, False when the corpus changed, and None when the publication cannot be republished as
-    it is, such as after a settings change, an interrupted forced rebuild, or when its collection cannot be read.
-
-    A Git base whose revision did not move is unchanged by construction: MindRoom owns the checkout and realigns it
-    with ``git reset --hard``, and every corpus filter lives in the settings compared here. Any other base hashes its
-    corpus, reading only the files whose stamp or size no longer match the published collection's claims.
-    """
-    storage = published_index_storage_path(key)
-    if (
-        publication.collection is None
-        or publication.settings != key.indexing_settings
-        or not await asyncio.to_thread(published_collection_exists, key, publication)
-        or await manager.has_unfinished_rebuild(publication)
-    ):
-        return None
-    known = await manager.published_file_signatures(publication.collection)
-    if known is None:
-        return None
-    needs_scan = git_head is None or publication.published_revision != git_head
-    if needs_scan and await manager.source_signature(known) != publication.source_signature:
-        return False
-    if git_head is not None:
-        # The dashboard reports this as the last successful sync.
-        await run_blocking_until_complete(
-            save_publication,
-            storage,
-            replace(publication, published_revision=git_head, last_published_at=utc_now()),
-        )
-    await manager.discard_superseded_builds(publication)
-    return True
-
-
-async def _refresh_files_mode(manager: KnowledgeManager, key: PublishedIndexKey) -> _RefreshChildResult:
-    """Publish current source metadata for a file-only base, syncing its Git checkout first when it has one."""
-    published_revision: str | None = None
-    source_changed: str | None = None
-    if manager.git_source.is_configured():
-        git_sync_result = await manager.git_source.sync()
-        published_revision = git_sync_result.head
-        source_changed = "git_source_updated" if git_sync_result.updated else None
-    await _publish_file_mode_source_metadata(manager, key, published_revision=published_revision)
-    return _RefreshChildResult(published=True, source_changed=source_changed)
-
-
-async def _publish_file_mode_source_metadata(
-    manager: KnowledgeManager,
-    key: PublishedIndexKey,
-    *,
-    published_revision: str | None = None,
-) -> None:
-    publication = new_publication(
-        settings=key.indexing_settings,
-        collection=None,
-        indexed_count=0,
-        source_signature=await manager.source_signature(),
-        published_revision=published_revision,
-    )
-    await run_blocking_until_complete(save_publication, published_index_storage_path(key), publication)
 
 
 async def publish_file_mode_source_metadata_for_base(
@@ -775,14 +626,9 @@ async def publish_file_mode_source_metadata_for_base(
         execution_identity=execution_identity,
         create=True,
     )
-    manager = _knowledge_manager(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
+    manager = _knowledge_manager(key, config=config, runtime_paths=runtime_paths)
     reason_generation = await asyncio.to_thread(refresh_reason_generation, key)
-    await _publish_file_mode_source_metadata(manager, key)
+    await manager.publish_files_mode()
     await run_blocking_until_complete(partial(record_refresh_succeeded, key, reason_generation=reason_generation))
 
 

@@ -4513,11 +4513,20 @@ async def test_browser_read_and_control_enforce_runtime_action_boundaries(tmp_pa
     paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
     tool = BrowserTools(paths)
 
-    with pytest.raises(ValueError, match="Unsupported browser_read action"):
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported browser_read action: open\. Use browser_control\(action='open'\) instead\.",
+    ):
         await tool.browser_read(action="open")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="Unsupported browser_control action"):
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported browser_control action: tabs\. Use browser_read\(action='tabs'\) instead\.",
+    ):
         await tool.browser_control(action="tabs")  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="Unsupported browser_control action"):
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported browser_control action: actions\. Use browser_read\(action='actions'\) instead\.",
+    ):
         await tool.browser_control(action="actions")  # type: ignore[arg-type]
 
 
@@ -4628,6 +4637,53 @@ def test_browser_split_approval_rule_fails_closed_while_include_tools_remains_va
     )
     assert len(explicit.tool_approval.rules) == 2
 
+    # Control-only or broad non-read action filters never create a browser_control -> browser_read mismatch.
+    for valid_rule in (
+        {"match": ["browser_control"], "arguments": {"action": "open"}, "action": "require_approval"},
+        {"match": ["browser_control"], "arguments": {"action": ["open", "act"]}, "action": "require_approval"},
+        {"match": "*", "arguments": {"action": "delete"}, "action": "require_approval"},
+        {"match": "browser_*", "arguments": {"action": "open"}, "action": "require_approval"},
+        {"match": "*", "arguments": {"action": "snapshot"}, "action": "require_approval"},
+    ):
+        loaded = Config.validate_with_runtime(
+            {
+                "models": models,
+                "agents": {"assistant": {"display_name": "Assistant", "tools": ["browser"]}},
+                "tool_approval": {
+                    "default": "auto_approve",
+                    "rules": [valid_rule],
+                },
+            },
+            TEST_RUNTIME_PATHS,
+        )
+        assert len(loaded.tool_approval.rules) == 1
+
+    # Rules that match moved read actions, omit an action filter, or run a script still fail closed.
+    for fail_closed_rule in (
+        {"match": ["browser_control"], "arguments": {"action": "snapshot"}, "action": "require_approval"},
+        {"match": ["browser_control"], "arguments": {"action": ["open", "snapshot"]}, "action": "require_approval"},
+        {"match": ["browser_control"], "arguments": {"target": "desktop"}, "action": "require_approval"},
+        {"match": ["browser_control"], "arguments": {"action": "open"}, "script": "approve.py"},
+    ):
+        with pytest.raises(
+            ConfigRuntimeValidationError,
+            match="read actions from browser_control moved to browser_read",
+        ):
+            Config.validate_with_runtime(
+                {
+                    "models": models,
+                    "agents": {"assistant": {"display_name": "Assistant", "tools": ["browser"]}},
+                    "tool_approval": {"default": "auto_approve", "rules": [fail_closed_rule]},
+                },
+                TEST_RUNTIME_PATHS,
+            )
+
+    # Keep browser moved-action metadata synchronized with browser_read's actual actions.
+    from mindroom.config.retired_tool_renames import SPLIT_APPROVAL_ONLY_FUNCTIONS  # noqa: PLC0415
+    from mindroom.custom_tools.browser import _READ_ACTIONS  # noqa: PLC0415
+
+    assert SPLIT_APPROVAL_ONLY_FUNCTIONS["browser"]["browser_control"]["browser_read"] == _READ_ACTIONS
+
 
 @pytest.mark.asyncio
 async def test_browser_read_never_launches_chromium_or_activates_tabs(
@@ -4651,7 +4707,7 @@ async def test_browser_read_never_launches_chromium_or_activates_tabs(
     assert stopped_console["entries"] == []
 
     for action in ("snapshot", "screenshot"):
-        with pytest.raises(ValueError, match=r'not running.*browser_control\(action="open"\)'):
+        with pytest.raises(ValueError, match=r'not running.*browser_control\(action="open", targetUrl=\.\.\.\)'):
             await tool.browser_read(action=action)
     ensure_profile.assert_not_awaited()
 

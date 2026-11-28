@@ -1204,15 +1204,15 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
     transport: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A launched app and its activation become visible while native work waits."""
+    """A background-launched app becomes visible while native work waits without requesting activation."""
     launch_requested = threading.Event()
     launch_published = threading.Event()
     activation_requested = threading.Event()
-    activation_published = threading.Event()
+    activates_flags: list[bool] = []
     application = SimpleNamespace(
         bundleIdentifier=lambda: APP_ID,
         localizedName=lambda: "Editor",
-        isActive=activation_published.is_set,
+        isActive=lambda: False,
         activateWithOptions_=lambda _options: activation_requested.set() or True,
     )
 
@@ -1227,7 +1227,7 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         openApplicationAtURL_configuration_completionHandler_=open_app,
     )
     open_config = SimpleNamespace(
-        setActivates_=lambda _v: None,
+        setActivates_=activates_flags.append,
         setHides_=lambda _v: None,
         setCreatesNewApplicationInstance_=lambda _v: None,
     )
@@ -1238,8 +1238,6 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         assert 0 <= seconds <= 0.01
         if launch_requested.is_set():
             launch_published.set()
-        if activation_requested.is_set():
-            activation_published.set()
 
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setitem(sys.modules, "objc", SimpleNamespace(autorelease_pool=nullcontext))
@@ -1268,7 +1266,9 @@ async def test_bridge_refreshes_macos_apps_during_worker_launch(
         assert _response(transport).ok
         assert _response(transport).result.get("action_completed") is True
         assert backend.list_apps() == [DesktopApp(APP_ID, "Editor", True)]
-        assert activation_published.is_set()
+        assert launch_published.is_set()
+        assert activates_flags == [False]
+        assert not activation_requested.is_set()
     finally:
         await bridge.stop()
         await asyncio.wait_for(worker, timeout=1)
@@ -1691,7 +1691,7 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
     # The provider's reason comes first, ahead of the fixed recovery advice.
     assert warning.startswith("extension disconnected ")
     assert "outcome is unknown" in warning
-    assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
+    assert "browser_read(action='tabs' or 'snapshot', target='desktop')" in warning
 
 
 @pytest.mark.asyncio

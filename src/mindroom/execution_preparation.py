@@ -19,10 +19,9 @@ from mindroom.attachments.storage import (
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import (
-    COMPACTION_NOTICE_CONTENT_KEY,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    NON_TURN_META_NOTICE_CONTENT_KEYS,
     ORIGINAL_SENDER_KEY,
-    SKILL_REVIEW_NOTICE_CONTENT_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -31,7 +30,6 @@ from mindroom.constants import (
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
     THREAD_SUMMARY_CONTENT_KEY,
-    UI_ACTION_CONTENT_KEY,
     RuntimePaths,
 )
 from mindroom.dispatch_source import hook_source_from_content
@@ -100,9 +98,7 @@ _AUTHORSHIP_CLAIM_KEYS = (ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY)
 # call's fallback text for other clients (answers and error reports name the canvas themselves),
 # and a thread summary is the thread's title.
 _NON_TURN_NOTICE_CONTENT_KEYS = (
-    COMPACTION_NOTICE_CONTENT_KEY,
-    SKILL_REVIEW_NOTICE_CONTENT_KEY,
-    UI_ACTION_CONTENT_KEY,
+    *NON_TURN_META_NOTICE_CONTENT_KEYS,
     THREAD_SUMMARY_CONTENT_KEY,
 )
 

@@ -6,7 +6,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
 
 import nio
 
@@ -35,6 +35,8 @@ from mindroom.tool_system.events import tool_markers_in_text
 from mindroom.tools.native_helpers import validate_action_params
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
@@ -104,6 +106,9 @@ class _MatrixSearchResponse(nio.Response):
         )
 
 
+_SearchKey = Literal["content.body", "content.name", "content.topic"]
+
+
 class MatrixApiTools(Toolkit):
     """Expose a small low-level Matrix API surface to agents."""
 
@@ -143,20 +148,13 @@ class MatrixApiTools(Toolkit):
             "m.room.third_party_invite",
         },
     )
-    _SEARCH_ALLOWED_KEYS: ClassVar[tuple[str, ...]] = (
-        "content.body",
-        "content.name",
-        "content.topic",
-    )
+    _SEARCH_ALLOWED_KEYS: ClassVar[tuple[str, ...]] = get_args(_SearchKey)
     _SEARCH_ALLOWED_ORDER_BY: ClassVar[frozenset[str]] = frozenset({"rank", "recent"})
     _SEARCH_LIMIT_CAP: ClassVar[int] = 50
     _SEARCH_SNIPPET_MAX_CHARS: ClassVar[int] = 200
 
     def __init__(self) -> None:
-        super().__init__(
-            name="matrix_api",
-            tools=[self.matrix_api_read, self.matrix_api_write],
-        )
+        super().__init__(name="matrix_api")
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -318,7 +316,7 @@ class MatrixApiTools(Toolkit):
         return normalized_order_by
 
     @classmethod
-    def _validate_search_keys(cls, keys: list[str]) -> list[str]:
+    def _validate_search_keys(cls, keys: Sequence[str]) -> list[str]:
         normalized_keys = [key.strip() for key in keys]
         if not all(normalized_keys):
             error_message = "keys must be a list of non-empty strings."
@@ -450,7 +448,7 @@ class MatrixApiTools(Toolkit):
         *,
         room_id: str,
         search_term: str | None,
-        keys: list[str] | None,
+        keys: Sequence[str] | None,
         order_by: str,
         limit: int,
         search_filter: dict[str, object] | None,
@@ -1227,7 +1225,7 @@ class MatrixApiTools(Toolkit):
         *,
         room_id: str,
         search_term: str | None,
-        keys: list[str] | None,
+        keys: Sequence[str] | None,
         order_by: str | None,
         limit: int | None,
         next_batch: str | None,
@@ -1299,15 +1297,28 @@ class MatrixApiTools(Toolkit):
         function_name: str,
         action: object,
         allowed_by_action: dict[str, frozenset[str]],
+        sibling: tuple[str, dict[str, frozenset[str]]],
         params: dict[str, object],
         room_id: str | None,
     ) -> tuple[ToolRuntimeContext, str, str] | str:
         if isinstance(context := tool_context_or_error(self._payload, "Matrix API"), str):
             return context
 
-        normalized_action = action.strip().lower() if isinstance(action, str) else ""
-        if (error := validate_action_params(function_name, normalized_action, allowed_by_action, params)) is not None:
-            return self._error_payload(action=normalized_action or str(action), message=error)
+        normalized_action = action.strip().lower() if isinstance(action, str) else action
+        if (
+            error := validate_action_params(
+                function_name,
+                normalized_action,
+                allowed_by_action,
+                params,
+                sibling=sibling,
+            )
+        ) is not None:
+            action_label = (
+                normalized_action if isinstance(normalized_action, str) and normalized_action else str(action)
+            )
+            return self._error_payload(action=action_label, message=error)
+        assert isinstance(normalized_action, str)
 
         resolved_room_id, room_id_error = self._resolve_room_id(context, room_id)
         if room_id_error is not None:
@@ -1330,34 +1341,29 @@ class MatrixApiTools(Toolkit):
         state_key: str | None = None,
         event_id: str | None = None,
         search_term: str | None = None,
-        keys: list[str] | None = None,
+        keys: list[_SearchKey] | None = None,
         order_by: Literal["rank", "recent"] | None = None,
         limit: int | None = None,
         next_batch: str | None = None,
         filter: dict[str, object] | None = None,  # noqa: A002
         event_context: dict[str, object] | None = None,
     ) -> str:
-        """Read-only low-level Matrix API (`room_id` defaults to current room; only pass parameters for the chosen action).
+        """Read-only low-level Matrix API (`room_id` defaults to current room; pass only parameters for the chosen action).
 
         Actions:
         - `get_state`: Read state event (`event_type`, optional `state_key`).
         - `get_event`: Fetch raw event by `event_id` (v3 replies store calls only in `io.mindroom.tool_trace.events`).
-        - `search`: Single-room full-text search (`search_term`, optional `keys`, `order_by` `'rank'`|`'recent'` default `'rank'`, `limit` 1-50 default 10, `next_batch`, `filter`, `event_context`). `filter.rooms` must match `room_id`; `filter.limit` is rejected.
+        - `search`: Single-room full-text search (`search_term`, optional `keys`, `order_by` default `'rank'`, `limit` 1-50 default 10, `next_batch`, `filter`, `event_context`). Results return snippets; use `get_event` for full content. `filter.rooms` must match `room_id`; `filter.limit` is rejected.
         """
-        params: dict[str, object] = {
-            "room_id": room_id,
-            "event_type": event_type,
-            "state_key": state_key,
-            "event_id": event_id,
-            "search_term": search_term,
-            "keys": keys,
-            "order_by": order_by,
-            "limit": limit,
-            "next_batch": next_batch,
-            "filter": filter,
-            "event_context": event_context,
-        }
-        prepared = await self._prepare_action("matrix_api_read", action, self._READ_ALLOWED, params, room_id)
+        params: dict[str, object] = {key: value for key, value in locals().items() if key not in {"self", "action"}}
+        prepared = await self._prepare_action(
+            "matrix_api_read",
+            action,
+            self._READ_ALLOWED,
+            ("matrix_api_write", self._WRITE_ALLOWED),
+            params,
+            room_id,
+        )
         if isinstance(prepared, str):
             return prepared
         context, normalized_action, resolved_room_id = prepared
@@ -1397,34 +1403,31 @@ class MatrixApiTools(Toolkit):
         state_key: str | None = None,
         event_id: str | None = None,
         reason: str | None = None,
-        dry_run: bool | None = None,
+        dry_run: bool = False,
         allow_dangerous: bool | None = None,
     ) -> str:
-        """Mutating low-level Matrix API (`room_id` defaults to current room; only pass parameters for the chosen action).
+        """Mutating low-level Matrix API (`room_id` defaults to current room; all actions accept optional `dry_run`; pass only parameters for the chosen action).
 
         Actions:
-        - `send_event`: Send room event (`event_type`, `content`, optional `dry_run`).
-        - `put_state`: Write state event (`event_type`, `content`, optional `state_key`, `dry_run`, `allow_dangerous`).
-        - `redact`: Redact `event_id` (optional `reason`, `dry_run`, `allow_dangerous`; state redaction follows `put_state` policy).
+        - `send_event`: Send room event (`event_type`, `content`).
+        - `put_state`: Write state event (`event_type`, `content`, optional `state_key`, `allow_dangerous`).
+        - `redact`: Redact `event_id` (optional `reason`, `allow_dangerous`; state redaction follows `put_state` policy).
 
         Rules: `com.mindroom.*`, `io.mindroom.*`, and `chat.mindroom.*` are reserved (blocked in `content` keys and written event types). `allow_dangerous` unlocks high-risk state types for `put_state`/`redact` (requires joined room admin).
         """
-        params: dict[str, object] = {
-            "room_id": room_id,
-            "event_type": event_type,
-            "content": content,
-            "state_key": state_key,
-            "event_id": event_id,
-            "reason": reason,
-            "dry_run": dry_run,
-            "allow_dangerous": allow_dangerous,
-        }
-        prepared = await self._prepare_action("matrix_api_write", action, self._WRITE_ALLOWED, params, room_id)
+        params: dict[str, object] = {key: value for key, value in locals().items() if key not in {"self", "action"}}
+        prepared = await self._prepare_action(
+            "matrix_api_write",
+            action,
+            self._WRITE_ALLOWED,
+            ("matrix_api_read", self._READ_ALLOWED),
+            params,
+            room_id,
+        )
         if isinstance(prepared, str):
             return prepared
         context, normalized_action, resolved_room_id = prepared
 
-        resolved_dry_run = False if dry_run is None else dry_run
         resolved_allow_dangerous = False if allow_dangerous is None else allow_dangerous
         if normalized_action == "send_event":
             return await self._send_event(
@@ -1432,7 +1435,7 @@ class MatrixApiTools(Toolkit):
                 room_id=resolved_room_id,
                 event_type=event_type,
                 content=content,
-                dry_run=resolved_dry_run,
+                dry_run=dry_run,
             )
         if normalized_action == "put_state":
             return await self._put_state(
@@ -1441,7 +1444,7 @@ class MatrixApiTools(Toolkit):
                 event_type=event_type,
                 state_key=state_key,
                 content=content,
-                dry_run=resolved_dry_run,
+                dry_run=dry_run,
                 allow_dangerous=resolved_allow_dangerous,
             )
         return await self._redact(
@@ -1449,6 +1452,6 @@ class MatrixApiTools(Toolkit):
             room_id=resolved_room_id,
             event_id=event_id,
             reason=reason,
-            dry_run=resolved_dry_run,
+            dry_run=dry_run,
             allow_dangerous=resolved_allow_dangerous,
         )
