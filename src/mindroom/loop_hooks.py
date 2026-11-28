@@ -195,7 +195,8 @@ def _loop_hooks(
     compaction's sizing see the definitions the request sends; the participation gate decides next, so a reply that
     stays silent never compacts or requests; the bound approval receipt then joins the messages of a run that reads
     it, before its first request as a reader; in-turn tool-image pruning next batch-prunes older seen tool images
-    unless the route enforces strict thinking prefixes; mid-turn compaction last sizes the request that is sent, rewrites the
+    unless the route enforces strict thinking prefixes or a fallback already answered in this turn; mid-turn
+    compaction last sizes the request that is sent, rewrites the
     live messages, keeping the receipt, and folds into the scope only when the run replays it; the checkpoint then
     saves the run as that request finds it, and again before each tool batch runs. Queued-message notices
     follow every tool batch and a resume's entry when ``queued_notices`` is on, and a ``steering`` run ends at such a
@@ -260,12 +261,27 @@ def _loop_hooks(
     )
 
 
+def _has_in_turn_fallback(messages: Sequence[Message]) -> bool:
+    """Return whether a fallback model already answered inside the current turn."""
+    return any(
+        not message.from_history and message.role == "assistant" and message.meta.fallback_model is not None
+        for message in messages
+    )
+
+
 def prune_in_turn_tool_images_hook(model: ModelProvider) -> BeforeRequestHook:
-    """Return a pre-request hook that batch-prunes older seen in-turn tool images unless thinking prefixes are strict."""
+    """Return a pre-request hook that batch-prunes older seen in-turn tool images.
+
+    Skips pruning when the primary route enforces strict thinking prefixes or a fallback model already answered in
+    this turn, because ``model.capabilities`` reflects the primary route and a strict fallback's signed thinking
+    blocks cannot tolerate earlier prefix rewrites.
+    """
 
     async def prune(state: LoopState) -> SendRequest:
         strict_thinking_prefix = model.capabilities.strict_thinking_prefix
-        if strict_thinking_prefix is not None and strict_thinking_prefix(state.request()):
+        if (strict_thinking_prefix is not None and strict_thinking_prefix(state.request())) or _has_in_turn_fallback(
+            state.messages,
+        ):
             return SendRequest()
         prune_in_turn_tool_images(state.messages)
         return SendRequest()

@@ -7,15 +7,21 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom import loop_hooks
-from mindroom.agent_loop.model_loop import EMPTY_REQUEST, SendRequest
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
 from mindroom.config.main import Config
 from mindroom.history.message_content import _IN_TURN_TRANSIENT_IMAGE_TRIGGER_BYTES, prune_in_turn_tool_images
 from mindroom.history.run_checkpoint import CheckpointHooks
 from mindroom.history.types import HistoryScope
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Audio, Image
-from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, PRUNED_MEDIA_FOLLOW_UP_TEXT, Message, is_media_follow_up
+from mindroom.llm.messages import (
+    MEDIA_FOLLOW_UP_TEXT,
+    PRUNED_MEDIA_FOLLOW_UP_TEXT,
+    Message,
+    MessageMeta,
+    is_media_follow_up,
+)
 from mindroom.llm.provider import DeferredTools
-from mindroom.loop_hooks import HookTurn
+from mindroom.loop_hooks import HookTurn, prune_in_turn_tool_images_hook
 from mindroom.tool_system.tool_function import ToolValue
 from tests.agent_loop.helpers import run_loop, spec, toolkit
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -280,3 +286,47 @@ def test_oversized_seen_images_never_prune_to_zero_when_no_unseen_image_follows(
     two_large.append(Message(role="assistant", content="clicked with observation=none"))
     assert prune_in_turn_tool_images(two_large) is True
     assert _image_ids(two_large) == ["shot-2"]
+
+
+@pytest.mark.asyncio
+async def test_prune_hook_skips_in_turn_fallback_but_ignores_history_fallback() -> None:
+    """An in-turn fallback assistant message skips pruning, whereas a prior history turn's fallback does not."""
+    in_turn: list[Message] = [Message(role="user", content="start")]
+    for step in range(1, 12):
+        _step(in_turn, step, [_transient(step)])
+    in_turn[1] = Message(
+        role="assistant",
+        tool_calls=in_turn[1].tool_calls,
+        meta=MessageMeta(fallback_model="bedrock"),
+    )
+    in_turn_model = ScriptedModel([answer("done")])
+    await run_loop(
+        spec(in_turn_model),
+        in_turn,
+        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(in_turn_model),)),
+        request_template=EMPTY_REQUEST,
+    )
+    assert [img.id for m in in_turn_model.requests[0].messages for img in m.images or ()] == [
+        f"shot-{i}" for i in range(1, 12)
+    ]
+
+    prior_turn: list[Message] = [
+        Message(role="user", content="earlier", from_history=True),
+        Message(
+            role="assistant",
+            content="earlier reply",
+            from_history=True,
+            meta=MessageMeta(fallback_model="bedrock"),
+        ),
+        Message(role="user", content="start"),
+    ]
+    for step in range(1, 12):
+        _step(prior_turn, step, [_transient(step)])
+    prior_model = ScriptedModel([answer("done")])
+    await run_loop(
+        spec(prior_model),
+        prior_turn,
+        hooks=LoopHooks(before_request=(prune_in_turn_tool_images_hook(prior_model),)),
+        request_template=EMPTY_REQUEST,
+    )
+    assert [img.id for m in prior_model.requests[0].messages for img in m.images or ()] == ["shot-10", "shot-11"]
