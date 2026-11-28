@@ -74,6 +74,18 @@ class UsageSummary:
     turn_costs: list[float]
 
 
+@dataclass(frozen=True, slots=True)
+class WorkflowRunWorker:
+    """Immutable persisted spec of one named shell worker admitted for a workflow run."""
+
+    run_id: str
+    worker_name: str
+    owner_scope: str
+    resource_profile: str | None
+    sandbox_json: str | None
+    created_at: str
+
+
 class WorkflowRunStoreError(ValueError):
     """Raised when durable workflow state cannot be used safely."""
 
@@ -551,6 +563,52 @@ class WorkflowRunStore:
             ).fetchone()
         return bytes(row["source"]), str(row["sha256"])
 
+    def get_run_worker(self, run_id: str, worker_name: str) -> WorkflowRunWorker | None:
+        """Return the persisted immutable lock for *worker_name* in *run_id*, if admitted."""
+        with self.read_connection() as connection:
+            return _select_run_worker(connection, run_id, worker_name)
+
+    def admit_run_worker(
+        self,
+        run_id: str,
+        worker_name: str,
+        epoch: int,
+        *,
+        owner_scope: str,
+        resource_profile: str | None,
+        sandbox_json: str | None,
+        exclude_key: str,
+        exclude_generation: int,
+        commit: bool = True,
+    ) -> tuple[WorkflowRunWorker | None, list[dict[str, object]]]:
+        """Inspect or atomically record *worker_name*'s immutable lock, returning ``(worker, prior_requests)``."""
+        ctx = self.write_transaction() if commit else self.read_connection()
+        with ctx as connection:
+            if commit:
+                _fenced(connection, run_id, epoch)
+            existing = _select_run_worker(connection, run_id, worker_name)
+            prior = _prior_admitted_worker_requests(connection, run_id, worker_name, exclude_key, exclude_generation)
+            if existing is not None or not commit:
+                return existing, prior
+            if prior:
+                msg = f"Worker '{worker_name}' has prior admitted calls in this run without a persisted worker lock."
+                raise WorkflowRunStoreError(msg)
+            created = WorkflowRunWorker(
+                run_id,
+                worker_name,
+                owner_scope,
+                resource_profile,
+                sandbox_json,
+                utc_timestamp(),
+            )
+            connection.execute(
+                "INSERT INTO workflow_run_workers "
+                "(run_id, worker_name, owner_scope, resource_profile, sandbox_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (created.run_id, created.worker_name, owner_scope, resource_profile, sandbox_json, created.created_at),
+            )
+            return created, []
+
     def prune(self, finished_before: str, held: Collection[str] | None = ()) -> int:
         """Delete finished runs that ended before *finished_before*, with all they own; return how many.
 
@@ -929,7 +987,56 @@ _SCHEMA_STATEMENTS = (
         PRIMARY KEY (run_id, op_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS workflow_run_workers (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        worker_name TEXT NOT NULL,
+        owner_scope TEXT NOT NULL,
+        resource_profile TEXT,
+        sandbox_json TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, worker_name)
+    )
+    """,
 )
+
+
+def _select_run_worker(connection: sqlite3.Connection, run_id: str, worker_name: str) -> WorkflowRunWorker | None:
+    row = connection.execute(
+        "SELECT run_id, worker_name, owner_scope, resource_profile, sandbox_json, created_at "
+        "FROM workflow_run_workers WHERE run_id = ? AND worker_name = ?",
+        (run_id, worker_name),
+    ).fetchone()
+    return None if row is None else WorkflowRunWorker(*row)
+
+
+def _prior_admitted_worker_requests(
+    connection: sqlite3.Connection,
+    run_id: str,
+    worker_name: str,
+    exclude_key: str,
+    exclude_generation: int,
+) -> list[dict[str, object]]:
+    rows = connection.execute(
+        "SELECT request_json FROM workflow_nodes WHERE run_id = ? AND kind = 'tool' "
+        "AND json_extract(request_json, '$.toolkit') = 'shell' "
+        "AND json_extract(request_json, '$.function') = 'run_shell_command' "
+        "AND json_extract(request_json, '$.arguments.worker') = ? "
+        "AND (handle_json != 'null' OR state IN ('completed', 'running', 'waiting', 'indeterminate')) "
+        "AND NOT (key = ? AND generation = ?)",
+        (run_id, worker_name, exclude_key, exclude_generation),
+    ).fetchall()
+    requests: list[dict[str, object]] = []
+    for row in rows:
+        try:
+            parsed = json.loads(row["request_json"])
+        except (TypeError, ValueError) as exc:
+            msg = f"Corrupted workflow node request for worker '{worker_name}'."
+            raise WorkflowRunStoreError(msg) from exc
+        arguments = parsed.get("arguments") if isinstance(parsed, dict) else None
+        requests.append(arguments if isinstance(arguments, dict) else {})
+    return requests
+
 
 # What a light read takes in place of the columns that can be megabytes: of a request, the operation of a group.
 _LIGHT = {

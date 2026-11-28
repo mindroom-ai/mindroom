@@ -23,6 +23,11 @@ class ExecutionResourceReference:
         self._owner = owner
         self._released = False
 
+    @property
+    def released(self) -> bool:
+        """Return whether this reference has already been released."""
+        return self._released
+
     async def release(self) -> None:
         """Release once, draining cleanup when this was the final owner."""
         if not self._released:

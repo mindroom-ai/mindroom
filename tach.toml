@@ -2590,6 +2590,7 @@ expose = [
     "WorkflowRunNotFoundError",
     "WorkflowRunStore",
     "WorkflowRunStoreError",
+    "WorkflowRunWorker",
     "owned_run",
     "redact_json_text",
 ]
@@ -2797,6 +2798,7 @@ expose = [
 path = "mindroom.workflow_runs.nodes"
 depends_on = [
     "mindroom.delegation.state",
+    "mindroom.tool_jobs.resources",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
@@ -10387,6 +10389,7 @@ visibility = [
     "mindroom.tool_jobs.execution_scope",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.nodes",
 ]
 
 [[modules]]

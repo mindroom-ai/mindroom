@@ -32,7 +32,7 @@ from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
-from mindroom.tool_system.progress import report_tool_metadata
+from mindroom.tool_system.progress import report_tool_metadata, structured_result_requested
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -74,6 +74,7 @@ from mindroom.workers.models import (
 from mindroom.workers.named import (
     NamedWorkerCall,
     NamedWorkerError,
+    current_named_worker_owner,
     ensure_named_worker,
     named_worker_call,
     sandbox_mount_relative_path,
@@ -1066,7 +1067,7 @@ def _build_execute_request(
     pre_route_sandbox = placement.sandbox if placement is not None else None
     if pre_route_sandbox is None and named is not None:
         normal_key = worker_target.worker_key or normal_worker_key(worker_target) if worker_target is not None else None
-        pre_route_sandbox = named.locked_sandbox(normal_key) if normal_key is not None else named.sandbox
+        pre_route_sandbox = named.locked_sandbox(normal_key)
     _reject_sandbox_output_path(
         has_output_path=has_output_path,
         sandbox=pre_route_sandbox,
@@ -1268,7 +1269,7 @@ def _call_proxy_sync(
         elif tool_name == "browser_mcp" or is_media_result_envelope(result):
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
-        if named is not None and worker_handle is not None:
+        if named is not None and worker_handle is not None and not structured_result_requested():
             return _format_named_worker_result(
                 result,
                 header=header or named.header(worker_handle),
@@ -1293,6 +1294,7 @@ def _named_worker_call(
         return None
     worker_target = stand_ins.worker_target
     context = get_tool_runtime_context()
+    owner_id = current_named_worker_owner() or (context.turn_id if context is not None else None)
     return named_worker_call(
         arguments.get("worker"),
         arguments.get("resource_profile"),
@@ -1302,7 +1304,7 @@ def _named_worker_call(
         agent_name=worker_target.routing_agent_name if worker_target is not None else None,
         config=stand_ins.runtime_config,
         runtime_paths=stand_ins.runtime_paths,
-        turn_id=context.turn_id if context is not None else None,
+        owner_id=owner_id,
     )
 
 
@@ -1384,6 +1386,7 @@ class WorkerStandIns:
                 )
                 return await run_blocking(call)
             except NamedWorkerError:
+                report_tool_metadata(not_started=True)
                 note_call_refusal()
                 raise
             except asyncio.CancelledError:

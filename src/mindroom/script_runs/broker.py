@@ -18,7 +18,7 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     toolkit_approval_alias,
 )
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.launch_contract import digest_arguments
@@ -41,6 +41,7 @@ from mindroom.script_runs.store import (
     ScriptRunStore,
     script_capability_hash,
 )
+from mindroom.tool_jobs.resources import ExecutionResourceReference, current_response_resources
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
@@ -330,7 +331,10 @@ class ScriptToolBroker:
         key = (request.run_id, request.call_id)
         self._preparing[key] = self._preparing.get(key, 0) + 1
         preparation_finished = False
+        resource_ref: ExecutionResourceReference | None = None
+        handed_off = False
         try:
+            resource_ref = _acquire_response_resource_ref()
             claim = await asyncio.to_thread(self._claim_authenticated_call, request, authorization, authenticated)
             call = claim.call
 
@@ -356,9 +360,10 @@ class ScriptToolBroker:
                 return call
 
             task = asyncio.create_task(
-                self._execute_claimed_call(call, request.arguments),
+                self._execute_claimed_call(call, request.arguments, resource_ref=resource_ref),
                 name=f"script-tool:{call.run_id}:{call.call_id}",
             )
+            handed_off = True
             self._tasks[key] = task
             self._finish_preparation(key)
             preparation_finished = True
@@ -368,10 +373,13 @@ class ScriptToolBroker:
                     self._tasks.pop(key, None)
                 if not any(active_key[0] == call.run_id for active_key in self._tasks):
                     self._run_locks.pop(call.run_id, None)
+                _release_detached_resource_ref(resource_ref, call)
 
             task.add_done_callback(forget_completed_task)
             return call
         finally:
+            if not handed_off and resource_ref is not None:
+                await run_coroutine_until_complete(resource_ref.release())
             if not preparation_finished:
                 self._finish_preparation(key)
 
@@ -626,20 +634,30 @@ class ScriptToolBroker:
         for run_id in sorted(run_ids):
             await self.cancel_run(run_id)
 
-    async def _execute_claimed_call(self, call: ScriptCallRecord, arguments: dict[str, object]) -> ScriptCallRecord:
-        # Plain script calls run one at a time; workflow attempts enforce concurrency in WorkflowEngine.
-        plain = _WORKFLOW_CALL.get() is None
-        async with self._run_locks.setdefault(call.run_id, asyncio.Lock()) if plain else nullcontext():
-            try:
-                durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
-            except ScriptCapabilityError:
-                self._mark_script_check_tool_denied(call.run_id)
-                return await self._publish_async(
-                    call,
-                    state=ScriptCallState.FAILED,
-                    error=_REVOKED_GRANT_ERROR,
-                )
-            return await self._execute_claimed_call_serialized(durable_run, call, arguments)
+    async def _execute_claimed_call(
+        self,
+        call: ScriptCallRecord,
+        arguments: dict[str, object],
+        *,
+        resource_ref: ExecutionResourceReference | None = None,
+    ) -> ScriptCallRecord:
+        try:
+            # Plain script calls run one at a time; workflow attempts enforce concurrency in WorkflowEngine.
+            plain = _WORKFLOW_CALL.get() is None
+            async with self._run_locks.setdefault(call.run_id, asyncio.Lock()) if plain else nullcontext():
+                try:
+                    durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
+                except ScriptCapabilityError:
+                    self._mark_script_check_tool_denied(call.run_id)
+                    return await self._publish_async(
+                        call,
+                        state=ScriptCallState.FAILED,
+                        error=_REVOKED_GRANT_ERROR,
+                    )
+                return await self._execute_claimed_call_serialized(durable_run, call, arguments)
+        finally:
+            if resource_ref is not None:
+                await run_coroutine_until_complete(resource_ref.release())
 
     async def _execute_claimed_call_serialized(  # noqa: PLR0911
         self,
@@ -1164,3 +1182,24 @@ def _strict_json_result(result: object) -> object:
     except (TypeError, ValueError) as exc:
         raise _InvalidToolResultError from exc
     return normalized
+
+
+def _acquire_response_resource_ref() -> ExecutionResourceReference | None:
+    resources = current_response_resources()
+    if resources is None:
+        return None
+    try:
+        return resources.acquire()
+    except RuntimeError as exc:
+        raise ScriptRuntimeUnavailableError(str(exc)) from exc
+
+
+def _release_detached_resource_ref(
+    resource_ref: ExecutionResourceReference | None,
+    call: ScriptCallRecord,
+) -> None:
+    if resource_ref is not None and not resource_ref.released:
+        create_background_task(
+            resource_ref.release(),
+            name=f"script-tool-resource-release:{call.run_id}:{call.call_id}",
+        )

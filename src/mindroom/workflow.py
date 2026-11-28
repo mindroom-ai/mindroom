@@ -637,15 +637,37 @@ def ask_user(question: str, options: list[str] | None = None) -> str:
     return str(_call("ask", {"question": str(question), "options": options}))
 
 
-def shell(command: str, *, timeout: int = 3600, tail: int = 2000, cached: bool = True) -> ShellResult:
+def shell(
+    command: str,
+    *,
+    timeout: int = 3600,
+    tail: int = 2000,
+    cached: bool = True,
+    worker: str | None = None,
+    resource_profile: str | None = None,
+    sandbox: bool | None = None,
+    mount_dir: str | None = None,
+    mount_read_only: bool | None = None,
+) -> ShellResult:
     """Run a command with the owner's shell tool; returns ShellResult(ok, exit_code, output) and never raises on a non-zero exit.
 
     `output` is the last `tail` lines. With cached=False the command runs again on every resume.
     shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
     """
+    extra = {
+        key: value
+        for key, value in (
+            ("worker", worker),
+            ("resource_profile", resource_profile),
+            ("sandbox", sandbox),
+            ("mount_dir", mount_dir),
+            ("mount_read_only", mount_read_only),
+        )
+        if value is not None
+    }
     result = cast(
         "dict[str, object]",
-        tool("shell", "run_shell_command", cached=cached, args=command, timeout=timeout, tail=tail),
+        tool("shell", "run_shell_command", cached=cached, args=command, timeout=timeout, tail=tail, **extra),
     )
     exit_code = cast("int", result["exit_code"])
     return ShellResult(ok=exit_code == 0, exit_code=exit_code, output=str(result["output"]))
