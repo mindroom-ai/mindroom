@@ -399,13 +399,13 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
 
     async def _run_direct(self, function_name: str, arguments: Mapping[str, object]) -> str:
         """Run one call's child inside this call, settled by the shared lifecycle owner."""
+        prepared = await self._prepare(function_name, arguments)
+        if isinstance(prepared, str):
+            return prepared
         executor = self._delegation_executor
         if executor is None or executor.run_direct_child is None:
             msg = "Direct delegation requires a direct child response runner"
             raise RuntimeError(msg)
-        prepared = await self._prepare(function_name, arguments)
-        if isinstance(prepared, str):
-            return prepared
         child, config, parent_run_id = prepared
         try:
             result = await run_direct_child_turn(

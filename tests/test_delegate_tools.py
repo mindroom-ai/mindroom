@@ -116,8 +116,10 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("background", [False, True], ids=["direct", "background"])
     async def test_delegation_requires_its_executor(self, tmp_path: Path, config: Config, background: bool) -> None:
-        """A build without execution callbacks refuses to run a child before it needs a caller runtime."""
-        tools = DelegateTools("leader", _runtime_paths(tmp_path), config, tmp_path)
+        """A build without execution callbacks cannot run a child, even for an authorized caller."""
+        with_responder_access(config, "code", users=["@alice:example.org"])
+        runtime_paths = _runtime_paths(tmp_path)
+        tools = DelegateTools("leader", runtime_paths, config, tmp_path)
         if background:
             with pytest.raises(RuntimeError, match="Background delegation requires a delegation job builder"):
                 await tools.managed_job(
@@ -127,7 +129,10 @@ class TestDelegateTools:
                     runtime=MagicMock(),
                 )
         else:
-            with pytest.raises(RuntimeError, match="Direct delegation requires a direct child response runner"):
+            with (
+                tool_runtime_context(_delegate_runtime_context(config, runtime_paths)),
+                pytest.raises(RuntimeError, match="Direct delegation requires a direct child response runner"),
+            ):
                 await tools.run_subagent(agent_name="code", task="Do work")
 
     def test_toolkit_name(self, tools: DelegateTools) -> None:

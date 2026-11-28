@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom import agents
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE, queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
@@ -228,13 +227,13 @@ async def test_a_child_resume_whose_session_is_gone_stops_before_rebuilding_the_
 
         monkeypatch.setattr(ConversationStore, "load_session", child_session_gone)
         built: list[str] = []
-        create_agent = agents.create_agent
+        create_agent = execution.create_agent
 
         def recorded_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
             built.append(agent_name)
             return create_agent(agent_name, *args, **kwargs)
 
-        monkeypatch.setattr(agents, "create_agent", recorded_build)
+        monkeypatch.setattr(execution, "create_agent", recorded_build)
         result = await resume(
             executor,
             paused,
