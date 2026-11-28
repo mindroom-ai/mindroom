@@ -29,7 +29,7 @@ from mindroom.reactive_triggers.models import (
 )
 from mindroom.reactive_triggers.script_check import (
     SCRIPT_CHECK_BOOTSTRAP_SOURCE,
-    _agent_supports_script_check,
+    agent_supports_script_check,
     build_script_check_dry_run_event,
     check_script_check_access,
     clamp_script_check_poll_interval,
@@ -157,9 +157,9 @@ def test_script_check_policy_models_and_access(tmp_path: Path, monkeypatch: pyte
     p_no, p_yes = _paths(tmp_path / "no"), _paths(tmp_path / "yes", allow_local=True)
     cfg, cfg_local = _cfg(p_no), _cfg(p_yes, allow_local=True)
     assert (
-        _agent_supports_script_check(cfg, "coder"),
-        _agent_supports_script_check(cfg, "planner"),
-        _agent_supports_script_check(cfg, "watcher"),
+        agent_supports_script_check(cfg, "coder"),
+        agent_supports_script_check(cfg, "planner"),
+        agent_supports_script_check(cfg, "watcher"),
     ) == (
         True,
         True,

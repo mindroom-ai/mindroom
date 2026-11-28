@@ -869,7 +869,7 @@ def test_desktop_exposes_folder_actions_and_separate_run_desktop_shell_tool() ->
     assert "run_desktop_shell" in control_desc
     assert "check_shell" not in read_desc
     assert "kill_shell" not in read_desc
-    assert "gui_mode (observe_only or control) covers only app control" in read_desc
+    assert "gui_mode (observe_only/control) covers app control only" in read_desc
 
     shell_fn = toolkit_offers(DesktopTools(), "run_desktop_shell")
     shell_schema = shell_fn.parameters
@@ -1505,6 +1505,8 @@ async def test_screenshot_observation_defaults_to_screenshot_and_allows_explicit
     schema_prop = toolkit_offers(DesktopTools(), "desktop_read").parameters["properties"]["observation"]
     assert "default" not in schema_prop
     assert "action=screenshot" in schema_prop["description"]
+    control_obs = toolkit_offers(DesktopTools(), "desktop_control").parameters["properties"]["observation"]
+    assert "action=screenshot" not in control_obs["description"]
 
     request = _route_desktop_requests(
         monkeypatch,
@@ -1789,11 +1791,12 @@ async def test_desktop_split_boundaries_and_fail_closed_migration(
 
     bad_read = json.loads((await tool.desktop_read("launch_app", app="com.example.Editor")).content)
     bad_control = json.loads((await tool.desktop_control("status", app="com.example.Editor")).content)
-    assert (bad_read["status"], "Unsupported desktop_read action: launch_app" in bad_read["message"]) == ("error", True)
-    assert (bad_control["status"], "Unsupported desktop_control action: status" in bad_control["message"]) == (
-        "error",
-        True,
-    )
+    assert bad_read["status"] == "error"
+    assert "Unsupported desktop_read action: launch_app." in bad_read["message"]
+    assert "Use desktop_control(action='launch_app') instead." in bad_read["message"]
+    assert bad_control["status"] == "error"
+    assert "Unsupported desktop_control action: status." in bad_control["message"]
+    assert "Use desktop_read(action='status') instead." in bad_control["message"]
     request.assert_not_awaited()
 
     runtime_paths = test_runtime_paths(tmp_path)

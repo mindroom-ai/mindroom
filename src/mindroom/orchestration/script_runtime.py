@@ -18,7 +18,6 @@ from mindroom.approval.tool_approval import (
     ToolApprovalDecision,
     human_gate,
     resolve_tool_approval_approver,
-    tool_may_require_approval,
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -26,6 +25,7 @@ from mindroom.delegation.lifecycle import accessed_entities, bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.origins import configured_public_url
+from mindroom.reactive_triggers.script_check import agent_supports_script_check
 from mindroom.response_activity import ActiveScriptRunInfo
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker, drain_script_tool_cleanup
@@ -654,8 +654,8 @@ class ScriptRuntimeLifecycle:
         script_check_agent_lost = {
             agent_name
             for agent_name in continuing_agents
-            if _agent_supports_script_check(current_config, agent_name)
-            and not _agent_supports_script_check(new_config, agent_name)
+            if agent_supports_script_check(current_config, agent_name)
+            and not agent_supports_script_check(new_config, agent_name)
         }
         if (
             not removed_agents
@@ -671,7 +671,7 @@ class ScriptRuntimeLifecycle:
 
         script_check_disabled = not _script_check_policy_enabled(new_config)
         script_check_agent_removals = {
-            agent_name for agent_name in continuing_agents if not _agent_supports_script_check(new_config, agent_name)
+            agent_name for agent_name in continuing_agents if not agent_supports_script_check(new_config, agent_name)
         }
         launch_fence_started = False
 
@@ -1321,25 +1321,6 @@ def _agent_has_tool(config: Config, agent_name: str, tool_name: str) -> bool:
 def _script_check_policy_enabled(config: Config) -> bool:
     pol = config.external_trigger_policy
     return pol.is_reactive_active and pol.script_check_enabled
-
-
-def _agent_supports_script_check(config: Config, agent_name: str) -> bool:
-    return (
-        agent_name in config.agents
-        and _agent_has_tool(config, agent_name, "triggers")
-        and (
-            _agent_has_tool(config, agent_name, "script")
-            or (
-                _agent_has_tool(config, agent_name, "workflow")
-                and not tool_may_require_approval(
-                    config,
-                    "workflow_write",
-                    agent_name=agent_name,
-                    fixed_arguments={"action": "start"},
-                )
-            )
-        )
-    )
 
 
 def _reload_reason_for(

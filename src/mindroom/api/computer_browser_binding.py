@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
+from mindroom.browser.call_limit import BROWSER_FUNCTION_NAMES
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.toolkits import toolkit_function
@@ -100,7 +101,7 @@ def select_browser_provider(
             frozenset(browser_mcp_catalog()),
             encode_media_result,
         )
-    elif tool_name == "browser" and function_name in {"browser_read", "browser_control"}:
+    elif tool_name == "browser" and function_name in BROWSER_FUNCTION_NAMES:
 
         def encode_action_browser_result(result: object) -> object:
             if isinstance(result, ToolValue):
@@ -110,7 +111,7 @@ def select_browser_provider(
         expected_factory = browser_tools
         provider = _ComputerBrowserProvider(
             BrowserTools,
-            frozenset({"browser_read", "browser_control"}),
+            frozenset(BROWSER_FUNCTION_NAMES),
             encode_action_browser_result,
         )
     else:

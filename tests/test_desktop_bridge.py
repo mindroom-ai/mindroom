@@ -1691,7 +1691,7 @@ async def test_browser_control_failure_requires_fresh_observation(transport: Asy
     # The provider's reason comes first, ahead of the fixed recovery advice.
     assert warning.startswith("extension disconnected ")
     assert "outcome is unknown" in warning
-    assert "browser(action='tabs' or 'snapshot', target='desktop')" in warning
+    assert "browser_read(action='tabs' or 'snapshot', target='desktop')" in warning
 
 
 @pytest.mark.asyncio

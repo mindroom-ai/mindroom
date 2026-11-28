@@ -57,7 +57,6 @@ from mindroom.config.legacy_access import (
 from mindroom.config.legacy_fields import (
     RETIRED_CONSOLIDATED_FUNCTIONS,
     RETIRED_PROMPT_NAMES,
-    RETIRED_SPLIT_FUNCTIONS,
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     dynamic_workflow_deprecation_warning,
@@ -65,7 +64,6 @@ from mindroom.config.legacy_fields import (
     retired_action_argument_approval_error,
     retired_builtin_approval_error,
     retired_consolidated_approval_error,
-    retired_split_approval_only_error,
     retired_tool_message,
 )
 from mindroom.config.matrix import (
@@ -1784,16 +1782,6 @@ class Config(BaseModel):
         # Skills is a generated toolkit (and workspace skills can appear at runtime), so always validate it.
         toolkit_checks: list[tuple[str, dict[str, str], bool | None]] = []
         for toolkit_name in sorted(enabled_toolkits | {"skills"}):
-            if (
-                split_only_error := retired_split_approval_only_error(
-                    toolkit_name,
-                    self.tool_approval.rules,
-                    self.tool_approval.default,
-                    self.tool_approval.timeout_days,
-                    agent_names=self.agents.keys(),
-                )
-            ) is not None:
-                raise ToolConfigOverrideError(split_only_error)
             builtin_renames = RETIRED_CONSOLIDATED_FUNCTIONS.get(toolkit_name)
             strict_toolkit = toolkit_name
             metadata = tools.entries.get(toolkit_name)
@@ -1812,9 +1800,6 @@ class Config(BaseModel):
                 if all(f"{prefix}_{new}" in metadata.function_names for new in set(base_renames.values())):
                     builtin_renames = {f"{prefix}_{old}": f"{prefix}_{new}" for old, new in base_renames.items()}
             declared_renames = metadata.retired_functions if metadata is not None else None
-            has_split = toolkit_name in RETIRED_SPLIT_FUNCTIONS
-            if not builtin_renames and not declared_renames and not has_split:
-                continue
             renames = {**(builtin_renames or {}), **(declared_renames or {})}
             toolkit_checks.append(
                 (strict_toolkit, renames, True if declared_renames and not prefixed_builtin else None),

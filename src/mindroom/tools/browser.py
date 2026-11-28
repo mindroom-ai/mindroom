@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.browser.call_limit import BROWSER_FUNCTION_NAMES
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -107,8 +108,8 @@ if TYPE_CHECKING:
             description="Matrix and local Playwright MCP timeout from 1 to 120 seconds.",
         ),
     ],
-    function_names=("browser_read", "browser_control"),
-    action_scoped_grants=("browser_read", "browser_control"),
+    function_names=BROWSER_FUNCTION_NAMES,
+    action_scoped_grants=BROWSER_FUNCTION_NAMES,
 )
 def browser_tools() -> type[BrowserTools]:
     """Return Browser tools with OpenClaw-style action routing."""

@@ -2570,3 +2570,28 @@ def test_matrix_api_offer_boundaries_and_required_action() -> None:
     assert write_fn.offer_output_path is False
     assert read_fn.parameters["required"] == ["action"]
     assert write_fn.parameters["required"] == ["action"]
+    assert read_fn.parameters["properties"]["keys"]["items"]["enum"] == [
+        "content.body",
+        "content.name",
+        "content.topic",
+    ]
+    assert write_fn.parameters["properties"]["dry_run"] == {"type": "boolean"}
+
+
+@pytest.mark.asyncio
+async def test_matrix_api_wrong_half_points_to_sibling_and_preserves_non_str_action() -> None:
+    """Wrong-half actions point to the sibling function, and non-str actions preserve their repr."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx):
+        wrong_read = json.loads(await tool.matrix_api_read(action="send_event"))  # type: ignore[arg-type]
+        wrong_write = json.loads(await tool.matrix_api_write(action="search"))  # type: ignore[arg-type]
+        non_str = json.loads(await tool.matrix_api_read(action=123))  # type: ignore[arg-type]
+
+    assert wrong_read["status"] == "error"
+    assert "Use matrix_api_write(action='send_event') instead." in wrong_read["message"]
+    assert wrong_write["status"] == "error"
+    assert "Use matrix_api_read(action='search') instead." in wrong_write["message"]
+    assert non_str["status"] == "error"
+    assert "Unsupported matrix_api_read action 123." in non_str["message"]

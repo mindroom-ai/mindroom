@@ -1305,6 +1305,9 @@ async def test_triggers_tool_registered_event_source_discovery_subscribe_and_bin
         "match_fields": ["channel_id"],
         "example": "subscribe_event(source_id='slack_private', kind='message')",
         "private_room_only": True,
+        "default_once": False,
+        "default_new_thread": True,
+        "default_reopen_on_fire": True,
     }
 
     other_list = await env.call("list", requester_id=_OTHER, room_id=_SHARED_ROOM)

@@ -3948,6 +3948,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.origins",
+    "mindroom.reactive_triggers.script_check",
     "mindroom.response_activity",
     "mindroom.script_runs.recovery",
     "mindroom.script_runs.worker_client",
@@ -8983,6 +8984,7 @@ expose = [
     "RETIRED_CONSOLIDATED_FUNCTIONS",
     "RETIRED_SPLIT_FUNCTIONS",
     "SINGLE_VERB_RENAMED_TARGETS",
+    "SPLIT_APPROVAL_ONLY_FUNCTIONS",
     "STRICT_WILDCARD_SCRIPT_RENAMES",
     "STRICT_WILDCARD_SCRIPT_TOOLKITS",
 ]

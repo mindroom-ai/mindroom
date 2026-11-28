@@ -185,7 +185,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
+          "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First live host call (browser_control, browser_read page view, or browser_mcp) auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -557,7 +557,7 @@
         },
         {
           "name": "open_panel",
-          "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First host browser_read/browser_control or browser_mcp call auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
+          "description": "Show a MindRoom Chat side panel: computer or members.\ncomputer: live worker browser view (browser_read/browser_control target=host); user may take control (e.g. login), blocking your browser calls until handback. Never navigates, takes control, or opens the user's browser. First live host call (browser_control, browser_read page view, or browser_mcp) auto-shows it; reopen only in a later reply (max 1/reply). members: room people/agents. Success = request sent, not opened.",
           "parameters": {
             "type": "object",
             "properties": {

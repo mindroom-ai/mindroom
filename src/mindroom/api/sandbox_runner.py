@@ -52,7 +52,7 @@ from mindroom.api.worker_responses import (
 )
 from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.browser.call_limit import browser_request_budget_seconds
+from mindroom.browser.call_limit import BROWSER_FUNCTION_NAMES, browser_request_budget_seconds
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.yaml_includes import load_yaml_config_source
@@ -2484,7 +2484,7 @@ def _persistent_browser_runtime(
 ) -> WorkerComputerRuntime | WorkerBrowserRuntime | None:
     """Return the worker's long-lived browser runtime when this call drives it."""
     if payload.tool_name != "browser_mcp" and not (
-        payload.tool_name == "browser" and payload.function_name in {"browser_read", "browser_control"}
+        payload.tool_name == "browser" and payload.function_name in BROWSER_FUNCTION_NAMES
     ):
         return None
     computer = getattr(app.state, "worker_computer", None)
